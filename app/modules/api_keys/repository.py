@@ -812,12 +812,16 @@ class ApiKeysRepository:
         *,
         limit_id: int,
         reserved_delta: int,
+        expected_reset_at: datetime | None = None,
     ) -> bool:
+        values: dict[str, int | datetime] = {"reserved_delta": reserved_delta}
+        if expected_reset_at is not None:
+            values["expected_reset_at"] = expected_reset_at
         result = await self._session.execute(
             update(ApiKeyUsageReservationItem)
             .where(ApiKeyUsageReservationItem.reservation_id == reservation_id)
             .where(ApiKeyUsageReservationItem.limit_id == limit_id)
-            .values(reserved_delta=reserved_delta)
+            .values(**values)
             .returning(ApiKeyUsageReservationItem.id)
         )
         return result.scalar_one_or_none() is not None

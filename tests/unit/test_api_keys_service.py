@@ -396,6 +396,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         *,
         limit_id: int,
         reserved_delta: int,
+        expected_reset_at: datetime | None = None,
     ) -> bool:
         reservation = self._reservations.get(reservation_id)
         if reservation is None or reservation.status != "reserved":
@@ -409,7 +410,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
                         limit_id=item.limit_id,
                         limit_type=item.limit_type,
                         reserved_delta=reserved_delta,
-                        expected_reset_at=item.expected_reset_at,
+                        expected_reset_at=expected_reset_at or item.expected_reset_at,
                         actual_delta=item.actual_delta,
                     )
                 )

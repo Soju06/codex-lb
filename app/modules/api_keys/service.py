@@ -174,6 +174,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         limit_id: int,
         reserved_delta: int,
+        expected_reset_at: datetime | None = None,
     ) -> bool: ...
 
     async def transition_usage_reservation_status(
@@ -1076,19 +1077,37 @@ class ApiKeysService:
                     raise
         raise RuntimeError("unreachable")
 
-    async def _reset_elapsed_windows_of_unreserved_limits(self, reservation_id: str, *, now: datetime) -> None:
+    async def _reset_elapsed_windows_before_reconciliation(self, reservation_id: str, *, now: datetime) -> None:
         # Lazy resets commit, so they must happen before the reservation row is locked.
         reservation = await self._repository.get_usage_reservation(reservation_id)
         if reservation is None or reservation.status != "reserved":
             return
         key = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(reservation.api_key_id))
-        reserved_limit_ids = {item.limit_id for item in reservation.items}
-        unreserved_applicable_limits = [
-            limit
-            for limit in key.limits
-            if limit.id not in reserved_limit_ids and _limit_applies_for_request(limit, request_model=reservation.model)
-        ]
-        await _lazy_reset_expired_limits(self._repository, unreserved_applicable_limits, now=now)
+        await _lazy_reset_expired_limits(self._repository, key.limits, now=now)
+
+    async def _rebase_usage_reservation_item(
+        self,
+        reservation_id: str,
+        *,
+        item: UsageReservationItemData,
+        limit: ApiKeyLimit,
+        input_delta: int,
+    ) -> None:
+        # The window advanced, so the item's earlier budget no longer counts against the live counter.
+        rebased_delta = item.reserved_delta + input_delta
+        result = await self._repository.try_reserve_usage(
+            limit.id, delta=rebased_delta, expected_reset_at=limit.reset_at
+        )
+        if not result.success:
+            raise _rate_limit_exceeded_error(limit)
+        updated = await self._repository.set_usage_reservation_item_reserved_delta(
+            reservation_id,
+            limit_id=item.limit_id,
+            reserved_delta=rebased_delta,
+            expected_reset_at=limit.reset_at,
+        )
+        if not updated:
+            raise RuntimeError("API key usage reservation item disappeared")
 
     async def _adjust_usage_reservation_input_budget_once(
         self,
@@ -1106,7 +1125,7 @@ class ApiKeysService:
         now = utcnow()
         async with sqlite_writer_section():
             if direction > 0:
-                await self._reset_elapsed_windows_of_unreserved_limits(reservation_id, now=now)
+                await self._reset_elapsed_windows_before_reconciliation(reservation_id, now=now)
             reservation = await self._repository.get_usage_reservation_for_update(reservation_id)
             if reservation is None or reservation.status != "reserved":
                 await self._repository.rollback()
@@ -1119,6 +1138,7 @@ class ApiKeysService:
                     if key.expires_at is not None and key.expires_at < now:
                         raise ApiKeyInvalidError("API key has expired")
                     existing_limit_ids = {item.limit_id for item in reservation.items}
+                    live_limits_by_id = {limit.id: limit for limit in key.limits}
                     for limit in key.limits:
                         if not _limit_applies_for_request(limit, request_model=reservation.model):
                             continue
@@ -1156,6 +1176,12 @@ class ApiKeysService:
                     if input_delta <= 0:
                         continue
                     if direction > 0:
+                        live_limit = live_limits_by_id.get(item.limit_id)
+                        if live_limit is not None and live_limit.reset_at != item.expected_reset_at:
+                            await self._rebase_usage_reservation_item(
+                                reservation_id, item=item, limit=live_limit, input_delta=input_delta
+                            )
+                            continue
                         result = await self._repository.try_reserve_usage(
                             item.limit_id,
                             delta=input_delta,

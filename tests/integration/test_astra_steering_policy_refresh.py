@@ -25,7 +25,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("initial_limit", ["none", "existing", "other-model"])
+@pytest.mark.parametrize("initial_limit", ["none", "existing", "existing-advanced", "other-model"])
 @pytest.mark.parametrize("counter", ["exhausted", "fresh", "elapsed"], ids=["reject", "admit", "admit-after-reset"])
 async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
     app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, initial_limit: str, counter: str
@@ -37,8 +37,10 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
     before_terminal: list[tuple[int, int]] = []
     service, api_key, _ = await _configure_route(app_instance, monkeypatch, ScriptedUpstream([]))
     existing = LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000)
+    has_existing = initial_limit in {"existing", "existing-advanced"}
+    advanced_reset_at: list = []
     async with SessionLocal() as session:
-        limits = [existing] if initial_limit == "existing" else []
+        limits = [existing] if has_existing else []
         if initial_limit == "other-model":
             limits = [
                 LimitRuleInput(
@@ -55,7 +57,7 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
             if event["type"] == "response.steer.accepted":
                 # When the administrator changes policy before the next frame.
                 async with SessionLocal() as session:
-                    refreshed = [existing] if initial_limit == "existing" else []
+                    refreshed = [existing] if has_existing else []
                     refreshed.append(
                         LimitRuleInput(limit_type="input_tokens", limit_window="daily", max_value=1_000_000)
                     )
@@ -72,6 +74,18 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
                     limit.current_value = 0 if counter == "fresh" else limit.max_value
                     if counter == "elapsed":
                         limit.reset_at = utcnow() - timedelta(days=2)
+                    if initial_limit == "existing-advanced":
+                        # As the hourly sweep would after the weekly window rolled over.
+                        total = (
+                            await session.execute(
+                                select(ApiKeyLimit).where(
+                                    ApiKeyLimit.api_key_id == api_key.id, ApiKeyLimit.limit_type == "total_tokens"
+                                )
+                            )
+                        ).scalar_one()
+                        total.reset_at = total.reset_at + timedelta(days=7)
+                        total.current_value = 0
+                        advanced_reset_at.append(total.reset_at)
                     await session.commit()
             elif event["type"] == "response.steer.failed":
                 finish_successor.set()
@@ -130,6 +144,9 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
                     assert reservation is not None
                     input_items = [item for item in reservation.items if item.limit_type == "input_tokens"]
                     assert [item.reserved_delta for item in input_items] == [8192]
+                    if initial_limit == "existing-advanced":
+                        total_item = next(item for item in reservation.items if item.limit_type == "total_tokens")
+                        assert total_item.expected_reset_at == advanced_reset_at[0]
             for kind in ["response.created", "response.completed"]:
                 await connection.send(json.dumps(response(kind, "successor", parent="parent")))
             await connection.wait_closed()
@@ -165,6 +182,15 @@ async def test_queued_steering_reconciles_refreshed_limits_on_the_wire(
         input_limit = next(x for x in limits if x.limit_type == "input_tokens")
         assert input_limit.current_value == expected_input_usage
         assert input_limit.reset_at > utcnow()
+        if has_existing:
+            # Once the window advanced, the parent's 14 tokens stay behind in it. An admitted steer
+            # re-reserves the successor in the live window, so its 14 tokens settle there once; a
+            # rejected steer rolls back, leaving the successor's item in the retired window.
+            total_limit = next(x for x in limits if x.limit_type == "total_tokens")
+            if initial_limit == "existing-advanced":
+                assert total_limit.current_value == (0 if exhausted else 14)
+            else:
+                assert total_limit.current_value == 28
         rows = (
             (
                 await session.execute(

@@ -1961,7 +1961,9 @@ budget under the existing request-admission policy; existing items SHALL extend
 only the new input increment. An exhausted newly applicable limit SHALL reject
 the new submission before dispatch without disturbing admitted work. A newly
 applicable limit whose window has elapsed SHALL be reset under the existing lazy
-on-read strategy before reconciliation reserves against it. Reconciliation
+on-read strategy before reconciliation reserves against it. An existing item
+whose limit window advanced SHALL be re-reserved in full against the live window
+before extension, so terminal settlement charges that window. Reconciliation
 SHALL keep one successor reservation and its existing terminal settlement owner.
 Cancellation during creation of a newly applicable reservation SHALL be deferred
 until that reservation is attached to the successor's cleanup owner, then
@@ -1990,6 +1992,12 @@ propagated through normal socket teardown.
 - **WHEN** another submission is admitted after that limit becomes applicable
 - **THEN** the counter SHALL reset and `reset_at` SHALL advance before the new item is reserved
 - **AND** the additional steer SHALL be admitted against the fresh window
+
+#### Scenario: A reserved item's window advances before another submission
+- **GIVEN** a successor holds a reservation item for a limit whose `reset_at` has since advanced
+- **WHEN** another submission is admitted onto that successor
+- **THEN** the item SHALL be re-reserved in the live window with the advanced `reset_at`
+- **AND** the additional steer SHALL NOT be rejected for the stale window
 
 #### Scenario: Additional steering input extends the successor reservation
 

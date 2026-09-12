@@ -45,10 +45,50 @@ def check(database: Path, active: Path, candidate: Path) -> dict[str, str]:
 def check_plan(plan_path: Path, port: int) -> dict[str, str]:
     plan = json.loads(plan_path.read_text())
     # A fixed operator-owned plan, never supplied by a control-socket caller.
+    if plan.get("driver") == "postgresql":
+        return check_postgres_plan(plan, port)
     if port != plan["active_port"]:
         raise ValueError("SQLite lifetime lock forbids overlapping backends; use PostgreSQL or a maintenance window")
     candidate = Path(plan["candidates"][str(port)])
     return check(Path(plan["database"]), Path(plan["active_release"]), candidate)
+
+
+def check_postgres_plan(plan: dict, port: int) -> dict[str, str]:
+    import sqlalchemy as sa
+
+    candidate = Path(plan["candidates"][str(port)])
+    active_head, active_digest = release_schema(Path(plan["active_release"]))
+    if release_schema(candidate) != (active_head, active_digest):
+        raise ValueError("PostgreSQL release schema differs; migration review required")
+    settings = json.loads(Path(plan["backend_environments"][str(port)]).read_text())
+    if settings["CODEX_LB_DATABASE_MIGRATE_ON_STARTUP"] != "false":
+        raise ValueError("Serving backend must disable migrations")
+    url = settings["CODEX_LB_DATABASE_URL"]
+    reference = json.loads(Path(plan["connection_file"]).read_text())["url"]
+    parsed = sa.engine.make_url(url).set(drivername="postgresql+psycopg")
+    if parsed != sa.engine.make_url(reference).set(drivername="postgresql+psycopg"):
+        raise ValueError("Backend database differs from the approved database")
+    if sa.engine.make_url(url).get_backend_name() != "postgresql":
+        raise ValueError("PostgreSQL plan requires PostgreSQL")
+    if settings["CODEX_LB_ENCRYPTION_KEY_FILE"] != plan["encryption_key_file"]:
+        raise ValueError("Backend encryption key differs")
+    identities = []
+    for env_file in plan["backend_environments"].values():
+        env = json.loads(Path(env_file).read_text())
+        identities.append(env["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID"])
+    if len(identities) != len(set(identities)) or not all(identities):
+        raise ValueError("Backend instance identities must be distinct")
+    engine = sa.create_engine(parsed, hide_parameters=True, connect_args={"connect_timeout": 5})
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+            connection.exec_driver_sql("SET LOCAL statement_timeout = '5s'")
+            revisions = tuple(connection.execute(sa.text("SELECT version_num FROM alembic_version")).scalars())
+            if revisions != (active_head,):
+                raise ValueError("PostgreSQL schema revision mismatch")
+    finally:
+        engine.dispose()
+    return {"revision": active_head, "schema_digest": active_digest}
 
 
 if __name__ == "__main__":

@@ -10,7 +10,10 @@ The closed enums -- the request-log ``source`` values, the metric ``route``
 labels and the dispatch kinds -- are discovered from ``overflow.py`` by import
 (``tests/unit/_overflow_constants.py``) rather than spelled here, so a value
 added to the authority grows the expected set instead of slipping past guards
-that only knew the values which existed when they were written.
+that only knew the values which existed when they were written. The removal
+direction is covered by comparing the delta's own prose enumerations of the
+closed ``route`` and dispatch-``kind`` sets against the discovered enum, so a
+retired label cannot stay advertised by the normative spec either.
 """
 
 from __future__ import annotations
@@ -49,6 +52,14 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
 
+# ``route`` labels and dispatch kinds are ordinary words, so they have no shape
+# the outcome regex above could match on. The delta enumerates them in prose
+# instead -- "closed `route` set `a`, `b`, `c`", "`kind` `a`, `b` or `c`" -- and
+# each such run is compared to the discovered enum in both directions.
+_ENUMERATED_RUN = re.compile(r"`[a-z0-9_]+`(?:(?:, | or |, or )`[a-z0-9_]+`)*")
+_ROUTE_ENUMERATION = re.compile(r"`route`(?: set| in) (?=`)")
+_KIND_ENUMERATION = re.compile(r"(?:for direct source routing and |`kind` (?=`))")
+
 # The closed enums the deltas and the docs must keep naming, read off the authority.
 SOURCE_LITERALS = overflow_constants(SOURCE_PREFIX)
 ROUTE_LABELS = overflow_constants(ROUTE_PREFIX)
@@ -65,6 +76,16 @@ def _rel(path: Path) -> str:
 
 def _backticked(path: Path) -> set[str]:
     return set(_BACKTICKED.findall(_read(path)))
+
+
+def _enumerations(text: str, anchor: re.Pattern[str]) -> list[set[str]]:
+    """Every backticked run the delta enumerates right after ``anchor``."""
+    runs: list[set[str]] = []
+    for match in anchor.finditer(text):
+        run = _ENUMERATED_RUN.match(text, match.end())
+        assert run is not None, text[match.start() : match.end() + 80]
+        runs.append(set(_BACKTICKED.findall(run.group(0))))
+    return runs
 
 
 @pytest.mark.parametrize("prefix", [SOURCE_PREFIX, ROUTE_PREFIX, DISPATCH_KIND_PREFIX])
@@ -115,6 +136,34 @@ def test_observability_delta_names_the_routes_and_metrics() -> None:
     # counter; naming it would also trip the model-source metric drift guard's
     # successor regex once it covers the overflow prefix.
     assert "codex_lb_subscription_overflow_source_result_total" not in text
+
+
+def test_observability_delta_enumerates_exactly_the_closed_route_and_kind_sets() -> None:
+    """The other direction: the delta may not advertise a label the runtime cannot emit.
+
+    Discovery grows the expected set when a label is *added*. A retired
+    ``ROUTE_*`` / ``DISPATCH_KIND_*`` constant would just shrink the loops above,
+    leaving the normative delta enumerating a value the metric can no longer
+    carry -- so each prose enumeration is compared to the enum as a set.
+    """
+    text = _read(_OBSERVABILITY_DELTA)
+
+    for family, anchor, expected in (
+        ("`route`", _ROUTE_ENUMERATION, set(ROUTE_LABELS.values())),
+        ("dispatch `kind`", _KIND_ENUMERATION, set(DISPATCH_KINDS.values())),
+    ):
+        runs = _enumerations(text, anchor)
+
+        assert runs, (
+            f"{_rel(_OBSERVABILITY_DELTA)} no longer enumerates the closed {family} set in a shape "
+            f"this guard can read; the reverse check would pass vacuously"
+        )
+        for run in runs:
+            assert run == expected, {
+                "family": family,
+                "in_spec_only": sorted(run - expected),
+                "in_code_only": sorted(expected - run),
+            }
 
 
 def test_request_log_source_values_are_quoted_in_every_normative_surface() -> None:

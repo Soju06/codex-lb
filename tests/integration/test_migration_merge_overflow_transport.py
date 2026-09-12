@@ -22,7 +22,6 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
-_HEAD = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
 _RECOVERY = "20260906_000000_add_http_bridge_rebind_claim"
 
 
@@ -158,8 +157,9 @@ def test_overflow_transport_merge_retains_original_parents_below_combined_head(t
     # Later revisions build on the merge; the graph must still have one head
     # and the merge must be on its ancestry.
     heads = script.get_heads()
-    assert heads == [_HEAD]
-    assert _MERGE in {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    assert len(heads) == 1
+    (head,) = heads
+    assert _MERGE in {revision.revision for revision in script.iterate_revisions(head, "base")}
     merge = script.get_revision(_MERGE)
     assert merge is not None and merge.down_revision == _PARENTS
     for revision in _PARENTS:

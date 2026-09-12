@@ -3530,3 +3530,44 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 
 # end bridge continuity abandonment
+@pytest.mark.asyncio
+async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_path):
+    """A database already stamped at the deployed head receives missing recovery columns."""
+    from sqlalchemy import inspect as sa_inspect
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair.sqlite'}"
+    deployed_head = "20260911_030000_add_local_login_policy"
+    repair_head = "20260911_040000_repair_http_bridge_recovery_columns"
+    columns_to_repair = {
+        "rebind_claim_id",
+        "transcript_version",
+        "response_output_items_json",
+        "response_output_items_complete",
+        "response_replay_input_json",
+        "response_replay_input_complete",
+        "response_replay_input_turn_count",
+    }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, deployed_head, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            for column in columns_to_repair:
+                await conn.execute(text(f"ALTER TABLE http_bridge_operations DROP COLUMN {column}"))
+
+        async with engine.connect() as conn:
+            before = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns("http_bridge_operations")}
+            )
+        assert columns_to_repair.isdisjoint(before)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == repair_head
+
+        async with engine.connect() as conn:
+            after = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns("http_bridge_operations")}
+            )
+        assert columns_to_repair <= after
+    finally:
+        await engine.dispose()

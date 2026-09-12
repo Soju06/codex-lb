@@ -4873,6 +4873,31 @@ class _HTTPBridgeRequestSubmitMixin:
                 for pending_request in session.pending_requests
             )
 
+        async def reconnect_with_visibility_fence(**kwargs: Any) -> bool:
+            """Fence sibling visibility while the shared reader is replaced.
+
+            The final visibility check and the fence publication happen under
+            ``pending_lock``. Upstream event bookkeeping takes that same lock
+            before mutating request visibility and drops frames while the
+            fence is held, closing the handoff race without holding the lock
+            across the reconnect awaits.
+            """
+            assert request_state is not None
+            async with session.pending_lock:
+                if has_other_visible_pending_requests(request_state):
+                    return False
+                session.reconnect_admission_in_progress = True
+            try:
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    **kwargs,
+                )
+            finally:
+                async with session.pending_lock:
+                    session.reconnect_admission_in_progress = False
+            return True
+
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -5246,36 +5271,30 @@ class _HTTPBridgeRequestSubmitMixin:
             if fresh_hard_request_account_switch_allowed:
                 await self._release_request_state_account_response_create_lease(request_state)
             if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
-                await self._reconnect_http_bridge_session(
-                    session,
-                    request_state=request_state,
+                if not await reconnect_with_visibility_fence(
                     require_same_account=True,
                     **reconnect_reader_kwargs,
-                )
+                ):
+                    return False
             elif require_preferred_reconnect:
-                await self._reconnect_http_bridge_session(
-                    session,
-                    request_state=request_state,
+                if not await reconnect_with_visibility_fence(
                     require_same_account=account_neutral_recovery or account_bound_replay,
                     require_preferred_account=True,
                     **reconnect_reader_kwargs,
-                )
+                ):
+                    return False
             elif clean_close_hard_continuation or clean_close_hard_continuity_anchor:
-                await self._reconnect_http_bridge_session(
-                    session,
-                    request_state=request_state,
+                if not await reconnect_with_visibility_fence(
                     # Continuity anchors (previous_response_id and turn-state)
                     # are account-bound. Do not migrate them while recovering a
                     # clean handoff close.
                     require_same_account=True,
                     **reconnect_reader_kwargs,
-                )
+                ):
+                    return False
             else:
-                await self._reconnect_http_bridge_session(
-                    session,
-                    request_state=request_state,
-                    **reconnect_reader_kwargs,
-                )
+                if not await reconnect_with_visibility_fence(**reconnect_reader_kwargs):
+                    return False
             if request_state.account_response_create_lease is None:
                 current_settings = await _service_get_settings_cache().get()
                 request_state.account_response_create_lease = (

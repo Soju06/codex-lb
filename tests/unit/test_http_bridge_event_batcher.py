@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import shutdown as shutdown_state
 from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
@@ -1046,7 +1047,9 @@ async def test_close_owns_terminal_finalize_pending_past_bound(caplog: pytest.Lo
 
 
 @pytest.mark.asyncio
-async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff() -> None:
+async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Shutdown tracking covers the caller window between append completion and finalizer scheduling."""
     durable = _BlockingTerminalAppendDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(
@@ -1055,6 +1058,9 @@ async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff() ->
         flush_interval_seconds=60.0,
         terminal_append_timeout_seconds=1.0,
     )
+    # Model an active graceful-shutdown drain so close() has a bounded window
+    # in which to let this already-admitted caller hand off its result.
+    monkeypatch.setattr(shutdown_state, "remaining_drain_timeout_seconds", lambda: 1.0)
     try:
         append_task = asyncio.create_task(
             batcher.append_terminal_event(
@@ -1069,11 +1075,17 @@ async def test_terminal_append_caller_stays_tracked_until_finalizer_handoff() ->
         )
         await asyncio.wait_for(durable.terminal_started.wait(), timeout=1.0)
         assert len(batcher._terminal_append_callers) == 1
+        close_task = asyncio.create_task(batcher.close())
+        # Shutdown must observe the still-running public caller and wait for
+        # it to hand its successful append result to the finalizer tracker.
+        await asyncio.sleep(0)
+        assert not close_task.done()
+        assert append_task in batcher._terminal_append_callers
         durable.release_terminal.set()
         result = await asyncio.wait_for(append_task, timeout=1.0)
         assert result.persisted is True
         assert batcher._terminal_append_callers == set()
-        await batcher.close()
+        await asyncio.wait_for(close_task, timeout=1.0)
     finally:
         durable.release_terminal.set()
         await batcher.close()

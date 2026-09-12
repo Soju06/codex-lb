@@ -661,6 +661,25 @@ _HTTP_BRIDGE_SNAPSHOT_MAX_TASKS = 32
 _HTTP_BRIDGE_SNAPSHOT_TIMEOUT_SECONDS = 2.0
 
 
+def _http_bridge_terminal_finalizer_for_snapshot(
+    service: Any,
+    *,
+    operation_id: str | None,
+    owner_epoch: int | None,
+) -> asyncio.Task[Any] | None:
+    """Find the terminal spool finalizer for one owner-fenced operation."""
+    if operation_id is None:
+        return None
+    batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    for task in getattr(batcher, "_terminal_finalize_tasks", ()):
+        if task.done() or getattr(task, "_http_bridge_operation_id", None) != operation_id:
+            continue
+        if owner_epoch is not None and getattr(task, "_http_bridge_owner_epoch", owner_epoch) != owner_epoch:
+            continue
+        return task
+    return None
+
+
 def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, request_state: Any, **kwargs: Any) -> None:
     """Best-effort post-delivery persistence, bounded and owned until shutdown."""
     tasks = getattr(service, "_background_cleanup_tasks", None)
@@ -682,6 +701,25 @@ def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, reques
 
     async def persist() -> None:
         """Persist the captured transcript snapshot inside the background task's bounded lifetime."""
+        finalizer = _http_bridge_terminal_finalizer_for_snapshot(
+            service,
+            operation_id=getattr(frozen_state, "operation_id", None),
+            owner_epoch=getattr(frozen_session, "durable_owner_epoch", None),
+        )
+        if finalizer is not None:
+            # The append deliberately leaves ``event_spool_complete`` false
+            # until this owner-fenced marker commits.  Await the exact
+            # finalizer before reading that flag; otherwise a fast snapshot
+            # can race a slow database writer and discard a valid transcript.
+            try:
+                await asyncio.shield(finalizer)
+            except Exception:
+                logger.debug(
+                    "HTTP bridge terminal spool finalizer failed before transcript snapshot operation_id=%s",
+                    getattr(frozen_state, "operation_id", None),
+                    exc_info=True,
+                )
+                return
         try:
             await scheduler_for(service).wait_for(
                 _update_http_bridge_operation_state(service, frozen_session, frozen_state, **kwargs),
@@ -692,9 +730,16 @@ def _schedule_http_bridge_transcript_snapshot(service: Any, session: Any, reques
                 "HTTP bridge optional transcript snapshot deadline exceeded operation_id=%s", request_state.operation_id
             )
 
-    _schedule_http_bridge_background_cleanup(
+    snapshot_task = _schedule_http_bridge_background_cleanup(
         service, persist(), name=name, error_message="HTTP bridge optional transcript snapshot failed"
     )
+    if snapshot_task is not None:
+        # Resource teardown uses this ownership marker to retain the durable
+        # lease until snapshot persistence has settled, including normal
+        # (non-shutdown) session retirement.
+        setattr(snapshot_task, "_http_bridge_operation_id", getattr(frozen_state, "operation_id", None))
+        setattr(snapshot_task, "_http_bridge_recovery_session_id", getattr(frozen_session, "durable_session_id", None))
+        setattr(snapshot_task, "_http_bridge_owner_epoch", getattr(frozen_session, "durable_owner_epoch", None))
 
 
 def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None:
@@ -4608,6 +4653,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         completed_event_queue_claimed = False
         emitted_sequence_number: int | None = None
         async with session.pending_lock:
+            # A pre-created retry has completed its final sibling-visibility
+            # check and is about to replace this shared reader. Frames that
+            # arrive from the superseded reader during that handoff must not
+            # publish lifecycle/output visibility for a sibling; the retry
+            # admission fence will re-establish a fresh reader afterwards.
+            if getattr(session, "reconnect_admission_in_progress", False):
+                return
             matched_request_state = None
             created_request_state = None
             suppress_downstream_event = False

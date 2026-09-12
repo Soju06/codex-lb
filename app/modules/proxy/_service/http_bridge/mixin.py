@@ -2349,8 +2349,7 @@ class _HTTPBridgeMixin(
 
         async def abort_selected_handoff() -> None:
             session.closed = True
-            # ``shield(coroutine)`` would ``ensure_future`` an unowned task; the
-            # scheduler spawns it so a simulation owns the outliving cleanup.
+            # Scheduler-owned shielded tasks avoid unowned cleanup coroutines.
             scheduler = scheduler_for(self)
             try:
                 await asyncio.shield(scheduler.create_task(upstream.close(), name="http-bridge-handoff-abort-close"))
@@ -2420,6 +2419,7 @@ class _HTTPBridgeMixin(
             session.last_upstream_close_code = None
             session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
+            session.reconnect_admission_in_progress = False
         except BaseException:
             await abort_selected_handoff()
             raise

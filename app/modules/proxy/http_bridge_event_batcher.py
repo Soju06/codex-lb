@@ -955,6 +955,10 @@ class HttpBridgeOperationEventBatcher:
             ),
             name=f"http-bridge-terminal-spool-finalize-{operation_id}",
         )
+        # Keep the operation identity alongside the session/epoch fence so
+        # post-terminal snapshot work can await exactly this finalizer instead
+        # of racing a sibling generation that reuses the same durable session.
+        setattr(finalize_task, "_http_bridge_operation_id", operation_id)
         setattr(finalize_task, "_http_bridge_session_id", session_id)
         setattr(finalize_task, "_http_bridge_owner_epoch", owner_epoch)
         self._terminal_finalize_tasks.add(finalize_task)
@@ -1176,6 +1180,12 @@ class HttpBridgeOperationEventBatcher:
         # Let enqueue callers that crossed the admission fence finish before
         # stopping the flusher.  This prevents a producer that started just
         # before shutdown from publishing work after the close drain snapshot.
+        shutdown_remaining = shutdown_state.remaining_drain_timeout_seconds()
+        shutdown_deadline = (
+            clock_for(self).monotonic()
+            if shutdown_remaining is None
+            else clock_for(self).monotonic() + max(shutdown_remaining, 0.0)
+        )
         while True:
             current = asyncio.current_task()
             async with self._lock:
@@ -1184,7 +1194,27 @@ class HttpBridgeOperationEventBatcher:
                 )
             if not active_enqueue_callers:
                 break
-            await asyncio.sleep(0)
+            if shutdown_deadline is None:
+                await asyncio.sleep(0)
+                continue
+            remaining = shutdown_deadline - clock_for(self).monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "HTTP bridge enqueue callers exceeded the shutdown deadline; cancelling count=%d",
+                    len(active_enqueue_callers),
+                )
+                for caller in active_enqueue_callers:
+                    caller.cancel()
+                break
+            _, pending_callers = await self._scheduler.wait(active_enqueue_callers, timeout=remaining)
+            if pending_callers:
+                logger.warning(
+                    "HTTP bridge enqueue callers exceeded the shutdown deadline; cancelling count=%d",
+                    len(pending_callers),
+                )
+                for caller in pending_callers:
+                    caller.cancel()
+                break
         task = self._task
         self._task = None
         if task is not None:
@@ -1193,12 +1223,12 @@ class HttpBridgeOperationEventBatcher:
                 await task
             except asyncio.CancelledError:
                 pass
-        # Cancel known append tasks, then yield until callers that were between
-        # append completion and finalizer scheduling have handed off.  This
-        # closes the race where a finalizer would otherwise appear after the
-        # finalizer snapshot below.
+        # Let terminal append callers that crossed the admission fence finish
+        # handing their result to the finalizer tracker before cancelling any
+        # still-running append task.  Cancelling the inner append first would
+        # make the outer caller lose a successful terminal write and could
+        # strand a finalizer between the two shutdown snapshots.
         while True:
-            await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append", cancel=True)
             current = asyncio.current_task()
             async with self._lock:
                 active_callers = tuple(
@@ -1206,7 +1236,31 @@ class HttpBridgeOperationEventBatcher:
                 )
             if not active_callers:
                 break
-            await asyncio.sleep(0)
+            if shutdown_deadline is None:
+                await asyncio.sleep(0)
+                continue
+            remaining = shutdown_deadline - clock_for(self).monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "HTTP bridge terminal append callers exceeded the shutdown deadline; draining count=%d",
+                    len(active_callers),
+                )
+                break
+            _, pending_callers = await self._scheduler.wait(active_callers, timeout=remaining)
+            if pending_callers:
+                logger.warning(
+                    "HTTP bridge terminal append callers exceeded the shutdown deadline; draining count=%d",
+                    len(pending_callers),
+                )
+                break
+        # Any append caller that did not finish before the deadline is allowed
+        # to observe its inner append task being cancelled below and return the
+        # normal settlement-required result; cancelling the public caller here
+        # would leak CancelledError to its owner instead.
+        await self._drain_terminal_tasks(tuple(self._terminal_append_tasks), kind="append", cancel=True)
+        # Yield once so a caller completing its finalizer handoff after the
+        # append-task drain is visible before taking the finalizer snapshot.
+        await asyncio.sleep(0)
         # A successful terminal append has already made the transcript eligible
         # for replay; cancelling its finalizer during shutdown would leave the
         # durable row permanently marked event_spool_complete=false. Finalizer

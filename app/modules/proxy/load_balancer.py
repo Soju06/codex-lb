@@ -99,6 +99,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.quarantine import quarantine_permanent_failure as _quarantine_permanent_failure
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -150,7 +151,11 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    is_account_locally_routing_unavailable,
+    mark_account_routing_unavailable,
+)
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -631,6 +636,11 @@ class LoadBalancer:
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
+            )
+            excluded_ids.update(
+                account.id
+                for account in selection_inputs.accounts
+                if is_account_locally_routing_unavailable(account.id)
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
@@ -1766,10 +1776,13 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
+            if downgraded and state.blocks_routing:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
+
+    async def quarantine_permanent_failure(self, account: Account, error_code: str) -> bool:
+        return await _quarantine_permanent_failure(self, account, error_code)
 
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)

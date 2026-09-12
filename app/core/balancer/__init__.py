@@ -8,6 +8,7 @@ from app.core.balancer.logic import (
     RATE_LIMIT_RESET_MAX_HORIZON_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     REAUTH_REQUIRED_FAILURE_CODES,
+    ROUTING_BLOCKED_REAUTH_REASONS,
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
@@ -31,6 +32,7 @@ from app.core.balancer.logic import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
     pool_usage_exhaustion,
+    reauth_reason_blocks_routing,
     select_account,
 )
 
@@ -41,6 +43,7 @@ __all__ = [
     "HEALTH_TIER_PROBING",
     "ERROR_BACKOFF_THRESHOLD",
     "REAUTH_REQUIRED_FAILURE_CODES",
+    "ROUTING_BLOCKED_REAUTH_REASONS",
     "AccountState",
     "RoutingCost",
     "RoutingCostsByAccount",
@@ -67,5 +70,6 @@ __all__ = [
     "handle_rate_limit",
     "plausible_rate_limit_reset_at",
     "pool_usage_exhaustion",
+    "reauth_reason_blocks_routing",
     "select_account",
 ]

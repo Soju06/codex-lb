@@ -90,9 +90,11 @@ async def _insert_account(account_id: str, status: AccountStatus = AccountStatus
         await session.commit()
 
 
-async def _set_account_status(account_id: str, status: AccountStatus) -> None:
+async def _set_account_status(account_id: str, status: AccountStatus, reason: str | None = None) -> None:
     async with SessionLocal() as session:
-        await session.execute(update(Account).where(Account.id == account_id).values(status=status))
+        await session.execute(
+            update(Account).where(Account.id == account_id).values(status=status, deactivation_reason=reason)
+        )
         await session.commit()
 
 
@@ -247,6 +249,66 @@ async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller
     assert is_account_routing_unavailable(account_id) is False
     reauth_session = _fake_bridge_session(_make_account(account_id, AccountStatus.REAUTH_REQUIRED))
     assert _http_bridge_session_account_active(reauth_session) is True
+
+
+@pytest.mark.asyncio
+async def test_active_snapshot_does_not_clear_revoked_token_routing_mark(db_setup) -> None:
+    account_id = "acct-bus-revoked-settlement"
+    await _insert_account(account_id)
+    routing_cache = RoutingAvailabilityCache(SessionLocal)
+    await routing_cache.refresh_from_db()
+
+    routing_cache.mark_unavailable_pending_persist(account_id)
+    await routing_cache.refresh_from_db()
+
+    assert routing_cache.is_unavailable(account_id) is True
+
+    await _set_account_status(
+        account_id,
+        AccountStatus.REAUTH_REQUIRED,
+        "Authentication token revoked - re-login required",
+    )
+    await routing_cache.refresh_from_db()
+    assert routing_cache.is_unavailable(account_id) is True
+
+    await _set_account_status(account_id, AccountStatus.ACTIVE)
+    await routing_cache.refresh_from_db()
+    assert routing_cache.is_unavailable(account_id) is False
+
+    await _set_account_status(account_id, AccountStatus.ACTIVE, "Authentication token revoked - re-login required")
+    await routing_cache.refresh_from_db()
+    assert routing_cache.is_unavailable(account_id) is True
+
+
+@pytest.mark.asyncio
+async def test_reauth_reason_controls_peer_routing_availability(db_setup, poller_slot) -> None:
+    account_id = "acct-bus-reauth-reason"
+    await _insert_account(account_id)
+    local_poller = CacheInvalidationPoller(SessionLocal)
+    routing_cache = RoutingAvailabilityCache(SessionLocal)
+    local_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_cache.refresh_from_db)
+    set_cache_invalidation_poller(local_poller)
+    await routing_cache.refresh_from_db()
+    await local_poller._poll_once()
+
+    await _set_account_status(
+        account_id,
+        AccountStatus.REAUTH_REQUIRED,
+        "Authentication token revoked - re-login required",
+    )
+    remote_poller = CacheInvalidationPoller(SessionLocal)
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    await local_poller._poll_once()
+    assert routing_cache.is_unavailable(account_id) is True
+
+    await _set_account_status(
+        account_id,
+        AccountStatus.REAUTH_REQUIRED,
+        "Refresh token was revoked - re-login required",
+    )
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    await local_poller._poll_once()
+    assert routing_cache.is_unavailable(account_id) is False
 
 
 @pytest.mark.asyncio

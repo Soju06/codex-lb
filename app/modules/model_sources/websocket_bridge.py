@@ -12,7 +12,7 @@ from sqlalchemy import select
 from starlette.types import Message
 from starlette.websockets import WebSocket
 
-from app.core.config.settings import get_settings
+from app.core.clients.proxy import MAX_SSE_EVENT_BYTES
 from app.core.types import JsonValue
 from app.db.models import ModelSource, ModelSourceModel
 from app.db.session import get_background_session
@@ -87,7 +87,7 @@ class CompanyWebSocketBridge:
             )
         if owned is None:
             return False
-        limit = get_settings().max_sse_event_bytes
+        limit = MAX_SSE_EVENT_BYTES
         body = dict(payload)
         body.pop("type", None)
         if body.pop("generate", True) is False:

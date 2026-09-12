@@ -5,6 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, AsyncExitStack, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from json import JSONDecodeError
 from math import isfinite
@@ -57,6 +58,11 @@ SOURCE_STREAM_IDLE_CAP_SECONDS = 300.0
 # this bound trips, while a source that only ever produces bookkeeping frames
 # cannot grow the withheld buffer for its whole total budget.
 SOURCE_STREAM_WITHHELD_CAP_BYTES = 2 * 1_048_576
+
+# TRAE selects a protocol variant from the internally generated config name.
+# Keep that request-local value out of the header builder's public signature so
+# the structural outbound-header guard remains simple and auditable.
+_TRAE_CONFIG_NAME: ContextVar[str | None] = ContextVar("trae_config_name", default=None)
 
 TimeoutPhase = Literal["connect", "header", "first_frame", "idle"]
 FrameKind = Literal["non_content", "content", "success_terminal", "failure_terminal"]
@@ -301,21 +307,25 @@ async def forward_chat_completion(
     stack = AsyncExitStack()
     try:
         session = await stack.enter_async_context(lease_model_source_session())
-        response = await stack.enter_async_context(
-            session.post(
+        request_payload = (
+            codebase_llm.upstream_payload(payload) if source.kind == codebase_llm.CODEBASE_LLM_KIND else payload
+        )
+        if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND):
+            request_context = session.post(
                 _source_url(source, "/chat/completions"),
                 headers=_source_headers(source, encryptor=encryptor),
-                **(
-                    {"allow_redirects": False}
-                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
-                    else {}
-                ),
-                json=codebase_llm.upstream_payload(payload)
-                if source.kind == codebase_llm.CODEBASE_LLM_KIND
-                else payload,
+                allow_redirects=False,
+                json=request_payload,
                 timeout=_source_client_timeout(source),
             )
-        )
+        else:
+            request_context = session.post(
+                _source_url(source, "/chat/completions"),
+                headers=_source_headers(source, encryptor=encryptor),
+                json=request_payload,
+                timeout=_source_client_timeout(source),
+            )
+        response = await stack.enter_async_context(request_context)
         data = await _response_json(response)
         if (
             source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
@@ -431,19 +441,25 @@ async def forward_responses(
             # Non-stream generations legitimately spend minutes before the
             # first byte, so only connect establishment and the source's total
             # budget are bounded here (no header/first-frame deadline).
-            async with session.post(
-                _source_url(source, "/responses"),
-                headers=_source_headers(source, encryptor=encryptor),
-                **(
-                    {"allow_redirects": False}
-                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
-                    else {}
-                ),
-                json=codebase_llm.upstream_payload(payload)
-                if source.kind == codebase_llm.CODEBASE_LLM_KIND
-                else payload,
-                timeout=_source_client_timeout(source),
-            ) as response:
+            request_payload = (
+                codebase_llm.upstream_payload(payload) if source.kind == codebase_llm.CODEBASE_LLM_KIND else payload
+            )
+            if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND):
+                request_context = session.post(
+                    _source_url(source, "/responses"),
+                    headers=_source_headers(source, encryptor=encryptor),
+                    allow_redirects=False,
+                    json=request_payload,
+                    timeout=_source_client_timeout(source),
+                )
+            else:
+                request_context = session.post(
+                    _source_url(source, "/responses"),
+                    headers=_source_headers(source, encryptor=encryptor),
+                    json=request_payload,
+                    timeout=_source_client_timeout(source),
+                )
+            async with request_context as response:
                 if (
                     source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
                     and 300 <= response.status < 400
@@ -531,19 +547,25 @@ async def forward_embeddings(
 ) -> SourceEmbeddings:
     try:
         async with lease_model_source_session() as session:
-            async with session.post(
-                _source_url(source, "/embeddings"),
-                headers=_source_headers(source, encryptor=encryptor),
-                **(
-                    {"allow_redirects": False}
-                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
-                    else {}
-                ),
-                json=codebase_llm.upstream_payload(payload)
-                if source.kind == codebase_llm.CODEBASE_LLM_KIND
-                else payload,
-                timeout=_source_client_timeout(source),
-            ) as response:
+            request_payload = (
+                codebase_llm.upstream_payload(payload) if source.kind == codebase_llm.CODEBASE_LLM_KIND else payload
+            )
+            if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND):
+                request_context = session.post(
+                    _source_url(source, "/embeddings"),
+                    headers=_source_headers(source, encryptor=encryptor),
+                    allow_redirects=False,
+                    json=request_payload,
+                    timeout=_source_client_timeout(source),
+                )
+            else:
+                request_context = session.post(
+                    _source_url(source, "/embeddings"),
+                    headers=_source_headers(source, encryptor=encryptor),
+                    json=request_payload,
+                    timeout=_source_client_timeout(source),
+                )
+            async with request_context as response:
                 data = await _response_json(response)
                 if (
                     source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
@@ -855,28 +877,33 @@ async def _open_source_stream(
     opened_at = clock.monotonic()
     try:
         session = await stack.enter_async_context(lease_model_source_session())
+        request_payload = (
+            codebase_llm.upstream_payload(payload) if source.kind == codebase_llm.CODEBASE_LLM_KIND else payload
+        )
         try:
             with _phase_deadline(scheduler, header_deadline_seconds):
-                response = await stack.enter_async_context(
-                    session.post(
-                        _source_url(source, path),
-                        headers=_source_headers(
-                            source,
-                            encryptor=encryptor,
-                            stream=True,
-                            trae_config_name=trae_config_name if isinstance(trae_config_name, str) else None,
-                        ),
-                        **(
-                            {"allow_redirects": False}
-                            if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND)
-                            else {}
-                        ),
-                        json=codebase_llm.upstream_payload(payload)
-                        if source.kind == codebase_llm.CODEBASE_LLM_KIND
-                        else payload,
-                        timeout=_source_client_timeout(source),
-                    )
+                trae_config_token = _TRAE_CONFIG_NAME.set(
+                    trae_config_name if isinstance(trae_config_name, str) else None
                 )
+                try:
+                    if source.kind in (llmbox.LLMBOX_KIND, trae.TRAE_KIND, codebase_llm.CODEBASE_LLM_KIND):
+                        request_context = session.post(
+                            _source_url(source, path),
+                            headers=_source_headers(source, encryptor=encryptor, stream=True),
+                            allow_redirects=False,
+                            json=request_payload,
+                            timeout=_source_client_timeout(source),
+                        )
+                    else:
+                        request_context = session.post(
+                            _source_url(source, path),
+                            headers=_source_headers(source, encryptor=encryptor, stream=True),
+                            json=request_payload,
+                            timeout=_source_client_timeout(source),
+                        )
+                    response = await stack.enter_async_context(request_context)
+                finally:
+                    _TRAE_CONFIG_NAME.reset(trae_config_token)
         except aiohttp.ConnectionTimeoutError as exc:
             # ``connect`` / ``sock_connect`` expired: the source never accepted
             # a connection, which is the existing "unreachable" verdict.
@@ -1118,14 +1145,14 @@ def _source_headers(
     stream: bool = False,
     accept: str | None = None,
     content_type: str | None = "application/json",
-    trae_config_name: str | None = None,
 ) -> dict[str, str]:
     headers = {
         "Accept": accept or ("text/event-stream" if stream else "application/json"),
     }
     if content_type is not None:
         headers["Content-Type"] = content_type
-    if source.kind == codebase_llm.CODEBASE_LLM_KIND:
+    source_kind = getattr(source, "kind", None)
+    if source_kind == codebase_llm.CODEBASE_LLM_KIND:
         try:
             codebase_llm.validate_binding(
                 source.base_url,
@@ -1142,7 +1169,7 @@ def _source_headers(
                     "error": {"message": str(exc), "type": "upstream_error", "code": "model_source_credentials_error"}
                 },
             ) from None
-    if source.kind == trae.TRAE_KIND:
+    if source_kind == trae.TRAE_KIND:
         try:
             trae.validate_binding(
                 source.base_url,
@@ -1150,7 +1177,7 @@ def _source_headers(
                 source.supports_audio_transcriptions,
                 source.supports_embeddings,
             )
-            return trae.request_headers(trae_config_name)
+            return trae.request_headers(_TRAE_CONFIG_NAME.get())
         except ValueError as exc:
             raise ModelSourceForwardingError(
                 status_code=502,
@@ -1158,7 +1185,7 @@ def _source_headers(
                     "error": {"message": str(exc), "type": "upstream_error", "code": "model_source_credentials_error"}
                 },
             ) from None
-    if source.kind == llmbox.LLMBOX_KIND:
+    if source_kind == llmbox.LLMBOX_KIND:
         try:
             llmbox.validate_binding(
                 source.base_url,

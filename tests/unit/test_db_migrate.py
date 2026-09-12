@@ -1911,6 +1911,7 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
     rebind_claim_revision = "20260906_000000_add_http_bridge_rebind_claim"
     overflow_revision = "20260908_000000_add_subscription_overflow"
     merge_revision = "20260908_010000_merge_http_bridge_and_subscription_overflow"
+    rehome_revision = "20260912_020000_rehome_recovery_repair_ownership"
 
     assert script_directory.get_revision(compatibility_revision) is not None
     assert script_directory.get_revision(repair_revision) is not None
@@ -1995,7 +1996,8 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         recovery_repair_revision,
         "20260912_000000_merge_thread_cache_and_bridge_retirement_heads",
     )
-    assert script_directory.get_heads() == [recovery_merge_revision]
+    assert script_directory.get_revision(rehome_revision).down_revision == recovery_merge_revision
+    assert script_directory.get_heads() == [rehome_revision]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:

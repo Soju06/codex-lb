@@ -3666,3 +3666,97 @@ async def test_http_bridge_recovery_column_repair_downgrade_preserves_parent_sch
         assert "target_response_id" in alias_columns
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_recovery_repair_rehomes_legacy_ownership_for_historical_downgrade(tmp_path):
+    """Legacy repair markers are migrated so historical downgrades still own their objects."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-rehome.sqlite'}"
+    parent_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
+    head_revision = "20260912_020000_rehome_recovery_repair_ownership"
+    downgrade_revision = "20260821_020000_add_http_bridge_replay_snapshot"
+    operation_table = "http_bridge_operations"
+    alias_table = "http_bridge_session_aliases"
+    operation_columns = {
+        "rebind_claim_id",
+        "transcript_version",
+        "response_output_items_json",
+        "response_output_items_complete",
+        "response_replay_input_json",
+        "response_replay_input_complete",
+        "response_replay_input_turn_count",
+    }
+    operation_indexes = {
+        "idx_http_bridge_operations_session_state_created",
+        "idx_http_bridge_operations_response_state",
+    }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            for index in operation_indexes:
+                await conn.execute(text(f"DROP INDEX {index}"))
+            for column in operation_columns:
+                await conn.execute(text(f"ALTER TABLE {operation_table} DROP COLUMN {column}"))
+            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
+        # Reproduce markers written by the old repair implementation.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM http_bridge_migration_object_ownership WHERE revision != :legacy_revision"),
+                {"legacy_revision": repair_revision},
+            )
+            for object_type, object_name in (
+                [("column", name) for name in operation_columns]
+                + [("index", name) for name in operation_indexes]
+                + [("column", "target_response_id")]
+            ):
+                await conn.execute(
+                    text(
+                        "INSERT INTO http_bridge_migration_object_ownership "
+                        "(revision, object_type, object_name) VALUES "
+                        "(:revision, :object_type, :object_name)"
+                    ),
+                    {"revision": repair_revision, "object_type": object_type, "object_name": object_name},
+                )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, head_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            legacy_count = await conn.scalar(
+                text("SELECT count(*) FROM http_bridge_migration_object_ownership WHERE revision = :revision"),
+                {"revision": repair_revision},
+            )
+        assert legacy_count == 0
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), downgrade_revision))
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(operation_table)}
+            )
+            indexes = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes(operation_table)}
+            )
+            aliases = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
+        assert {"transcript_version", "response_output_items_json", "response_output_items_complete"} <= columns
+        assert {"response_replay_input_json", "response_replay_input_complete"} <= columns
+        assert "rebind_claim_id" not in columns
+        assert "response_replay_input_turn_count" not in columns
+        assert "target_response_id" not in aliases
+        # The session-state index is owned by the 20260815 revision, which is
+        # a descendant of this target in the rebased graph and is therefore
+        # removed by the downgrade. The response-state index belongs to the
+        # retained 20260821_010000 ancestor and must remain.
+        assert "idx_http_bridge_operations_session_state_created" not in indexes
+        assert "idx_http_bridge_operations_response_state" in indexes
+    finally:
+        await engine.dispose()

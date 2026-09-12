@@ -1649,24 +1649,19 @@ class StubHistoryUsageRepository(StubUsageRepository):
         super().__init__(**latest)
         self._history = history or {}
         self.history_windows: list[str] = []
-        self.history_limits: list[int | None] = []
 
     async def history_since(
         self,
         account_id: str,
         window: str,
         since: datetime,
-        *,
-        limit: int | None = None,
     ) -> list[UsageHistory]:
         self.history_windows.append(window)
-        self.history_limits.append(limit)
-        rows = [
+        return [
             entry
             for entry in self._history.get(window, [])
             if entry.account_id == account_id and entry.recorded_at >= since
         ]
-        return rows if limit is None else rows[-limit:]
 
 
 def _weekly_block(
@@ -1857,53 +1852,9 @@ async def test_resolve_reset_evidence_anchors_a_paid_block_to_its_primary_window
     )
 
     assert usage_repo.history_windows == ["primary"]
-    assert usage_repo.history_limits == [refresh_scheduler_module._RESET_EVIDENCE_HISTORY_ROW_CAP]
     resolved = evidence[account.id]
     assert resolved.window == "primary"
     assert (resolved.baseline.reset_at, resolved.after.used_percent) == (weekly_reset_at, 0.0)
-
-
-@pytest.mark.asyncio
-async def test_resolve_reset_evidence_scans_only_the_newest_capped_history() -> None:
-    """The anchored lookup is bounded, so a long block does not grow the scan."""
-
-    now = 1_700_000_000.0
-    blocked_at = int(now - 30 * 24 * 3600)
-    weekly_reset_at = int(now + 3 * 24 * 3600)
-    account = _make_account(
-        "acc_pro_capped",
-        status=AccountStatus.RATE_LIMITED,
-        plan_type="pro",
-        reset_at=weekly_reset_at,
-        blocked_at=blocked_at,
-    )
-    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
-    cap = refresh_scheduler_module._RESET_EVIDENCE_HISTORY_ROW_CAP
-    # Far more pre-block-era rows than the cap, all carrying the stale deadline.
-    filler = [
-        _make_usage(
-            account.id,
-            window="primary",
-            used_percent=100.0,
-            reset_at=weekly_reset_at,
-            recorded_at=_epoch_to_naive_utc(now - 3600 - index),
-            window_minutes=10_080,
-        )
-        for index in range(cap * 2, 0, -1)
-    ]
-    usage_repo = StubHistoryUsageRepository(history={"primary": [*filler, before, after]})
-
-    evidence = await refresh_scheduler_module._resolve_reset_evidence(
-        accounts=[account],
-        usage_repo=cast(Any, usage_repo),
-        before_monthly={},
-        after_monthly={},
-    )
-
-    # The transition still resolves from the capped tail.
-    resolved = evidence[account.id]
-    assert (resolved.window, resolved.baseline.reset_at) == ("primary", weekly_reset_at)
-    assert resolved.after.used_percent == 0.0
 
 
 @pytest.mark.asyncio
@@ -2057,6 +2008,60 @@ async def test_reconcile_keeps_account_blocked_when_a_freshly_reported_sibling_i
         usage_repo=StubUsageRepository(
             primary={account.id: after},
             secondary={account.id: fresh_exhausted_sibling},
+        ),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        weekly_reset_at,
+        blocked_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_unknown_plan_blocked_when_a_reported_sibling_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown plan capacity is not evidence that a reported window does not exist.
+
+    `coerce_account_plan_type` preserves an unrecognized stored plan, and
+    `capacity_for_plan` then returns `None` for every slot. Treating that as
+    "no such window" would clear the cooldown even though upstream just
+    reported a second window at `100%` with an unelapsed deadline.
+    """
+
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    weekly_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_unknown_plan_sibling",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="some-new-plan",
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
+    reported_exhausted_sibling = _make_usage(
+        account.id,
+        window="secondary",
+        used_percent=100.0,
+        reset_at=int(now + 2 * 24 * 3600),
+        recorded_at=after.recorded_at,
+        window_minutes=10_080,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={account.id: after},
+            secondary={account.id: reported_exhausted_sibling},
         ),
         accounts=[account],
         reset_evidence={account.id: _reset_evidence(before, after)},

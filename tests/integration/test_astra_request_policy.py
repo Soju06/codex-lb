@@ -170,13 +170,14 @@ async def test_astra_compact_rejects_configuration_update_with_openai_error(asyn
         {"context_management": [{"type": "compaction", "compact_threshold": 200000}]},
     ],
 )
-async def test_astra_invalid_controls_return_400_before_upstream(async_client, monkeypatch, extra):
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/v1/chat/completions"])
+async def test_astra_invalid_controls_return_400_before_upstream(async_client, monkeypatch, extra, endpoint):
     async def fail_upstream(*args, **kwargs):
         raise AssertionError("Invalid Astra request reached upstream")
         yield ""
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_upstream)
-    response = await async_client.post("/v1/responses", json={**_payload(), **extra})
+    response = await async_client.post(endpoint, json={**_payload(), **extra})
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
 

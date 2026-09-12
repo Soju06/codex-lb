@@ -590,10 +590,8 @@ def test_websocket_subscription_owner_replays_validated_proxy_injected_full_rese
     assert connect.await_count == 2
     selected = json.loads(stale_upstream.sent_text[0])
     assert selected["previous_response_id"] == _ANCHOR
-    assert selected["input"] == [
-        {"type": "configuration_update", "reasoning": {"effort": "max"}},
-        full_input[1],
-    ]
+    # Allowed-list keys do not synthesize a reset after trimming the stored prefix.
+    assert selected["input"] == [full_input[1]]
     replay = json.loads(replay_upstream.sent_text[0])
     assert "previous_response_id" not in replay
     assert replay["input"] == [

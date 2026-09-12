@@ -169,7 +169,7 @@ async def test_astra_full_resend_preserves_bridge_prefix(async_client, monkeypat
     # Given a real route, bridge and durable store, with only upstream I/O faked.
     account_id = await _import_account(async_client, "astra-history", "astra-history@example.com")
     account = await _get_account(account_id)
-    key = await _reasoning_key(async_client, allowed=["high"])
+    key = await _reasoning_key(async_client, enforced="high")
     _install_bridge_settings(monkeypatch, enabled=True)
     upstream = _FakeBridgeUpstreamWebSocket()
     service = get_proxy_service_for_app(app_instance)
@@ -281,10 +281,6 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
     assert created.status_code == 200
     key = created.json()
     _install_bridge_settings(monkeypatch, enabled=True)
-    bridge_settings = proxy_module.get_settings().model_copy(
-        update={"http_responses_session_bridge_ambiguous_continuation_recovery_mode": "server_indefinite_recovery"}
-    )
-    monkeypatch.setattr(proxy_module, "get_settings", lambda: bridge_settings)
     upstream = _FakeBridgeUpstreamWebSocket()
     service = get_proxy_service_for_app(app_instance)
     monkeypatch.setattr(
@@ -320,9 +316,12 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
     normalized_history = ResponsesRequest.model_validate({**body, "input": history}).input
     assert isinstance(normalized_history, list)
 
-    async def post_turn(input_items, response_id):
+    async def post_turn(input_items, response_id, *, previous_response_id=None):
+        request_body = {**body, "input": input_items}
+        if previous_response_id is not None:
+            request_body["previous_response_id"] = previous_response_id
         with anyio.fail_after(5):
-            response = await async_client.post(path, json={**body, "input": input_items}, headers=headers)
+            response = await async_client.post(path, json=request_body, headers=headers)
             assert response.status_code == 200, response.text
             if stream:
                 events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
@@ -335,10 +334,10 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
             await registered[response_id].wait()
             return response
 
-    # Establish a real session, then record the repeated hard turn without an anchor.
+    # Current upstream journals anchored continuations, not unanchored hard turns.
     first = await post_turn(history, "resp_bridge_1")
     headers["x-codex-turn-state"] = first.headers["x-codex-turn-state"]
-    await post_turn(history, "resp_bridge_2")
+    await post_turn(history, "resp_bridge_2", previous_response_id="resp_bridge_1")
     async with SessionLocal() as db:
         operation = (
             await db.execute(
@@ -346,15 +345,40 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
             )
         ).scalar_one()
         assert operation.state == "completed"
-        assert operation.parent_response_id is None
+        assert operation.parent_response_id == "resp_bridge_1"
 
-    # The actual completed ledger entry injects the third turn's anchor after preparation.
-    await post_turn(history, "resp_bridge_3")
+    # Model completion becoming visible between the initial lookup and the
+    # completed-operation query. Only the two initial reads are stale; the
+    # completion lookup, subsequent writes and history bookkeeping use real DBs.
+    original_by_fingerprint = service._durable_bridge.get_operation_by_fingerprint
+    original_by_id = service._durable_bridge.get_operation
+    stale_reads = {"fingerprint", "id"}
+
+    async def initial_fingerprint_miss(**kwargs):
+        if "fingerprint" in stale_reads:
+            stale_reads.remove("fingerprint")
+            return None
+        return await original_by_fingerprint(**kwargs)
+
+    async def initial_id_miss(**kwargs):
+        if "id" in stale_reads:
+            stale_reads.remove("id")
+            return None
+        return await original_by_id(**kwargs)
+
+    monkeypatch.setattr(service._durable_bridge, "get_operation_by_fingerprint", initial_fingerprint_miss)
+    monkeypatch.setattr(service._durable_bridge, "get_operation", initial_id_miss)
+    await post_turn(history, "resp_bridge_3", previous_response_id="resp_bridge_1")
+    assert stale_reads == set()
     assert late_anchors == ["resp_bridge_2"]
-    reset = {"type": "configuration_update", "reasoning": {"effort": "max" if effort == "ultra" else effort}}
+    resets = (
+        [{"type": "configuration_update", "reasoning": {"effort": "max" if effort == "ultra" else effort}}]
+        if enforced
+        else []
+    )
     third = json.loads(upstream.sent_text[2])
     assert third["previous_response_id"] == "resp_bridge_2"
-    assert third["input"] == [reset, *normalized_history]
+    assert third["input"] == [*resets, *normalized_history]
     async with SessionLocal() as db:
         stored = (
             await db.execute(
@@ -370,6 +394,8 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
     )
     live_count = session.last_completed_input_count
     live_fingerprint = session.last_completed_input_prefix_fingerprint
+    assert stored_count == live_count == len(normalized_history)
+    assert stored_fingerprint == live_fingerprint == proxy_module._fingerprint_input_items(normalized_history)
 
     # A client full resend omits the proxy reset and must still trim/reuse the third response.
     suffix = [
@@ -379,9 +405,7 @@ async def test_astra_late_ledger_anchor_preserves_client_prefix(
     await post_turn([*history, *suffix], "resp_bridge_4")
     fourth = json.loads(upstream.sent_text[3])
     assert fourth.get("previous_response_id") == "resp_bridge_3"
-    assert fourth["input"] == [reset, *suffix]
-    assert stored_count == live_count == len(normalized_history)
-    assert stored_fingerprint == live_fingerprint == proxy_module._fingerprint_input_items(normalized_history)
+    assert fourth["input"] == [*resets, *suffix]
     assert late_anchors == ["resp_bridge_2"]
     connect.assert_awaited_once()
     await service.drain_persistence_tasks(timeout_seconds=5)
@@ -398,10 +422,10 @@ async def test_astra_full_resend_http_fallback_keeps_reset(
     async_client, monkeypatch, stream: bool, bridge_enabled: bool
 ) -> None:
     await _import_account(async_client, "astra-fallback", "astra-fallback@example.com")
-    key = await _reasoning_key(async_client, allowed=["high"])
+    key = await _reasoning_key(async_client, enforced="high")
     _install_bridge_settings(monkeypatch, enabled=bridge_enabled)
     # Exercise the runtime size bypass after the route has chosen the bridge.
-    monkeypatch.setattr(bridge_streaming, "_ws_transport_payload_budget_bytes", lambda settings: 1)
+    monkeypatch.setattr(bridge_streaming, "_ws_transport_payload_budget_bytes", lambda max_sse_event_bytes=None: 1)
     forwarded = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
@@ -544,7 +568,8 @@ async def test_astra_connect_fallback_preserves_prepared_continuation(
         assert sent["reasoning"] == {"effort": wire_effort}
         wire_reset = {"type": "configuration_update", "reasoning": {"effort": wire_effort}}
         normalized_user = {"role": "user", "content": "Continue"}
-        assert sent["input"] == [wire_reset, tool_output if history == "replay" else normalized_user]
+        expected_updates = [wire_reset] if key_mode == "enforced-ultra" or history == "explicit" else []
+        assert sent["input"] == [*expected_updates, tool_output if history == "replay" else normalized_user]
         await service.drain_persistence_tasks(timeout_seconds=5)
         async with SessionLocal() as db:
             assert list((await db.execute(select(ApiKeyUsageReservation.status))).scalars()) == []

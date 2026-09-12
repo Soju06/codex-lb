@@ -6,6 +6,7 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
@@ -29,6 +30,7 @@ from app.core.clients.thread_cache_identity import (
 from app.core.clients.thread_cache_identity import (
     effective_thread_cache_identity_mode as _effective_thread_cache_identity_mode,
 )
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
@@ -58,7 +60,6 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _resolve_prompt_cache_key,
-    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
 )
@@ -447,11 +448,18 @@ def _sticky_key_for_compact_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
-    cache_key, _ = _resolve_prompt_cache_key(
+    # A compact body is already trimmed, so it rarely extends the ordinary
+    # turns' transcript and will usually mint a new anchor. That is the same
+    # answer the ordinary path gives for a compacted turn, and it is correct:
+    # the upstream prefix cache is cold after compaction.
+    resolution = _resolve_prompt_cache_key(
         payload,
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
+        max_age_seconds=openai_cache_affinity_max_age_seconds,
     )
+    cache_key = resolution.sticky_key
+    cache_key_source = resolution.source
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         policy = _AffinityPolicy(
@@ -480,15 +488,18 @@ def _sticky_key_for_compact_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            prompt_cache_key_source=cache_key_source,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            prompt_cache_key_source=cache_key_source,
         )
     else:
         policy = _AffinityPolicy()
+    policy = replace(policy, prompt_cache_derivation_outcome=resolution.outcome)
     return _affinity_with_payload_continuity(policy, payload)
 
 
@@ -860,11 +871,13 @@ class _CompactMixin:
         resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        # Resolved once per request: API-key override, then the fleet value.
+        # Resolved once per request: API-key override, then the fleet value read
+        # off the *overlaid* settings (dashboard over environment over default),
+        # never the raw dashboard row whose column is NULL until an operator sets
+        # it. See the matching comment in ``streaming/retry.py``.
         thread_cache_identity_mode, thread_cache_identity_from_key = _effective_thread_cache_identity_mode(
-            api_key, settings
+            api_key, with_dashboard_overrides(base_settings)
         )
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
         affinity = _sticky_key_for_compact_request(
             payload,
             headers,
@@ -874,27 +887,14 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            # The payload cache hint remains unchanged; diagnostics must not
-            # imply that it supplied the internal thread-local routing key.
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            if _sticky_key_from_turn_state_header(headers) is not None:
-                sticky_key_source = "turn_state_header"
-            elif _sticky_key_from_session_header(headers) is not None:
-                sticky_key_source = "session_header"
-            else:
-                sticky_key_source = "payload"
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
-        affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+        affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
             "compact",
             payload,
             headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=affinity_observation.kind,
+            sticky_key_source=affinity_observation.source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
             thread_cache_identity_mode=thread_cache_identity_mode,
             thread_cache_identity_from_key=thread_cache_identity_from_key,

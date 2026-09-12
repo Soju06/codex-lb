@@ -65,7 +65,7 @@ help:
 	@printf '%s\n' \
 	  'Common targets:' \
 	  '  make lint                    ruff check + format check + architecture checks' \
-	  '  make architecture-check      proxy architecture fitness ratchets' \
+	  '  make architecture-check      proxy, settings, and migration-graph fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make rust-check              fmt + clippy + tests + release build' \
 	  '  make rust-audit              cargo-deny dependency policy' \
@@ -114,6 +114,7 @@ architecture-check:
 	uv run python scripts/check_cancellation_safety.py
 	uv run python scripts/check_proxy_timing_seams.py
 	uv run python scripts/check_settings_tiers.py
+	uv run python scripts/check_migration_topology.py
 
 typecheck:
 	uv sync --dev --frozen

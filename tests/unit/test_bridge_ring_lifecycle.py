@@ -2283,6 +2283,126 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
 
 
 @pytest.mark.asyncio
+async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """An operation carried across an upgrade with a consumed claim must settle.
+
+    The recovery-dispatch fence is opt-in: only a caller that claimed a
+    dispatch pins the generation it observed. A caller that never claimed one
+    passes no expectation, so a row whose counter was advanced by an earlier
+    release is not locked out of terminal append or fallback settlement.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-legacy-generation",
+            session_key_value="sid-legacy-generation",
+        )
+
+        async def _operation_with_consumed_claim(label: str, response_id: str) -> str:
+            fingerprint = durable_bridge_hash(label)
+            operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+            assert await repository.record_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                request_fingerprint=fingerprint,
+                account_id="account-legacy-generation",
+                model="gpt-5.6",
+                parent_response_id="resp-parent",
+            )
+            assert await repository.update_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                state="unknown",
+            )
+            assert await repository.claim_unknown_operation_for_recovery(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+            )
+            assert await repository.update_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id="inst-legacy-generation",
+                owner_epoch=claim.owner_epoch,
+                state="acknowledged",
+                response_id=response_id,
+            )
+            carried_over = await repository.get_operation(operation_id=operation_id)
+            assert carried_over is not None
+            assert carried_over.recovery_dispatch_count == 1
+            return operation_id
+
+        appended_operation_id = await _operation_with_consumed_claim("legacy-generation-append", "resp-legacy-append")
+        assert await repository.append_terminal_operation_event(
+            operation_id=appended_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            response_id="resp-legacy-append",
+        )
+        appended = await repository.get_operation(operation_id=appended_operation_id)
+        assert appended is not None
+        assert appended.state == "failed"
+        assert appended.event_spool_complete is True
+        assert appended.recovery_dispatch_count == 1
+
+        settled_operation_id = await _operation_with_consumed_claim("legacy-generation-settle", "resp-legacy-settle")
+        assert await repository.settle_terminal_append_failure(
+            operation_id=settled_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-legacy-settle",
+            response_id="resp-legacy-settle",
+        )
+        settled = await repository.get_operation(operation_id=settled_operation_id)
+        assert settled is not None
+        assert settled.state == "failed"
+        assert settled.recovery_dispatch_count == 1
+
+        fenced_operation_id = await _operation_with_consumed_claim("legacy-generation-fenced", "resp-legacy-fenced")
+        assert not await repository.append_terminal_operation_event(
+            operation_id=fenced_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-legacy-fenced",
+        )
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=fenced_operation_id,
+            session_id=claim.id,
+            instance_id="inst-legacy-generation",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-legacy-fenced",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-legacy-fenced",
+        )
+        still_acknowledged = await repository.get_operation(operation_id=fenced_operation_id)
+        assert still_acknowledged is not None
+        assert still_acknowledged.state == "acknowledged"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     async_session_factory: Callable[[], AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -2562,6 +2682,225 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     assert after_stale_settlement.state == "submitted"
     assert after_stale_settlement.response_id is None
     await batcher.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spool_format", [HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1, HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2])
+async def test_late_terminal_append_cannot_restore_replay_after_failure_settlement(
+    async_session_factory: Callable[[], AsyncSession],
+    spool_format: str,
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-late-terminal",
+            session_key_value=f"sid-late-terminal-{spool_format}",
+        )
+        fingerprint = durable_bridge_hash(f"late-terminal-{spool_format}")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-late-terminal",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-late-terminal",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-late-terminal",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-late-terminal",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-late-terminal",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            expected_response_id="resp-late-terminal",
+            response_id="resp-late-terminal",
+        )
+
+        append_terminal = (
+            repository.append_terminal_operation_chunk
+            if spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2
+            else repository.append_terminal_operation_event
+        )
+        assert not await append_terminal(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-late-terminal",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.completed"}\n\n',
+            max_bytes=1024,
+            state="completed",
+            response_id="resp-late-terminal",
+        )
+
+        operation = await repository.get_operation(operation_id=operation_id)
+        assert operation is not None
+        assert operation.state == "completed"
+        assert operation.event_spool_complete is False
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spool_format", [HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1, HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2])
+async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
+    async_session_factory: Callable[[], AsyncSession],
+    spool_format: str,
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-deferred-finalize",
+            session_key_value=f"sid-deferred-finalize-{spool_format}",
+        )
+        fingerprint = durable_bridge_hash(f"deferred-finalize-{spool_format}")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-deferred-finalize",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-deferred-finalize",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-deferred-finalize",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-deferred-finalize",
+        )
+
+        append_terminal = (
+            repository.append_terminal_operation_chunk
+            if spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2
+            else repository.append_terminal_operation_event
+        )
+        assert await append_terminal(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-deferred-finalize",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.completed"}\n\n',
+            max_bytes=1024,
+            state="completed",
+            response_id="resp-deferred-finalize",
+            complete_spool=False,
+        )
+        incomplete = await repository.get_operation(operation_id=operation_id)
+        assert incomplete is not None
+        assert incomplete.state == "completed"
+        assert incomplete.event_spool_complete is False
+
+        # Finalization is fenced on the outcome the append observed, so an
+        # attempt that recorded a different terminal state cannot claim it.
+        assert not await repository.finalize_operation_event_spool(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-deferred-finalize",
+            owner_epoch=claim.owner_epoch,
+            expected_state="incomplete",
+        )
+        assert await repository.finalize_operation_event_spool(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-deferred-finalize",
+            owner_epoch=claim.owner_epoch,
+            expected_state="completed",
+        )
+        completed = await repository.get_operation(operation_id=operation_id)
+        assert completed is not None
+        assert completed.event_spool_complete is True
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-duplicate-terminal",
+            session_key_value="sid-duplicate-terminal",
+        )
+        fingerprint = durable_bridge_hash("duplicate-terminal")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-duplicate-terminal",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-duplicate-terminal",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-duplicate-terminal",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-duplicate-terminal",
+        )
+        assert await repository.append_terminal_operation_chunk(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-duplicate-terminal",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.completed"}\n\n',
+            max_bytes=1024,
+            state="completed",
+            response_id="resp-duplicate-terminal",
+            complete_spool=False,
+        )
+
+        assert not await repository.append_terminal_operation_chunk(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-duplicate-terminal",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            response_id="resp-conflicting-terminal",
+            complete_spool=False,
+        )
+        preserved = await repository.get_operation(operation_id=operation_id)
+        assert preserved is not None
+        assert preserved.state == "completed"
+        assert preserved.response_id == "resp-duplicate-terminal"
+        assert preserved.event_spool_complete is False
+        assert await repository.finalize_operation_event_spool(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-duplicate-terminal",
+            owner_epoch=claim.owner_epoch,
+            expected_state="completed",
+        )
+    finally:
+        await session.close()
 
 
 @pytest.mark.asyncio

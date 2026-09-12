@@ -29,6 +29,7 @@ from app.modules.dashboard_auth.service import (
     PasswordNotConfiguredError,
     UsernameRequiredError,
 )
+from app.modules.dashboard_users.break_glass import user_qualifies
 from app.modules.dashboard_users.repository import DashboardUserCounts, LocalAuthState
 
 pytestmark = pytest.mark.unit
@@ -83,6 +84,7 @@ class _FakeSettings:
     dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
     totp_required_on_login: bool = False
     totp_required_for_admin_role: bool = False
+    local_login_policy: str = "enabled"
 
 
 def _role(slug: PresetRoleSlug) -> DashboardRoleRecord:
@@ -172,6 +174,14 @@ class _FakeRepository:
             non_admin=sum(1 for u in users if u.role_id != PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]),
             pending_invites=0,
         )
+
+    async def count_qualifying_break_glass(self, *, exclude_user_id: str | None = None) -> int:
+        # The production predicate itself, not a hand-copied one. The repository's
+        # SQL filter is kept in step with ``qualifies``; a second transcription
+        # here is exactly how a fake drifts, and it already had: the password
+        # term went missing, so a credential-less proxy admin counted as a way
+        # back in and a removal production refuses would have passed here.
+        return sum(1 for u in self.users.values() if u.id != exclude_user_id and user_qualifies(u))
 
     async def count_custom_roles(self) -> int:
         return 0
@@ -611,6 +621,35 @@ async def test_stale_generation_and_disabled_user_sessions_are_unauthenticated()
     assert (await service.get_session_state(fresh)).authenticated is True
     admin.status = "disabled"
     assert await service.resolve_user_session(fresh) is None
+
+
+@pytest.mark.asyncio
+async def test_the_fake_counts_qualifying_accounts_the_way_the_repository_does() -> None:
+    """A designation is not a way back in until all five facts hold.
+
+    This pins the stand-in to the production predicate the repository's SQL
+    filter mirrors. A hand-copied predicate here dropped the password term
+    once, which made every removal test in this file agree with a production
+    refusal it was no longer reproducing.
+    """
+
+    repository = _FakeRepository()
+    proxy_admin = repository.add(_make_user("proxy-admin", password_hash=None))
+    proxy_admin.is_break_glass = True
+    proxy_admin.totp_secret_encrypted = b"secret"
+    assert await repository.count_qualifying_break_glass() == 0
+
+    proxy_admin.password_hash = "hash"
+    assert await repository.count_qualifying_break_glass() == 1
+    assert await repository.count_qualifying_break_glass(exclude_user_id=proxy_admin.id) == 0
+
+    for attribute, value in (("totp_secret_encrypted", None), ("status", "disabled"), ("is_break_glass", False)):
+        original = getattr(proxy_admin, attribute)
+        setattr(proxy_admin, attribute, value)
+        assert await repository.count_qualifying_break_glass() == 0, attribute
+        setattr(proxy_admin, attribute, original)
+    proxy_admin.role_id = PRESET_ROLE_IDS[PresetRoleSlug.OPERATOR]
+    assert await repository.count_qualifying_break_glass() == 0
 
 
 @pytest.mark.asyncio

@@ -94,6 +94,15 @@ async def _enrol_totp(client: AsyncClient) -> str:
     return secret
 
 
+async def _present_totp(client: AsyncClient, secret: str) -> None:
+    """The migrated ``admin`` row is the designated emergency account: once it holds a
+    secret every request needs it, whatever the two toggles say, so the session that
+    enrolled it presents the code once."""
+
+    verified = await client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
+    assert verified.status_code == 200, verified.text
+
+
 async def _custom_role(slug: str, *permissions: Permission) -> str:
     role_id = str(uuid.uuid4())
     async with SessionLocal() as session:
@@ -339,6 +348,7 @@ async def test_enabling_a_totp_requirement_needs_the_actors_own_secret(async_cli
         assert (await async_client.get("/api/settings")).json()["totpRequiredForAdminRole"] is False
 
         secret = await _enrol_totp(async_client)
+        await _present_totp(async_client, secret)
         assert (await async_client.get("/api/dashboard-auth/session")).json()["totpConfigured"] is True
         assert (await admin2.get("/api/dashboard-auth/session")).json()["totpConfigured"] is False
 
@@ -359,11 +369,7 @@ async def test_enabling_a_totp_requirement_needs_the_actors_own_secret(async_cli
         assert (await operator.get("/api/dashboard-auth/session")).json()["totpEnrollmentRequired"] is False
         assert (await viewer.get("/api/dashboard-auth/session")).json()["totpEnrollmentRequired"] is False
 
-        # The acting admin who enabled it now has to present the code, then keeps working.
-        pending = await async_client.get("/api/settings")
-        assert pending.status_code == 401 and _error(pending)[0] == "totp_required"
-        verified = await async_client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
-        assert verified.status_code == 200, verified.text
+        # The acting admin already presented its code when it enrolled, and keeps working.
         me = await async_client.get("/api/dashboard-auth/me")
         assert me.status_code == 200 and me.json()["id"] == admin_id
         assert (await async_client.get("/api/settings")).status_code == 200
@@ -390,7 +396,7 @@ async def test_global_requirement_waits_for_the_compat_admin_to_enrol(async_clie
         verified = await admin2.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(admin2_secret).now()})
         assert verified.status_code == 200, verified.text
 
-        await _enrol_totp(async_client)
+        await _present_totp(async_client, await _enrol_totp(async_client))
         enabled = await admin2.put("/api/settings", json={"totpRequiredOnLogin": True})
         assert enabled.status_code == 200, enabled.text
         assert enabled.json()["totpRequiredOnLogin"] is True
@@ -408,10 +414,8 @@ async def test_password_removal_resets_the_admin_role_requirement(async_client: 
 
     await _setup_admin(async_client)
     secret = await _enrol_totp(async_client)
+    await _present_totp(async_client, secret)
     assert (await async_client.put("/api/settings", json={"totpRequiredForAdminRole": True})).status_code == 200
-    # The requirement now binds this admin: present the code before the management route.
-    verified = await async_client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
-    assert verified.status_code == 200, verified.text
 
     removed = await async_client.request("DELETE", "/api/dashboard-auth/password", json={"password": ADMIN_PASSWORD})
     assert removed.status_code == 200, removed.text
@@ -429,7 +433,7 @@ async def test_admin_role_policy_change_is_audited(async_client: AsyncClient):
     from app.db.models import AuditLog
 
     await _setup_admin(async_client)
-    await _enrol_totp(async_client)
+    await _present_totp(async_client, await _enrol_totp(async_client))
     response = await async_client.put("/api/settings", json={"totpRequiredForAdminRole": True})
     assert response.status_code == 200, response.text
     assert await drain_audit_log_tasks(5.0)

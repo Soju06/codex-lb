@@ -24,6 +24,7 @@ from app.dependencies import AuthProvidersContext, get_auth_providers_context
 from app.modules.auth_providers.schemas import AuthProviderResponse, AuthProviderUpdateRequest
 from app.modules.auth_providers.service import ProviderNotFoundError
 from app.modules.dashboard_roles.service import RoleNotAssignableError
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 
 router = APIRouter(
     prefix="/api/auth-providers",
@@ -106,4 +107,8 @@ async def update_provider(
         raise DashboardValidationError(str(exc), code="role_not_assignable") from exc
     except InsufficientDelegationError as exc:
         raise DashboardPermissionError(str(exc), code="insufficient_delegation") from exc
+    except BreakGlassRequiresTotpError as exc:
+        raise DashboardConflictError(
+            str(exc), code="break_glass_requires_totp", param=exc.username, details={"username": exc.username}
+        ) from exc
     return _response(provider)

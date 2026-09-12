@@ -44,6 +44,7 @@ from app.core.clients.thread_cache_identity import (
 )
 from app.core.config.settings import Settings, get_settings
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.db.models import DashboardSettings
 from app.modules.settings.service import _resolve_inheritable_settings
 
@@ -53,6 +54,21 @@ _ACCOUNT_A = "lb-account-a"
 _ACCOUNT_B = "lb-account-b"
 _TURN_STATE = "turn_8f1c0f5e-2b17-4a9d-9a0e-1b2c3d4e5f60"
 _SESSION_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
+    assert isinstance(value, Mapping)
+    return value
+
+
+def _sequence(value: JsonValue) -> list[JsonValue]:
+    assert isinstance(value, list)
+    return value
+
+
+def _text(value: JsonValue) -> str:
+    assert isinstance(value, str)
+    return value
 
 
 def _shared(account_id: str = _ACCOUNT_A) -> ThreadCacheIdentity:
@@ -240,8 +256,9 @@ def test_injected_prefix_survives_onto_response_create() -> None:
     frame = _build_websocket_response_create_payload(payload)
 
     assert frame["type"] == "response.create"
-    assert frame["input"][0]["content"][0]["text"] == _isolated().scope_line
-    assert frame["prompt_cache_key"].endswith(_isolated().token)
+    first_item = _mapping(_sequence(frame["input"])[0])
+    assert _text(_mapping(_sequence(first_item["content"])[0])["text"]) == _isolated().scope_line
+    assert _text(frame["prompt_cache_key"]).endswith(_isolated().token)
 
 
 # --------------------------------------------------------------------------
@@ -266,8 +283,8 @@ def test_scoped_key_is_suffixed() -> None:
     ],
 )
 def test_client_key_that_looks_pre_scoped_is_still_scoped_per_account(client_key: str) -> None:
-    a = {"prompt_cache_key": client_key}
-    b = {"prompt_cache_key": client_key}
+    a: dict[str, JsonValue] = {"prompt_cache_key": client_key}
+    b: dict[str, JsonValue] = {"prompt_cache_key": client_key}
     scope_prompt_cache_key(a, _isolated(_ACCOUNT_A))
     scope_prompt_cache_key(b, _isolated(_ACCOUNT_B))
     assert a["prompt_cache_key"] != client_key
@@ -282,23 +299,23 @@ def test_scoped_key_never_exceeds_the_upstream_length_bound(length: int) -> None
     request into an upstream rejection, so past the bound the original folds
     into a digest instead.
     """
-    payload = {"prompt_cache_key": "k" * length}
+    payload: dict[str, JsonValue] = {"prompt_cache_key": "k" * length}
     scope_prompt_cache_key(payload, _isolated())
     assert len(payload["prompt_cache_key"]) <= 64
 
 
 def test_scoped_key_stays_account_unique_past_the_length_bound() -> None:
     long_key = "k" * 200
-    a = {"prompt_cache_key": long_key}
-    b = {"prompt_cache_key": long_key}
+    a: dict[str, JsonValue] = {"prompt_cache_key": long_key}
+    b: dict[str, JsonValue] = {"prompt_cache_key": long_key}
     scope_prompt_cache_key(a, _isolated(_ACCOUNT_A))
     scope_prompt_cache_key(b, _isolated(_ACCOUNT_B))
     assert a["prompt_cache_key"] != b["prompt_cache_key"]
 
 
 def test_scoped_key_stays_client_unique_past_the_length_bound() -> None:
-    a = {"prompt_cache_key": "a" * 200}
-    b = {"prompt_cache_key": "b" * 200}
+    a: dict[str, JsonValue] = {"prompt_cache_key": "a" * 200}
+    b: dict[str, JsonValue] = {"prompt_cache_key": "b" * 200}
     scope_prompt_cache_key(a, _isolated())
     scope_prompt_cache_key(b, _isolated())
     assert a["prompt_cache_key"] != b["prompt_cache_key"]
@@ -307,8 +324,8 @@ def test_scoped_key_stays_client_unique_past_the_length_bound() -> None:
 @pytest.mark.parametrize("length", [1, 20, 46, 47, 48, 64, 200])
 def test_scoped_key_is_deterministic_for_one_account(length: int) -> None:
     """Same client key + same account == same scoped key, on every request."""
-    first = {"prompt_cache_key": "k" * length}
-    second = {"prompt_cache_key": "k" * length}
+    first: dict[str, JsonValue] = {"prompt_cache_key": "k" * length}
+    second: dict[str, JsonValue] = {"prompt_cache_key": "k" * length}
     scope_prompt_cache_key(first, _isolated())
     scope_prompt_cache_key(second, _isolated())
     assert first["prompt_cache_key"] == second["prompt_cache_key"]
@@ -576,7 +593,7 @@ async def test_isolated_mode_does_not_mutate_the_request_model_or_inbound_header
 
     assert payload.prompt_cache_key == "cache-key-1"
     assert isinstance(payload.input, list)
-    assert payload.input[0]["type"] == "additional_tools"
+    assert _mapping(payload.input[0])["type"] == "additional_tools"
     assert headers == headers_before
 
 

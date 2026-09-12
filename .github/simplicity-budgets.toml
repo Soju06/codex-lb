@@ -55,12 +55,13 @@ max_items = 5
 # the ambiguous-continuation recovery mode selector (fail-closed is the only
 # behaviour now); 95 -> 96 dashboard_auth_proxy_groups_header (the reverse
 # proxy's group header must match that proxy's config, so it cannot be a
-# dashboard row, PR-2c-2); 96 -> 97 thread_cache_identity_mode (a fleet-wide
-# behaviour switch an operator must be able to roll back without a deploy, so
-# it needs a dashboard home; the environment leg exists only so an operator who
-# has locked themselves out of the dashboard can still pin the mode at boot,
-# and it is a fallback, never a seed).
-max = 97
+# dashboard row, PR-2c-2); 96 -> 95 constantize-token-refresh-interval fixed
+# the proactive token-refresh window at eight days and emptied the `MIGRATING`
+# backlog; 95 -> 96 thread_cache_identity_mode (a fleet-wide behaviour switch an
+# operator must be able to roll back without a deploy, so it needs a dashboard
+# home; the environment leg exists only so an operator locked out of the
+# dashboard can still pin the mode at boot, and it is a fallback, never a seed).
+max = 96
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

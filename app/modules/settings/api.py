@@ -14,7 +14,7 @@ from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.audit.service import AuditActor, AuditService, AuditSeverity, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
@@ -56,6 +56,7 @@ from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
@@ -70,6 +71,7 @@ from app.modules.settings.schemas import (
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    LocalLoginPolicyLiteral,
     ModelContextWindowOverrideResponse,
     ModelContextWindowOverridesResponse,
     ModelContextWindowOverrideUpsertRequest,
@@ -280,6 +282,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_required_for_admin_role=settings.totp_required_for_admin_role,
+        local_login_policy=cast(LocalLoginPolicyLiteral, settings.local_login_policy),
         users_without_totp_count=settings.users_without_totp_count,
         admins_without_totp_count=settings.admins_without_totp_count,
         api_key_auth_enabled=settings.api_key_auth_enabled,
@@ -1369,6 +1372,9 @@ async def update_settings(
                     if payload.totp_required_for_admin_role is not None
                     else current.totp_required_for_admin_role
                 ),
+                local_login_policy=(
+                    payload.local_login_policy if payload.local_login_policy is not None else current.local_login_policy
+                ),
                 api_key_auth_enabled=(
                     payload.api_key_auth_enabled
                     if payload.api_key_auth_enabled is not None
@@ -1542,6 +1548,15 @@ async def update_settings(
             actor_user_id=principal.user_id,
             expected_version=current.version,
         )
+    except BreakGlassRequiresTotpError as exc:
+        # Before the generic ValueError arm: this refusal is a 409 whose body
+        # names the account that would clear it, not a malformed-input 400.
+        raise DashboardConflictError(
+            str(exc),
+            code="break_glass_requires_totp",
+            param=exc.username,
+            details={"username": exc.username},
+        ) from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
     except CompatAdminUnenrolledError as exc:
@@ -1595,6 +1610,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "totp_required_for_admin_role",
+            "local_login_policy",
             "api_key_auth_enabled",
             "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
@@ -1688,6 +1704,17 @@ async def update_settings(
         target=AuditTarget("settings", "dashboard"),
         details={"changed_fields": changed_fields},
     )
+    if current.local_login_policy != updated.local_login_policy:
+        # Who may use the local password form is a security decision with its
+        # own event: ``settings_changed`` lists field names, this names values.
+        AuditService.log_async(
+            "login_policy_changed",
+            actor_ip=actor_ip,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("settings", "local_login_policy"),
+            details={"from": current.local_login_policy, "to": updated.local_login_policy},
+            severity=AuditSeverity.WARNING,
+        )
     # M5 conversation archive: enabling turns the proxy into a full
     # prompt/response recorder readable by the same dashboard admin, so every
     # effective on/off change is a dedicated audit event with the actor, not

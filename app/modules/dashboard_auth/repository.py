@@ -161,6 +161,9 @@ class DashboardAuthRepository:
     async def get_user_counts(self) -> DashboardUserCounts:
         return await self._users.counts()
 
+    async def count_qualifying_break_glass(self, *, exclude_user_id: str | None = None) -> int:
+        return await self._users.count_qualifying_break_glass(exclude_user_id=exclude_user_id)
+
     async def count_custom_roles(self) -> int:
         return await self._roles.count_custom_roles()
 

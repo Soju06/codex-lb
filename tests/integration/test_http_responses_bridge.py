@@ -487,9 +487,13 @@ class _ClosingBridgeUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 
 
 class _PrecreatedCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    def __init__(self, response_id_prefix: str = "resp_bridge", *, close_code: int = 1011) -> None:
+        super().__init__(response_id_prefix)
+        self.close_code = close_code
+
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
-        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=self.close_code))
 
 
 class _PrecreatedOverloadUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -16723,6 +16727,531 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     )
 
 
+# --- Reproduction for #2364: the denied-anchor refusal must reach native Codex clients ---
+
+
+def _install_denied_anchor_bridge_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: Account,
+    upstream: _DeniesAnchoredTurnUpstreamWebSocket,
+) -> None:
+    """Pin selection, token refresh, and the upstream connect to one fake that
+    denies every anchored turn."""
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del self, deadline, request_id, kind, request_stage, sticky_key, sticky_kind
+        del reallocate_sticky, sticky_max_age_seconds, prefer_earlier_reset_accounts
+        del routing_strategy, model, exclude_account_ids, additional_limit_name
+        del api_key, preferred_account_id
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+
+@contextlib.asynccontextmanager
+async def _client_reporting_committed_stream_failures(app_instance) -> AsyncGenerator[AsyncClient, None]:
+    """Yield a client that sees what a real ASGI server hands a real client.
+
+    ``ASGITransport`` re-raises an exception that escapes the application, which
+    hides the shape issue #2364 is about: uvicorn logs the escaped
+    ``ProxyResponseError`` and closes the socket, so the client is left holding
+    the already-committed ``200`` with an empty body rather than an exception.
+    """
+    async with AsyncClient(
+        transport=ASGITransport(app=app_instance, raise_app_exceptions=False),
+        base_url="http://testserver",
+    ) as client:
+        yield client
+
+
+def _assert_denied_anchor_fence_refused_before_dispatch(caplog) -> None:
+    """The before-dispatch fence, not the plain upstream denial, must be what
+    failed the turn.
+
+    Both paths end in a ``stream_incomplete`` 502 for a non-native client, so a
+    scenario that drifted onto the upstream denial would otherwise pass while
+    testing nothing about issue #2364.
+    """
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if "continuity_fail_closed surface=http_bridge reason=denied_proxy_anchor_before_dispatch"
+        in record.getMessage()
+    ], "the before-dispatch denied-anchor fence never fired; the turn failed somewhere else"
+
+
+def _anchored_bridge_frames(upstream: _FakeBridgeUpstreamWebSocket) -> list[dict[str, Any]]:
+    frames = [json.loads(text) for text in upstream.sent_text]
+    return [frame for frame in frames if frame.get("previous_response_id") is not None]
+
+
+def _denied_anchor_turn_inputs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _user_item(text: str) -> dict[str, Any]:
+        return {"role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    turn_one_input = [_user_item("turn one")]
+    return turn_one_input, [*turn_one_input, _user_item("turn two")]
+
+
+@pytest.mark.asyncio
+async def test_native_codex_http_bridge_denied_anchor_refusal_returns_502_before_commit(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A native Codex client must receive the before-dispatch refusal itself.
+
+    Regression for issue #2364: the fence raises its ``stream_incomplete`` 502
+    from inside the SSE body generator, and the native transport-failure
+    lifecycle replayed even a probe-caught, pre-commit refusal back into the
+    committed response. The client saw ``200`` with zero bytes and no terminal
+    event, and the ASGI layer logged an unhandled exception.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_native_denied_anchor_precommit",
+        "native-denied-anchor-precommit@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+
+    headers = {
+        "session_id": "native-denied-anchor-precommit-session",
+        "user-agent": "codex_exec/0.153.4",
+    }
+    turn_one_input, turn_two_input = _denied_anchor_turn_inputs()
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        first = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+            headers=headers,
+        )
+        assert first.status_code == 200
+
+        # Upstream denies the injected anchor, local recovery rebinds the same
+        # now-denied id, and the fence refuses the retry before dispatch.
+        second = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+            headers=headers,
+        )
+
+    _assert_denied_anchor_fence_refused_before_dispatch(caplog)
+    assert second.status_code == 502, f"native client received {second.status_code} with body {second.text!r}"
+    assert second.json()["error"]["code"] == "stream_incomplete"
+    # The retry instruction is the actionable half: a terminal that kept the
+    # code and dropped the message leaves the client where #2364 left it.
+    assert second.json()["error"]["message"] == "The previous response anchor was rejected upstream; retry the request."
+    assert len(_anchored_bridge_frames(upstream)) == 1, "the denied anchor was sent upstream a second time"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_http_bridge_denied_anchor_refusal_emits_terminal_after_commit(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """Once the response has committed, the refusal must arrive as a terminal.
+
+    Same scenario as the pre-commit case with the startup probe disabled, so the
+    refusal lands after the ``200`` is on the wire. The stream must end with a
+    ``response.failed`` the client can read instead of stopping at zero bytes,
+    and that terminal must not be marked as a synthetic transport failure — the
+    native normalizer turns a marked terminal straight back into an abort.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    from app.modules.proxy import api as proxy_api_module
+
+    monkeypatch.setattr(proxy_api_module, "_HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS", 0.0)
+    account_id = await _import_account(
+        async_client,
+        "acc_native_denied_anchor_postcommit",
+        "native-denied-anchor-postcommit@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+
+    headers = {
+        "session_id": "native-denied-anchor-postcommit-session",
+        "user-agent": "codex_exec/0.153.4",
+    }
+    turn_one_input, turn_two_input = _denied_anchor_turn_inputs()
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.downstream_delivery")
+
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        first = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+            headers=headers,
+        )
+        assert first.status_code == 200
+
+        second = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+            headers=headers,
+        )
+
+    _assert_denied_anchor_fence_refused_before_dispatch(caplog)
+    assert second.status_code == 200
+    assert second.text, "the committed response ended with an empty body"
+    events = [
+        json.loads(block.split("data: ", 1)[1])
+        for block in second.text.split("\n\n")
+        if "data: " in block and "data: [DONE]" not in block
+    ]
+    failed = [event for event in events if event.get("type") == "response.failed"]
+    assert len(failed) == 1, f"expected one terminal failure, got {[event.get('type') for event in events]}"
+    assert failed[0]["response"]["error"]["code"] == "stream_incomplete"
+    assert (
+        failed[0]["response"]["error"]["message"]
+        == "The previous response anchor was rejected upstream; retry the request."
+    )
+    assert "_codex_lb_synthetic_transport_failure" not in second.text
+    assert second.text.rstrip().endswith("data: [DONE]")
+    assert not [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.modules.proxy.downstream_delivery"
+        and "outcome=exception_before_terminal" in record.getMessage()
+    ], "the refusal still escaped the committed body instead of ending it with a terminal"
+    assert len(_anchored_bridge_frames(upstream)) == 1, "the denied anchor was sent upstream a second time"
+
+
+@pytest.mark.asyncio
+async def test_non_native_http_bridge_denied_anchor_refusal_still_returns_502_json(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A non-native client keeps the 502 JSON envelope it already receives.
+
+    The native fix suppresses the synthetic-transport-failure marker for this
+    refusal; the marker is stripped before a non-native client ever sees it, so
+    this contract must be byte-identical afterwards.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_non_native_denied_anchor",
+        "non-native-denied-anchor@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+
+    headers = {
+        "session_id": "non-native-denied-anchor-session",
+        "user-agent": "OpenAI/Python 1.0.0",
+    }
+    turn_one_input, turn_two_input = _denied_anchor_turn_inputs()
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        first = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+            headers=headers,
+        )
+        assert first.status_code == 200
+
+        second = await client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+            headers=headers,
+        )
+
+    _assert_denied_anchor_fence_refused_before_dispatch(caplog)
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
+
+
+def _denied_anchor_owner_forward_headers(
+    payload_dict: dict[str, Any],
+    *,
+    session_key: str,
+) -> tuple[proxy_module.ResponsesRequest, dict[str, str]]:
+    """Sign a native Codex turn the way an origin instance forwards it.
+
+    ``original_request_unanchored`` mirrors what the origin computes for these
+    turns: the affinity is the session header, the client sent no turn-state
+    token, and the client payload carries no ``previous_response_id`` — the
+    anchor for turn two is the one the owner injects itself.
+    """
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    payload = proxy_module.ResponsesRequest.model_validate(payload_dict)
+    context = HTTPBridgeForwardContext(
+        origin_instance="instance-b",
+        target_instance="instance-a",
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        original_request_unanchored=True,
+        original_affinity_kind="session_header",
+        original_affinity_key=session_key,
+    )
+    headers = build_owner_forward_headers(
+        headers={"session_id": session_key, "user-agent": "codex_exec/0.153.4"},
+        payload=payload,
+        context=context,
+    )
+    return payload, headers
+
+
+@pytest.mark.asyncio
+async def test_forwarded_denied_anchor_refusal_marks_the_owner_error_as_a_local_refusal(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """The owner half of a ring deployment must say the refusal was its own.
+
+    The origin instance rebuilds the failure from the owner's status and body,
+    and that body cannot express the difference between a refusal the owner
+    raised before dispatch and a transport failure it observed: both are
+    `stream_incomplete`. The owner therefore marks the response, and
+    ``test_native_codex_owner_forward_denied_anchor_refusal_returns_502_before_commit``
+    covers what the origin does with the mark (issue #2364).
+    """
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
+    account_id = await _import_account(
+        async_client,
+        "acc_forwarded_denied_anchor_owner",
+        "forwarded-denied-anchor-owner@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+    _install_denied_anchor_bridge_fakes(monkeypatch, account=account, upstream=upstream)
+
+    session_key = "forwarded-denied-anchor-owner-session"
+    turn_one_input, turn_two_input = _denied_anchor_turn_inputs()
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        payload_one, headers_one = _denied_anchor_owner_forward_headers(
+            {"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+            session_key=session_key,
+        )
+        first = await client.post(
+            "/internal/bridge/responses",
+            json=payload_one.model_dump_for_forwarding(),
+            headers=headers_one,
+        )
+        assert first.status_code == 200, first.text
+
+        payload_two, headers_two = _denied_anchor_owner_forward_headers(
+            {"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+            session_key=session_key,
+        )
+        second = await client.post(
+            "/internal/bridge/responses",
+            json=payload_two.model_dump_for_forwarding(),
+            headers=headers_two,
+        )
+
+    _assert_denied_anchor_fence_refused_before_dispatch(caplog)
+    assert second.status_code == 502, second.text
+    assert second.json()["error"]["code"] == "stream_incomplete"
+    assert second.headers.get(HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER) == "1"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_owner_forward_denied_anchor_refusal_returns_502_before_commit(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """The origin half must deliver the owner's refusal, not abort its own body.
+
+    In a ring deployment the bridge session, its denial tombstone, and the
+    before-dispatch fence all live on the owner replica, so a continuation
+    reaches the fence only through the internal forward. The origin rebuilds
+    the owner's failure into a fresh error; without the owner's marker that
+    rebuild loses the provenance and the origin's own native transport-failure
+    lifecycle aborts the committed body, putting issue #2364's zero-byte 200 on
+    the origin instead of the owner.
+    """
+    from app.modules.proxy.http_bridge_forwarding import HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER
+
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-b",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_native_owner_forward_denied_anchor",
+        "native-owner-forward-denied-anchor@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    prompt_cache_key = "native-owner-forward-denied-anchor-cache"
+    turn_state = "http_turn_native_owner_forward_denied_anchor"
+    response_id = "resp_native_owner_forward_denied_anchor"
+    durable_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value=prompt_cache_key,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="remote-process",
+        lease_ttl_seconds=60.0,
+        account_id=account_id,
+        model="gpt-5.1",
+        service_tier=None,
+        latest_turn_state=turn_state,
+        latest_response_id=response_id,
+        allow_takeover=True,
+    )
+    await service._durable_bridge.register_turn_state(
+        session_id=durable_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=durable_lookup.owner_epoch,
+        turn_state=turn_state,
+        lease_ttl_seconds=60.0,
+    )
+    await service._durable_bridge.register_previous_response_id(
+        session_id=durable_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=durable_lookup.owner_epoch,
+        response_id=response_id,
+        lease_ttl_seconds=60.0,
+    )
+
+    class Ring:
+        async def list_active(self, *, require_endpoint: bool = False) -> list[str]:
+            assert require_endpoint is True
+            return ["instance-a", "instance-b"]
+
+        async def resolve_endpoint(self, instance_id: str) -> str:
+            assert instance_id == "instance-a"
+            return "http://instance-a"
+
+    # The owner answers exactly as the route above does: the fence's 502
+    # envelope plus the marker that says the owner, not upstream, refused.
+    owner_refusal_body = json.dumps(
+        {
+            "error": {
+                "message": "The previous response anchor was rejected upstream; retry the request.",
+                "type": "server_error",
+                "code": "stream_incomplete",
+            }
+        }
+    )
+
+    class FakeOwnerResponse:
+        status = 502
+        headers = {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
+
+        async def __aenter__(self) -> "FakeOwnerResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def text(self) -> str:
+            return owner_refusal_body
+
+    class FakeOwnerSession:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeOwnerSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **_kwargs: object) -> FakeOwnerResponse:
+            assert url == "http://instance-a/internal/bridge/responses"
+            return FakeOwnerResponse()
+
+    monkeypatch.setattr(
+        "app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession",
+        FakeOwnerSession,
+    )
+
+    original_ring = service._ring_membership
+    service._ring_membership = cast(Any, Ring())
+    try:
+        async with _client_reporting_committed_stream_failures(app_instance) as client:
+            response = await client.post(
+                "/backend-api/codex/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "continue",
+                    "prompt_cache_key": prompt_cache_key,
+                    "previous_response_id": response_id,
+                    "stream": True,
+                },
+                headers={
+                    "x-codex-turn-state": turn_state,
+                    "user-agent": "codex_exec/0.153.4",
+                },
+            )
+    finally:
+        service._ring_membership = original_ring
+
+    assert response.status_code == 502, f"native client received {response.status_code} with body {response.text!r}"
+    assert response.json()["error"]["code"] == "stream_incomplete"
+    # The marker belongs to the internal forward contract; the external client
+    # sees only the ordinary error envelope.
+    assert HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER not in response.headers
+
+
 # --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---
 
 
@@ -17050,6 +17579,10 @@ def _install_two_account_bridge_failover_with_hard_owner(
                     account=None,
                     error_message="Hard affinity owner account is unavailable",
                     error_code="hard_affinity_saturated",
+                    # The production selector reports that the hard owner it
+                    # resolved is one of this caller's own exclusions, so the
+                    # owner-recovery wait cannot clear it (#2163).
+                    hard_affinity_owner_excluded=True,
                 )
             return AccountSelection(account=owner, error_message=None, error_code=None)
         chosen = alternate if owner.id in excluded else owner
@@ -17316,6 +17849,128 @@ async def test_backend_responses_http_bridge_accepted_replay_moved_by_a_soft_row
     # handshake carries none of it.
     assert "x-codex-turn-state" not in connects[0][1]
     assert "x-codex-turn-state" not in connects[1][1], connects[1][1]["x-codex-turn-state"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["created_only", "model_fallback"])
+async def test_backend_responses_http_bridge_fails_a_self_excluded_hard_owner_replay_closed(
+    async_client,
+    monkeypatch,
+    shape,
+):
+    """#2163 (residual of #2150): the two replays that still exclude the
+    account they are moving off -- the created-only pre-created replay
+    (upstream died before ``response.created`` reached the client) and the
+    model-fallback replay (the account rejected the requested model) -- on a
+    native Codex session whose affinity resolves a raw legacy hard
+    ``CODEX_SESSION`` owner. That owner is the only account selection may
+    return, so the exclusion makes every re-selection report
+    ``hard_affinity_saturated``; the reconnect read that as a transient owner
+    outage and slept ``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS`` per attempt
+    until the bridge request budget was spent (measured on the pre-fix tree
+    with the budget bounded to 15s and the sleep to 50ms: 294 and 295 saturated
+    re-selections over the full 15s; production defaults are 2s per attempt to
+    a 7200s budget, ~3600 attempts before the client sees anything).
+
+    The selector now reports that the saturation is this request's own
+    exclusion, so the wait is refused and the failure is immediate. The turn is
+    never handed to the alternate account: a resolved hard row is ownership
+    evidence, and the client's own retry reaches the owner unexcluded."""
+    legacy_session_key = f"sid-http-bridge-self-excluded-{shape}"
+    model = "gpt-5.3-codex-spark" if shape == "model_fallback" else "gpt-5.1"
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True).model_copy(
+            update={"http_responses_session_bridge_request_budget_seconds": 15.0}
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_support, "_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS", 0.05)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS", 0.01)
+    owner_id = await _import_account(
+        async_client,
+        f"acc_self_excluded_owner_{shape}",
+        f"self-excluded-owner-{shape}@example.com",
+    )
+    alternate_id = await _import_account(
+        async_client,
+        f"acc_self_excluded_alternate_{shape}",
+        f"self-excluded-alternate-{shape}@example.com",
+    )
+    owner = await _get_account(owner_id)
+    alternate = await _get_account(alternate_id)
+    failing_upstream = (
+        _ErrorOnlyUpstreamWebSocket("resp_self_excluded_model_rejected")
+        if shape == "model_fallback"
+        else _PrecreatedCloseUpstreamWebSocket("resp_self_excluded_created_only", close_code=1006)
+    )
+    owner_second_upstream = _FakeBridgeUpstreamWebSocket("resp_self_excluded_owner_second")
+    alternate_upstream = _FakeBridgeUpstreamWebSocket("resp_self_excluded_alternate")
+    connect_account_ids, selection_exclusions, selection_legacy_keys = (
+        _install_two_account_bridge_failover_with_hard_owner(
+            monkeypatch,
+            owner=owner,
+            alternate=alternate,
+            legacy_session_key=legacy_session_key,
+            upstreams_by_account_header={
+                f"acc_self_excluded_owner_{shape}": [failing_upstream, owner_second_upstream],
+                f"acc_self_excluded_alternate_{shape}": [alternate_upstream],
+            },
+        )
+    )
+
+    started_at = time.monotonic()
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "Return exactly OK.",
+            "input": "self-excluded-hard-owner-replay",
+            "stream": True,
+        },
+        headers={"session_id": legacy_session_key},
+    )
+    body = response.text
+    elapsed_seconds = time.monotonic() - started_at
+
+    # The bound: ONE saturated re-selection, not one per recovery sleep until
+    # the request budget. 5s is two orders of magnitude below the 15s budget
+    # this test allows, so a reintroduced spin fails here instead of hanging.
+    saturated_selections = [excluded for excluded in selection_exclusions if owner.id in excluded]
+    assert len(saturated_selections) == 1, (
+        f"the reconnect must not spin on a self-excluded hard owner: {len(saturated_selections)} attempts "
+        f"in {elapsed_seconds:.2f}s"
+    )
+    assert elapsed_seconds < 5.0
+    assert selection_legacy_keys[-1] == legacy_session_key
+    # The hard owner keeps its turns: the excluded replay is not served by the
+    # alternate account, and the owner is not reconnected behind the client's
+    # back either -- the request fails closed on its first re-selection.
+    assert connect_account_ids == [f"acc_self_excluded_owner_{shape}"]
+    assert len(failing_upstream.sent_text) == 1
+    assert owner_second_upstream.sent_text == []
+    assert alternate_upstream.sent_text == []
+    if shape == "created_only":
+        # Nothing was visible downstream yet, so the selection failure is the
+        # response: a 503 instead of 7200s of keepalives and a 502.
+        assert response.status_code == 503
+        assert json.loads(body)["error"]["code"] == "hard_affinity_saturated"
+        return
+    # The model-fallback replay surfaces the upstream rejection that started
+    # it, which is the actionable error for a hard owner that cannot serve the
+    # requested model.
+    assert response.status_code == 200
+    events = [
+        event
+        for line in body.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+        if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+    ]
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["error"]["code"] == "invalid_request_error"
+    assert events[0]["error"]["message"] == (
+        f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    )
 
 
 class _AcceptedOutputItemCapacityErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):

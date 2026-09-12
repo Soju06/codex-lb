@@ -274,7 +274,7 @@ describe("AuthGate", () => {
     const pending = {
       usernameField: "shown" as const,
       providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
-      localLogin: "enabled",
+      localLogin: "enabled" as const,
       pendingIdentity: true,
     };
     setAuthState({
@@ -418,5 +418,63 @@ describe("AuthGate", () => {
 
     screen.getByTestId("route-retry").click();
     await waitFor(() => expect(refreshSession).toHaveBeenCalledTimes(2));
+  });
+  describe("local login policy", () => {
+    const PROXY = { kind: "trusted_header", providerKey: "default", label: "Reverse proxy", loginUrl: null };
+
+    it("hides the password form under break_glass_only and shows it at /login?local=1", () => {
+      const hint = LoginHintSchema.parse({
+        usernameField: "shown",
+        providers: [PROXY],
+        localLogin: "break_glass_only",
+      });
+      setAuthState({ refreshSession: vi.fn().mockResolvedValue(undefined), loginHint: hint });
+
+      const view = renderGate("/");
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByTestId("login-providers")).toBeInTheDocument();
+      view.unmount();
+
+      setAuthState({ refreshSession: vi.fn().mockResolvedValue(undefined), loginHint: hint });
+      renderGate("/login?local=1");
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    });
+
+    it("collapses the form under admins_only unless the URL asks for it", () => {
+      const hint = LoginHintSchema.parse({ usernameField: "shown", localLogin: "admins_only" });
+      setAuthState({ refreshSession: vi.fn().mockResolvedValue(undefined), loginHint: hint });
+
+      const view = renderGate("/");
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in with a password instead" })).toBeInTheDocument();
+      view.unmount();
+
+      setAuthState({ refreshSession: vi.fn().mockResolvedValue(undefined), loginHint: hint });
+      renderGate("/login?local=1");
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    });
+
+    it("offers the emergency link, not a second form, on the pending screen", () => {
+      setAuthState({
+        refreshSession: vi.fn().mockResolvedValue(undefined),
+        authMode: "trusted_header",
+        localPasswordConfigured: true,
+        loginHint: LoginHintSchema.parse({
+          usernameField: "shown",
+          providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }, PROXY],
+          localLogin: "break_glass_only",
+          pendingIdentity: true,
+        }),
+      });
+
+      renderGate("/auth/pending");
+
+      expect(screen.getByText("Your account is not ready yet")).toBeInTheDocument();
+      expect(screen.queryByTestId("pending-local-login")).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Emergency sign-in with a password" })).toHaveAttribute(
+        "href",
+        "/login?local=1",
+      );
+    });
   });
 });

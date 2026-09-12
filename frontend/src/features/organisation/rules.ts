@@ -1,4 +1,5 @@
 import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
+import type { DashboardUser } from "@/features/access/api";
 import type { AccessSummary } from "@/features/auth/schemas";
 
 // Pure helpers behind the Organisation group. They live outside the components
@@ -29,10 +30,47 @@ export function refusedSince(now: Date = new Date()): string {
  * "nothing configured": the one-line label says nothing it should not.
  */
 export function isOrganisationConfigured(summary: AccessSummary | null): boolean {
+  return hasCompanyLogin(summary) || isLocalLoginRestricted(summary);
+}
+
+/** A sign-in method other than the local password, or a rule that routes one. */
+export function hasCompanyLogin(summary: AccessSummary | null): boolean {
   if (summary === null) {
     return false;
   }
   return summary.providersEnabled.some((kind) => kind !== "password") || summary.roleMappings >= 1;
+}
+
+/**
+ * The local password form is closed to somebody. It is a configured fact in
+ * its own right — an install can restrict it with no company login at all
+ * (the host CLI can set it) — so the collapsed line has to say so.
+ */
+export function isLocalLoginRestricted(summary: AccessSummary | null): boolean {
+  return summary !== null && summary.localLoginPolicy !== "enabled";
+}
+
+/**
+ * The five facts that make a break-glass *designation* a *qualifying* account
+ * (`app/modules/dashboard_users/break_glass.py`): designated, active, on the
+ * admin preset, holding a second factor, and holding a local password — an
+ * account the proxy provisioned cannot use the local form the designation is
+ * about. Computed here the same way the server computes it, so the card can
+ * explain a refusal before it happens.
+ */
+export function isQualifyingBreakGlass(user: DashboardUser): boolean {
+  return (
+    user.isBreakGlass &&
+    user.status === "active" &&
+    user.role.slug === "admin" &&
+    user.totpConfigured &&
+    user.hasPassword
+  );
+}
+
+/** Every account carrying the designation, qualifying or not; the card names these. */
+export function breakGlassDesignations(users: readonly DashboardUser[] | undefined): DashboardUser[] {
+  return (users ?? []).filter((user) => user.isBreakGlass);
 }
 
 /** Presets in the order people meet them; Guest last because it is not an account. */

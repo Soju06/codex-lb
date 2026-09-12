@@ -123,6 +123,7 @@ def _maybe_log_proxy_request_shape(
     sticky_kind: str | None = None,
     sticky_key_source: str | None = None,
     prompt_cache_key_set: bool | None = None,
+    derivation_outcome: str | None = None,
     thread_cache_identity_mode: str | None = None,
     thread_cache_identity_from_key: bool | None = None,
 ) -> None:
@@ -150,7 +151,7 @@ def _maybe_log_proxy_request_shape(
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
-        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s"
+        "sticky_kind=%s sticky_key_source=%s derivation_outcome=%s prompt_cache_key_set=%s"
         " session_header_present=%s tools_hash=%s model_class=%s"
         " thread_cache_identity_mode=%s thread_cache_identity_from_key=%s",
         request_id,
@@ -165,6 +166,7 @@ def _maybe_log_proxy_request_shape(
         header_keys,
         sticky_kind,
         sticky_key_source,
+        derivation_outcome,
         prompt_cache_key_set,
         session_header_present,
         tools_hash,

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import startup as startup_module
 from app.core.config.settings import get_settings
 from app.core.config.spool_retention import (
@@ -21,6 +23,7 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.rate_limiter.db_rate_limiter import get_rate_limit_attempt_sweeper
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
@@ -55,6 +58,23 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # Keep each pass large enough to outpace steady-state expiry, but small enough
 # that a historical backlog is resumed across scheduler ticks instead of
 # monopolizing the database in one drain-all loop.
+# No key-prefix sweep of the `sticky_thread` kind exists, deliberately.
+#
+# A prompt-cache key derived by the proxy -- the retired content-hash shape
+# (`{model_class}-{api_key_id[:12]}-{hash}`) and the current thread-anchored
+# `v2t-` shape alike -- is only ever produced when `openai_cache_affinity` is
+# enabled, and that is exactly the branch that classifies the mapping as
+# PROMPT_CACHE (see `_sticky_key_for_responses_request` /
+# `_sticky_key_for_compact_request`: the STICKY_THREAD branch is `elif
+# sticky_threads_enabled`, reachable only with cache affinity off, where the
+# derivation supplies no sticky key at all). So a derived key can never be
+# written as a `sticky_thread` row, and `purge_prompt_cache_before` already
+# retires every derived row of either shape at the freshness window.
+#
+# A `sticky_thread` row whose key starts with `std-`/`codex-`/`mini-` is
+# therefore necessarily *client-supplied*, and `sticky_thread` has no TTL by
+# design. Deleting those rows by key prefix silently drops a client's soft
+# locality because its key text happens to look like a retired proxy shape.
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -181,6 +201,28 @@ def _next_cleanup_delay_seconds(
 
 def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
+
+
+async def _purge_expired_rate_limit_attempts(session: AsyncSession) -> None:
+    """Age out ``rate_limit_attempts`` on every leader pass.
+
+    ``clear_for_key`` only runs on a *successful* sign-in, so failed attempts
+    have no other way out of the table, and the failed-login keys now carry a
+    caller-supplied username: without this the row count is the attacker's to
+    choose. It runs whatever the sticky-mapping toggle says, for the same
+    reason the operation retention sweep does, and its failure is contained so
+    it can never cost the rest of the pass.
+    """
+
+    try:
+        await get_rate_limit_attempt_sweeper().cleanup(session)
+    except Exception:
+        logger.exception("Rate-limit attempt retention failed")
+        # The rest of the pass must not inherit a half-finished transaction,
+        # and a rollback that fails on an already-broken session says nothing
+        # the log above has not already said.
+        with contextlib.suppress(Exception):
+            await session.rollback()
 
 
 def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -> float:
@@ -355,6 +397,7 @@ class StickySessionCleanupScheduler:
             retention_attempted = False
             try:
                 async with get_background_session() as session:
+                    await _purge_expired_rate_limit_attempts(session)
                     settings_repo = SettingsRepository(session)
                     bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)
@@ -365,6 +408,9 @@ class StickySessionCleanupScheduler:
 
                     if self.enabled:
                         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                        # Retires every proxy-derived prompt-cache mapping, of
+                        # either key shape: see the module note above on why no
+                        # `sticky_thread` key-prefix sweep belongs here.
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
                             logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)

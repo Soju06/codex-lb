@@ -25,8 +25,9 @@ from app.core.config.settings import Settings, get_settings
 from app.core.config.spool_retention import OPERATION_SPOOL_RETENTION_SETTING
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
-from app.db.models import COMPAT_ADMIN_USERNAME, DashboardSettings
+from app.db.models import COMPAT_ADMIN_USERNAME, DashboardSettings, LocalLoginPolicy
 from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
@@ -89,6 +90,7 @@ class DashboardSettingsData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_required_for_admin_role: bool
+    local_login_policy: str
     users_without_totp_count: int
     admins_without_totp_count: int
     api_key_auth_enabled: bool
@@ -209,6 +211,7 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     totp_required_for_admin_role: bool
+    local_login_policy: str | None
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -327,6 +330,15 @@ class SettingsService:
         actor_user_id: str | None = None,
         expected_version: int | None = None,
     ) -> DashboardSettingsData:
+        # The accounts lock is taken before this service reads anything and is
+        # held until ``update`` commits, so the count below and the policy write
+        # are one step. Acquiring it first keeps both dialects taking the lock
+        # at the same moment instead of relying on the in-transaction fallback
+        # of ``acquire_write_intent``. It is only taken when the payload could
+        # be a tightening, so an ordinary settings save is never queued behind
+        # account mutations.
+        if payload.local_login_policy not in (None, LocalLoginPolicy.ENABLED.value):
+            await self._repository.acquire_account_write_intent()
         current = await self._repository.get_or_create()
         # Requiring TOTP of others starts with the acting account: whoever turns
         # either requirement on must already hold a secret, or the next request
@@ -342,6 +354,31 @@ class SettingsService:
                     "Enrol the 'admin' account in two-factor, or remove its password, "
                     "before requiring two-factor at sign-in"
                 )
+        # Closing the local password form is the most dangerous button in the
+        # product: it is also the setting that locks the install out when the
+        # identity provider is down. Only the tightening transition is gated
+        # (re-saving the stored value, and relaxing back to ``enabled``, never
+        # are), and the refusal names the account that would fix it. The count
+        # and the settings write are one atomic step: the accounts lock above
+        # is held until ``update`` commits, so no concurrent mutation can
+        # remove the last qualifying account in between.
+        tightening = (
+            payload.local_login_policy is not None
+            and payload.local_login_policy != current.local_login_policy
+            and payload.local_login_policy != LocalLoginPolicy.ENABLED.value
+        )
+        if tightening and await self._repository.count_qualifying_break_glass() == 0:
+            designated = await self._repository.list_break_glass_designations()
+            username = designated[0].username if designated else None
+            raise BreakGlassRequiresTotpError(
+                (
+                    f"Turn on two-factor for '{username}' before restricting local sign-in"
+                    if username is not None
+                    else "Designate an admin account with two-factor as the emergency account "
+                    "before restricting local sign-in"
+                ),
+                username=username,
+            )
         row = await self._repository.update(
             expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
@@ -405,6 +442,7 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             totp_required_for_admin_role=payload.totp_required_for_admin_role,
+            local_login_policy=payload.local_login_policy,
             api_key_auth_enabled=payload.api_key_auth_enabled,
             hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
@@ -666,6 +704,7 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
         import_without_overwrite=row.import_without_overwrite,
         totp_required_on_login=row.totp_required_on_login,
         totp_required_for_admin_role=row.totp_required_for_admin_role,
+        local_login_policy=row.local_login_policy,
         users_without_totp_count=totp.users_without_totp,
         admins_without_totp_count=totp.admins_without_totp,
         api_key_auth_enabled=row.api_key_auth_enabled,

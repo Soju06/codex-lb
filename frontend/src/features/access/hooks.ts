@@ -36,6 +36,10 @@ const EXPLAINED_ERROR_CODES = new Set([
   "invite_not_pending",
   "invite_pending",
   "last_admin_protected",
+  // The break-glass guard refuses here too: role change, disable, delete,
+  // clearing the designation, admin reset-totp (PLAN §4.2).
+  "last_break_glass_protected",
+  "break_glass_requires_totp",
   "role_managed_externally",
   "role_not_assignable",
   "self_modification_forbidden",

@@ -141,6 +141,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _header_value_case_insensitive,
     _http_bridge_startup_keepalive_grace_seconds,
     _inject_missing_interrupted_function_call_outputs,
+    _input_image_request_requires_http_upstream,
     _input_prefix_matches_stored_context,
     _is_previous_response_not_found_error,
     _maybe_log_proxy_request_payload,
@@ -963,7 +964,20 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        force_upstream_stream_transport = "http" if image_request else None
+        # The bridge bypass below is about bridge pending slots; it must not also
+        # decide the upstream transport. An inline ``data:`` image rides the
+        # upstream websocket unchanged, so only the two websocket-specific
+        # hazards keep the pin (#2363). ``image_request`` gates the predicate
+        # because the predicate's own first check is that same walk of the whole
+        # input, and this runs on every request on the hot path.
+        force_upstream_stream_transport = (
+            "http"
+            if image_request
+            and _input_image_request_requires_http_upstream(
+                payload, payload_size_estimate_bytes=payload_size_estimate_bytes
+            )
+            else None
+        )
         if runtime_config.enabled and (image_request or image_generation_request):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
@@ -1309,7 +1323,6 @@ class _HTTPBridgeStreamingMixin:
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
         explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
-        had_prompt_cache_key = explicit_prompt_cache_key is not None
         affinity = _sticky_key_for_responses_request(
             payload,
             headers,
@@ -1319,21 +1332,14 @@ class _HTTPBridgeStreamingMixin:
             sticky_threads_enabled=dashboard_settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            sticky_key_source = (
-                "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
-            )
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        inbound_affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
             "stream_http_bridge",
             payload,
             headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=inbound_affinity_observation.kind,
+            sticky_key_source=inbound_affinity_observation.source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
         )
 
@@ -1818,7 +1824,9 @@ class _HTTPBridgeStreamingMixin:
             )
         request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
         request_state.affinity_policy = affinity
-        request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+        request_state.affinity_observation = AffinityObservation.retaining_source(
+            inbound_affinity_observation.source, affinity
+        )
         _apply_http_bridge_downstream_turn_state(
             request_state,
             downstream_turn_state=downstream_turn_state,
@@ -1980,6 +1988,7 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
@@ -2033,6 +2042,70 @@ class _HTTPBridgeStreamingMixin:
                 )
             return durable_full_resend_is_account_neutral
 
+        def switch_model_transition_to_account_neutral_fork(exc: ProxyResponseError) -> bool:
+            nonlocal account_neutral_recovery
+            nonlocal affinity
+            nonlocal bridge_session_key
+            nonlocal downstream_turn_state
+            nonlocal force_local_recovery_creation
+            nonlocal incoming_turn_state_header
+            nonlocal model_transition_owner_conflict_fork_attempted
+            nonlocal preferred_account_has_continuity_provenance
+            nonlocal request_state
+            nonlocal session_creation_headers
+            nonlocal session_header_fallback_key
+
+            error_code, _error_message = _proxy_error_code_message(exc)
+            if (
+                durable_model_transition_lookup is None
+                or error_code != "continuity_owner_conflict"
+                or model_transition_owner_conflict_fork_attempted
+                or forwarded_request
+                or not _http_bridge_payload_is_account_neutral_fresh_replay(effective_payload)
+                or request_state.previous_response_id is not None
+                or rewritten_file_account_id is not None
+            ):
+                return False
+            reused_parent_turn_state = (
+                incoming_turn_state_header is not None and downstream_turn_state == incoming_turn_state_header
+            )
+            failed_owner_id = request_state.preferred_account_id
+            _log_http_bridge_event(
+                "model_transition_owner_conflict_fork",
+                bridge_session_key,
+                account_id=failed_owner_id,
+                model=effective_payload.model,
+                detail="outcome=retry_without_previous_model_owner",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
+            if failed_owner_id is not None:
+                fresh_replay_excluded_account_ids.add(failed_owner_id)
+            session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
+            incoming_turn_state_header = None
+            session_header_fallback_key = None
+            affinity = _AffinityPolicy()
+            replay_kind, replay_key = make_http_bridge_account_neutral_replay_key(uuid4().hex)
+            bridge_session_key = _HTTPBridgeSessionKey(
+                replay_kind,
+                replay_key,
+                bridge_session_key.api_key_id,
+                strength="hard",
+            )
+            account_neutral_recovery = True
+            force_local_recovery_creation = True
+            model_transition_owner_conflict_fork_attempted = True
+            request_state.affinity_policy = affinity
+            request_state.hard_continuity_anchor = False
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
+            preferred_account_has_continuity_provenance = False
+            if reused_parent_turn_state:
+                request_state.session_id = None
+                downstream_turn_state = None
+            return True
+
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             return (
                 _http_bridge_is_previous_response_owner_unavailable(exc)
@@ -2079,9 +2152,6 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             prior_operation_registered = request_state.operation_registered if preserve_operation_identity else False
-            prior_operation_attempt_generation = (
-                request_state.operation_attempt_generation if preserve_operation_identity else 0
-            )
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
@@ -2114,12 +2184,13 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_fingerprint = prior_operation_fingerprint
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
-                request_state.operation_attempt_generation = prior_operation_attempt_generation
                 request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
-            request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             if downstream_turn_state is not None:
                 request_state.session_id = _normalize_session_id(downstream_turn_state)
@@ -2244,6 +2315,8 @@ class _HTTPBridgeStreamingMixin:
                 # carries its own continuity is a safe fresh raw-HTTP replay.
                 if effective_payload.previous_response_id != payload.previous_response_id:
                     setattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
+                if switch_model_transition_to_account_neutral_fork(exc):
+                    continue
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
@@ -2688,8 +2761,8 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                     retry_request_state.affinity_policy = affinity
-                    retry_request_state.affinity_observation = AffinityObservation.from_policy(
-                        sticky_key_source, affinity
+                    retry_request_state.affinity_observation = AffinityObservation.retaining_source(
+                        inbound_affinity_observation.source, affinity
                     )
                     _apply_http_bridge_downstream_turn_state(
                         retry_request_state,
@@ -2861,7 +2934,9 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepare_bridge_request(effective_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
-            request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -2995,7 +3070,9 @@ class _HTTPBridgeStreamingMixin:
             request_state, text_data = prepare_bridge_request(submit_payload)
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
-            request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                inbound_affinity_observation.source, affinity
+            )
             _apply_http_bridge_downstream_turn_state(
                 request_state,
                 downstream_turn_state=downstream_turn_state,
@@ -3856,7 +3933,6 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_fingerprint = request_state.operation_fingerprint
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
-                retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
                 retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 # An anchored recovery replays the proxy's own anchor, so the
@@ -3905,7 +3981,9 @@ class _HTTPBridgeStreamingMixin:
                     # atomically moves it back to submitted before send.
                     retry_request_state.operation_rebind_required = True
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
-                retry_request_state.affinity_observation = AffinityObservation.from_policy(sticky_key_source, affinity)
+                retry_request_state.affinity_observation = AffinityObservation.retaining_source(
+                    inbound_affinity_observation.source, affinity
+                )
                 _apply_http_bridge_downstream_turn_state(
                     retry_request_state,
                     downstream_turn_state=downstream_turn_state,

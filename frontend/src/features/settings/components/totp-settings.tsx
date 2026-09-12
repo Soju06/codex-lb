@@ -25,6 +25,7 @@ import { TotpEnrollmentForm } from "@/features/auth/components/totp-enrollment-f
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import { ApiError } from "@/lib/api-client";
 import { getErrorMessage } from "@/utils/errors";
 
 // NOTE: validation message is intentionally a translation key resolved at render time;
@@ -84,7 +85,13 @@ export function TotpSettings({ settings, disabled = false, canEditPolicy = true,
       toast.success(t("settings.totp.toasts.disabled"));
       closeDialog();
     } catch (caught) {
-      setError(getErrorMessage(caught));
+      // The break-glass guard can refuse here: this account may be the only
+      // emergency way in while local sign-in is restricted (PLAN §4.2).
+      setError(
+        caught instanceof ApiError && caught.code === "last_break_glass_protected"
+          ? t("access.errors.last_break_glass_protected")
+          : getErrorMessage(caught),
+      );
     }
   };
 

@@ -96,6 +96,7 @@ from app.modules.audit import api as audit_api
 from app.modules.auth_providers import api as auth_providers_api
 from app.modules.automations import api as automations_api
 from app.modules.automations.scheduler import build_automations_scheduler
+from app.modules.cache_isolation_probe import api as cache_isolation_probe_api
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -1058,6 +1059,7 @@ def create_app() -> FastAPI:
     app.include_router(firewall_api.router)
     app.include_router(fleet_api.router)
     app.include_router(sticky_sessions_api.router)
+    app.include_router(cache_isolation_probe_api.router)
     app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(model_sources_api.router)

@@ -26,6 +26,8 @@ class DashboardSessionUser(DashboardModel):
 
 
 LoginProviderKind = Literal["password", "trusted_header"]
+#: ``dashboard_settings.local_login_policy`` on the wire (PLAN §4.6).
+LocalLoginPolicyValue = Literal["enabled", "admins_only", "break_glass_only"]
 
 
 class DashboardLoginProvider(DashboardModel):
@@ -45,7 +47,10 @@ class DashboardLoginHint(DashboardModel):
 
     username_field: Literal["hidden", "shown"]
     providers: list[DashboardLoginProvider]
-    local_login: Literal["enabled"] = "enabled"
+    #: Whether the local password form is shown, collapsed behind a link
+    #: (``admins_only``) or reachable only at ``/login?local=1``
+    #: (``break_glass_only``). The account name is never sent here.
+    local_login: LocalLoginPolicyValue = "enabled"
     pending_identity: bool = False
 
 
@@ -63,7 +68,7 @@ class DashboardAccessSummary(DashboardModel):
     role_mappings: int
     scim_tokens: int
     audit_sinks: int
-    local_login_policy: Literal["enabled"]
+    local_login_policy: LocalLoginPolicyValue
 
 
 class DashboardStepUpState(DashboardModel):
@@ -109,6 +114,9 @@ class DashboardAuthSessionResponse(DashboardModel):
     assignable_role_ids: list[str] = Field(default_factory=list)
     #: Present for signed-in accounts only; principals without an account have nothing to re-verify.
     step_up: DashboardStepUpState | None = None
+    #: True when the session was minted for an account carrying the
+    #: break-glass designation, so the header can show the emergency pill.
+    break_glass_session: bool = False
 
 
 class DashboardMeResponse(DashboardModel):

@@ -12,6 +12,9 @@ column without losing data when an operator downgrades.
 - Attribute repaired objects to their historical migrations and preserve them
   on repair downgrade; re-home legacy repair markers in
   `20260912_020000_rehome_recovery_repair_ownership`.
+- Keep the deployed `20260911_020000_add_http_bridge_terminal_append_phase`
+  parent unchanged and converge its affinity merge through the metadata-only
+  `20260912_030000_merge_terminal_append_lineage` revision.
 - Keep the continuity-abandonment migration as a sibling of the thread-cache
   branch and converge both branches through the existing metadata-only merge.
 - Add SQLite migration and downgrade coverage, including schema-drift parity.

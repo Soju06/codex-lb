@@ -3533,11 +3533,14 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 @pytest.mark.asyncio
 async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_path):
     """A database already stamped at the deployed head receives missing recovery columns."""
+    from alembic import command
     from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair.sqlite'}"
     deployed_head = "20260911_030000_add_local_login_policy"
-    repair_head = "20260912_020000_rehome_recovery_repair_ownership"
+    repair_head = "20260912_030000_merge_terminal_append_lineage"
     alias_table = "http_bridge_session_aliases"
     alias_column = "target_response_id"
     indexes_to_repair = {
@@ -3557,12 +3560,17 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
     await to_thread.run_sync(lambda: run_upgrade(db_url, deployed_head, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     try:
+        # The deployed head keeps the terminal-append migration's historical
+        # parent, so the separate request-log branch is not an ancestor of
+        # this stamp.  Leave one target index in place to prove that repair
+        # ownership is recorded only for objects it actually creates.
         async with engine.begin() as conn:
-            for index in indexes_to_repair:
-                await conn.execute(text(f"DROP INDEX {index}"))
-            for column in columns_to_repair:
-                await conn.execute(text(f"ALTER TABLE http_bridge_operations DROP COLUMN {column}"))
-            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN {alias_column}"))
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_http_bridge_operations_response_state "
+                    "ON http_bridge_operations (response_id, state)"
+                )
+            )
 
         async with engine.connect() as conn:
             before = await conn.run_sync(
@@ -3576,7 +3584,8 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
             )
         assert columns_to_repair.isdisjoint(before)
         assert alias_column not in aliases_before
-        assert indexes_to_repair.isdisjoint(indexes_before)
+        assert "idx_http_bridge_operations_session_state_created" not in indexes_before
+        assert "idx_http_bridge_operations_response_state" in indexes_before
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == repair_head
@@ -3594,6 +3603,25 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
         assert columns_to_repair <= after
         assert alias_column in aliases_after
         assert indexes_to_repair <= indexes_after
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), deployed_head))
+        async with engine.connect() as conn:
+            indexes_after_downgrade = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes("http_bridge_operations")}
+            )
+            aliases_after_downgrade = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
+        # The separate bridge-affinity branch remains stamped alongside the
+        # deployed head, so repaired objects stay available across this
+        # compatibility downgrade.  In particular, the pre-existing index
+        # was never assigned repair ownership and must remain intact.
+        assert indexes_to_repair <= indexes_after_downgrade
+        assert alias_column in aliases_after_downgrade
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == repair_head
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:
         await engine.dispose()
@@ -3629,12 +3657,23 @@ async def test_http_bridge_recovery_column_repair_downgrade_preserves_parent_sch
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     try:
+        async with engine.connect() as conn:
+            existing_indexes = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes(operation_table)}
+            )
+            existing_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(operation_table)}
+            )
+            existing_alias_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
         async with engine.begin() as conn:
-            for index in indexes_to_repair:
+            for index in indexes_to_repair & existing_indexes:
                 await conn.execute(text(f"DROP INDEX {index}"))
-            for column in columns_to_repair:
+            for column in columns_to_repair & existing_columns:
                 await conn.execute(text(f"ALTER TABLE {operation_table} DROP COLUMN {column}"))
-            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
+            if "target_response_id" in existing_alias_columns:
+                await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
         # Simulate a database repaired by the previous implementation, which
@@ -3679,7 +3718,11 @@ async def test_http_bridge_recovery_repair_direct_downgrade_rehomes_legacy_marke
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-direct-downgrade.sqlite'}"
     parent_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
     repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
-    downgrade_revision = "20260821_020000_add_http_bridge_replay_snapshot"
+    # The repair revision now follows the preserved terminal-append branch;
+    # the request-log branch is joined only at the later head.  A direct
+    # downgrade from the repair revision can therefore target its local-login
+    # ancestor, but not a revision from the sibling request-log branch.
+    downgrade_revision = "20260911_030000_add_local_login_policy"
     operation_table = "http_bridge_operations"
     alias_table = "http_bridge_session_aliases"
     operation_columns = {
@@ -3699,12 +3742,23 @@ async def test_http_bridge_recovery_repair_direct_downgrade_rehomes_legacy_marke
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     try:
+        async with engine.connect() as conn:
+            existing_indexes = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes(operation_table)}
+            )
+            existing_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(operation_table)}
+            )
+            existing_alias_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
         async with engine.begin() as conn:
-            for index in operation_indexes:
+            for index in operation_indexes & existing_indexes:
                 await conn.execute(text(f"DROP INDEX {index}"))
-            for column in operation_columns:
+            for column in operation_columns & existing_columns:
                 await conn.execute(text(f"ALTER TABLE {operation_table} DROP COLUMN {column}"))
-            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
+            if "target_response_id" in existing_alias_columns:
+                await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
         # Reproduce the legacy repair's revision-local ownership rows without
@@ -3746,13 +3800,9 @@ async def test_http_bridge_recovery_repair_direct_downgrade_rehomes_legacy_marke
                 lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
             )
         assert legacy_count == 0
-        assert {"transcript_version", "response_output_items_json", "response_output_items_complete"} <= columns
-        assert {"response_replay_input_json", "response_replay_input_complete"} <= columns
-        assert "rebind_claim_id" not in columns
-        assert "response_replay_input_turn_count" not in columns
-        assert "target_response_id" not in aliases
-        assert "idx_http_bridge_operations_session_state_created" not in indexes
-        assert "idx_http_bridge_operations_response_state" in indexes
+        assert operation_columns <= columns
+        assert operation_indexes <= indexes
+        assert "target_response_id" in aliases
     finally:
         await engine.dispose()
 
@@ -3768,7 +3818,7 @@ async def test_http_bridge_recovery_repair_rehomes_legacy_ownership_for_historic
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-rehome.sqlite'}"
     parent_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
     repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
-    head_revision = "20260912_020000_rehome_recovery_repair_ownership"
+    head_revision = "20260912_030000_merge_terminal_append_lineage"
     downgrade_revision = "20260821_020000_add_http_bridge_replay_snapshot"
     operation_table = "http_bridge_operations"
     alias_table = "http_bridge_session_aliases"
@@ -3789,12 +3839,23 @@ async def test_http_bridge_recovery_repair_rehomes_legacy_ownership_for_historic
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
     try:
+        async with engine.connect() as conn:
+            existing_indexes = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_indexes(operation_table)}
+            )
+            existing_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(operation_table)}
+            )
+            existing_alias_columns = await conn.run_sync(
+                lambda sync: {item["name"] for item in sa_inspect(sync).get_columns(alias_table)}
+            )
         async with engine.begin() as conn:
-            for index in operation_indexes:
+            for index in operation_indexes & existing_indexes:
                 await conn.execute(text(f"DROP INDEX {index}"))
-            for column in operation_columns:
+            for column in operation_columns & existing_columns:
                 await conn.execute(text(f"ALTER TABLE {operation_table} DROP COLUMN {column}"))
-            await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
+            if "target_response_id" in existing_alias_columns:
+                await conn.execute(text(f"ALTER TABLE {alias_table} DROP COLUMN target_response_id"))
 
         await to_thread.run_sync(lambda: run_upgrade(db_url, repair_revision, bootstrap_legacy=False))
         # Reproduce markers written by the old repair implementation.

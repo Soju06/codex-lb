@@ -1989,6 +1989,8 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
     continuity_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
     recovery_repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
     recovery_merge_revision = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
+    terminal_phase_revision = "20260911_020000_add_http_bridge_terminal_append_phase"
+    lineage_merge_revision = "20260912_030000_merge_terminal_append_lineage"
     assert script_directory.get_revision(thread_cache_revision).down_revision == local_login_revision
     assert script_directory.get_revision(continuity_revision).down_revision == local_login_revision
     assert script_directory.get_revision(recovery_repair_revision).down_revision == continuity_revision
@@ -1996,8 +1998,13 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         recovery_repair_revision,
         "20260912_000000_merge_thread_cache_and_bridge_retirement_heads",
     )
+    assert script_directory.get_revision(terminal_phase_revision).down_revision == pin_affinity_merge
     assert script_directory.get_revision(rehome_revision).down_revision == recovery_merge_revision
-    assert script_directory.get_heads() == [rehome_revision]
+    assert script_directory.get_revision(lineage_merge_revision).down_revision == (
+        rehome_revision,
+        bridge_affinity_merge,
+    )
+    assert script_directory.get_heads() == [lineage_merge_revision]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:

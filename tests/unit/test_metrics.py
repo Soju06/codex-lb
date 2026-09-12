@@ -162,6 +162,17 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
         "status",
         "outcome",
     )
+    assert (
+        prometheus_module.bridge_ring_heartbeat_last_success_timestamp_seconds.name
+        == "codex_lb_bridge_ring_heartbeat_last_success_timestamp_seconds"
+    )
+    assert (
+        prometheus_module.bridge_ring_heartbeat_failures_total.name == "codex_lb_bridge_ring_heartbeat_failures_total"
+    )
+    assert prometheus_module.bridge_ring_heartbeat_last_success_timestamp_seconds.labelnames == ()
+    assert prometheus_module.bridge_ring_heartbeat_failures_total.labelnames == ()
+    assert prometheus_module.bridge_ring_maintenance_total.name == "codex_lb_bridge_ring_maintenance_total"
+    assert prometheus_module.bridge_ring_maintenance_total.labelnames == ("phase", "outcome")
 
 
 def test_cap_partition_replicas_gauge_uses_livemax_in_multiprocess_mode(
@@ -178,6 +189,17 @@ def test_cap_partition_replicas_gauge_uses_livemax_in_multiprocess_mode(
     # removes live* gauge files), so a scaled-down worker's stale higher
     # count would be reported forever. "livemax" drops dead workers while
     # still taking the max across live sibling workers.
+    assert gauge.multiprocess_mode == "livemax"
+
+
+def test_bridge_heartbeat_timestamp_gauge_uses_livemax_in_multiprocess_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    prometheus_module, _ = _load_metrics_modules(monkeypatch, prometheus_client_module=_fake_prometheus_client_module())
+
+    gauge = prometheus_module.bridge_ring_heartbeat_last_success_timestamp_seconds
+    assert gauge is not None
     assert gauge.multiprocess_mode == "livemax"
 
 
@@ -365,6 +387,9 @@ def test_bridge_instance_mismatch_counter_noop_without_prometheus(monkeypatch: p
 
     assert prometheus_module.PROMETHEUS_AVAILABLE is False
     assert prometheus_module.bridge_instance_mismatch_total is None
+    assert prometheus_module.bridge_ring_heartbeat_last_success_timestamp_seconds is None
+    assert prometheus_module.bridge_ring_heartbeat_failures_total is None
+    assert prometheus_module.bridge_ring_maintenance_total is None
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

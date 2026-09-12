@@ -819,6 +819,7 @@ async def test_init_background_db_derives_postgres_pool_size_from_main_pool() ->
 async def test_get_background_session_uses_background_pool_when_initialized() -> None:
     session_module.init_background_db("sqlite+aiosqlite:///:memory:")
 
+    assert session_module.get_background_session_factory() is session_module._background_session_factory
     async with session_module.get_background_session() as session:
         assert session is not None
         assert isinstance(session, session_module.AsyncSession)
@@ -834,6 +835,7 @@ async def test_get_background_session_falls_back_to_main_pool_when_not_initializ
     session_module._background_engine = None
     session_module._background_session_factory = None
 
+    assert session_module.get_background_session_factory() is session_module.SessionLocal
     async with session_module.get_background_session() as session:
         assert session is not None
         assert isinstance(session, session_module.AsyncSession)

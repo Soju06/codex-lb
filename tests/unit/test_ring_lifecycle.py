@@ -1,0 +1,937 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
+
+import anyio
+import pytest
+from sqlalchemy import Table, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.core.utils.periodic import PeriodicPhaseEvent
+from app.modules.proxy import ring_lifecycle as ring_lifecycle_module
+from app.modules.proxy.ring_lifecycle import (
+    BridgePeriodicShutdownResult,
+    BridgePeriodicStopResult,
+    BridgeRingPeriodicLifecycle,
+    stop_bridge_periodic_work,
+)
+from app.modules.proxy.ring_membership import RingMembershipService
+
+pytestmark = pytest.mark.unit
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 1.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_phase", ["durable_ownership", "idle_sweep", "cap_partition"])
+async def test_blocked_maintenance_does_not_delay_heartbeat_or_other_phases(blocked_phase: str) -> None:
+    blocked_started = asyncio.Event()
+    release_blocked = asyncio.Event()
+    calls = {"heartbeat": 0, "durable_ownership": 0, "idle_sweep": 0, "cap_partition": 0}
+    active = 0
+    max_active = 0
+
+    async def heartbeat() -> None:
+        calls["heartbeat"] += 1
+
+    def maintenance(phase: str):
+        async def run() -> None:
+            nonlocal active, max_active
+            calls[phase] += 1
+            if phase != blocked_phase:
+                return
+            active += 1
+            max_active = max(max_active, active)
+            blocked_started.set()
+            try:
+                await release_blocked.wait()
+            finally:
+                active -= 1
+
+        return run
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=heartbeat,
+        durable_ownership=maintenance("durable_ownership"),
+        idle_sweep=maintenance("idle_sweep"),
+        cap_partition=maintenance("cap_partition"),
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.02,
+        maintenance_deadline_seconds=0.01,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    try:
+        await asyncio.wait_for(blocked_started.wait(), timeout=1)
+        await _wait_until(
+            lambda: (
+                calls["heartbeat"] >= 3
+                and all(calls[phase] >= 2 for phase in calls if phase not in {"heartbeat", blocked_phase})
+            )
+        )
+        assert calls[blocked_phase] == 1
+        assert max_active == 1
+    finally:
+        release_blocked.set()
+        result = await lifecycle.stop(timeout_seconds=1)
+
+    assert result.heartbeat_stopped is True
+    assert result.all_stopped is True
+
+
+@pytest.mark.asyncio
+async def test_exhausted_production_sized_request_pool_does_not_block_heartbeat_pool() -> None:
+    request_pool = asyncio.Semaphore(2)
+    heartbeat_pool = asyncio.Semaphore(1)
+    release_maintenance = asyncio.Event()
+    maintenance_started = {"durable_ownership": asyncio.Event(), "cap_partition": asyncio.Event()}
+    heartbeat_calls = 0
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        async with heartbeat_pool:
+            heartbeat_calls += 1
+
+    def blocking_maintenance(phase: str):
+        async def run() -> None:
+            async with request_pool:
+                maintenance_started[phase].set()
+                await release_maintenance.wait()
+
+        return run
+
+    async def idle_sweep() -> None:
+        return None
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=heartbeat,
+        durable_ownership=blocking_maintenance("durable_ownership"),
+        idle_sweep=idle_sweep,
+        cap_partition=blocking_maintenance("cap_partition"),
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.05,
+        maintenance_deadline_seconds=0.01,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(started.wait() for started in maintenance_started.values())),
+            timeout=1,
+        )
+        assert request_pool.locked()
+        await _wait_until(lambda: heartbeat_calls >= 3)
+    finally:
+        release_maintenance.set()
+        result = await lifecycle.stop(timeout_seconds=1)
+
+    assert result.heartbeat_stopped is True
+    assert result.all_stopped is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_persists_heartbeats_while_real_maintenance_wiring_is_blocked(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.core.openai.model_registry_store as model_registry_store
+    import app.core.shutdown as shutdown_state
+    import app.main as main
+    from app.core.config.settings import Settings
+    from app.db.models import BridgeRingMember
+
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'ring-lifecycle.db'}"
+    request_engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    heartbeat_engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    observer_engine = create_async_engine(database_url, pool_size=1, max_overflow=0)
+    request_factory = async_sessionmaker(request_engine, expire_on_commit=False)
+    heartbeat_factory = async_sessionmaker(heartbeat_engine, expire_on_commit=False)
+    observer_factory = async_sessionmaker(observer_engine, expire_on_commit=False)
+    bridge_ring_table = cast(Table, BridgeRingMember.__table__)
+    async with request_engine.begin() as connection:
+        await connection.run_sync(bridge_ring_table.create)
+
+    settings = Settings(
+        otel_enabled=False,
+        otel_exporter_endpoint="",
+        metrics_enabled=False,
+        database_migrations_fail_fast=False,
+        shutdown_drain_timeout_seconds=1,
+        http_responses_session_bridge_instance_id="pod-product-path",
+    )
+    settings_cache = SimpleNamespace(
+        invalidate=AsyncMock(),
+        refresh=AsyncMock(),
+        get=AsyncMock(side_effect=RuntimeError("dashboard snapshot unavailable")),
+    )
+    rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
+    dashboard_users_cache = SimpleNamespace(invalidate=AsyncMock())
+    cache_poller = SimpleNamespace(
+        on_invalidation=Mock(),
+        prime=AsyncMock(),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    maintenance_started = asyncio.Event()
+    release_maintenance = asyncio.Event()
+    maintenance_calls = 0
+    active_maintenance = 0
+    max_active_maintenance = 0
+
+    class NoopScheduler:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    class NoopAccountsRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def seed_hard_sticky_outage_grace_on_startup(self) -> int:
+            return 0
+
+    async def blocked_maintenance(_proxy_service: object) -> None:
+        nonlocal maintenance_calls, active_maintenance, max_active_maintenance
+        maintenance_calls += 1
+        active_maintenance += 1
+        max_active_maintenance = max(max_active_maintenance, active_maintenance)
+        maintenance_started.set()
+        try:
+            await release_maintenance.wait()
+        finally:
+            active_maintenance -= 1
+
+    async def heartbeat_timestamp() -> datetime | None:
+        async with observer_factory() as session:
+            return await session.scalar(
+                select(BridgeRingMember.last_heartbeat_at).where(BridgeRingMember.instance_id == "pod-product-path")
+            )
+
+    real_lifecycle = BridgeRingPeriodicLifecycle
+    real_ring_shutdown = main._shutdown_bridge_ring_membership
+    shutdown_deadline = time.monotonic() + 10
+    observed_shutdown_deadlines: list[float] = []
+
+    def fast_lifecycle(**kwargs: object) -> BridgeRingPeriodicLifecycle:
+        return real_lifecycle(
+            **cast(dict[str, Any], kwargs),
+            interval_seconds=0.02,
+            heartbeat_deadline_seconds=0.2,
+            maintenance_deadline_seconds=0.01,
+            restart_delay_seconds=0.01,
+        )
+
+    async def record_ring_shutdown(**kwargs: Any) -> tuple[bool, asyncio.CancelledError | None]:
+        observed_shutdown_deadlines.append(kwargs["deadline_monotonic"])
+        return await real_ring_shutdown(**kwargs)
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
+    monkeypatch.setattr(main, "get_dashboard_users_cache", lambda: dashboard_users_cache)
+    monkeypatch.setattr(main, "get_rate_limit_headers_cache", lambda: rate_limit_cache)
+    monkeypatch.setattr(main, "reload_additional_quota_registry", lambda: None)
+    monkeypatch.setattr(main, "init_db", AsyncMock())
+    monkeypatch.setattr(main, "init_background_db", Mock())
+    monkeypatch.setattr(main, "verify_encryption_key_fingerprint", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "init_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_http_client", AsyncMock())
+    monkeypatch.setattr(main, "close_discovered_native_egress_client", AsyncMock())
+    monkeypatch.setattr(main, "close_db", AsyncMock(return_value=True))
+    monkeypatch.setattr(main, "mark_sqlite_shutdown_clean", Mock())
+    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    monkeypatch.setattr(main, "SessionLocal", request_factory)
+    monkeypatch.setattr(main, "get_background_session_factory", lambda: heartbeat_factory)
+    monkeypatch.setattr(main, "AccountsRepository", NoopAccountsRepository)
+    monkeypatch.setattr(main, "_ensure_bridge_durable_schema_ready", AsyncMock(return_value=False))
+    monkeypatch.setattr(main, "BridgeRingPeriodicLifecycle", fast_lifecycle)
+    monkeypatch.setattr(main, "_shutdown_bridge_ring_membership", record_ring_shutdown)
+    monkeypatch.setattr(
+        shutdown_state,
+        "post_drain_cleanup_deadline_monotonic",
+        lambda: shutdown_deadline,
+    )
+    monkeypatch.setattr(main, "run_http_bridge_durable_ownership_maintenance", blocked_maintenance)
+    monkeypatch.setattr(main, "run_http_bridge_idle_sweep_maintenance", AsyncMock())
+    monkeypatch.setattr(main, "run_cap_partition_maintenance", AsyncMock())
+    monkeypatch.setattr(main, "start_live_usage_ingestor", lambda: None)
+    monkeypatch.setattr(main, "stop_live_usage_ingestor", AsyncMock())
+    monkeypatch.setattr(main, "build_api_key_last_used_flush_scheduler", NoopScheduler)
+    monkeypatch.setattr(model_registry_store, "reconcile_model_registry_from_store", AsyncMock())
+    monkeypatch.setattr(
+        "app.core.cache.invalidation.CacheInvalidationPoller",
+        lambda _session_factory: cache_poller,
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.get_routing_availability_cache",
+        lambda: SimpleNamespace(refresh_from_db=AsyncMock()),
+    )
+
+    test_app = main.create_app()
+    try:
+        async with main.lifespan(test_app):
+            try:
+                await asyncio.wait_for(maintenance_started.wait(), timeout=1)
+                first_heartbeat = await heartbeat_timestamp()
+                assert isinstance(first_heartbeat, datetime)
+
+                # Exhaust the production request-pool seam. The real heartbeat
+                # must still update through the separately wired background pool.
+                async with request_engine.connect():
+                    async with asyncio.timeout(1):
+                        while True:
+                            later_heartbeat = await heartbeat_timestamp()
+                            if isinstance(later_heartbeat, datetime) and later_heartbeat > first_heartbeat:
+                                break
+                            await asyncio.sleep(0.005)
+                assert maintenance_calls == 1
+                assert max_active_maintenance == 1
+            finally:
+                release_maintenance.set()
+        assert observed_shutdown_deadlines == [shutdown_deadline]
+    finally:
+        await request_engine.dispose()
+        await heartbeat_engine.dispose()
+        await observer_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_each_periodic_phase_runs_in_a_distinct_owned_task() -> None:
+    phase_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def operation(phase: str):
+        async def run() -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            phase_tasks.setdefault(phase, task)
+
+        return run
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=operation("heartbeat"),
+        durable_ownership=operation("durable_ownership"),
+        idle_sweep=operation("idle_sweep"),
+        cap_partition=operation("cap_partition"),
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.05,
+        maintenance_deadline_seconds=0.05,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    try:
+        await _wait_until(lambda: len(phase_tasks) == 4)
+    finally:
+        result = await lifecycle.stop(timeout_seconds=1)
+
+    assert result.all_stopped is True
+    assert len(set(phase_tasks.values())) == 4
+    assert {task.get_name() for task in phase_tasks.values()} == {
+        "periodic-heartbeat-attempt",
+        "periodic-durable_ownership-attempt",
+        "periodic-idle_sweep-attempt",
+        "periodic-cap_partition-attempt",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cap_partition_maintenance_surfaces_retained_membership_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    list_active = AsyncMock(return_value=["pod-a"])
+    service = cast(RingMembershipService, AsyncMock(list_active=list_active))
+    refresh = AsyncMock(return_value=False)
+    monkeypatch.setattr(main, "refresh_cap_partition", refresh)
+
+    with pytest.raises(RuntimeError, match="membership read failed"):
+        await main.run_cap_partition_maintenance(service, "pod-a")
+
+    refresh.assert_awaited_once_with(list_active, "pod-a")
+
+
+@pytest.mark.asyncio
+async def test_periodic_lifecycle_records_bounded_metrics_and_structured_recovery_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import app.main as main
+
+    class FakeGauge:
+        def __init__(self) -> None:
+            self.values: list[float] = []
+
+        def set(self, value: float) -> None:
+            self.values.append(value)
+
+    class FakeCounter:
+        def __init__(self) -> None:
+            self.values: dict[tuple[str, str] | None, int] = {}
+
+        def labels(self, *, phase: str, outcome: str) -> FakeCounterChild:
+            return FakeCounterChild(self, (phase, outcome))
+
+        def inc(self) -> None:
+            self.values[None] = self.values.get(None, 0) + 1
+
+    class FakeCounterChild:
+        def __init__(self, counter: FakeCounter, key: tuple[str, str]) -> None:
+            self._counter = counter
+            self._key = key
+
+        def inc(self) -> None:
+            self._counter.values[self._key] = self._counter.values.get(self._key, 0) + 1
+
+    gauge = FakeGauge()
+    heartbeat_failures = FakeCounter()
+    maintenance = FakeCounter()
+    monkeypatch.setattr(
+        ring_lifecycle_module.prometheus_metrics,
+        "bridge_ring_heartbeat_last_success_timestamp_seconds",
+        gauge,
+    )
+    monkeypatch.setattr(
+        ring_lifecycle_module.prometheus_metrics,
+        "bridge_ring_heartbeat_failures_total",
+        heartbeat_failures,
+    )
+    monkeypatch.setattr(
+        ring_lifecycle_module.prometheus_metrics,
+        "bridge_ring_maintenance_total",
+        maintenance,
+    )
+    caplog.set_level(logging.INFO, logger=ring_lifecycle_module.__name__)
+    heartbeat_calls = 0
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 1:
+            raise RuntimeError("heartbeat failed")
+
+    stale_cleanup = AsyncMock(side_effect=RuntimeError("stale cleanup failed"))
+    proxy_service = SimpleNamespace(
+        reconcile_durable_http_bridge_ownership=AsyncMock(return_value=0),
+        abandon_stale_http_bridge_operations=stale_cleanup,
+    )
+
+    async def durable_ownership() -> None:
+        await main.run_http_bridge_durable_ownership_maintenance(proxy_service)
+
+    async def noop() -> None:
+        return None
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=heartbeat,
+        durable_ownership=durable_ownership,
+        idle_sweep=noop,
+        cap_partition=noop,
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.05,
+        maintenance_deadline_seconds=0.05,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    try:
+        await _wait_until(lambda: heartbeat_calls >= 2)
+        await _wait_until(lambda: len(gauge.values) >= 2)
+        await _wait_until(lambda: maintenance.values.get(("durable_ownership", "failure"), 0) >= 1)
+    finally:
+        assert (await lifecycle.stop(timeout_seconds=1)).all_stopped
+
+    assert len(gauge.values) >= 2
+    assert heartbeat_failures.values[None] == 1
+    stale_cleanup.assert_awaited()
+    assert maintenance.values.get(("durable_ownership", "failure"), 0) >= 1
+    assert set(key for key in maintenance.values if key is not None) <= {
+        ("durable_ownership", "success"),
+        ("durable_ownership", "failure"),
+        ("durable_ownership", "timeout"),
+        ("idle_sweep", "success"),
+        ("idle_sweep", "failure"),
+        ("idle_sweep", "timeout"),
+        ("cap_partition", "success"),
+        ("cap_partition", "failure"),
+        ("cap_partition", "timeout"),
+    }
+    heartbeat_failure_record = next(
+        record
+        for record in caplog.records
+        if record.message == "Bridge ring heartbeat attempt did not complete successfully"
+    )
+    assert getattr(heartbeat_failure_record, "phase") == "heartbeat"
+    assert getattr(heartbeat_failure_record, "outcome") == "failure"
+    assert getattr(heartbeat_failure_record, "consecutive_failures") == 1
+    recovery_record = next(record for record in caplog.records if record.message == "Bridge ring heartbeat recovered")
+    assert getattr(recovery_record, "phase") == "heartbeat"
+    assert getattr(recovery_record, "consecutive_failures") == 1
+
+    escaped = RuntimeError("worker escaped")
+    lifecycle._record_supervisor_exit("heartbeat", escaped, 1.0)
+    supervisor_record = next(
+        record for record in caplog.records if record.message == "Bridge periodic worker exited unexpectedly"
+    )
+    assert getattr(supervisor_record, "phase") == "heartbeat"
+    assert getattr(supervisor_record, "outcome") == "failure"
+    assert getattr(supervisor_record, "error_type") == "RuntimeError"
+    assert getattr(supervisor_record, "restart_delay_seconds") == 1.0
+
+    lifecycle._record_maintenance_event(
+        PeriodicPhaseEvent(
+            phase="durable_ownership",
+            outcome="timeout",
+            elapsed_seconds=30.0,
+            consecutive_failures=2,
+        )
+    )
+    assert maintenance.values[("durable_ownership", "timeout")] == 1
+    timeout_record = next(
+        record
+        for record in caplog.records
+        if record.message == "Bridge ring maintenance did not complete successfully"
+        and getattr(record, "outcome", None) == "timeout"
+    )
+    assert getattr(timeout_record, "phase") == "durable_ownership"
+    assert getattr(timeout_record, "elapsed_seconds") == 30.0
+    assert getattr(timeout_record, "consecutive_failures") == 2
+
+
+@pytest.mark.asyncio
+async def test_periodic_lifecycle_shutdown_cancels_and_drains_every_phase() -> None:
+    started = {phase: asyncio.Event() for phase in ("heartbeat", "durable_ownership", "idle_sweep", "cap_partition")}
+    cancelled = {phase: asyncio.Event() for phase in started}
+
+    def operation(phase: str):
+        async def run() -> None:
+            started[phase].set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled[phase].set()
+                raise
+
+        return run
+
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=operation("heartbeat"),
+        durable_ownership=operation("durable_ownership"),
+        idle_sweep=operation("idle_sweep"),
+        cap_partition=operation("cap_partition"),
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=1,
+        maintenance_deadline_seconds=1,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    await asyncio.gather(*(event.wait() for event in started.values()))
+
+    result = await lifecycle.stop(timeout_seconds=1)
+
+    assert result.all_stopped is True
+    assert all(event.is_set() for event in cancelled.values())
+    assert all(phase.phase_task is None for phase in lifecycle.phases)
+
+
+@pytest.mark.asyncio
+async def test_stop_bridge_periodic_work_cancels_registration_before_periodic_owners() -> None:
+    registration_started = asyncio.Event()
+    registration_cancelled = asyncio.Event()
+    stop_called = asyncio.Event()
+
+    async def registration() -> None:
+        registration_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            registration_cancelled.set()
+            raise
+
+    class FakeLifecycle:
+        async def stop(self, *, timeout_seconds: float) -> BridgePeriodicStopResult:
+            assert registration_task.cancelling() > 0
+            assert 0 < timeout_seconds <= 1
+            stop_called.set()
+            return BridgePeriodicStopResult(heartbeat_stopped=True, all_stopped=True)
+
+    registration_task = asyncio.create_task(registration())
+    await asyncio.wait_for(registration_started.wait(), timeout=1)
+
+    result = await stop_bridge_periodic_work(
+        registration_task,
+        cast(BridgeRingPeriodicLifecycle, FakeLifecycle()),
+        timeout_seconds=1,
+    )
+
+    assert result.registration_stopped is True
+    assert result.heartbeat_stopped is True
+    assert result.all_stopped is True
+    assert stop_called.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_shares_one_deadline_with_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = 100.0
+    registration = asyncio.create_task(asyncio.sleep(60))
+    await asyncio.sleep(0)
+    waits: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def record_wait(tasks, *, timeout=None):
+        waits.append(timeout)
+        return await real_wait(tasks, timeout=timeout)
+
+    class FakeLifecycle:
+        async def stop(self, *, timeout_seconds: float) -> BridgePeriodicStopResult:
+            nonlocal now
+            assert registration.cancelling() > 0
+            assert timeout_seconds == 2.0
+            now += 1.5
+            return BridgePeriodicStopResult(heartbeat_stopped=True, all_stopped=True)
+
+    monkeypatch.setattr(ring_lifecycle_module, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(asyncio, "wait", record_wait)
+    try:
+        result = await stop_bridge_periodic_work(
+            registration, cast(BridgeRingPeriodicLifecycle, FakeLifecycle()), timeout_seconds=2.0
+        )
+        assert result.all_stopped
+        assert waits == [0.5]
+    finally:
+        registration.cancel()
+        await asyncio.gather(registration, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_ring_shutdown_uses_one_absolute_deadline_for_drain_and_stale_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    now = 100.0
+    stop_timeouts: list[float] = []
+    stale_timeouts: list[float] = []
+
+    async def stop_periodic(*args: object, timeout_seconds: float) -> BridgePeriodicShutdownResult:
+        nonlocal now
+        del args
+        stop_timeouts.append(timeout_seconds)
+        now += 1.5
+        return BridgePeriodicShutdownResult(
+            registration_stopped=True,
+            heartbeat_stopped=True,
+            all_stopped=True,
+        )
+
+    async def wait_for_stale(
+        tasks: set[asyncio.Task[None]],
+        timeout: float | None,
+    ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+        stale_timeouts.append(cast(float, timeout))
+        await asyncio.gather(*tasks)
+        return tasks, set()
+
+    monkeypatch.setattr(main, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(main, "stop_bridge_periodic_work", stop_periodic)
+    monkeypatch.setattr(main.asyncio, "wait", wait_for_stale)
+    ring_service = cast(RingMembershipService, AsyncMock(mark_stale=AsyncMock()))
+
+    stopped = await main._shutdown_bridge_ring_membership_impl(
+        registration_task=None,
+        periodic_lifecycle=None,
+        ring_service=ring_service,
+        instance_id="pod-a",
+        deadline_monotonic=104.0,
+    )
+
+    assert stopped is True
+    assert stop_timeouts == [2.0]
+    assert stale_timeouts == [2.5]
+
+
+@pytest.mark.asyncio
+async def test_stale_mark_timeout_is_hard_bounded_and_late_cleanup_stays_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    cancellation_seen = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def stop_periodic(*args: object, timeout_seconds: float) -> BridgePeriodicShutdownResult:
+        del args, timeout_seconds
+        return BridgePeriodicShutdownResult(
+            registration_stopped=True,
+            heartbeat_stopped=True,
+            all_stopped=True,
+        )
+
+    async def mark_stale(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_cleanup.wait()
+            raise
+
+    monkeypatch.setattr(main, "stop_bridge_periodic_work", stop_periodic)
+    ring_service = cast(RingMembershipService, AsyncMock(mark_stale=mark_stale))
+
+    try:
+        async with asyncio.timeout(0.2):
+            stopped = await main._shutdown_bridge_ring_membership_impl(
+                registration_task=None,
+                periodic_lifecycle=None,
+                ring_service=ring_service,
+                instance_id="pod-a",
+                deadline_monotonic=time.monotonic() + 0.01,
+            )
+        assert stopped is False
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        assert len(main._bridge_ring_stale_mark_tasks) == 1
+    finally:
+        release_cleanup.set()
+        async with asyncio.timeout(1):
+            while main._bridge_ring_stale_mark_tasks:
+                await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_stop_bridge_periodic_work_reports_noncooperative_registration() -> None:
+    registration_started = asyncio.Event()
+    release_registration = asyncio.Event()
+
+    async def registration() -> None:
+        registration_started.set()
+        while not release_registration.is_set():
+            try:
+                await release_registration.wait()
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                assert task is not None
+                task.uncancel()
+
+    registration_task = asyncio.create_task(registration())
+    await asyncio.wait_for(registration_started.wait(), timeout=1)
+
+    result = await stop_bridge_periodic_work(
+        registration_task,
+        None,
+        timeout_seconds=0.01,
+    )
+    assert result.registration_stopped is False
+    assert result.all_stopped is False
+
+    release_registration.set()
+    await asyncio.wait_for(registration_task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_owned_lifespan_shutdown_completes_under_anyio_level_cancellation() -> None:
+    import app.main as main
+
+    cleanup_complete = asyncio.Event()
+
+    async def cleanup() -> None:
+        await anyio.sleep(0)
+        cleanup_complete.set()
+
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        cancellation = await main._run_owned_lifespan_shutdown(cleanup)
+
+    assert cleanup_complete.is_set()
+    assert isinstance(cancellation, asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+async def test_owned_lifespan_shutdown_defers_direct_task_cancellation() -> None:
+    import app.main as main
+
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_complete = asyncio.Event()
+
+    async def cleanup() -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_complete.set()
+
+    owner = asyncio.create_task(main._run_owned_lifespan_shutdown(cleanup))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    owner.cancel()
+    release_cleanup.set()
+
+    cancellation = await asyncio.wait_for(owner, timeout=1)
+    assert cleanup_complete.is_set()
+    assert isinstance(cancellation, asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance_stopped", [True, False])
+async def test_shutdown_marks_ring_stale_after_ring_writers_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    maintenance_stopped: bool,
+) -> None:
+    import app.main as main
+
+    order: list[str] = []
+
+    async def stop_periodic(*args, **kwargs) -> BridgePeriodicShutdownResult:
+        order.append("stop_periodic")
+        return BridgePeriodicShutdownResult(
+            registration_stopped=True,
+            heartbeat_stopped=True,
+            all_stopped=maintenance_stopped,
+        )
+
+    async def mark_stale(*args, **kwargs) -> None:
+        assert order == ["stop_periodic"]
+        order.append("mark_stale")
+
+    monkeypatch.setattr(main, "stop_bridge_periodic_work", stop_periodic)
+    ring_service = cast(RingMembershipService, AsyncMock(mark_stale=mark_stale))
+
+    marked, cancellation = await main._shutdown_bridge_ring_membership(
+        registration_task=None,
+        periodic_lifecycle=None,
+        ring_service=ring_service,
+        instance_id="pod-a",
+        deadline_monotonic=time.monotonic() + 1,
+    )
+
+    assert marked is maintenance_stopped  # Still withhold CLEAN for an active database owner.
+    assert cancellation is None
+    assert order == ["stop_periodic", "mark_stale"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_defers_cancellation_until_after_stale_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main
+
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    stale_marked = asyncio.Event()
+
+    async def stop_periodic(*args, **kwargs) -> BridgePeriodicShutdownResult:
+        stop_started.set()
+        await release_stop.wait()
+        return BridgePeriodicShutdownResult(
+            registration_stopped=True,
+            heartbeat_stopped=True,
+            all_stopped=True,
+        )
+
+    async def mark_stale(*args, **kwargs) -> None:
+        stale_marked.set()
+
+    monkeypatch.setattr(main, "stop_bridge_periodic_work", stop_periodic)
+    ring_service = cast(RingMembershipService, AsyncMock(mark_stale=mark_stale))
+    shutdown_task = asyncio.create_task(
+        main._shutdown_bridge_ring_membership(
+            registration_task=None,
+            periodic_lifecycle=None,
+            ring_service=ring_service,
+            instance_id="pod-a",
+            deadline_monotonic=time.monotonic() + 1,
+        )
+    )
+    await asyncio.wait_for(stop_started.wait(), timeout=1)
+
+    shutdown_task.cancel()
+    release_stop.set()
+    marked, cancellation = await asyncio.wait_for(shutdown_task, timeout=1)
+
+    assert marked is True
+    assert stale_marked.is_set()
+    assert isinstance(cancellation, asyncio.CancelledError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("registration_stopped", "heartbeat_stopped"), [(True, False), (False, True), (False, False)])
+async def test_shutdown_skips_stale_mark_when_ring_writer_remains(
+    monkeypatch: pytest.MonkeyPatch,
+    registration_stopped: bool,
+    heartbeat_stopped: bool,
+) -> None:
+    import app.main as main
+
+    monkeypatch.setattr(
+        main,
+        "stop_bridge_periodic_work",
+        AsyncMock(
+            return_value=BridgePeriodicShutdownResult(
+                registration_stopped=registration_stopped,
+                heartbeat_stopped=heartbeat_stopped,
+                all_stopped=False,
+            )
+        ),
+    )
+    ring_service = AsyncMock()
+
+    marked, cancellation = await main._shutdown_bridge_ring_membership(
+        registration_task=None,
+        periodic_lifecycle=None,
+        ring_service=ring_service,
+        instance_id="pod-a",
+        deadline_monotonic=time.monotonic() + 1,
+    )
+
+    assert marked is False
+    assert cancellation is None
+    ring_service.mark_stale.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_periodic_lifecycle_reports_heartbeat_that_cannot_stop() -> None:
+    heartbeat_started = asyncio.Event()
+    release_heartbeat = asyncio.Event()
+
+    async def heartbeat() -> None:
+        heartbeat_started.set()
+        while not release_heartbeat.is_set():
+            try:
+                await release_heartbeat.wait()
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                assert task is not None
+                task.uncancel()
+
+    noop = AsyncMock()
+    lifecycle = BridgeRingPeriodicLifecycle(
+        heartbeat=heartbeat,
+        durable_ownership=noop,
+        idle_sweep=noop,
+        cap_partition=noop,
+        interval_seconds=0.01,
+        heartbeat_deadline_seconds=0.01,
+        maintenance_deadline_seconds=0.05,
+        restart_delay_seconds=0.01,
+    )
+    lifecycle.start()
+    await asyncio.wait_for(heartbeat_started.wait(), timeout=1)
+
+    result = await lifecycle.stop(timeout_seconds=0.01)
+    assert result.heartbeat_stopped is False
+    assert result.all_stopped is False
+
+    release_heartbeat.set()
+    heartbeat_phase = next(phase for phase in lifecycle.phases if phase.phase == "heartbeat")
+    owned = heartbeat_phase.phase_task
+    assert owned is not None
+    await asyncio.wait_for(owned, timeout=1)

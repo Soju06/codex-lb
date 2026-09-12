@@ -252,7 +252,7 @@ def observe_ring_members(
 async def refresh_cap_partition(
     list_active_members: Callable[[], Awaitable[Sequence[str]]],
     self_instance_id: str,
-) -> None:
+) -> bool:
     """Refresh the partition from active bridge-ring membership.
 
     A failed membership read retains the last-known adopted partition instead
@@ -265,9 +265,10 @@ async def refresh_cap_partition(
     except Exception:
         logger.warning("Cap partition refresh failed; retaining last-known partition", exc_info=True)
         _holder.note_failed_read()
-        return
+        return False
     dashboard_settings = await _current_dashboard_settings()
     observe_ring_members(members, self_instance_id, dashboard_settings=dashboard_settings)
+    return True
 
 
 def reset_cap_partition_for_tests() -> None:

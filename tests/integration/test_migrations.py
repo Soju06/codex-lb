@@ -1872,19 +1872,22 @@ async def test_http_bridge_rebind_claim_migration_round_trip(tmp_path, empty_reg
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'rebind-claim.sqlite'}"
     parent = "20260904_000000_repair_http_bridge_ownership_registry"
     revision = "20260906_000000_add_http_bridge_rebind_claim"
-    # Keep the independent upstream schema branches present while round-tripping
-    # this branch, so schema-drift validation compares the complete ORM schema.
-    await to_thread.run_sync(
-        lambda: run_upgrade(db_url, "20260910_000000_request_logs_missing_cost_index", bootstrap_legacy=False)
-    )
-    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
-    # The guest-session migration extends the dashboard spool-retention branch.
-    # Apply it as well so schema-drift validation compares the complete ORM
-    # schema while round-tripping the rebind claim.
-    await to_thread.run_sync(
-        lambda: run_upgrade(db_url, "20260908_000000_add_guest_session_generation", bootstrap_legacy=False)
-    )
+    # Build the complete current ORM schema first, then model a database that
+    # predates only the rebind column under test.  Stamping the repair parent
+    # preserves all newer independent branches so schema-drift validation is
+    # still a full-schema check after the migration round trip.
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
     engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE http_bridge_operations DROP COLUMN rebind_claim_id"))
+        await conn.execute(
+            text(
+                "DELETE FROM http_bridge_migration_object_ownership "
+                "WHERE revision = :revision AND object_type = 'column' AND object_name = 'rebind_claim_id'"
+            ),
+            {"revision": revision},
+        )
+    await to_thread.run_sync(lambda: command.stamp(_build_alembic_config(db_url), parent))
     if empty_registry:
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM http_bridge_migration_object_ownership"))

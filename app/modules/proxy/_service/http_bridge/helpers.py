@@ -1595,11 +1595,28 @@ async def _close_http_bridge_session_resources(
     finally:
         session.account_lease = None
     durable_release_succeeded = durable_owner_epoch is None
+    durable_release_attempted = False
+
+    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+    drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
+    session_finalizers_pending = bool(
+        durable_session_id is not None
+        and event_batcher is not None
+        and any(
+            not task.done() and getattr(task, "_http_bridge_session_id", None) == durable_session_id
+            for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
+        )
+    )
 
     async def release_durable_session_and_cleanup() -> None:
         """Release the durable owner and retire process-local denial state when it is safe."""
-        nonlocal durable_release_succeeded
-        if release_durable_session and _http_bridge_durable_release_allowed(service, session):
+        nonlocal durable_release_attempted, durable_release_succeeded
+        if (
+            release_durable_session
+            and not durable_release_attempted
+            and _http_bridge_durable_release_allowed(service, session)
+        ):
+            durable_release_attempted = True
             try:
                 released = await service._durable_bridge.release_live_session(
                     session_id=durable_session_id,
@@ -1612,6 +1629,7 @@ async def _close_http_bridge_session_resources(
                 # missing row) means this generation no longer owns a durable lease.
                 durable_release_succeeded = released is None or getattr(released, "owner_instance_id", None) is None
             except Exception:
+                durable_release_attempted = False
                 logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
         # Closing a generation retires its process-local denial slot as well as
         # its routing aliases. Keep pinned requests fenced; the owner helper marks
@@ -1633,6 +1651,14 @@ async def _close_http_bridge_session_resources(
                 owner_epoch=durable_owner_epoch,
                 preserve_response_ids=pending_denied_response_ids,
             )
+
+    # Ordinary retirement keeps the historical fast release ordering.  A
+    # detached reader can be waiting on this close path itself; starting the
+    # owner-fenced release first avoids a close/reader cycle while still
+    # deferring shutdown releases and any close with a pending terminal
+    # finalizer until those writers have drained.
+    if not drain_terminal_finalizers and not session_finalizers_pending:
+        await release_durable_session_and_cleanup()
 
     upstream_reader = session.upstream_reader
     detached_reader_pending = False
@@ -1669,16 +1695,6 @@ async def _close_http_bridge_session_resources(
             api_key=None,
             response_create_gate=response_create_gate,
         )
-    event_batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
-    drain_finalizers = getattr(event_batcher, "drain_terminal_finalizers", None)
-    session_finalizers_pending = bool(
-        durable_session_id is not None
-        and event_batcher is not None
-        and any(
-            not task.done() and getattr(task, "_http_bridge_session_id", None) == durable_session_id
-            for task in getattr(event_batcher, "_terminal_finalize_tasks", ())
-        )
-    )
 
     async def drain_and_release(*, force_drain: bool = False) -> None:
         if callable(drain_finalizers) and (force_drain or drain_terminal_finalizers or session_finalizers_pending):
@@ -1727,6 +1743,12 @@ async def _close_http_bridge_session_resources(
                     logger.warning("Deferred HTTP bridge durable release failed", exc_info=True)
 
             deferred_task.add_done_callback(deferred_release_done)
+        elif not cleanup_tasks and (existing_deferred is None or existing_deferred.done()):
+            # The cleanup marker may have completed between the release-fence
+            # snapshot above and this branch.  In that case there is no task
+            # left to defer behind; still perform the durable release instead
+            # of silently dropping it.
+            await drain_and_release()
     else:
         await drain_and_release()
     _log_http_bridge_event(

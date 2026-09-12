@@ -1,12 +1,19 @@
 """Source-body projection: telemetry stripping and the overflow portability view (#2123 WP-C1, §4.6, CP-7).
 
-The two ``tests/fixtures/codex_bodies`` bodies are synthetic but shaped after
-Codex's request construction (``client.rs``/``responses_metadata.rs`` for the
-gpt-5.5 standard body; ``core/tests/suite/responses_lite.rs`` for the gpt-5.6
-Responses-Lite bundle: ``namespace`` tools ``functions``->``exec``/``wait``,
-``web``->``run``, ``image_gen``->``imagegen``, the tagged developer
-base-instructions message, ``reasoning.context=all_turns``, no top-level
-``tools``). Captured bodies replace them before WP-C2 (design §16 item i).
+The two bodies this module loads are the *pre-strip* fixtures of
+``tests/fixtures/codex_bodies``: synthetic, and kept synthetic because they
+carry the Codex telemetry this module's stripper has to remove. They are shaped
+after Codex's request construction (``client.rs``/``responses_metadata.rs`` for
+the gpt-5.5 standard body; ``core/tests/suite/responses_lite.rs`` for the
+gpt-5.6 Responses-Lite bundle: ``namespace`` tools
+``functions``->``exec``/``wait``, ``web``->``run``, ``image_gen``->``imagegen``,
+the tagged developer base-instructions message, ``reasoning.context=all_turns``,
+no top-level ``tools``) but they are shape-illustrative, not byte-faithful.
+
+Real captured bodies now live alongside them (design §16 item i is closed); the
+corpus, the per-fixture divergences from Codex 0.154.0 and the recorded
+portability verdicts are in ``tests/fixtures/codex_bodies/provenance.json`` and
+its README, gated by ``tests/unit/test_codex_body_fixtures.py``.
 """
 
 from __future__ import annotations

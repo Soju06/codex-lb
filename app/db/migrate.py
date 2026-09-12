@@ -688,7 +688,12 @@ def _schema_ahead_error(state: MigrationState) -> MigrationBootstrapError:
     return MigrationBootstrapError(
         f"Database schema revision(s) {','.join(state.unknown_revisions)} are not known to this build "
         f"(head={state.head_revision}); the schema was likely migrated by a newer version. "
-        "Deploy a matching or newer image, or run an Alembic downgrade to a revision this build knows."
+        "Deploy a matching or newer image, or use a build containing the required migrations for a reviewed "
+        "Alembic downgrade. For an image rollback only after verifying schema and data compatibility with the "
+        "rollback image, ensuring migration transactions have ended, and preserving a recoverable database backup "
+        "and encryption key: run `python -m app.db.migrate stamp <revision>` from a build containing both the "
+        "recorded and target revisions, against the same database. Stamping only changes migration metadata; "
+        "it does not roll back schema or data. See docs/database.md for recovery preconditions and verification."
     )
 
 

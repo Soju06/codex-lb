@@ -224,22 +224,28 @@ streaming and non-streaming HTTP through the core upstream client, the upstream
 websocket `response.create` frame that same client sends, and the compact
 command.
 
-It does NOT yet apply to two egress paths, and no document may describe it as
-covering them:
+It also applies to the **HTTP session bridge**, which is enabled by default and
+submits its own serialized request text rather than going through the core
+upstream client. The bridge MUST scope the frame it sends and MUST NOT write
+the scoped text back into the request state or the fresh upstream request text,
+because the durable operation fingerprint has to keep hashing account-neutral
+text: a scoped value in that fingerprint would change the operation identity on
+every account swap and make the spool lookup miss mid-recovery. Leaving the
+bridge unscoped is not a smaller version of the feature but a worse one — a
+thread served partly by the bridge and partly by the per-turn bypass would
+alternate between a scoped and an unscoped identity turn by turn, so upstream
+would see two names for one thread on one account.
 
-- the **HTTP session bridge**, which is enabled by default and submits its own
-  serialized request text through a bridge session rather than through the core
-  upstream client;
-- the **direct downstream WebSocket** surface, which relays the client's frame
-  text verbatim.
-
-Both serialize the request text *before* an account is chosen and then treat
-that exact text as a dispatch-owner and replay key, so scoping either one means
-re-preparing the text after account selection, against the stored-input-context,
-input-fingerprint and size-guard invariants that re-preparation already has to
-respect. That is a separate change. Until it lands, an operator enabling
-`isolated` SHALL be told which paths remain shared, and the observability for
-the mode SHALL make the applied path distinguishable.
+It does NOT yet apply to the **direct downstream WebSocket** surface, which
+relays the client's frame text verbatim, and no document may describe it as
+covering that path. That surface serializes the request text *before* an
+account is chosen and then treats that exact text as a dispatch-owner and
+replay key, so scoping it means re-preparing the text after account selection,
+against the stored-input-context, input-fingerprint and size-guard invariants
+that re-preparation already has to respect. That is a separate change. Until it
+lands, an operator enabling `isolated` SHALL be told that this path remains
+shared, and the observability for the mode SHALL make the applied path
+distinguishable.
 
 An unrecognised configured mode — from a typo in the environment variable, a
 stale `dashboard_settings` value, or a hand-edited API-key override — MUST
@@ -311,11 +317,18 @@ request-shape trace so an A/B can be sliced after the fact.
 - **THEN** the request model's `prompt_cache_key` is still the unscoped value
 - **AND** the retry carries the sibling's scope token, not the first account's
 
-#### Scenario: Bridge and direct WebSocket traffic stay shared for now
+#### Scenario: The HTTP session bridge scopes the frame it sends
 
 - **GIVEN** the effective mode is `isolated`
-- **WHEN** a turn is carried by the HTTP session bridge or by the direct
-  downstream WebSocket surface
+- **WHEN** a turn is carried by the HTTP session bridge
+- **THEN** the frame that crosses the wire carries the scoped identity
+- **AND** the request state and the fresh upstream request text keep the
+  account-neutral original, so the durable operation fingerprint is unchanged
+
+#### Scenario: Direct WebSocket traffic stays shared for now
+
+- **GIVEN** the effective mode is `isolated`
+- **WHEN** a turn is carried by the direct downstream WebSocket surface
 - **THEN** that turn is sent with its original cache key, headers and content
 - **AND** the limitation is documented as a gap rather than presented as
   isolation

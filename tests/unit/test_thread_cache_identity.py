@@ -15,6 +15,7 @@ import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -46,6 +47,7 @@ from app.core.config.settings import Settings, get_settings
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.db.models import DashboardSettings
+from app.modules.proxy._service.http_bridge import request_submit as request_submit_module
 from app.modules.settings.service import _resolve_inheritable_settings
 
 pytestmark = pytest.mark.unit
@@ -822,3 +824,51 @@ async def test_compact_wire_budget_sees_the_injected_prefix(compact_budget_spy: 
     validated = compact_budget_spy[0]
     assert validated["input"][0]["content"][0]["text"] == _isolated().scope_line
     assert validated["prompt_cache_key"] == f"compact-key-1-{_isolated().token}"
+
+
+# --------------------------------------------------------------------------
+# The wiring itself, not just the helper
+#
+# Every one of these asserts on a call site rather than on
+# `thread_cache_identity.py`. Deleting the wiring in the service or bridge
+# layer used to leave the whole suite green, so the feature could be turned
+# into a no-op for real traffic without a single test noticing.
+# --------------------------------------------------------------------------
+
+
+def test_the_websocket_rejection_http_fallback_rescopes_its_headers() -> None:
+    """The fallback rebuilds headers from the raw inbound set.
+
+    Without a second scoping call the retry goes out with a scoped body and
+    unscoped headers, i.e. one thread presenting two identities on one account.
+    """
+
+    source = (Path(proxy_module.__file__)).read_text()
+    fallback = source[source.index("async def _stream_via_http_after_websocket_rejection") :]
+    fallback = fallback[: fallback.index("\n    async def ", 1)] if "\n    async def " in fallback[1:] else fallback
+    assert "scope_session_headers(" in fallback
+
+
+def test_the_http_session_bridge_scopes_the_frame_it_sends() -> None:
+    """The bridge dispatches response.create itself.
+
+    If it does not scope, a thread served partly by the bridge and partly by
+    the per-turn bypass alternates identities turn by turn.
+    """
+
+    source = (Path(request_submit_module.__file__)).read_text()
+    assert "_text_with_thread_cache_identity(" in source
+    send = source[source.index("async def _send_http_bridge_request_text_with_archive_id") :]
+    assert "_text_with_thread_cache_identity(" in send[: send.index("# Operation metadata")]
+
+
+def test_the_bridge_never_writes_the_scoped_text_back_into_request_state() -> None:
+    """The durable operation fingerprint must stay account-neutral.
+
+    A scoped value in the fingerprint would change the operation identity on
+    every account swap and make the spool lookup miss mid-recovery.
+    """
+
+    source = (Path(request_submit_module.__file__)).read_text()
+    assert "request_state.request_text = _text_with_thread_cache_identity" not in source
+    assert "fresh_upstream_request_text = _text_with_thread_cache_identity" not in source

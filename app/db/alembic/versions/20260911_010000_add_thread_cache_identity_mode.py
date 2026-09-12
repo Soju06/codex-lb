@@ -18,7 +18,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260911_010000_add_thread_cache_identity_mode"
-down_revision = "20260911_010000_merge_pin_index_and_affinity_heads"
+down_revision = "20260911_030000_add_local_login_policy"
 branch_labels = None
 depends_on = None
 

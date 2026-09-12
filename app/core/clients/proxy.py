@@ -4224,6 +4224,16 @@ async def _stream_responses_with_session(
             codex_installation_id,
             wire_profile=CODEX_0150_RESPONSES_HTTP_WIRE_PROFILE,
         )
+        # This fallback rebuilds the headers from the raw inbound set, which
+        # drops the scoping the websocket attempt applied. The body keeps it
+        # (``http_payload_dict`` was derived after ``apply_thread_cache_identity``),
+        # so without this the retry would go out with a scoped body and unscoped
+        # headers -- one thread presenting two identities on one account.
+        scope_session_headers(
+            upstream_headers,
+            thread_cache_identity,
+            replace=_replace_header_preserving_position,
+        )
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
             request_total_timeout,

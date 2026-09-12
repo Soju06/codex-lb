@@ -13936,6 +13936,7 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
     monkeypatch,
     resend_kind,
 ):
+    """Replay only a complete portable transcript after a pre-output quota failure."""
     monkeypatch.setattr(proxy_module.LoadBalancer, "mark_rate_limit", AsyncMock())
     reasoning = {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "owner-ciphertext"}
     assistant = {

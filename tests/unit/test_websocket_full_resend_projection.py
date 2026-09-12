@@ -10,6 +10,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.parametrize("unsafe", [None, "missing_reply", "unpaired_call", "file", "prompt"])
 def test_full_resend_projection_preserves_content_and_rejects_unsafe_replay(unsafe: str | None) -> None:
+    """Project response-owned fields only when the complete payload remains portable."""
     user = {"role": "user", "content": "hello"}
     call = {"type": "function_call", "id": "fc_owner", "call_id": "call_1", "name": "read", "arguments": "{}"}
     output = {"type": "function_call_output", "call_id": "call_1", "output": "file contents"}

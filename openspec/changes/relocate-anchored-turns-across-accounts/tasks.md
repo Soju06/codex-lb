@@ -34,6 +34,20 @@
   not a completeness test; using it as one inverts the outcome for the full
   resends Codex actually sends (developer-instruction-led, tool-pair tail).
   Still pass the anchor in so the walk can verify it terminates there.
+- [ ] Compute the overlap on the PROJECTED form of both sides while dispatching
+  the client's verbatim items, and compute it in LINEAR time. Comparing
+  projected chain items against verbatim client ones makes one allowlisted-field
+  difference (an assistant message without `status`) collapse the overlap and
+  double the conversation. A nested scan is 6.6 s of blocking CPU on a chain at
+  72% of the byte cap and extrapolates to ~16 minutes at the cap, because the
+  caps bound turns and bytes but not items.
+- [ ] Build the truth-table rows from WIRE shapes, not from the proxy's
+  post-projection normal form. Every non-zero-overlap row of the previous round
+  used `_replayed_assistant_item`, so the rows that were supposed to prove the
+  overlap works proved only that it works on already-normalized input. Include a
+  row where the client's input ENDS the conversation rather than extending it —
+  every previous row appended a fresh question, and two independent edits
+  survive because of it.
 - [ ] Bind the join with a truth table over real client shapes, asserting the
   dispatched body item by item: developer-led full resend, tool-pair-tail full
   resend, tool-only history, rolling window of 1 and 2 exchanges, a window from

@@ -44,9 +44,15 @@ A turn counts as settled, and so as material for the rebuild, only when its spoo
 
 The chain is the proxy's own reconstruction of turns the client is not currently sending. The client's input is what the client is sending right now. When the two overlap, the client's copy is authoritative — so the proxy MUST drop the overlapping portion **from the chain** and MUST keep every item the client sent. Dropping a chain turn the client has just re-supplied loses nothing; dropping a client item loses something no downstream check can detect.
 
-The join is therefore: walk the chain oldest first; where the client's input matches the **tail** of what the walk has accumulated, discard that tail; append the client's input verbatim and last. The overlap MUST be anchored at the accumulated tail — a match anywhere else is a coincidence, not a restatement, and MUST NOT shorten anything. Apply the same rule to each chain turn's stored request as the walk accumulates it, so a parent turn that restated the conversation replaces what it restates instead of repeating it.
+The join is therefore: walk the chain oldest first; where the client's input matches the **tail** of what the walk has accumulated, discard that tail; append the client's input verbatim and last. The overlap MUST be anchored at the accumulated tail — a match anywhere else is a coincidence, not a restatement, and MUST NOT shorten anything.
+
+**The comparison MUST be made on the projected form of both sides, and the dispatched items MUST be the client's verbatim ones.** The chain's items have been through the account-neutral projection and the client's have not, so comparing them as they stand makes the overlap depend on fields the projection normalizes away: one legal difference — an assistant message that omits `status`, which the wire allows — collapses the overlap to zero and doubles the whole conversation. Normalize for the comparison only. Never let normalization reach the body that is dispatched.
+
+**The overlap computation MUST be linear in the number of items.** The transcript caps bound turns and bytes, not items, so a chain that is legal under both can still carry six figures of them; a nested scan over that is minutes of blocking work on a single-worker event loop, inside a failover path whose whole purpose is to be faster than losing the conversation. Apply the same rule to each chain turn's stored request as the walk accumulates it, so a parent turn that restated the conversation replaces what it restates instead of repeating it.
 
 The proxy MUST NOT attempt to classify the client's intent. Whether the input is a full resend, a continuation delta, a rolling window of recent turns, or a coincidence is not knowable from the request: a client that re-sends its last exchange plus a new turn is byte-identical to one whose conversation genuinely began at that exchange. Any rule that decides between them — from `previous_response_id`, from the presence of model-authored items, from structural self-containment — will be wrong for one of them. The tail-overlap rule needs no such decision, because both readings produce the same correct conversation.
+
+**A request that names a prior response is owed material.** When it names one and the chain is absent, incomplete or unusable, the proxy MUST fail closed; it MUST NOT dispatch the client's own input as though it were the whole conversation, because the original dispatch would have carried prior state the relocated one would not. A request naming no prior response is owed nothing, and its own body is the conversation. This is the one place the anchor is read, and it decides whether material is owed — never what the input contains.
 
 `responses_input_items_are_self_contained_fresh_replay` MUST NOT be read as "this input carries the whole conversation". It answers a different question — whether the input references state the proxy does not hold — and using it as a completeness test inverts the outcome for the shapes Codex actually sends.
 
@@ -72,6 +78,13 @@ The proxy MUST NOT attempt to classify the client's intent. Whether the input is
 - **WHEN** the join runs
 - **THEN** the three earlier turns survive from the chain, the restated exchange survives from the client, and the new turn is last
 - **AND** no item the client sent is missing
+
+#### Scenario: A legal field difference does not double the conversation
+
+- **GIVEN** a client restating the chain's turns in a form the wire allows but the projection normalizes — an assistant message without `status`, say
+- **WHEN** the join computes the overlap
+- **THEN** the restated turns are recognised and the chain's copies are discarded
+- **AND** the dispatched body carries the client's items as the client sent them
 
 #### Scenario: A coincidental content match never costs the client a message
 

@@ -139,17 +139,35 @@ a fake pass.
 declines even when the source model declares `custom`, `tool_search` *and*
 `web_search`, for three independent reasons:
 
-1. The real `tool_search` declaration carries an `execution` field, and
-   `replay_safety._STATELESS_TOOL_DECLARATION_FIELDS` admits exactly
-   `{description, type}`. Declaring the type cannot help.
+1. The real `tool_search` declaration carries **two** fields beyond
+   `replay_safety._STATELESS_TOOL_DECLARATION_FIELDS` (which admits exactly
+   `{description, type}`): `execution` **and `parameters`**. Declaring the type
+   cannot help, and admitting `execution` alone would not be enough either.
 2. The real `web_search` declaration carries `external_web_access` and
    `search_content_types`, outside
-   `_ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS["web_search"]`.
+   `_ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS["web_search"]`. The *set* is
+   profile-dependent: the standard slugs (`gpt-5.4`, `gpt-5.5`) send both, while
+   the fallback surface the CLI uses for a slug it has no bundled `model_info`
+   for sends `external_web_access` alone. Both are outside the allowlist, so the
+   verdict is the same either way — but "two extra fields" is not universal.
 3. Every input item carries a prefixed `id` (Codex mints them deliberately),
    and `responses_input_items_are_self_contained_fresh_replay` rejects any
    non-empty item id, so `transcript_is_source_free` is false. The overflow
    decision runs before `strip_input_item_ids`, which is release-direction
    only.
+
+The Lite capture adds a fourth, which matters only once the first three are
+closed: the `additional_tools` bundle item itself carries an `id` key, outside
+`_ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["additional_tools"]` (`{role, tools, type}`).
+The Lite decline fires first today, so it is not load-bearing — but "drop the
+Lite bundle" would not be sufficient on its own either.
+
+The three declaration field sets above — `tool_search`'s extras, `web_search`'s
+extras and the bundle item's `id` — are asserted against the committed bodies by
+`test_the_declaration_extras_the_corpus_documents_are_the_ones_the_bodies_carry`,
+so this section cannot drift away from the bytes again. The profile-dependence
+in (2) is from the capture sweep, not from the committed pair: both committed
+captures are standard slugs, so only the two-field form is in the corpus.
 
 These are two HTTP bodies from one CLI version through one uncredentialed lane,
 so they are evidence about the mechanism rather than a census. Closing the three
@@ -186,12 +204,26 @@ capture time, and `docs/traffic-parity.md` walks the lane.
 | `parallel_tool_calls` (5.5) | `true` (corrected) | `true` |
 | `reasoning` (5.5) | `{effort, summary}` | `{effort}` — no `summary` |
 | `tools` (5.5) | `shell`, `update_plan`, `apply_patch`, `view_image` | `exec_command`, `write_stdin`, `request_user_input`, custom `apply_patch`, `view_image`, `tool_search`, `web_search` |
-| `<environment_context>` (prose; not in the rebuilt fixture) | `cwd`, `approval_policy`, `sandbox_mode`, `network_access`, `shell` | `cwd`, `shell`, `current_date`, `timezone`, `filesystem/workspace_roots/root`, `permission_profile` |
+| Environment context (prose; not in the rebuilt fixture) | an `<environment_context>` tag *inside* `instructions` carrying `cwd`, `approval_policy`, `sandbox_mode`, `network_access`, `shell` | **not in `instructions` at all.** 0.154.0's `instructions` carries no `<environment_context>` tag and no `cwd`/`timezone`/`workspace_roots`/`permission_profile` string. The context moved into the **first developer message** (`input[0]`), as a `<skills_instructions>` block — including a *skill roots* table of **absolute paths under the operator's real `CODEX_HOME`** — followed by a `<permissions instructions>` block naming `sandbox_mode`, the network restriction and the approval policy. `input[1]` then opens with `# AGENTS.md instructions for <absolute workspace path>` |
 | Lite `additional_tools` | `functions(exec, wait)`, `web`, `image_gen` | `functions(exec, wait, request_user_input)`, `collaboration` (6 tools); no `web`/`image_gen` in this lane. Declaration *structure* is in the fixture; the descriptions are not |
 | Lite prefix | 1 developer + 2 user | 4 developer + 2 user |
 | Lite `instructions` | `""` | **absent** |
 | Input-item `id` | absent (5.5) | present on every item |
 | `text.verbosity` | `medium` | `low` |
+
+The environment-context row is load-bearing twice over. First for the gate:
+`ResponsesRequest`'s before-validator folds a leading developer message back
+into `instructions`, so by the time the overflow decision sees the body the
+operator's skill roots and sandbox policy are part of `instructions` — checked
+on the committed capture, where `input[0]` disappears and `instructions` grows.
+Second for what overflow means: a `portable` verdict ships that to a third-party
+provider, and `replay_safety` has no opinion about it. That is deliberate and
+recorded rather than closed — `instructions` is classified `forwarded` in
+`replay_safety.OVERFLOW_FIELD_CLASSIFICATION`, because the same absolute paths
+already ride in the transcript's tool output and file contents, and stripping
+the block would change how the model behaves (it would no longer know the
+sandbox is read-only). The decision that a designated source may read the
+operator's conversations is made once, at configuration time.
 
 The Lite `instructions` row is load-bearing for the gate: a real Lite body has
 no `instructions` key, so `ResponsesRequest.model_validate` fails with

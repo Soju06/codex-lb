@@ -30,6 +30,10 @@ from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.model_sources.projection import (
     DECLINE_REASONS,
+    NEUTRALIZED_IDENTIFIER_FIELDS,
+    NEUTRALIZED_INCLUDE_VALUES,
+    OPAQUE_VALUE_DIGEST_CHARS,
+    OPAQUE_VALUE_PREFIX,
     OVERFLOW_VIEW_FIELDS,
     OVERFLOW_VIEW_REASONING_FIELDS,
     SERVICE_TIER_FIELD,
@@ -38,6 +42,8 @@ from app.modules.model_sources.projection import (
     STRIPPED_TELEMETRY_FIELDS,
     Declined,
     PortabilityView,
+    neutralize_overflow_egress,
+    overflow_opaque_value,
     overflow_portability_view,
     strip_source_telemetry,
 )
@@ -380,3 +386,74 @@ def test_gpt56_lite_bundle_declines_lite_namespace_while_the_stripped_body_still
     without_context = dict(stripped)
     without_context["reasoning"] = {"effort": "medium", "summary": "auto"}
     assert overflow_portability_view(without_context) == Declined("not_portable_lite_namespace", "additional_tools")
+
+
+# --- overflow egress neutralisation (#2123) -----------------------------------------------------
+
+
+def test_the_egress_rewrites_exactly_the_four_overflow_fields_and_nothing_else() -> None:
+    """A projection, not a filter: nothing else in the body moves."""
+
+    body: dict[str, JsonValue] = {
+        "model": "gpt-5.5",
+        "instructions": "You are Codex.",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "include": ["reasoning.encrypted_content", "message.output_text.logprobs"],
+        "prompt_cache_key": "01a099e8-25c2-7e30-bd5d-b1e522c07985",
+        "user": "operator@example.com",
+        "safety_identifier": "operator@example.com",
+        "metadata": {"team": "a"},
+        "store": False,
+        "stream": True,
+        "prompt_cache_retention": "24h",
+    }
+    before = copy.deepcopy(body)
+
+    neutralized = neutralize_overflow_egress(body, namespace="key_1")
+
+    assert neutralized is body, "in place, like every other step of the source-body projection"
+    assert neutralized["include"] == ["message.output_text.logprobs"]
+    for field in NEUTRALIZED_IDENTIFIER_FIELDS:
+        value = neutralized[field]
+        assert isinstance(value, str) and value.startswith(OPAQUE_VALUE_PREFIX)
+        assert len(value) == len(OPAQUE_VALUE_PREFIX) + OPAQUE_VALUE_DIGEST_CHARS
+        assert value != before[field]
+    untouched = set(before) - set(NEUTRALIZED_IDENTIFIER_FIELDS) - {"include"}
+    assert {field: neutralized[field] for field in untouched} == {field: before[field] for field in untouched}
+
+
+def test_the_egress_never_invents_a_field_and_never_hides_an_unclassifiable_value() -> None:
+    """A body with none of the four is returned unchanged; a non-string is left for the verdict to decline."""
+
+    bare: dict[str, JsonValue] = {"model": "gpt-5.5", "instructions": "", "input": []}
+    assert neutralize_overflow_egress(dict(bare), namespace="key_1") == bare
+
+    odd: dict[str, JsonValue] = {"include": {"not": "a list"}, "prompt_cache_key": 7, "user": ["a"]}
+    assert neutralize_overflow_egress(dict(odd), namespace="key_1") == odd
+
+    kept: dict[str, JsonValue] = {"include": ["message.output_text.logprobs"]}
+    assert neutralize_overflow_egress(dict(kept), namespace="key_1") == kept
+
+
+def test_the_opaque_value_is_a_function_of_the_namespace_the_domain_and_the_value_alone() -> None:
+    chosen = "shared-key"
+
+    assert overflow_opaque_value(chosen, namespace="key_a", domain="prompt_cache") == overflow_opaque_value(
+        chosen, namespace="key_a", domain="prompt_cache"
+    )
+    assert overflow_opaque_value(chosen, namespace="key_a", domain="prompt_cache") != overflow_opaque_value(
+        chosen, namespace="key_b", domain="prompt_cache"
+    )
+    assert overflow_opaque_value(chosen, namespace=None, domain="prompt_cache") != overflow_opaque_value(
+        "shared-key2", namespace=None, domain="prompt_cache"
+    )
+    # The separator is part of the material, so (namespace, domain, value) triples cannot be re-cut.
+    assert overflow_opaque_value("b", namespace="a", domain="d") != overflow_opaque_value(
+        "", namespace="a", domain="d\x00b"
+    )
+
+
+def test_the_neutralised_include_value_is_the_one_real_codex_traffic_always_asks_for() -> None:
+    assert NEUTRALIZED_INCLUDE_VALUES == frozenset({"reasoning.encrypted_content"})
+    fixture = _load_fixture("gpt55_standard_first_turn.json")
+    assert fixture["include"] == ["reasoning.encrypted_content"]

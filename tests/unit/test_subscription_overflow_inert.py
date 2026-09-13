@@ -128,8 +128,11 @@ _API_OVERFLOW_NAMES = frozenset(
         "apply_usage_limit_hint",
         "compact_pin_denial",
         "handshake_denial",
+        # The overflow-only wire shaping: ``restore_client_store`` plus the
+        # egress neutralisation (#2123), so the route file reaches both through
+        # one decision-module entry point rather than composing them itself.
+        "overflow_source_wire_body",
         "resolve_subscription_overflow",
-        "restore_client_store",
     }
 )
 _API_CALL_SITES = {

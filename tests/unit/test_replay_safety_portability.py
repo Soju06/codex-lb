@@ -20,24 +20,31 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import _RESPONSES_INCLUDE_ALLOWLIST, ResponsesRequest
 from app.core.types import JsonValue
 from app.db.models import ModelSource, ModelSourceModel
 from app.modules.model_sources.catalog import source_model_supported_tool_types, source_model_supports_vision
 from app.modules.model_sources.projection import (
     DECLINE_REASONS,
+    NEUTRALIZED_IDENTIFIER_FIELDS,
+    NEUTRALIZED_INCLUDE_VALUES,
     OVERFLOW_VIEW_FIELDS,
     Declined,
     PortabilityView,
+    neutralize_overflow_egress,
+    overflow_opaque_value,
     overflow_portability_view,
     strip_source_telemetry,
 )
 from app.modules.proxy.replay_safety import (
     _ACCOUNT_NEUTRAL_TOOL_TYPES,
     _PORTABILITY_VIEW_ONLY_FIELDS,
+    _PORTABLE_INCLUDE_VALUES,
     _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION,
     _STATELESS_DECLARABLE_TOOL_TYPES,
     _STATELESS_TOOL_DECLARATION_FIELDS,
+    OVERFLOW_FIELD_CLASSES,
+    OVERFLOW_FIELD_CLASSIFICATION,
     PortabilityVerdict,
     _classification_view,
     input_carries_image_parts,
@@ -74,7 +81,13 @@ def _custom_tool(name: str = "apply_patch") -> dict[str, JsonValue]:
     return {"type": "custom", "name": name, "format": {"type": "text"}}
 
 
-def _portable_body(**overrides: JsonValue) -> dict[str, JsonValue]:
+# The tenant an egress-neutralised identifier is scoped to in these tests.
+NAMESPACE = "key_portability"
+
+
+def _client_body(**overrides: JsonValue) -> dict[str, JsonValue]:
+    """A Codex-shaped body exactly as the client sent it, before the overflow egress."""
+
     body: dict[str, JsonValue] = {
         "model": "gpt-5.5",
         "instructions": "You are Codex.",
@@ -99,6 +112,17 @@ def _portable_body(**overrides: JsonValue) -> dict[str, JsonValue]:
     }
     body.update(overrides)
     return body
+
+
+def _portable_body(**overrides: JsonValue) -> dict[str, JsonValue]:
+    """``_client_body`` *as the overflow egress forwards it*.
+
+    The verdict is evaluated on this, because production classifies the body it
+    is about to put on the wire and never the raw one. The leak tests below
+    hand the verdict ``_client_body`` deliberately.
+    """
+
+    return neutralize_overflow_egress(_client_body(**overrides), namespace=NAMESPACE)
 
 
 def _view(body: Mapping[str, JsonValue]) -> PortabilityView:
@@ -824,7 +848,7 @@ def test_malformed_nested_values_decline_as_history_without_raising(case: str) -
 def _neutral_baseline() -> dict[str, JsonValue]:
     """A body the raw replay predicate accepts, so every injected slot is really exercised."""
 
-    return {
+    body: dict[str, JsonValue] = {
         "model": "gpt-5.5",
         "instructions": "You are Codex.",
         "input": [
@@ -843,6 +867,7 @@ def _neutral_baseline() -> dict[str, JsonValue]:
         "store": False,
         "stream": True,
     }
+    return neutralize_overflow_egress(body, namespace=NAMESPACE)
 
 
 _NESTED_SLOTS: tuple[tuple[str | int, ...], ...] = (
@@ -950,7 +975,10 @@ def _forwarded(body: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 def test_gpt55_standard_first_turn_is_portable_once_custom_is_declared() -> None:
-    stripped = strip_source_telemetry(_forwarded(_fixture("gpt55_standard_first_turn.json")), strip_service_tier=True)
+    stripped = neutralize_overflow_egress(
+        strip_source_telemetry(_forwarded(_fixture("gpt55_standard_first_turn.json")), strip_service_tier=True),
+        namespace=NAMESPACE,
+    )
     view = _view(stripped)
 
     undeclared = responses_payload_is_provider_portable(
@@ -982,3 +1010,279 @@ def test_gpt56_lite_bundle_is_declined_as_lite_by_the_view_and_by_the_verdict() 
         supports_vision=True,
     )
     assert verdict == PortabilityVerdict(False, "not_portable_lite_namespace", "additional_tools")
+
+
+# --- what a portable verdict forwards (#2123 leak set) -----------------------------------------
+#
+# Every case below was reproduced on a body the predicate called PORTABLE before
+# this rule existed (2026-09-13 capture sweep, section 6). The client-sent shape
+# is what the sweep injected; the egress shape is what now leaves.
+
+_DECLARED = frozenset({"custom", "web_search"})
+
+
+def _leak_verdict(body: Mapping[str, JsonValue]) -> PortabilityVerdict:
+    return _verdict(body, supported_tool_types=_DECLARED, supports_vision=True)
+
+
+def test_the_request_for_encrypted_reasoning_is_removed_on_the_way_out_not_declined() -> None:
+    """Leak 1, the one on 100 % of captured bodies.
+
+    Declining would make overflow unreachable for every real Codex request, so
+    the egress drops the entry instead -- and the verdict is what makes that
+    drop load-bearing: the client-sent body does *not* pass.
+    """
+
+    client = _client_body()
+    assert client["include"] == ["reasoning.encrypted_content"]
+
+    assert _leak_verdict(client) == PortabilityVerdict(
+        False, "not_portable_unknown_field", "include:reasoning.encrypted_content"
+    )
+
+    egress = neutralize_overflow_egress(client, namespace=NAMESPACE)
+    assert "include" not in egress, "an ``include`` emptied by the removal is dropped, not sent as []"
+    assert _leak_verdict(egress) == PortabilityVerdict(True)
+
+
+def test_an_include_entry_keeps_its_siblings_when_only_one_is_removed() -> None:
+    egress = neutralize_overflow_egress(
+        _client_body(include=["reasoning.encrypted_content", "message.output_text.logprobs"]), namespace=NAMESPACE
+    )
+
+    assert egress["include"] == ["message.output_text.logprobs"]
+    assert _leak_verdict(egress) == PortabilityVerdict(True)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results"],
+)
+def test_an_include_naming_a_hosted_tool_artifact_declines(value: str) -> None:
+    """Asking a source to mint an artifact whose items and declarations this module rejects everywhere else."""
+
+    body = _portable_body(include=[value])
+
+    assert _leak_verdict(body) == PortabilityVerdict(False, "not_portable_unknown_field", f"include:{value}")
+
+
+@pytest.mark.parametrize("value", sorted(_PORTABLE_INCLUDE_VALUES))
+def test_the_portable_include_values_are_forwarded(value: str) -> None:
+    """The positive control: the rule is a closed allowlist, not a blanket refusal."""
+
+    body = _portable_body(include=[value])
+
+    assert body["include"] == [value]
+    assert _leak_verdict(body) == PortabilityVerdict(True)
+
+
+@pytest.mark.parametrize(
+    ("include", "detail"),
+    [
+        (["totally.made.up"], "include:totally.made.up"),
+        ([{"nested": "object"}], "include[]"),
+        (["message.output_text.logprobs", 7], "include[]"),
+        ("reasoning.encrypted_content", "include"),
+    ],
+    ids=["unknown-value", "object-element", "number-element", "not-a-list"],
+)
+def test_an_unrecognised_include_fails_closed(include: JsonValue, detail: str) -> None:
+    """A non-string element used to ride along unread; now every shape declines, naming where."""
+
+    body = _portable_body(include=include)
+
+    assert _leak_verdict(body) == PortabilityVerdict(False, "not_portable_unknown_field", detail)
+
+
+def test_the_clients_prompt_cache_namespace_never_reaches_a_source() -> None:
+    """Leak 2: a cache key is a namespace at the destination, and this proxy measured that cache to be shared."""
+
+    client = {**_portable_body(), "prompt_cache_key": "acct_someone-elses-namespace"}
+
+    assert _leak_verdict(client) == PortabilityVerdict(False, "not_portable_unknown_field", "prompt_cache_key")
+
+    egress = neutralize_overflow_egress(dict(client), namespace=NAMESPACE)
+    assert egress["prompt_cache_key"] != "acct_someone-elses-namespace"
+    assert _leak_verdict(egress) == PortabilityVerdict(True)
+
+
+def test_the_forwarded_cache_key_is_stable_per_tenant_and_disjoint_across_tenants() -> None:
+    """Both halves of the neutralisation: the cache still hits, and two tenants cannot collide."""
+
+    chosen = "01a099e8-25c2-7e30-bd5d-b1e522c07985"
+
+    first = overflow_opaque_value(chosen, namespace="key_a", domain="prompt_cache")
+    again = overflow_opaque_value(chosen, namespace="key_a", domain="prompt_cache")
+    other_tenant = overflow_opaque_value(chosen, namespace="key_b", domain="prompt_cache")
+    other_domain = overflow_opaque_value(chosen, namespace="key_a", domain="end_user")
+
+    assert first == again, "the same tenant re-sending the same key must reuse the source's prompt cache"
+    assert first != other_tenant, "a value one tenant chose must not name another tenant's cache"
+    assert first != other_domain, "a cache key equal to an end-user id must not alias it"
+    assert chosen not in (first, other_tenant, other_domain)
+
+
+@pytest.mark.parametrize("field", sorted(NEUTRALIZED_IDENTIFIER_FIELDS))
+def test_a_client_chosen_identifier_declines_and_its_opaque_stand_in_does_not(field: str) -> None:
+    """Leak 3: ``user`` and ``safety_identifier`` are end-user identifiers, in practice emails."""
+
+    client = {**_portable_body(), field: "operator@example.com"}
+
+    assert _leak_verdict(client) == PortabilityVerdict(False, "not_portable_unknown_field", field)
+
+    egress = neutralize_overflow_egress(dict(client), namespace=NAMESPACE)
+    forwarded = egress[field]
+    assert isinstance(forwarded, str) and "operator@example.com" not in forwarded
+    assert _leak_verdict(egress) == PortabilityVerdict(True)
+
+
+def test_the_same_end_user_is_one_subject_across_both_identifier_fields() -> None:
+    egress = neutralize_overflow_egress(
+        _client_body(user="operator@example.com", safety_identifier="operator@example.com"), namespace=NAMESPACE
+    )
+
+    assert egress["user"] == egress["safety_identifier"]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "portable"),
+    [
+        ({"team": "a", "run": "17"}, True),
+        ({}, True),
+        ({"chatgpt_account_id": "org-123"}, True),
+        ({"file_id": "file_abc"}, False),
+        ({"vector_store_ids": "vs_1"}, False),
+        ({"image_url": "cdn://tenant-a/x.png"}, False),
+        ({"encrypted_content": "gAAAA"}, False),
+        ({"depth": {"nested": "object"}}, False),
+        ([{"k": "v"}], False),
+    ],
+    ids=[
+        "plain-string-map",
+        "empty",
+        "opaque-label",
+        "file-id",
+        "vector-store-ids",
+        "non-neutral-url",
+        "encrypted-content",
+        "nested-object",
+        "not-a-map",
+    ],
+)
+def test_metadata_is_validated_as_a_string_map_that_names_no_reference(metadata: JsonValue, portable: bool) -> None:
+    """Leak 3 (continued): client bookkeeping is forwarded, a reference is not.
+
+    ``chatgpt_account_id`` stays portable on purpose: it is an opaque label the
+    client chose, not a handle this module can resolve, and the transcript it
+    accompanies is far more exposing. The rule is about *references*.
+    """
+
+    body = _portable_body(metadata=metadata)
+
+    verdict = _leak_verdict(body)
+    assert verdict == (
+        PortabilityVerdict(True) if portable else PortabilityVerdict(False, "not_portable_unknown_field", "metadata")
+    )
+
+
+@pytest.mark.parametrize(
+    ("retention", "portable"), [("in_memory", True), ("24h", True), ("forever", False), (86400, False)]
+)
+def test_prompt_cache_retention_is_a_closed_set(retention: JsonValue, portable: bool) -> None:
+    body = _portable_body(prompt_cache_retention=retention)
+
+    verdict = _leak_verdict(body)
+    assert verdict == (
+        PortabilityVerdict(True)
+        if portable
+        else PortabilityVerdict(False, "not_portable_unknown_field", "prompt_cache_retention")
+    )
+
+
+@pytest.mark.parametrize(("truncation", "portable"), [("auto", True), ("disabled", True), ("middle-out", False)])
+def test_truncation_is_a_closed_set_in_this_module_too(truncation: JsonValue, portable: bool) -> None:
+    """The request model closes it as well; a hand-built view does not go through the request model."""
+
+    body = _portable_body(truncation=truncation)
+
+    verdict = _leak_verdict(body)
+    assert verdict == (
+        PortabilityVerdict(True) if portable else PortabilityVerdict(False, "not_portable_unknown_field", "truncation")
+    )
+
+
+def test_store_true_stays_portable_because_the_anchor_lifecycle_depends_on_it() -> None:
+    """Leak 5, declared rather than closed: a client that left storage on is what an anchored pin is *for*."""
+
+    assert _leak_verdict(_portable_body(store=True)) == PortabilityVerdict(True)
+    assert OVERFLOW_FIELD_CLASSIFICATION["store"] == "forwarded"
+
+
+def test_the_field_value_step_runs_after_the_configuration_class_reasons_and_before_history() -> None:
+    """Order, measured: an operator keeps the reason they can act on, and a field problem is never 'history'."""
+
+    lite = _client_body(input=[{"type": "additional_tools", "role": "developer", "tools": []}, _user("hi")])
+    undeclared_tool = _client_body(tools=[_function_tool(), _custom_tool()])
+    history = _client_body(previous_response_id="resp_1")
+
+    assert responses_payload_is_provider_portable(
+        PortabilityView(body=lite), NO_HEADERS, supported_tool_types=_DECLARED, supports_vision=True
+    ) == PortabilityVerdict(False, "not_portable_lite_namespace", "additional_tools")
+    assert _verdict(undeclared_tool, supports_vision=True) == PortabilityVerdict(False, "not_portable_tools", "custom")
+    # ...and the raw identifiers are reported before history, which alone earns the "new conversation" hint.
+    assert _leak_verdict(history) == PortabilityVerdict(
+        False, "not_portable_unknown_field", "include:reasoning.encrypted_content"
+    )
+    assert _leak_verdict(neutralize_overflow_egress(history, namespace=NAMESPACE)) == PortabilityVerdict(
+        False, "not_portable_history"
+    )
+
+
+# --- the field classification table cannot drift ------------------------------------------------
+
+
+def test_the_classification_table_answers_for_exactly_the_fields_the_view_admits() -> None:
+    """Closed in both directions: the view allowlist is no longer open on the value side."""
+
+    assert set(OVERFLOW_FIELD_CLASSIFICATION) == set(OVERFLOW_VIEW_FIELDS)
+    assert set(OVERFLOW_FIELD_CLASSIFICATION.values()) <= OVERFLOW_FIELD_CLASSES
+    assert {field for field, kind in OVERFLOW_FIELD_CLASSIFICATION.items() if kind == "rewritten"} == (
+        set(NEUTRALIZED_IDENTIFIER_FIELDS) | {"include", "model"}
+    )
+
+
+def test_a_portable_verdict_forwards_nothing_the_table_leaves_unclassified() -> None:
+    """The adversarial question, asserted rather than reasoned about."""
+
+    body = _portable_body()
+
+    assert _leak_verdict(body) == PortabilityVerdict(True)
+    assert sorted(set(body) - set(OVERFLOW_FIELD_CLASSIFICATION)) == []
+
+
+def test_every_include_value_the_request_model_admits_has_a_rule_here() -> None:
+    """The vocabulary is closed twice, and the two closures must stay aligned.
+
+    ``ResponsesRequest`` already restricts ``include`` to seven values and to
+    ``list[str]``, which is why the unknown and non-string rules above are
+    backstops for a hand-built view rather than production declines. What *is*
+    live is those seven: each one must be portable, neutralised on the egress,
+    or declined on purpose. An eighth value added to the request model with no
+    rule here would otherwise be forwarded to a third-party provider unread --
+    which is exactly how this leak happened the first time.
+    """
+
+    declined = _RESPONSES_INCLUDE_ALLOWLIST - _PORTABLE_INCLUDE_VALUES - NEUTRALIZED_INCLUDE_VALUES
+
+    assert declined == {
+        "code_interpreter_call.outputs",
+        "computer_call_output.output.image_url",
+        "file_search_call.results",
+    }
+    assert not _PORTABLE_INCLUDE_VALUES & NEUTRALIZED_INCLUDE_VALUES
+    assert _PORTABLE_INCLUDE_VALUES <= _RESPONSES_INCLUDE_ALLOWLIST
+    assert NEUTRALIZED_INCLUDE_VALUES <= _RESPONSES_INCLUDE_ALLOWLIST
+    for value in sorted(declined):
+        assert _leak_verdict(_portable_body(include=[value])) == PortabilityVerdict(
+            False, "not_portable_unknown_field", f"include:{value}"
+        )

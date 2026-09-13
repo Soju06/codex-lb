@@ -53,6 +53,7 @@ from app.modules.model_sources.catalog import source_model_supported_tool_types,
 from app.modules.model_sources.projection import (
     Declined,
     PortabilityView,
+    neutralize_overflow_egress,
     overflow_portability_view,
     strip_source_telemetry,
 )
@@ -158,6 +159,7 @@ __all__ = [
     "get_pin_toucher",
     "get_source_breaker",
     "handshake_denial",
+    "overflow_source_wire_body",
     "overflow_thread_key",
     "portability_decline",
     "pin_commit_outcome_label",
@@ -909,12 +911,35 @@ def _handshake_denial_response() -> JSONResponse:
     )
 
 
-def _source_body(payload: ResponsesRequest) -> dict[str, JsonValue]:
-    """The overflow source body: the forwarding dump with telemetry and ``service_tier`` stripped (§4.6, P9)
-    and the client's ``store`` restored (the route helper shapes the wire body the same way)."""
+def overflow_source_wire_body(
+    source_payload: dict[str, JsonValue],
+    payload: ResponsesRequest,
+    *,
+    namespace: str | None,
+) -> dict[str, JsonValue]:
+    """The overflow-only shaping of a stripped source body, in place; returns ``source_payload``.
 
-    return restore_client_store(
-        strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True), payload
+    The client's own ``store`` intent restored, then the egress neutralisation
+    (``neutralize_overflow_egress``): the rewritten ``include``,
+    ``prompt_cache_key``, ``user`` and ``safety_identifier`` a third-party
+    provider may see. Both the body the portability verdict classifies
+    (``_source_body``) and the body the route helper puts on the wire go through
+    this one function, so what was judged is what leaves. ``namespace`` is the
+    tenant those identifiers are scoped to -- the API key id, ``None`` when the
+    request carried no key.
+    """
+
+    return neutralize_overflow_egress(restore_client_store(source_payload, payload), namespace=namespace)
+
+
+def _source_body(payload: ResponsesRequest, *, namespace: str | None) -> dict[str, JsonValue]:
+    """The overflow source body: the forwarding dump with telemetry and ``service_tier`` stripped (§4.6, P9)
+    and the overflow-only shaping applied (the route helper shapes the wire body the same way)."""
+
+    return overflow_source_wire_body(
+        strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True),
+        payload,
+        namespace=namespace,
     )
 
 
@@ -1166,7 +1191,7 @@ async def _resolve_fresh(decision: _Decision, designated: str) -> OverflowDispat
         )
         return None
     source, model = selection
-    body = _source_body(payload)
+    body = _source_body(payload, namespace=decision.api_key_id)
     portability_reason, detail = portability_decline(body, decision.headers, source=source, model=model)
     if portability_reason is not None:
         if portability_reason == "not_portable_history":
@@ -1275,7 +1300,7 @@ async def _unservable_answer(
             return None
         # Steps 1-2 of the portability predicate on the id-stripped body (design §7.2):
         # the source-minted item ids are exactly what the release removes.
-        body = _source_body(payload)
+        body = _source_body(payload, namespace=decision.api_key_id)
         stripped_input = strip_input_item_ids(payload.input) if isinstance(payload.input, list) else None
         if stripped_input is not None:
             body["input"] = stripped_input
@@ -1376,7 +1401,7 @@ async def _dispatch_bound(
         return _pinned_unsupported(
             decision, cause="unsupported_input", kind=kind, source=source, message=UNSUPPORTED_INPUT_MESSAGE
         )
-    body = _source_body(decision.payload)
+    body = _source_body(decision.payload, namespace=decision.api_key_id)
     # A pin overrides body portability except for what the source model cannot
     # see (design §7.2 P16): an ``input_image`` needs its ``supports_vision``.
     if not source_model_supports_vision(source, model) and input_carries_image_parts(body.get("input")):

@@ -23,6 +23,7 @@ import hashlib
 import json
 import re
 import socket
+from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
 from typing import Any, cast
@@ -36,6 +37,7 @@ from app.modules.model_sources.projection import (
     STRIPPED_TELEMETRY_FIELDS,
     Declined,
     PortabilityView,
+    neutralize_overflow_egress,
     overflow_portability_view,
     strip_source_telemetry,
 )
@@ -44,6 +46,9 @@ from app.modules.proxy.replay_safety import (
     _ACCOUNT_NEUTRAL_CONTENT_FIELDS,
     _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS,
     _ACCOUNT_NEUTRAL_MESSAGE_FIELDS,
+    _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS,
+    _STATELESS_TOOL_DECLARATION_FIELDS,
+    OVERFLOW_FIELD_CLASSIFICATION,
     PortabilityVerdict,
     responses_payload_is_provider_portable,
     transcript_is_source_free,
@@ -63,6 +68,9 @@ pytestmark = pytest.mark.unit
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codex_bodies"
 PROVENANCE_NAME = "provenance.json"
 README_NAME = "README.md"
+
+# The tenant the egress-neutralised identifiers are scoped to for this gate.
+EGRESS_NAMESPACE = "key_corpus_gate"
 
 # Fields a fixture may carry beyond the portability view: the Codex telemetry a
 # pre-strip fixture exists to feed to ``strip_source_telemetry``.
@@ -139,11 +147,22 @@ def _stripped(name: str) -> dict[str, JsonValue]:
     ``ResponsesRequest.model_validate`` fails with ``instructions Field
     required`` and the gate would red-line for the wrong reason the day a
     capture lands.
+
+    ``neutralize_overflow_egress`` is the last step for the same reason: it is
+    the last step of ``overflow._source_body``. The overflow decision classifies
+    the body it is about to put on the wire, so a corpus that classified the raw
+    body would be recording a verdict production never computes.
     """
 
-    body = _load(name)
+    return _overflow_body(_load(name))
+
+
+def _overflow_body(body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     payload = normalize_responses_request_payload(dict(body), openai_compat=_has_openai_responses_shape(body))
-    return strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True)
+    return neutralize_overflow_egress(
+        strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True),
+        namespace=EGRESS_NAMESPACE,
+    )
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
@@ -282,8 +301,10 @@ def test_a_captured_body_records_that_native_codex_traffic_cannot_overflow() -> 
 
     Not a synthetic construction: the real gpt-5.5 body declines even with
     every tool type it declares marked supported, because ``tool_search``
-    carries ``execution``, ``web_search`` carries ``external_web_access`` /
-    ``search_content_types``, and every input item carries a prefixed id.
+    carries ``execution`` *and* ``parameters``, ``web_search`` carries
+    ``external_web_access`` / ``search_content_types``, and every input item
+    carries a prefixed id. The declaration extras are asserted against the
+    bodies below rather than only described here.
     """
 
     captured = {name for name, entry in PROVENANCE.items() if entry["origin"] == "captured"}
@@ -304,6 +325,42 @@ def test_a_captured_body_records_that_native_codex_traffic_cannot_overflow() -> 
         items = _load(name)["input"]
         assert isinstance(items, list), _label(name)
         assert any(isinstance(item, dict) and item.get("id") for item in items), _label(name)
+
+
+@pytest.mark.parametrize("name", FIXTURE_NAMES)
+def test_every_field_a_fixture_carries_is_classified_somewhere_in_production(name: str) -> None:
+    """The drift guard the leak set needed (#2123).
+
+    ``OVERFLOW_VIEW_FIELDS`` only says a *name* may reach a source; for six
+    fields nothing then read the value, so ``portable`` forwarded a
+    tenant-chosen cache namespace, two end-user identifiers and a request for
+    encrypted reasoning unread. ``OVERFLOW_FIELD_CLASSIFICATION`` is the closed
+    answer, and this is what keeps it honest against real traffic rather than
+    against imagined shapes: a field a captured body carries that production
+    neither strips, nor rewrites, nor validates, nor has recorded evidence for
+    fails here **by name**, before anyone has to notice it in a diff.
+
+    Checked on the committed body *and* on the body the overflow egress builds
+    from it, so a field that only appears after normalisation (an alias the
+    request model materialises) is covered too.
+    """
+
+    body = _load(name)
+    label = _label(name)
+    # Fields production removes before the view is ever built are classified by
+    # the stripping itself, not by the table.
+    stripped_before_the_view = STRIPPED_TELEMETRY_FIELDS | {STREAM_OPTIONS_FIELD, "service_tier"}
+
+    for stage, fields in (("committed body", set(body)), ("overflow egress body", set(_overflow_body(body)))):
+        unclassified = sorted(
+            field
+            for field in fields
+            if field not in OVERFLOW_FIELD_CLASSIFICATION and field not in stripped_before_the_view
+        )
+        assert not unclassified, (
+            f"{label}: nothing in production classifies {unclassified} in the {stage}; "
+            "add it to replay_safety.OVERFLOW_FIELD_CLASSIFICATION with the rule that decides it"
+        )
 
 
 # --- cross-pins against the production constants -------------------------------------
@@ -530,12 +587,7 @@ def test_rebuilding_a_fixture_preserves_the_recorded_verdict(name: str) -> None:
 
     rebuilt, _ = codex_body_sanitize.sanitize_body(body)
 
-    stripped = strip_source_telemetry(
-        normalize_responses_request_payload(
-            dict(rebuilt), openai_compat=_has_openai_responses_shape(rebuilt)
-        ).model_dump_for_forwarding(),
-        strip_service_tier=True,
-    )
+    stripped = _overflow_body(rebuilt)
     view = overflow_portability_view(stripped)
     classified = view if isinstance(view, PortabilityView) else PortabilityView(body=stripped)
     expected = PROVENANCE[name]["expected_portability_verdict"]
@@ -596,3 +648,31 @@ def test_nothing_the_capture_authored_survives_the_rebuild(name: str) -> None:
     assert codex_body_sanitize.surviving_captured_strings(dirty, rebuilt) == [], _label(name)
     assert _OPERATOR_MARKER not in json.dumps(rebuilt), _label(name)
     assert "acme-holdings" not in json.dumps(rebuilt), _label(name)
+
+
+def test_the_declaration_extras_the_corpus_documents_are_the_ones_the_bodies_carry() -> None:
+    """The three facts the prose used to get wrong, asserted against the committed bytes.
+
+    ``README.md`` and ``provenance.json`` named one extra field on
+    ``tool_search`` where the real declaration carries two, described the
+    ``web_search`` extras as if they were universal when they are
+    profile-dependent, and did not mention that the Lite bundle item carries an
+    ``id`` of its own. A sentence about a shape belongs next to an assertion
+    about that shape.
+    """
+
+    standard = _load("captured_gpt55_standard_http.json")
+    lite = _load("captured_gpt56sol_lite_http.json")
+    tools = standard["tools"]
+    assert isinstance(tools, list)
+    by_type = {tool["type"]: tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("type"), str)}
+
+    assert set(by_type["tool_search"]) - _STATELESS_TOOL_DECLARATION_FIELDS == {"execution", "parameters"}
+    assert set(by_type["web_search"]) - _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS["web_search"] == {
+        "external_web_access",
+        "search_content_types",
+    }
+
+    bundle = cast(list[JsonValue], lite["input"])[0]
+    assert isinstance(bundle, dict) and bundle["type"] == "additional_tools"
+    assert set(bundle) - _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["additional_tools"] == {"id"}

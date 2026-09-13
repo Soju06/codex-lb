@@ -5,12 +5,18 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast, get_args
 from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
-from app.modules.model_sources.projection import DeclineReason, PortabilityView
+from app.modules.model_sources.projection import (
+    NEUTRALIZED_IDENTIFIER_FIELDS,
+    OPAQUE_VALUE_DIGEST_CHARS,
+    OPAQUE_VALUE_PREFIX,
+    DeclineReason,
+    PortabilityView,
+)
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
@@ -1103,15 +1109,26 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
 #   step 4  input item type not provider-universal and its tool type undeclared
 #                                                    -> ``not_portable_items``
 #   step 6  ``input_image`` part without vision      -> ``not_portable_vision``
+#   step 8  a forwarded top-level field whose *value* is not portable
+#                                                    -> ``not_portable_unknown_field``
 #   step 1  account-neutral fresh replay of the classification view
 #   step 2  no ``reasoning``/``compaction`` item     -> ``not_portable_history``
 #   step 7  binding ``x-codex-turn-state``           -> ``turn_state_bound``
-# ``transcript_is_source_free`` is steps 1-2 alone.
+# ``transcript_is_source_free`` is steps 1-2 alone. Step 8 sits after the
+# configuration-class steps (a Codex body keeps reporting the reason an operator
+# can act on) and before the history step, because only ``not_portable_history``
+# earns the client a "start a new conversation" hint and a field-value problem
+# is not fixed by a new conversation.
 
 # Fields the view admits that ``responses_payload_is_account_neutral_fresh_replay``
-# has no dedicated validation for: provider-neutral generation knobs with no
-# account-scoped state. The classification view drops them; everything else in
-# the view is validated by the predicate (pinned by a unit test so the two
+# has no dedicated validation for, so the classification view drops them before
+# handing it the body. ``max_output_tokens``/``temperature``/``top_p`` are
+# generation knobs with no account-scoped state. The other three are *not*:
+# ``user`` and ``safety_identifier`` are end-user identifiers by the OpenAI
+# specification and ``prompt_cache_retention`` is a retention choice at the
+# destination -- they are dropped here only because the account-neutral
+# predicate has no vocabulary for them, and ``_unportable_forwarded_field``
+# reads them off the full view instead (pinned by a unit test so the two
 # allowlists cannot drift).
 _PORTABILITY_VIEW_ONLY_FIELDS = frozenset(
     {"max_output_tokens", "prompt_cache_retention", "safety_identifier", "temperature", "top_p", "user"}
@@ -1161,6 +1178,88 @@ _NAMESPACE_TOOL_TYPE = "namespace"
 _FUNCTION_TOOL_TYPE = "function"
 _INPUT_IMAGE_PART_TYPE = "input_image"
 
+# --- What a ``portable`` verdict forwards (#2123) ------------------------------
+#
+# The view allowlist says which top-level *names* may reach a source. It says
+# nothing about the values, and for six of them nothing else did either, so a
+# ``portable`` verdict shipped them to a third-party provider unread. The table
+# below is the closed answer: every field the view admits has exactly one class
+# here, a unit test pins the table against ``OVERFLOW_VIEW_FIELDS`` in both
+# directions, and the fixture corpus gate fails naming any field a captured body
+# carries that this table does not classify.
+
+OverflowFieldClass = Literal["validated", "rewritten", "forwarded"]
+
+OVERFLOW_FIELD_CLASSES: frozenset[str] = frozenset(get_args(OverflowFieldClass))
+
+OVERFLOW_FIELD_CLASSIFICATION: Mapping[str, OverflowFieldClass] = {
+    # ``rewritten``: the value the client sent is not the value that leaves.
+    # ``model`` becomes the source's own model id on dispatch. The other four
+    # are rewritten by ``neutralize_overflow_egress``, and
+    # ``_unportable_forwarded_field`` then *requires* the rewritten shape, so a
+    # bypassed rewrite fails closed instead of leaking.
+    "include": "rewritten",
+    "model": "rewritten",
+    "prompt_cache_key": "rewritten",
+    "safety_identifier": "rewritten",
+    "user": "rewritten",
+    # ``validated``: a predicate in this module reads the value and can decline.
+    "conversation": "validated",
+    "input": "validated",
+    "metadata": "validated",
+    "previous_response_id": "validated",
+    "prompt": "validated",
+    "prompt_cache_retention": "validated",
+    "reasoning": "validated",
+    "text": "validated",
+    "tool_choice": "validated",
+    "tools": "validated",
+    "truncation": "validated",
+    # ``forwarded``: carried as the client sent it, with the evidence for why.
+    # ``instructions`` is the conversation itself -- in Codex 0.154.0 it also
+    # carries the environment context the client folded into the first
+    # developer message (cwd, workspace roots, skill roots under the operator's
+    # CODEX_HOME, sandbox mode, approval policy). That is not categorically
+    # different from the paths, file contents and shell output the transcript
+    # already carries, and stripping it would change the model's behaviour, so
+    # this predicate is deliberately a *state* check and not a privacy check:
+    # the decision that a designated source may read the operator's
+    # conversations is made once at configuration time.
+    # ``store`` is the client's own storage intent and is load-bearing here --
+    # the anchored-pin lifecycle exists precisely for a client that did not send
+    # ``store: false`` and expects a ``previous_response_id`` chain to resolve
+    # at the source. The request model already constrains it to a boolean.
+    "instructions": "forwarded",
+    "max_output_tokens": "forwarded",
+    "parallel_tool_calls": "forwarded",
+    "store": "forwarded",
+    "stream": "forwarded",
+    "temperature": "forwarded",
+    "top_p": "forwarded",
+}
+
+# ``include`` values a standard OpenAI-compatible source may portably be asked
+# for: an ``include`` names a *response artifact*, and it is portable exactly
+# when the item class it names is one a portable body may carry. These three
+# name an echo of our own input, a generation detail, and the sources of a
+# ``web_search_call`` -- whose tool type is already in the portable set.
+# ``code_interpreter_call.outputs``, ``computer_call_output.output.image_url``
+# and ``file_search_call.results`` name hosted-tool artifacts whose declarations
+# and items this module rejects everywhere else, so asking a source to mint one
+# is incoherent: the client would echo the result into a next turn that is then
+# unportable. ``reasoning.encrypted_content`` is removed by the egress instead
+# (``NEUTRALIZED_INCLUDE_VALUES``) and therefore is not portable *here*: the
+# verdict is what makes that removal load-bearing.
+_PORTABLE_INCLUDE_VALUES = frozenset(
+    {"message.input_image.image_url", "message.output_text.logprobs", "web_search_call.action.sources"}
+)
+# ``in_memory`` is the default; ``24h`` is the only extension the API defines.
+# Like ``store``, this is the client's own choice about its own data at a source
+# the operator designated, so it is validated rather than declined.
+_PORTABLE_PROMPT_CACHE_RETENTIONS = frozenset({"24h", "in_memory"})
+_PORTABLE_TRUNCATIONS = frozenset({"auto", "disabled"})
+_OPAQUE_VALUE_DIGEST_ALPHABET = frozenset("0123456789abcdef")
+
 
 @dataclass(frozen=True, slots=True)
 class PortabilityVerdict:
@@ -1194,6 +1293,9 @@ def responses_payload_is_provider_portable(
         return PortabilityVerdict(False, "not_portable_items", unportable_item)
     if not supports_vision and _input_carries_image_parts(input_items):
         return PortabilityVerdict(False, "not_portable_vision", _INPUT_IMAGE_PART_TYPE)
+    unportable_field = _unportable_forwarded_field(view.body)
+    if unportable_field is not None:
+        return PortabilityVerdict(False, "not_portable_unknown_field", unportable_field)
     if not transcript_is_source_free(view, supported_tool_types=supported_tool_types):
         return PortabilityVerdict(False, "not_portable_history")
     if is_binding_turn_state(headers):
@@ -1281,6 +1383,75 @@ def _classification_view(
     ):
         body.pop("tool_choice")
     return body
+
+
+def _unportable_forwarded_field(body: Mapping[str, JsonValue]) -> str | None:
+    """First top-level field whose *value* a ``portable`` verdict must not forward as it stands, or ``None``.
+
+    Closed by construction: every field in ``OVERFLOW_FIELD_CLASSIFICATION``
+    that is not ``forwarded`` is answered here or by the account-neutral
+    predicate, and an unrecognised value inside one of them declines rather than
+    riding along -- the same fail-closed posture ``overflow_portability_view``
+    takes for an unrecognised top-level *name*. ``detail`` names the field, and
+    the offending entry for ``include``, because a decline an operator cannot
+    locate is not actionable. Never raises: a non-list, a non-string element and
+    a non-object ``metadata`` all answer here.
+    """
+
+    include = body.get("include")
+    if include is not None:
+        if not isinstance(include, list):
+            return "include"
+        for entry in include:
+            if not isinstance(entry, str):
+                return "include[]"
+            if entry not in _PORTABLE_INCLUDE_VALUES:
+                return f"include:{entry}"
+    for field in NEUTRALIZED_IDENTIFIER_FIELDS:
+        value = body.get(field)
+        if value is not None and not _is_proxy_minted_opaque_value(value):
+            return field
+    retention = body.get("prompt_cache_retention")
+    if retention is not None and not _is_one_of(retention, _PORTABLE_PROMPT_CACHE_RETENTIONS):
+        return "prompt_cache_retention"
+    truncation = body.get("truncation")
+    if truncation is not None and not _is_one_of(truncation, _PORTABLE_TRUNCATIONS):
+        return "truncation"
+    if not _metadata_is_provider_neutral(body.get("metadata")):
+        return "metadata"
+    return None
+
+
+def _is_proxy_minted_opaque_value(value: JsonValue) -> bool:
+    """``codexlb-`` plus exactly ``OPAQUE_VALUE_DIGEST_CHARS`` lowercase hex characters.
+
+    Recognised by shape rather than recomputed, so the verdict can require the
+    egress rewrite to have happened without being handed the namespace it was
+    scoped to.
+    """
+
+    if not isinstance(value, str) or not value.startswith(OPAQUE_VALUE_PREFIX):
+        return False
+    digest = value[len(OPAQUE_VALUE_PREFIX) :]
+    return len(digest) == OPAQUE_VALUE_DIGEST_CHARS and all(char in _OPAQUE_VALUE_DIGEST_ALPHABET for char in digest)
+
+
+def _metadata_is_provider_neutral(metadata: JsonValue | None) -> bool:
+    """The Responses ``metadata`` map, restricted to what carries no source-side state.
+
+    Client-authored bookkeeping echoed back on the response object: strictly
+    less exposing than the transcript it accompanies, so it is validated rather
+    than declined or dropped -- dropping it would silently break the echo an SDK
+    client relies on. What it may not be is a reference: the API's own shape is
+    ``Map<string, string>``, and a string map naming one of the account-scoped
+    reference keys this module already keys on is declined like any other.
+    """
+
+    if metadata is None:
+        return True
+    if not isinstance(metadata, dict) or not all(isinstance(value, str) for value in metadata.values()):
+        return False
+    return not _mapping_has_account_scoped_reference(metadata)
 
 
 def _view_input_items(view: PortabilityView) -> list[JsonValue]:

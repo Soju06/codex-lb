@@ -295,8 +295,8 @@ from app.modules.proxy.overflow import (
     apply_usage_limit_hint,
     compact_pin_denial,
     handshake_denial,
+    overflow_source_wire_body,
     resolve_subscription_overflow,
-    restore_client_store,
 )
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
@@ -5319,11 +5319,16 @@ async def _source_responses_response(
             strip_service_tier=overflow is not None,
         )
         if overflow is not None:
-            # The source keeps the client's storage intent (an SDK
-            # ``previous_response_id`` chain resolves only at a source that
-            # stored the previous response); the ChatGPT-forced ``store: false``
-            # stays on direct routing.
-            source_payload = restore_client_store(source_payload, payload)
+            # The overflow-only shaping, shared with the body the portability
+            # verdict classified (``overflow._source_body``): the source keeps
+            # the client's storage intent (an SDK ``previous_response_id`` chain
+            # resolves only at a source that stored the previous response) and
+            # the egress-neutralised identifiers and ``include`` are what
+            # actually leave. The ChatGPT-forced ``store: false`` and the
+            # client's own identifiers stay on direct routing.
+            source_payload = overflow_source_wire_body(
+                source_payload, payload, namespace=api_key.id if api_key is not None else None
+            )
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream

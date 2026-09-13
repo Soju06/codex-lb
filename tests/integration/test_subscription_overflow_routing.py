@@ -50,6 +50,7 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource, ModelSourcePin, RequestLog
 from app.db.session import SessionLocal, detach_session_objects
+from app.modules.model_sources.projection import overflow_opaque_value
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import model_source_pins as pins_module
@@ -1154,6 +1155,7 @@ async def test_fresh_overflow_serves_the_codex_route_from_the_designated_source(
             "store": False,
             "service_tier": "priority",
             "prompt_cache_key": "pck_codex_fresh",
+            "include": ["reasoning.encrypted_content"],
             "client_metadata": {"session_id": "sess_codex_fresh", "thread_id": thread_id},
             "stream_options": {"reasoning_summary_delivery": "final"},
         },
@@ -1179,7 +1181,13 @@ async def test_fresh_overflow_serves_the_codex_route_from_the_designated_source(
     assert "client_metadata" not in sent
     assert "stream_options" not in sent
     assert sent["store"] is False, "Codex's own ``store: false`` reaches the source verbatim"
-    assert sent["prompt_cache_key"] == "pck_codex_fresh"
+    # #2123 leak set: what the portability verdict judged is what left. The
+    # client's own cache namespace and its request for encrypted reasoning do
+    # not reach a third-party provider -- asserted on the bytes the source
+    # received, not on the verdict.
+    assert sent["prompt_cache_key"] == overflow_opaque_value("pck_codex_fresh", namespace=None, domain="prompt_cache")
+    assert "pck_codex_fresh" not in json.dumps(sent)
+    assert "include" not in sent
 
     rows = await _all_rows()
     assert len(rows) == 1, [(row.status, row.source, row.error_code) for row in rows]
@@ -1273,6 +1281,61 @@ async def test_fresh_overflow_forwards_only_constructed_headers_to_the_source(
 
     assert len(scene.state.headers) == 1
     assert_source_saw_only_constructed_headers(scene.state.headers[0], source_token="token-overflow-hdr")
+
+
+@pytest.mark.asyncio
+async def test_the_identifiers_that_reach_the_source_are_proxy_minted_and_scoped_per_key(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2123 leak set, on the bytes the third-party source received.
+
+    Two tenants send the *same* client-chosen `prompt_cache_key` and the same
+    end-user identifier. A cache key is a namespace at the destination, and this
+    proxy has measured that prompt cache to be shared rather than isolated, so
+    what must not happen is the two requests naming one namespace. The
+    identifiers also must not arrive as the client wrote them -- in practice an
+    email.
+    """
+
+    _forbid_subscription_stream(monkeypatch)
+    await _enable_api_key_auth(async_client)
+    key_a, key_a_id = await _create_unscoped_key(async_client, name="overflow-egress-a")
+    key_b, key_b_id = await _create_unscoped_key(async_client, name="overflow-egress-b")
+    scene = await _exhausted_scene(async_client, source_upstream, tag="egress")
+    chosen = "01a099e8-25c2-7e30-bd5d-b1e522c07985"
+    end_user = "operator@example.com"
+
+    for index, key in enumerate((key_a, key_b)):
+        async with async_client.stream(
+            "POST",
+            CODEX_ROUTE,
+            json={
+                **_codex_body(),
+                "store": False,
+                "prompt_cache_key": chosen,
+                "include": ["reasoning.encrypted_content"],
+                "user": end_user,
+                "safety_identifier": end_user,
+            },
+            headers={**_native_headers(f"thr_egress_{index}"), "authorization": f"Bearer {key}"},
+        ) as response:
+            assert response.status_code == 200, await response.aread()
+            await response.aread()
+    await _drain(async_client)
+
+    assert len(scene.state.requests) == 2
+    first, second = scene.state.requests
+    for sent, key_id in ((first, key_a_id), (second, key_b_id)):
+        assert chosen not in json.dumps(sent)
+        assert end_user not in json.dumps(sent)
+        assert "include" not in sent, "the source is never asked to mint encrypted reasoning"
+        assert sent["prompt_cache_key"] == overflow_opaque_value(chosen, namespace=key_id, domain="prompt_cache")
+        assert sent["user"] == overflow_opaque_value(end_user, namespace=key_id, domain="end_user")
+        assert sent["safety_identifier"] == sent["user"]
+    assert first["prompt_cache_key"] != second["prompt_cache_key"], (
+        "two tenants that chose the same cache key must not share one namespace at the source"
+    )
+    assert first["user"] != second["user"]
 
 
 @pytest.mark.asyncio

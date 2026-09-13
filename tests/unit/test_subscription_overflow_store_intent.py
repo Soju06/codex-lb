@@ -14,7 +14,14 @@ import pytest
 
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
-from app.modules.proxy.overflow import anchor_requested, client_store_intent, restore_client_store
+from app.modules.model_sources.projection import overflow_opaque_value, strip_source_telemetry
+from app.modules.proxy.overflow import (
+    _source_body,
+    anchor_requested,
+    client_store_intent,
+    overflow_source_wire_body,
+    restore_client_store,
+)
 from app.modules.proxy.request_policy import normalize_responses_request_payload
 
 _BODY: dict[str, JsonValue] = {
@@ -85,3 +92,50 @@ def test_explicit_null_store_is_read_conservatively_as_false() -> None:
     assert client_store_intent(payload) is False
     assert anchor_requested(payload) is False
     assert restore_client_store(payload.model_dump_for_forwarding(), payload)["store"] is False
+
+
+# --- the overflow-only wire shaping (#2123) -----------------------------------------------------
+
+
+def test_the_classified_body_and_the_wire_body_are_the_same_projection() -> None:
+    """One function, two call sites: what the portability verdict judged is what leaves.
+
+    ``overflow._source_body`` builds the body the verdict classifies and
+    ``api._source_responses_response`` builds the body the source receives.
+    They are separate dicts, so the only thing that keeps them honest is that
+    both end in ``overflow_source_wire_body`` -- asserted here rather than
+    assumed, because a drift between them is exactly how a neutralised value
+    stops being the value that leaves.
+    """
+
+    payload = _validate(store=None, openai_compat=True)
+
+    classified = _source_body(payload, namespace="key_1")
+    wire = overflow_source_wire_body(
+        strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True),
+        payload,
+        namespace="key_1",
+    )
+
+    assert classified == wire
+
+
+@pytest.mark.parametrize("namespace", [None, "key_1"])
+def test_the_wire_body_carries_the_neutralised_identifiers_and_not_the_clients(namespace: str | None) -> None:
+    body: dict[str, JsonValue] = {
+        **_BODY,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "01a099e8-25c2-7e30-bd5d-b1e522c07985",
+    }
+    payload = normalize_responses_request_payload(body, openai_compat=True)
+
+    wire = _source_body(payload, namespace=namespace)
+
+    assert "include" not in wire
+    assert wire["prompt_cache_key"] == overflow_opaque_value(
+        "01a099e8-25c2-7e30-bd5d-b1e522c07985", namespace=namespace, domain="prompt_cache"
+    )
+    # Direct source routing is the control: it still forwards what the client sent.
+    direct = strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=False)
+    assert direct["include"] == ["reasoning.encrypted_content"]
+    assert direct["prompt_cache_key"] == "01a099e8-25c2-7e30-bd5d-b1e522c07985"

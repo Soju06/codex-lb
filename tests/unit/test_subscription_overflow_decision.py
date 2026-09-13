@@ -38,6 +38,7 @@ from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import ModelSource, ModelSourceModel
 from app.modules.api_keys.service import TRAFFIC_CLASS_OPPORTUNISTIC, ApiKeyData
+from app.modules.model_sources.projection import overflow_opaque_value
 from app.modules.proxy import overflow as overflow_module
 from app.modules.proxy import source_admission as admission_module
 from app.modules.proxy.affinity import _CodexBackendIdentity
@@ -548,9 +549,11 @@ async def test_fresh_dispatch_shape_claims_last_and_owner_kwargs(env: _Env) -> N
     assert result.pin_intent.thread_key == _thread_key()
     assert result.pin_intent.anchor is False and result.pin_intent.source_id == SRC
     assert result.pin_executor is env.executor
-    # Source body: telemetry and the tier stripped, the cache key verbatim (P9, P10).
+    # Source body: telemetry and the tier stripped (P9, P10), and the client's own cache
+    # namespace replaced with the key-scoped opaque token the egress forwards (#2123).
     assert "client_metadata" not in result.body and "service_tier" not in result.body
-    assert result.body["prompt_cache_key"] == "cache-1" and result.body["model"] == MODEL
+    assert result.body["model"] == MODEL
+    assert result.body["prompt_cache_key"] == overflow_opaque_value("cache-1", namespace="key_1", domain="prompt_cache")
     assert result.owner_kwargs() == {
         "request_log_source": REQUEST_LOG_SOURCE_FRESH,
         "dispatch_kind": DISPATCH_KIND_FRESH,

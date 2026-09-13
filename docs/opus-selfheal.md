@@ -2,12 +2,13 @@
 
 ## User commands
 
-- `cc --doctor` runs definition repair and a foreground Opus runtime probe. It
-  writes the latest receipt to `~/.agent-lb/doctor.json` and appends a compact
-  entry to `~/.agent-lb/doctor.log`.
-- Every normal `cc` launch runs the cached agent-definition lint/repair before
-  Claude Code starts, then requests an asynchronous runtime probe. The probe is
-  gated to at most once every six hours.
+- `claude-lb-launch --doctor` runs definition repair and a foreground Opus
+  runtime probe. It writes the latest receipt to `~/.agent-lb/doctor.json` and
+  appends a compact entry to `~/.agent-lb/doctor.log`.
+- Every normal launcher-based entrypoint, including `fable`, runs the cached
+  agent-definition lint/repair before Claude Code starts, then requests an
+  asynchronous runtime probe. The probe is gated to at most once every six
+  hours.
 - Claude Code caches its session agent registry. After definitions or model
   routing change, start a new Claude Code session; an existing session does not
   reload the repaired registry.

@@ -2,10 +2,12 @@
 """fable: the canonical `cc` harness with the driver swapped to Fable 5.
 
 Driver-swap only (ROUTING.md, "Fable driver mode"). The driver and the
-opus/fable default slots resolve to Fable; the sonnet, haiku, and subagent
-slots are deliberately left untouched so the canonical seats keep resolving
-through the LB — Explore/implementer on `gpt-5.6-sol-medium`, verifier on
-`gpt-5.6-sol-xhigh`, catch-alls on sonnet/haiku.
+fable default slot resolve to Fable. The canonical Opus slot resolves from
+`AGENT_LB_OPUS_MODEL` (or `claude-opus-5`) independently of the driver. The
+sonnet, haiku, and subagent slots are deliberately left untouched so the
+canonical seats keep resolving through the LB — Explore/implementer on
+`gpt-5.6-sol-medium`, verifier on `gpt-5.6-sol-xhigh`, catch-alls on
+sonnet/haiku.
 
 Flattening every model slot to one driver model is the mistake the old `kimi`
 function made: it silently destroyed the seat lineup. A provider or driver
@@ -25,11 +27,12 @@ from pathlib import Path
 
 DRIVER_MODEL_ENV = "AGENT_LB_FABLE_MODEL"
 DEFAULT_DRIVER_MODEL = "claude-fable-5[1m]"
+OPUS_MODEL_ENV = "AGENT_LB_OPUS_MODEL"
+DEFAULT_OPUS_MODEL = "claude-opus-5"
 DEFAULT_AUTOCOMPACT = "1m"
 # Slots the driver swap owns.
 DRIVER_SLOTS = (
     "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
 )
 # Slots this client must never write: the canonical seats live here.
@@ -47,6 +50,7 @@ def main() -> None:
     model = os.environ.get(DRIVER_MODEL_ENV) or DEFAULT_DRIVER_MODEL
     for slot in DRIVER_SLOTS:
         os.environ[slot] = model
+    os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] = os.environ.get(OPUS_MODEL_ENV) or DEFAULT_OPUS_MODEL
     argv = list(sys.argv[1:])
     if "--autocompact" not in argv:
         argv = ["--autocompact", DEFAULT_AUTOCOMPACT, *argv]

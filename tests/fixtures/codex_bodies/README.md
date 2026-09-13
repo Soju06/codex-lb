@@ -1,15 +1,13 @@
-# Codex request-body fixtures (provider portability)
+# Codex request-body fixtures
 
-The corpus the provider-portability gate classifies. It backs issue #2123
-(subscription-exhaustion overflow to a designated Model Source) and closes
-design v3 §16 item (i): "captured bodies replace the synthetic pair".
+Real `codex-cli` request bodies, recorded as shape rather than as transcript, so
+the proxy's request-path work can be measured against what the client actually
+sends instead of against a hand-written guess.
 
-Normative contracts:
+Normative contract:
 [`openspec/specs/compatibility-tooling`](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/compatibility-tooling)
-(the capture lane and its refusals) and
-[`openspec/specs/model-source-routing`](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-source-routing)
-(what the corpus must record and what the gate must assert). Operator
-walkthrough: [`docs/traffic-parity.md`](../../../docs/traffic-parity.md).
+(the capture lane and its refusals). Operator walkthrough:
+[`docs/traffic-parity.md`](../../../docs/traffic-parity.md).
 
 `provenance.json` is the machine-readable source of truth. The table below is
 rendered from the same facts, and `tests/unit/test_codex_body_fixtures.py` pins
@@ -40,12 +38,13 @@ Two roles live side by side, distinguished by `carries_client_telemetry`:
 A captured fixture is **not a transcript**. It is the *shape* of a real Codex
 0.154.0 request, rebuilt field by field from a structural allowlist
 (`scripts/traffic_analysis/codex_body_sanitize.py`). Every *answer* the
-portability verdict gives survives; not every input to it does, because much of
-what the verdict reads is a predicate rather than a value — `_is_nonblank_string`
-on a tool `name`, a `description`, an `output`, an `operation.path`. Those become
-placeholders that are equally non-blank. A few things survive that the verdict
-does not read at all — Codex's own tool names, `content_item_kinds`, the model
-slug — kept for readability and provenance. The preserved list is closed:
+replay-safety predicates give survives; not every input to them does, because
+much of what they read is a predicate rather than a value —
+`_is_nonblank_string` on a tool `name`, a `description`, an `output`, an
+`operation.path`. Those become placeholders that are equally non-blank. A few
+things survive that no predicate reads at all — Codex's own tool names,
+`content_item_kinds`, the model slug — kept for readability and provenance. The
+preserved list is closed:
 
 * object key names, from the rule table;
 * discriminator values — `type`, `role`, `status`, `phase`, `effort`,
@@ -63,7 +62,7 @@ slug — kept for readability and provenance. The preserved list is closed:
   `|v| <= 2^31` with at most 4 decimal places (anything else refuses the
   rebuild), and every number inside a tool's JSON Schema is replaced with `0`,
   because an arbitrary-precision integer is an arbitrary-bandwidth channel that
-  no walk over *strings* can see and no schema number is read by the verdict;
+  no walk over *strings* can see and no schema number is read by the predicates;
 * the model slug, in slug shape — and, because a shape is not a closed domain,
   pinned twice by the gate: the committed body's `model` must equal the slug
   `provenance.json` records, and a captured fixture's slug must be one the
@@ -117,47 +116,32 @@ path/identifier alphabet.
 
 What this costs: the corpus no longer shows Codex's own prompt text, tool
 descriptions or schema property names. Nothing in the gate reads them, and the
-gate asserts that the recorded verdict is identical before and after the
+gate asserts that the recorded skeleton is identical before and after the
 rebuild. For what Codex actually sends, read the divergence table below and
 `docs/traffic-parity.md`, not the fixture.
 
-## Recorded verdicts (and why they are declines)
+## What the captures established about provider portability
 
-The gate asserts the verdict `provenance.json` records, so a real body that
-cannot overflow is green *and states that fact* instead of forcing a red CI or
-a fake pass.
+The corpus was captured to answer one question: can a native Codex request body
+be forwarded to a generic OpenAI-compatible provider? Both captured
+Codex 0.154.0 bodies say no, for reasons that are structural rather than
+incidental to these two captures:
 
-| Fixture | View | Verdict with the declared tool types |
-|---|---|---|
-| `captured_gpt55_standard_http.json` | admitted | `not_portable_tools` / `tool_search` |
-| `captured_gpt56sol_lite_http.json` | `not_portable_lite_namespace` / `reasoning.context` | `not_portable_lite_namespace` / `additional_tools` |
-| `gpt55_standard_first_turn.json` | admitted | portable |
-| `gpt56_lite_bundle.json` | `not_portable_lite_namespace` / `reasoning.context` | `not_portable_lite_namespace` / `additional_tools` |
-
-**Both captured Codex 0.154.0 bodies decline, for reasons that are structural in
-`replay_safety` rather than incidental to these two captures.** The gpt-5.5 body
-declines even when the source model declares `custom`, `tool_search` *and*
-`web_search`, for three independent reasons:
-
-1. The real `tool_search` declaration carries an `execution` field, and
-   `replay_safety._STATELESS_TOOL_DECLARATION_FIELDS` admits exactly
-   `{description, type}`. Declaring the type cannot help.
+1. The real `tool_search` declaration carries an `execution` field, beyond the
+   `{description, type}` shape a stateless declaration would need.
 2. The real `web_search` declaration carries `external_web_access` and
    `search_content_types`, outside
-   `_ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS["web_search"]`.
+   `replay_safety._ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS["web_search"]`.
 3. Every input item carries a prefixed `id` (Codex mints them deliberately),
    and `responses_input_items_are_self_contained_fresh_replay` rejects any
-   non-empty item id, so `transcript_is_source_free` is false. The overflow
-   decision runs before `strip_input_item_ids`, which is release-direction
-   only.
+   non-empty item id.
 
-These are two HTTP bodies from one CLI version through one uncredentialed lane,
-so they are evidence about the mechanism rather than a census. Closing the three
-gaps is production work, not fixture work: it changes `replay_safety` and the
-overflow decision order. It is tracked separately, and
-`add-subscription-overflow-model-source/design.md` decision 21 states the
-`{type, description?}` declaration shape as a design premise that these
-captures falsify.
+A 60-body sweep over both transports, seven model slugs and five prompt classes
+later reproduced this on every body, and the subscription-exhaustion overflow
+feature that motivated the capture was withdrawn as a result (issue #2123). The
+corpus is kept as a general traffic-parity asset: these are the facts a future
+request-path change is measured against, and the gate no longer classifies
+portability because the classifier is gone.
 
 ## Where the synthetic pair diverges from Codex 0.154.0
 
@@ -168,9 +152,9 @@ that a real capture no longer reaches.
 
 The **"Real 0.154.0" column describes the traffic the capture observed**, not
 what the committed fixture shows, and **the gate does not assert these rows**.
-What the gate asserts is the recorded portability verdict and the corpus sync;
-the rows below are recorded here because they are otherwise written down
-nowhere. Some are still visible in the captured pair (key presence and absence,
+What the gate asserts is the recorded shape, the sanitiser round-trip and the
+corpus sync; the rows below are recorded here because they are otherwise written
+down nowhere. Some are still visible in the captured pair (key presence and absence,
 tool types, item counts, item ids); some are not, because the rebuild replaces
 them: `<environment_context>` tag names and their text, tool `description`
 strings, JSON Schema property names, titles and `enum` values, and any tool name
@@ -309,8 +293,8 @@ this directory are refused outright.
 4. Copy it in with the acknowledgement: `uv run python -m scripts.traffic_analysis.codex_body_sanitize --in <scratch>/<name>.json --out tests/fixtures/codex_bodies/<name>.json --i-have-read-the-sanitised-body`.
 5. Gate the corpus: `uv run python -m scripts.traffic_analysis.fixture_privacy_scan --root tests/fixtures/codex_bodies --strict`. It exits 0 on a pristine tree; the bodies allowed to keep bare telemetry key names are read from `provenance.json` (`carries_client_telemetry`) and printed, so no flags are needed.
 6. Sanity-scan the scratch directory *without* `--strict`. The raw body, the header sidecar and the manifest all report findings by construction — that is the reminder to delete them (step 10), not a gate.
-7. Add the `provenance.json` entry and the table row above: origin, slug, transport, UTC date, `codex --version`, catalog sha256, sanitisation list, expected view and expected verdict.
-8. `uv run pytest -p no:cacheprovider -q tests/unit/test_codex_body_fixtures.py tests/unit/test_codex_body_sanitizer.py tests/unit/test_codex_body_capture_guards.py tests/unit/test_codex_body_capture_origin.py tests/unit/test_model_sources_projection.py tests/unit/test_replay_safety_portability.py`
+7. Add the `provenance.json` entry and the table row above: origin, slug, transport, UTC date, `codex --version`, catalog sha256 and sanitisation list.
+8. `uv run pytest -p no:cacheprovider -q tests/unit/test_codex_body_fixtures.py tests/unit/test_codex_body_sanitizer.py tests/unit/test_codex_body_capture_guards.py tests/unit/test_codex_body_capture_origin.py tests/unit/test_model_sources_projection.py`
 9. `ruff check`, `ruff format --check`, `ty check`.
 10. Delete the raw capture directory in the same session. Never commit a
    `headers-*.json` (it holds the `authorization` line even when the token was
@@ -342,17 +326,17 @@ this directory are refused outright.
   account-scoped reference names above, which `replay_safety` keys on. The
   exemption is narrower than it looks —
   `_contains_account_scoped_tool_state` skips a `function` tool's own
-  `parameters` at the root, so the same name moves the verdict under
+  `parameters` at the root, so the same name moves the answer under
   `tool_search` and does not under `function`. Measured both ways in
-  `test_an_account_scoped_property_name_is_kept_where_it_moves_the_verdict`.
+  `test_an_account_scoped_property_name_is_kept_where_it_moves_the_answer`.
 * Field *order* is not preserved: fixtures are written with sorted keys. No
   assertion reads ordering, and the capture runbook already says to compare the
   key list, the tool types and the item sequence rather than the bytes.
 * What survives is still, in information terms, a channel: cardinality (how
   many items, content parts, properties), array order, the permutation the
   `required` list encodes, which fields were blank, and the bounded numbers
-  above. That is irreducible — it is the shape the verdict is a function of —
-  and it is why the boundary is a human reading the diff rather than a
+  above. That is irreducible — it is the shape the predicates are a function of
+  — and it is why the boundary is a human reading the diff rather than a
   guarantee.
 * The self-check that refuses to write when a captured string survives
   (`surviving_captured_strings`) walks strings only, and only tokens of three
@@ -360,8 +344,8 @@ this directory are refused outright.
   non-ASCII survivor would be invisible to it. No current rule can produce one;
   it is recorded because the next rule might.
 * Neither the rebuild nor the scan reads `socket.gethostname()` or
-  `getpass.getuser()`, so the fixture a capture rebuilds to, and the verdict
-  the gate reaches, are the same on every machine. The pass this replaced
+  `getpass.getuser()`, so the fixture a capture rebuilds to, and the answer the
+  gate reaches, are the same on every machine. The pass this replaced
   matched a bare word taken from the running box: 36 of 57 plausible host names
   red-lined the *pristine* corpus (`repo` hit all four fixtures) with no flag to
   clear the finding. The gate test tries all 56, and pairs that absence

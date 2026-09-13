@@ -8,8 +8,8 @@ Five groups:
   ``rsync`` target, a ``file://`` URL, a home directory inside a nested JSON
   string, the same path ``\\u``-escaped and base64-wrapped, an email address and
   an API-key-shaped token.
-* **Preservation.** The shape the portability verdict is a function of survives
-  byte for byte: discriminators, key sets, tool declaration fields, item ids and
+* **Preservation.** The shape the replay-safety predicates are a function of
+  survives byte for byte: discriminators, key sets, tool declaration fields, item ids and
   the call/output pairing. An absent field stays absent.
 * **Refusals.** Everything the rules do not describe stops the rebuild instead
   of being copied or quietly dropped.
@@ -431,7 +431,7 @@ def test_a_replaced_string_leaves_behind_only_its_blankness_and_its_slot() -> No
 # --- preservation ---------------------------------------------------------------------
 
 
-def test_the_discriminators_the_verdict_reads_are_byte_identical() -> None:
+def test_the_discriminators_the_predicates_read_are_byte_identical() -> None:
     body = _realistic_body()
 
     rebuilt, _ = sanitize_body(body)
@@ -481,7 +481,7 @@ def test_a_number_inside_a_tool_schema_is_replaced_not_preserved() -> None:
     Python ints have no width and a JSON double carries 53 bits of mantissa, so
     a `default` or an `examples` entry in an MCP-authored schema will hold an
     encoded filesystem path that no walk over *strings* can see. No number in a
-    tool schema is read by the portability decision, so none is kept.
+    tool schema is read by the replay-safety predicates, so none is kept.
     """
 
     body = _realistic_body()
@@ -513,12 +513,12 @@ def test_a_preserved_number_is_bounded_and_a_boolean_is_not_touched() -> None:
     assert rebuilt["store"] is False and rebuilt["parallel_tool_calls"] is True
 
 
-def test_an_account_scoped_property_name_is_kept_where_it_moves_the_verdict() -> None:
+def test_an_account_scoped_property_name_is_kept_where_it_moves_the_answer() -> None:
     """Measured, and narrower than it looks.
 
     ``_contains_account_scoped_tool_state`` walks every declaration's subtree
     *except* a ``function`` tool's own ``parameters``, which it skips at the
-    root. So the same property name moves the verdict under ``tool_search`` and
+    root. So the same property name moves the answer under ``tool_search`` and
     does not under ``function``. The names are kept in both places because the
     rule is one line and the asymmetry is production's, not the corpus's.
     """
@@ -594,8 +594,8 @@ def test_stream_options_is_dropped_once_the_codex_key_empties_it() -> None:
 @pytest.mark.parametrize("absent", ["instructions", "tools", "stream_options"])
 def test_an_absent_field_stays_absent(absent: str) -> None:
     """A real Lite body has no ``instructions``/``tools``; a real 5.5 body has no
-    ``stream_options``. ``overflow_portability_view`` declines unknown top-level
-    fields, so fabricating one would change the recorded verdict."""
+    ``stream_options``. Fabricating one would misrepresent the wire the corpus
+    exists to record."""
 
     body = _realistic_body()
     del body[absent]
@@ -606,12 +606,12 @@ def test_an_absent_field_stays_absent(absent: str) -> None:
 
 
 def test_a_lite_additional_tools_bundle_keeps_its_shape_and_loses_its_prose() -> None:
-    """Codex-generated, and the load-bearing evidence for ``not_portable_lite_namespace``.
+    """Codex-generated, and the load-bearing evidence for the Responses-Lite tool bundle.
 
     The bundle used to be byte-preserved, which is exactly how an MCP server's
     tool description reached a fixture unrewritten. Its structure -- the
     namespace, the nested tool names, the declaration key sets -- is what the
-    verdict reads, and that is all that survives.
+    predicates read, and that is all that survives.
     """
 
     bundle = {
@@ -824,13 +824,13 @@ def test_the_field_sets_are_closed_and_disjoint() -> None:
     assert is_placeholder_uuid(placeholder_uuid(0)) and not is_placeholder_uuid(_LIVE_SESSION)
 
 
-def test_the_allowlist_is_not_empty_and_names_what_the_verdict_reads() -> None:
+def test_the_allowlist_is_not_empty_and_names_what_the_predicates_read() -> None:
     """Guards the guard: every assertion above would pass vacuously on an empty allowlist.
 
     An empty rule table refuses every body, so a corpus test would fail rather
     than pass -- but ``surviving_captured_strings`` would also report nothing,
     because nothing would be emitted. The vocabulary is therefore asserted to
-    contain the discriminators the portability decision actually reads.
+    contain the discriminators the replay-safety predicates actually read.
     """
 
     vocabulary = structural_vocabulary()
@@ -1201,9 +1201,8 @@ def test_mutation_nested_stream_telemetry_fails_the_corpus_gate(
 ) -> None:
     """The one telemetry shape no other pass in the gate can see.
 
-    The residual scan has no vocabulary for `reasoning_summary_delivery`, the
-    shape gate admits `stream_options`, and the verdict is computed after
-    `strip_source_telemetry` removes it -- so a fixture declaring
+    The residual scan has no vocabulary for `reasoning_summary_delivery` and
+    the shape gate admits `stream_options`, so a fixture declaring
     `carries_client_telemetry: false` while carrying it passed everything.
     """
 
@@ -1305,18 +1304,24 @@ def test_mutation_flipping_an_origin_without_the_readme_fails_the_sync_gate(
         gate.test_readme_rows_and_provenance_rows_agree_in_both_directions()
 
 
-def test_mutation_a_wrong_recorded_reason_fails_the_verdict_gate(
+def test_mutation_a_planted_telemetry_field_fails_the_strip_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Proves the recorded verdict is really asserted, not merely stored."""
+    """Proves the stripped-body contract is really asserted, not merely described."""
 
     root, provenance = _corpus(tmp_path)
-    provenance["fixtures"][CAPTURED_STANDARD]["expected_portability_verdict"]["reason"] = "not_portable_history"
+    body = json.loads((root / CAPTURED_STANDARD).read_text(encoding="utf-8"))
+    # ``access_programs`` is telemetry the stripper removes, so planting it where
+    # the stripper cannot see it -- inside the nested ``stream_options`` Codex key
+    # -- is the shape the gate has to catch.
+    body["stream_options"] = {"reasoning_summary_delivery": "interleaved", "include_obfuscation": True}
+    (root / CAPTURED_STANDARD).write_text(json.dumps(body), encoding="utf-8")
+    provenance["fixtures"][CAPTURED_STANDARD]["carries_client_telemetry"] = False
     _run_gate(monkeypatch, root, provenance)
 
-    with pytest.raises(AssertionError, match="not_portable_tools"):
-        gate.test_every_fixture_matches_its_recorded_view_and_verdict(CAPTURED_STANDARD)
+    with pytest.raises(AssertionError):
+        gate.test_telemetry_presence_matches_the_declared_fixture_role(CAPTURED_STANDARD)
 
 
 def test_mutation_an_undeclared_extra_file_fails_the_sync_gate(

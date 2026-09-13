@@ -36,7 +36,7 @@ The verdict MUST decline, before consulting any evidence, when downstream-visibl
 
 When an anchored continuation cannot be served by its owner account and the evidence is definitive — an upstream quota or usage-limit rejection, or a confirmed pre-dispatch transport failure, in both cases with no response event emitted and no downstream-visible output — the proxy MUST attempt to rebuild the turn's full conversation from the durable operation spool and dispatch it to another account without the anchor.
 
-The rebuild MUST walk the `parent_response_id` chain from the anchor and assemble the turns oldest first, matching the order the durable repository returns them in, and for each turn MUST combine the stored request body with the stored terminal response output. A rebuild that assembles the chain in any other order MUST be rejected: a chronologically reversed conversation satisfies every structural predicate and fails silently. It MUST be bounded by a maximum turn count and by a maximum byte size measured across the whole transcript, not per turn; a per-turn reading of the bound multiplies the worst case by the turn limit.
+The rebuild MUST walk the `parent_response_id` chain from the anchor and assemble the turns oldest first, matching the order the durable repository returns them in, and for each turn MUST combine the stored request body with the stored terminal response output. A rebuild that assembles the chain in any other order MUST be rejected: a chronologically reversed conversation satisfies every structural predicate and fails silently. It MUST be bounded by a maximum turn count, by a maximum byte size measured across the whole transcript rather than per turn, and by a maximum **item** count. Turns and bytes do not bound items — the smallest legal item repeated until the byte budget is spent yields six figures of them — and the item count is what every per-item cost in the rebuild scales with.
 
 A turn counts as settled, and so as material for the rebuild, only when its spool carries a terminal event that reports an answer. A terminal event that reports a failure MUST NOT make a failed turn read as an answered one in the rebuilt conversation. The rebuilt input MUST then be joined to the client's current turn. The join MUST NOT delete, reorder or alter any item the client sent. A rebuild that drops a client item because its content coincides with an item already in the chain is a worse failure than refusing to rebuild at all: the user's message is gone, the result still satisfies every structural predicate, and nothing downstream can detect it.
 
@@ -46,7 +46,7 @@ The chain is the proxy's own reconstruction of turns the client is not currently
 
 The join is therefore: walk the chain oldest first; where the client's input matches the **tail** of what the walk has accumulated, discard that tail; append the client's input verbatim and last. The overlap MUST be anchored at the accumulated tail — a match anywhere else is a coincidence, not a restatement, and MUST NOT shorten anything.
 
-**The comparison MUST be made on the projected form of both sides, and the dispatched items MUST be the client's verbatim ones.** The chain's items have been through the account-neutral projection and the client's have not, so comparing them as they stand makes the overlap depend on fields the projection normalizes away: one legal difference — an assistant message that omits `status`, which the wire allows — collapses the overlap to zero and doubles the whole conversation. Normalize for the comparison only. Never let normalization reach the body that is dispatched.
+**The comparison MUST be made on the projected form of both sides, and the dispatched items MUST be the client's verbatim ones.** The key the comparison uses MUST be built from a **positive enumeration of the fields that identify an item** — a message's role and content, a tool call's identity and arguments, a tool output's call and result — and MUST NOT be built by subtracting a list of fields that do not identify one. A subtractive list is open-ended: every field the wire may carry and the recording may drop has to be remembered, and the two rounds that tried it were each defeated by a field nobody had listed yet. A positive list is bounded by what a turn *is*, and a field nobody thought of is ignored by default instead of doubling the conversation. The chain's items have been through the account-neutral projection and the client's have not, so comparing them as they stand makes the overlap depend on fields the projection normalizes away: one legal difference — an assistant message that omits `status`, which the wire allows — collapses the overlap to zero and doubles the whole conversation. Normalize for the comparison only. Never let normalization reach the body that is dispatched.
 
 **The overlap computation MUST be linear in the number of items.** The transcript caps bound turns and bytes, not items, so a chain that is legal under both can still carry six figures of them; a nested scan over that is minutes of blocking work on a single-worker event loop, inside a failover path whose whole purpose is to be faster than losing the conversation. Apply the same rule to each chain turn's stored request as the walk accumulates it, so a parent turn that restated the conversation replaces what it restates instead of repeating it.
 
@@ -99,6 +99,18 @@ The proxy MUST NOT attempt to classify the client's intent. Whether the input is
 - **WHEN** the walk accumulates it
 - **THEN** the repeated tail is replaced rather than appended
 - **AND** the rebuilt conversation contains no turn twice
+
+#### Scenario: An unlisted wire field does not double the conversation
+
+- **GIVEN** a client restating the chain's turns with any field the wire permits and the recording does not keep — one the implementation has never enumerated
+- **WHEN** the join computes the overlap
+- **THEN** the restated turns are still recognised, because the key is built from what identifies a turn rather than from what to ignore
+
+#### Scenario: The item count is bounded
+
+- **GIVEN** a chain within the turn and byte bounds whose turns carry very many small items
+- **WHEN** the rebuild walks it
+- **THEN** it refuses once the item bound is passed, rather than doing unbounded per-item work
 
 #### Scenario: The byte bound is a whole-transcript bound
 

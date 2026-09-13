@@ -143,6 +143,19 @@ a chain that is legal under both can carry six figures of them, and a nested sca
 over that is minutes of blocking CPU inside a failover path that exists to be
 faster than losing the conversation.
 
+The comparison key is where the same defect kept reappearing, and the reason was
+the shape of the rule rather than the care taken implementing it. Two rounds
+built the key by projecting an item and then subtracting the fields a recording
+does not keep. Both lists were reasonable and both were incomplete — the first
+missed `status`, the second missed `phase` and
+`internal_chat_message_metadata_passthrough`, and each omission doubled a
+four-turn conversation through the public entry point. Subtraction requires
+knowing every field the wire may carry that the recording may drop, which is not
+a closed set. Enumerating positively what identifies a turn is: a message is its
+role and its content, a tool call is its identity and arguments, a tool output is
+its call and its result. A field nobody thought of is then ignored by default,
+which is the safe direction.
+
 The overlap must be anchored at the accumulated tail. A match in the middle of
 the chain is a coincidence, and coincidences must not shorten anything — that is
 the one case where content comparison would still be guessing.

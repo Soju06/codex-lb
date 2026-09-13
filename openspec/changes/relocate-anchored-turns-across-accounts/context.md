@@ -133,6 +133,16 @@ join discards from the chain, never from the client, and needs no view about
 what the client meant: both readings of an ambiguous input produce the same
 correct conversation.
 
+Two things the asymmetry does not say on its own, and both were measured as
+defects before they were written down. The chain's items have been projected and
+the client's have not, so the overlap has to be computed on a normalized view of
+both — otherwise an assistant message that simply omits `status`, which the wire
+allows, reads as a different item and the whole conversation doubles. And the
+search has to be linear: the transcript caps bound turns and bytes, not items, so
+a chain that is legal under both can carry six figures of them, and a nested scan
+over that is minutes of blocking CPU inside a failover path that exists to be
+faster than losing the conversation.
+
 The overlap must be anchored at the accumulated tail. A match in the middle of
 the chain is a coincidence, and coincidences must not shorten anything — that is
 the one case where content comparison would still be guessing.

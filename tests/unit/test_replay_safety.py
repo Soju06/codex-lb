@@ -17,6 +17,8 @@ from app.modules.proxy.continuity import (
 from app.modules.proxy.replay_safety import (
     RELOCATION_TRANSCRIPT_MAX_BYTES,
     RELOCATION_TRANSCRIPT_MAX_TURNS,
+    RelocatedReplayBody,
+    _tail_overlap_length,
     _terminal_response_output_items,
     _transcript_turn_input_items,
     project_durable_transcript_for_account_neutral_fresh_replay,
@@ -2803,6 +2805,25 @@ def _current_payload(input_items: Sequence[JsonValue], anchor: str, **extra: Jso
     return {"model": "gpt-5.4", "input": list(input_items), "previous_response_id": anchor, **extra}
 
 
+def _rebuild_result(
+    transcript: Sequence[object],
+    current_input: Sequence[JsonValue],
+    *,
+    anchor_response_id: str | None = None,
+    max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
+    max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+    **extra: JsonValue,
+) -> RelocatedReplayBody | None:
+    anchor = _newest_response_id(transcript) if anchor_response_id is None else anchor_response_id
+    return project_durable_transcript_for_account_neutral_fresh_replay(
+        transcript,
+        anchor_response_id=anchor,
+        current_payload=_current_payload(current_input, anchor, **extra),
+        max_turns=max_turns,
+        max_bytes=max_bytes,
+    )
+
+
 def _rebuild(
     transcript: Sequence[object],
     current_input: Sequence[JsonValue],
@@ -2812,14 +2833,15 @@ def _rebuild(
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
     **extra: JsonValue,
 ) -> dict[str, JsonValue] | None:
-    anchor = _newest_response_id(transcript) if anchor_response_id is None else anchor_response_id
-    return project_durable_transcript_for_account_neutral_fresh_replay(
+    rebuilt = _rebuild_result(
         transcript,
-        anchor_response_id=anchor,
-        current_payload=_current_payload(current_input, anchor, **extra),
+        current_input,
+        anchor_response_id=anchor_response_id,
         max_turns=max_turns,
         max_bytes=max_bytes,
+        **extra,
     )
+    return None if rebuilt is None else rebuilt.payload
 
 
 def _answerless_turn(
@@ -2974,59 +2996,73 @@ def test_durable_rebuild_refuses_a_chain_assembled_newest_turn_first() -> None:
 
 
 @pytest.mark.parametrize(
-    "broken_chain",
+    ("broken_chain", "anchor"),
     [
         # The oldest turn names a parent the chain does not contain, so the
         # conversation is missing its opening.
         (
-            _transcript_turn(
-                [_user_item("second")],
-                [_assistant_item("second answer", item_id="msg_2")],
-                response_id="resp_2",
-                parent_response_id="resp_1",
+            (
+                _transcript_turn(
+                    [_user_item("second")],
+                    [_assistant_item("second answer", item_id="msg_2")],
+                    response_id="resp_2",
+                    parent_response_id="resp_1",
+                ),
             ),
+            "resp_2",
         ),
         # Two turns that do not link to each other at all.
         (
-            _transcript_turn([_user_item("first")], [_assistant_item("a", item_id="msg_1")]),
-            _transcript_turn(
-                [_user_item("second")],
-                [_assistant_item("b", item_id="msg_2")],
-                response_id="resp_2",
-                parent_response_id="resp_other",
+            (
+                _transcript_turn([_user_item("first")], [_assistant_item("a", item_id="msg_1")]),
+                _transcript_turn(
+                    [_user_item("second")],
+                    [_assistant_item("b", item_id="msg_2")],
+                    response_id="resp_2",
+                    parent_response_id="resp_other",
+                ),
             ),
+            "resp_2",
         ),
         # A turn that names itself as its own parent.
         (
-            _transcript_turn(
-                [_user_item("first")],
-                [_assistant_item("a", item_id="msg_1")],
-                parent_response_id="resp_1",
-            ),
-        ),
-        # A turn the repository could not have produced: no response id to link.
-        (
-            _TranscriptTurn(
-                operation=_TranscriptOperation(
-                    request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
-                    response_id=None,
+            (
+                _transcript_turn(
+                    [_user_item("first")],
+                    [_assistant_item("a", item_id="msg_1")],
+                    parent_response_id="resp_1",
                 ),
-                events=(
-                    _sse_block(
-                        {
-                            "type": "response.completed",
-                            "response": {"id": "resp_1", "output": [_assistant_item("a", item_id="msg_1")]},
-                        }
+            ),
+            "resp_1",
+        ),
+        # A turn the repository could not have produced: no response id to link,
+        # though the client is anchored on the one upstream minted.
+        (
+            (
+                _TranscriptTurn(
+                    operation=_TranscriptOperation(
+                        request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+                        response_id=None,
+                    ),
+                    events=(
+                        _sse_block(
+                            {
+                                "type": "response.completed",
+                                "response": {"id": "resp_1", "output": [_assistant_item("a", item_id="msg_1")]},
+                            }
+                        ),
                     ),
                 ),
             ),
+            "resp_1",
         ),
     ],
 )
 def test_durable_rebuild_refuses_a_chain_whose_parent_links_do_not_hold(
     broken_chain: tuple[object, ...],
+    anchor: str,
 ) -> None:
-    assert _rebuild(broken_chain, [_user_item("third")]) is None
+    assert _rebuild(broken_chain, [_user_item("third")], anchor_response_id=anchor) is None
 
 
 def test_durable_rebuild_refuses_a_chain_that_returns_to_a_turn_it_already_walked() -> None:
@@ -3177,11 +3213,165 @@ def test_an_input_that_restates_nothing_is_that_turns_delta(client_turn: list[Js
     assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), *client_turn]
 
 
-def test_a_self_contained_history_supersedes_the_chain_it_restates() -> None:
+# --- The join, row by row over the shapes a client actually sends -------------
+#
+# Each row dispatches ``expected_chain_prefix + client_input``: what the walk
+# accumulated, minus the tail the client is restating, then every item the
+# client sent, verbatim and last. The two invariants are asserted for every row
+# rather than per row, because the rows that look harmless are exactly the ones
+# a boundary rule deletes a message from.
+
+_DEVELOPER_INSTRUCTION: dict[str, JsonValue] = {
+    "type": "message",
+    "role": "developer",
+    "content": [{"type": "input_text", "text": "be concise"}],
+}
+_FRESH_TOOL_CALL: dict[str, JsonValue] = {
+    "type": "function_call",
+    "call_id": "call_new",
+    "name": "lookup",
+    "arguments": "{}",
+}
+_FRESH_TOOL_OUTPUT: dict[str, JsonValue] = {"type": "function_call_output", "call_id": "call_new", "output": "ok"}
+
+
+def _four_turn_chain(*opening_items: JsonValue) -> tuple[object, ...]:
+    """``q1/a1 q2/a2 q3/a3 q4/a4``, led by whatever the opening request carried."""
+
+    return tuple(
+        _transcript_turn(
+            [*(opening_items if index == 1 else ()), _user_item(f"q{index}")],
+            [_assistant_item(f"a{index}", item_id=f"msg_{index}")],
+            response_id=f"resp_{index}",
+            parent_response_id=None if index == 1 else f"resp_{index - 1}",
+        )
+        for index in range(1, 5)
+    )
+
+
+def _four_turn_accumulation(*opening_items: JsonValue) -> list[JsonValue]:
+    """That chain as the walk accumulates it, before the client's turn joins."""
+
+    accumulated: list[JsonValue] = list(opening_items)
+    for index in range(1, 5):
+        accumulated.extend((_user_item(f"q{index}"), _replayed_assistant_item(f"a{index}")))
+    return accumulated
+
+
+_CHAIN = _four_turn_chain()
+_ACCUMULATED = _four_turn_accumulation()
+_DEVELOPER_LED_CHAIN = _four_turn_chain(_DEVELOPER_INSTRUCTION)
+_DEVELOPER_LED_ACCUMULATION = _four_turn_accumulation(_DEVELOPER_INSTRUCTION)
+
+_JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue]]] = [
+    (
+        "plain delta",
+        _CHAIN,
+        [_user_item("q5")],
+        _ACCUMULATED,
+    ),
+    (
+        "rolling window of one exchange",
+        _CHAIN,
+        [_user_item("q4"), _replayed_assistant_item("a4"), _user_item("q5")],
+        _ACCUMULATED[:6],
+    ),
+    (
+        "rolling window of two exchanges",
+        _CHAIN,
+        [
+            _user_item("q3"),
+            _replayed_assistant_item("a3"),
+            _user_item("q4"),
+            _replayed_assistant_item("a4"),
+            _user_item("q5"),
+        ],
+        _ACCUMULATED[:4],
+    ),
+    (
+        "full resend",
+        _CHAIN,
+        [*_ACCUMULATED, _user_item("q5")],
+        [],
+    ),
+    (
+        "developer-instruction-led full resend",
+        _DEVELOPER_LED_CHAIN,
+        [*_DEVELOPER_LED_ACCUMULATION, _user_item("q5")],
+        [],
+    ),
+    (
+        # No model-authored item anywhere in it, and its first item reads exactly
+        # like the message the thread opens with. Neither fact is at the
+        # accumulated tail, so neither shortens the chain.
+        "tool-only history",
+        _CHAIN,
+        [_user_item("q1"), _FRESH_TOOL_CALL, _FRESH_TOOL_OUTPUT, _user_item("q5")],
+        _ACCUMULATED,
+    ),
+    (
+        "window from the middle of the chain",
+        _CHAIN,
+        [_user_item("q2"), _replayed_assistant_item("a2"), _user_item("q4")],
+        _ACCUMULATED,
+    ),
+    (
+        # The client's new message repeats the conversation's opening. Two items
+        # being equal is not a turn arriving twice: both copies are dispatched.
+        "coincidental opening item",
+        _CHAIN,
+        [_user_item("q1"), _replayed_assistant_item("a5"), _user_item("q5")],
+        _ACCUMULATED,
+    ),
+]
+
+
+def test_the_overlap_is_the_longest_restated_tail_not_the_shortest() -> None:
+    # The accumulation ends on the item the incoming input opens with, so a
+    # one-item match exists as well as the three-item one. Stopping at the short
+    # match leaves the first two of those three items behind and dispatches
+    # them again in front of the input that restated them.
+    accumulated: list[JsonValue] = [_user_item("a"), _replayed_assistant_item("b"), _user_item("a")]
+    incoming: list[JsonValue] = [*accumulated, _user_item("c")]
+
+    assert _tail_overlap_length(accumulated, incoming) == 3
+
+
+def _assert_join_invariants(dispatched: list[JsonValue], *, client_input: list[JsonValue]) -> None:
+    """No item the client sent is absent from the body; no turn is in it twice."""
+
+    boundary = len(dispatched) - len(client_input)
+    assert dispatched[boundary:] == client_input
+    retained = dispatched[:boundary]
+    assert all(
+        retained[len(retained) - length :] != client_input[:length]
+        for length in range(1, min(len(retained), len(client_input)) + 1)
+    )
+
+
+@pytest.mark.parametrize(
+    ("transcript", "client_input", "expected_chain_prefix"),
+    [row[1:] for row in _JOIN_TABLE],
+    ids=[row[0] for row in _JOIN_TABLE],
+)
+def test_the_join_drops_the_restated_tail_from_the_chain_and_keeps_the_clients_turn_whole(
+    transcript: tuple[object, ...],
+    client_input: list[JsonValue],
+    expected_chain_prefix: list[JsonValue],
+) -> None:
+    rebuilt = _rebuild(transcript, client_input)
+
+    assert rebuilt is not None
+    dispatched = cast(list[JsonValue], rebuilt["input"])
+    assert dispatched == [*expected_chain_prefix, *client_input]
+    _assert_join_invariants(dispatched, client_input=client_input)
+
+
+def test_a_full_resend_leaves_the_chain_with_nothing_to_contribute() -> None:
     # The client resent the whole thread rather than a delta, and anchored it as
-    # well -- a shape this proxy already verifies. The resend is the
-    # conversation as of its own position, so it replaces what the walk had
-    # accumulated instead of being appended to it.
+    # well -- a shape this proxy already verifies. The overlap is the entire
+    # accumulation, so what is dispatched is the client's own request and the
+    # verdict must not describe it as a rebuilt transcript.
     transcript = (
         _transcript_turn(
             [_user_item("first")],
@@ -3190,32 +3380,38 @@ def test_a_self_contained_history_supersedes_the_chain_it_restates() -> None:
     )
     client_turn = [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
-    rebuilt = _rebuild(transcript, client_turn)
+    rebuilt = _rebuild_result(transcript, client_turn)
 
     assert rebuilt is not None
-    assert rebuilt["input"] == client_turn
+    assert rebuilt.payload["input"] == client_turn
+    assert rebuilt.carries_durable_items is False
 
 
-def test_an_input_restating_the_answer_alone_refuses_rather_than_repeating_it() -> None:
-    # The client restated the prior answer and nothing before it. Where that
-    # restatement ends is recoverable only by matching its content against the
-    # chain, so the rebuild refuses rather than carrying the answer twice.
+def test_an_input_restating_the_answer_alone_replaces_the_chains_copy_of_it() -> None:
+    # The client restated the prior answer and nothing before it. That answer is
+    # the tail of what the walk accumulated, so the chain's copy goes and the
+    # client's stands in its place -- the same conversation, in the client's own
+    # words, with the question that produced it still in front of it.
     transcript = (
         _transcript_turn(
             [_user_item("first")],
             [_reasoning_item("rs_1"), _assistant_item("answer", item_id="msg_1")],
         ),
     )
+    client_turn = [_replayed_assistant_item("answer"), _user_item("second")]
 
-    assert _rebuild(transcript, [_replayed_assistant_item("answer"), _user_item("second")]) is None
+    rebuilt = _rebuild_result(transcript, client_turn)
+
+    assert rebuilt is not None
+    assert rebuilt.payload["input"] == [_user_item("first"), *client_turn]
+    assert rebuilt.carries_durable_items is True
 
 
-def test_a_restatement_that_is_not_self_contained_refuses_even_when_a_later_turn_replaces_it() -> None:
-    # The unsettled search bookkeeping keeps this turn from standing on its own,
-    # so it is not the conversation as of its own position and must not be read
-    # as one. The turn after it supersedes and would carry the corruption out of
-    # the assembled body, leaving nothing downstream able to see that a recorded
-    # turn was silently discarded.
+def test_a_chain_turn_carrying_state_no_account_can_serve_still_fails_closed() -> None:
+    # The unsettled search bookkeeping is in the oldest turn, and the turn after
+    # it restates the tail rather than the whole thread, so the join leaves it
+    # standing. It reaches the strict predicate, which is where a body no
+    # replacement account can serve has to stop.
     unsettled_search: JsonValue = {
         "type": "tool_search_output",
         "call_id": "call_search",
@@ -3239,7 +3435,7 @@ def test_a_restatement_that_is_not_self_contained_refuses_even_when_a_later_turn
     assert _rebuild(transcript, [_user_item("third")]) is None
 
 
-def test_a_chain_turn_that_restated_the_conversation_supersedes_at_its_own_position() -> None:
+def test_a_chain_turn_that_restated_the_conversation_replaces_what_it_restates() -> None:
     # The thread's second recorded turn carries everything before it as well as
     # its own new message, which is what a client sends the first time this
     # proxy sees a conversation it did not start. Concatenating it onto the
@@ -3263,16 +3459,20 @@ def test_a_chain_turn_that_restated_the_conversation_supersedes_at_its_own_posit
         ),
     )
 
-    rebuilt = _rebuild(transcript, [_user_item("third")])
+    client_turn = [_user_item("third")]
+    rebuilt = _rebuild(transcript, client_turn)
 
     assert rebuilt is not None
-    assert rebuilt["input"] == [
+    dispatched = cast(list[JsonValue], rebuilt["input"])
+    assert dispatched == [
         _user_item("first"),
         _replayed_assistant_item("answer"),
         _user_item("second"),
         _replayed_assistant_item("second answer"),
-        _user_item("third"),
+        *client_turn,
     ]
+    assert dispatched.count(_user_item("first")) == 1
+    _assert_join_invariants(dispatched, client_input=client_turn)
 
 
 def test_durable_rebuild_keeps_a_repeated_message_the_chain_already_holds() -> None:
@@ -3519,6 +3719,20 @@ def test_a_terminal_with_no_response_object_fails_closed_over_the_accumulator() 
     )
 
     assert _terminal_response_output_items(events) is None
+    assert (
+        _rebuild(
+            (
+                _TranscriptTurn(
+                    operation=_TranscriptOperation(
+                        request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+                    ),
+                    events=events,
+                ),
+            ),
+            [_user_item("second")],
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("end_of_attempt", ["response.failed", "error"])
@@ -3619,7 +3833,7 @@ def test_a_malformed_item_frame_does_not_become_a_rebuilt_item() -> None:
     assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
 
-@pytest.mark.parametrize("wrong_anchor", ["resp_1", "resp_other", "", "resp_2 "])
+@pytest.mark.parametrize("wrong_anchor", ["resp_1", "resp_other", "resp_2 "])
 def test_durable_rebuild_refuses_a_chain_that_is_not_this_anchors_history(wrong_anchor: str) -> None:
     # Parent links prove only that these turns follow one another. This chain is
     # internally perfect and belongs to somebody else's conversation, or stops
@@ -3628,6 +3842,21 @@ def test_durable_rebuild_refuses_a_chain_that_is_not_this_anchors_history(wrong_
 
     assert _rebuild(transcript, [_user_item("third")], anchor_response_id=wrong_anchor) is None
     assert _rebuild(transcript, [_user_item("third")], anchor_response_id="resp_2") is not None
+
+
+@pytest.mark.parametrize("no_anchor", ["", "   "])
+def test_a_request_naming_no_prior_response_is_not_joined_to_a_chain(no_anchor: str) -> None:
+    # The dispatched frame carries no anchor, so the replacement account sees
+    # exactly what the owner account would have seen: this body and nothing
+    # else. A chain loaded for some other turn is not this request's history,
+    # and prepending it would answer a conversation the client never named.
+    client_turn = [_user_item("third")]
+
+    rebuilt = _rebuild_result(_linked_pair(), client_turn, anchor_response_id=no_anchor)
+
+    assert rebuilt is not None
+    assert rebuilt.payload["input"] == client_turn
+    assert rebuilt.carries_durable_items is False
 
 
 def test_durable_rebuild_refuses_a_turn_whose_event_spool_never_finished() -> None:
@@ -3735,6 +3964,24 @@ def test_durable_rebuild_refuses_a_populated_annotation_list(annotation: dict[st
         _transcript_turn(
             [_user_item("first")],
             [_assistant_item("answer", item_id="msg_1", annotations=[annotation])],
+        ),
+    )
+
+    assert _rebuild(transcript, [_user_item("second")]) is None
+
+
+def test_a_populated_annotation_list_fails_closed_wherever_it_sits_in_the_answer() -> None:
+    # The refusal must not depend on the citation being the whole of that turn's
+    # answer. Skipping the part instead of refusing leaves an answer standing
+    # with one of its messages gone, and every remaining item still projects
+    # cleanly, so the rebuild reports success on a conversation with a hole.
+    transcript = (
+        _transcript_turn(
+            [_user_item("first")],
+            [
+                _assistant_item("cited", item_id="msg_1", annotations=[_POPULATED_ANNOTATIONS[0]]),
+                _assistant_item("answer", item_id="msg_2"),
+            ],
         ),
     )
 
@@ -3869,8 +4116,23 @@ def test_a_turn_whose_whole_question_projects_away_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("empty_transcript", [(), []])
-def test_durable_rebuild_refuses_an_empty_chain(empty_transcript: Sequence[object]) -> None:
-    assert _rebuild(empty_transcript, [_user_item("second")]) is None
+def test_durable_rebuild_refuses_an_empty_chain_for_an_anchored_turn(empty_transcript: Sequence[object]) -> None:
+    # The anchor names state the replacement account will not have and the
+    # client is not supplying, and an empty chain cannot end on it.
+    assert _rebuild(empty_transcript, [_user_item("second")], anchor_response_id="resp_1") is None
+
+
+@pytest.mark.parametrize("empty_transcript", [(), []])
+def test_an_empty_chain_dispatches_an_unanchored_request_as_the_client_wrote_it(
+    empty_transcript: Sequence[object],
+) -> None:
+    client_turn = [_user_item("second")]
+
+    rebuilt = _rebuild_result(empty_transcript, client_turn, anchor_response_id="")
+
+    assert rebuilt is not None
+    assert rebuilt.payload["input"] == client_turn
+    assert rebuilt.carries_durable_items is False
 
 
 @pytest.mark.parametrize(

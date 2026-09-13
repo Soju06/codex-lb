@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 from app.core.types import JsonValue
 from app.modules.proxy.replay_safety import (
     project_durable_transcript_for_account_neutral_fresh_replay,
-    responses_payload_is_account_neutral_fresh_replay,
     responses_request_frame_payload,
 )
 
@@ -26,7 +25,9 @@ then died before any event, which may or may not have run. ``none`` covers every
 other outcome, including a deterministic rejection another account would repeat.
 """
 
-RelocationSource = Literal["durable_transcript", "unanchored"]
+RelocationSource = Literal["client_input", "durable_transcript"]
+"""What the dispatched body is made of, not which material the decision was offered."""
+
 RelocationDeclineReason = Literal[
     "downstream_output_visible",
     "single_account_routing",
@@ -96,8 +97,8 @@ def decide_relocation(inputs: RelocationInputs) -> RelocationVerdict:
     anything is consulted, because a client that already holds part of the turn
     cannot be served a second one. Ownership facts come next: no request body
     neutralizes them, so evaluating a body first would only produce a verdict the
-    facts then overturn. Evidence gates the rest, and only then does the source
-    ladder look for a body another account can accept.
+    facts then overturn. Evidence gates the rest, and only then is a body another
+    account can accept assembled.
     """
 
     if inputs.downstream_output_visible:
@@ -173,43 +174,41 @@ def _evidence_decline_reason(inputs: RelocationInputs) -> RelocationDeclineReaso
 def _relocated_body(
     inputs: RelocationInputs,
 ) -> tuple[Mapping[str, JsonValue], RelocationSource] | RelocationDeclineReason:
-    """The source that yields a body another account can accept, or why none did.
+    """The body another account can accept, or why none could be built.
 
-    A request carrying no anchor is the whole conversation already and needs
-    only the strict predicate. An anchored one is rebuilt from the chain, which
-    classifies the client's own turn the same way it classifies every stored
-    request in that chain -- so a client that resent its history supersedes the
-    chain rather than being joined to it, and the anchor is passed in only so
-    the walk can verify it terminates there.
+    There is one body and one way to reach it: the chain this proxy rebuilt,
+    joined to the input the client is sending now. The anchor does not choose
+    between the two. It cannot say what the client's input holds -- the proxy
+    injects anchors itself, and a client resending its history is byte-identical
+    to one whose thread genuinely began where that resend does -- so its only
+    job here is letting the walk prove the chain it was handed ends on the turn
+    this request continues.
 
-    An anchored turn whose transport recorded no durable material declines with
-    its own reason. Having nothing to rebuild from is a different fact from a
-    rebuild that ran and could not prove itself, and only the second one says
-    anything about this conversation.
+    The source names what the dispatched body turned out to be rather than which
+    material was offered. A join whose overlap consumed the whole chain
+    dispatches the client's own request, and calling that a rebuilt transcript
+    describes a body with no rebuilt item in it.
     """
 
     payload = _current_turn_payload(inputs)
     if payload is None:
         return "no_account_neutral_body"
-    anchor = payload.get("previous_response_id")
-    if not _names_a_prior_response(anchor):
-        unanchored_body = _account_neutral_body_without_anchor(payload)
-        return (unanchored_body, "unanchored") if unanchored_body is not None else "no_account_neutral_body"
-    if not inputs.durable_transcript:
-        return "absent_transcript"
-    durable_transcript_body = project_durable_transcript_for_account_neutral_fresh_replay(
-        inputs.durable_transcript,
-        anchor_response_id=cast(str, anchor),
+    transcript = inputs.durable_transcript or ()
+    relocated = project_durable_transcript_for_account_neutral_fresh_replay(
+        transcript,
+        anchor_response_id=payload.get("previous_response_id"),
         current_payload=payload,
     )
-    if durable_transcript_body is None:
+    if relocated is None:
+        # Holding no material is a different fact from a rebuild that ran and
+        # could not prove itself, and only the second says anything about this
+        # conversation. Material is owed exactly when the request names a prior
+        # response, because that is the state the replacement account will not
+        # have and the client is not supplying.
+        if not transcript and _names_a_prior_response(payload.get("previous_response_id")):
+            return "absent_transcript"
         return "no_account_neutral_body"
-    return durable_transcript_body, "durable_transcript"
-
-
-def _account_neutral_body_without_anchor(payload: Mapping[str, JsonValue]) -> Mapping[str, JsonValue] | None:
-    body = {key: value for key, value in payload.items() if key != "previous_response_id"}
-    return body if responses_payload_is_account_neutral_fresh_replay(body) else None
+    return relocated.payload, "durable_transcript" if relocated.carries_durable_items else "client_input"
 
 
 def _names_a_prior_response(value: JsonValue | None) -> bool:

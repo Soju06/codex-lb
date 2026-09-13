@@ -6,7 +6,7 @@ import json
 from collections import deque
 from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import cast
 from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
@@ -130,8 +130,6 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 # ratchet is full.
 RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
-
-_RelocationJoin = Literal["append", "refuse", "supersede"]
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
 _ATTEMPT_START_EVENT_TYPE = "response.created"
@@ -1080,14 +1078,23 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
     return False
 
 
+@dataclass(frozen=True, slots=True)
+class RelocatedReplayBody:
+    """The body a relocation dispatches, and whether the chain is part of it."""
+
+    payload: dict[str, JsonValue]
+    carries_durable_items: bool
+    """False when the join's overlap consumed the chain and the client's own request is the body."""
+
+
 def project_durable_transcript_for_account_neutral_fresh_replay(
     transcript: Sequence[object],
     *,
-    anchor_response_id: str,
+    anchor_response_id: JsonValue | None,
     current_payload: Mapping[str, JsonValue],
     max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
-) -> dict[str, JsonValue] | None:
+) -> RelocatedReplayBody | None:
     """Rebuild an anchor-free request body from a durable parent-response chain.
 
     A Codex continuation carries only its new turn plus ``previous_response_id``,
@@ -1099,7 +1106,10 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     ``anchor_response_id`` is the anchor ``current_payload`` carries, and the walk
     must end on it. Parent links prove only that these turns follow one another;
     an internally consistent chain from a different conversation satisfies every
-    one of them while being somebody else's history.
+    one of them while being somebody else's history. A request that names no
+    anchor is joined to the empty chain for the same reason: it would have been
+    dispatched to its own account with no prior state either, so a chain loaded
+    for some other turn is not its history and cannot be missing from it.
 
     ``transcript`` is consumed structurally -- ``turn.operation.request_text``,
     ``turn.operation.response_id``, ``turn.operation.parent_response_id``,
@@ -1110,22 +1120,26 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     fetched the chain. Anything the rebuild cannot prove returns ``None``,
     leaving the caller on the owner-bound behaviour it has without a transcript.
 
-    Every input is joined by ``_relocation_join``, the chain's stored requests
-    and the client's current turn alike, which is what makes a turn that
-    restated the conversation harmless: it supersedes at its own position.
+    Every input is folded in by ``_join_relocated_input``, the chain's stored
+    requests and the client's current turn alike, which is what makes a turn
+    that restated the conversation harmless: it replaces what it restates
+    instead of repeating it.
     """
 
+    anchor = cast(str, anchor_response_id) if _is_nonblank_string(anchor_response_id) else None
+    chain = transcript if anchor is not None else ()
     current_input = current_payload.get("input")
-    # A scalar input is the new prompt by itself. It cannot carry the prior
-    # conversation the anchor stood for, so there is nothing safe to join.
-    if not transcript or len(transcript) > max_turns or not isinstance(current_input, list) or not current_input:
+    # A scalar input is the new prompt by itself, and there is no way to put
+    # turns in front of a string. With nothing to prepend it is the whole
+    # request and passes through as the client wrote it.
+    if len(chain) > max_turns or (chain and not (isinstance(current_input, list) and current_input)):
         return None
 
     rebuilt_input: list[JsonValue] = []
     remaining_bytes = max_bytes
     expected_parent_response_id: str | None = None
     linked_response_ids: set[str] = set()
-    for turn in transcript:
+    for turn in chain:
         operation = getattr(turn, "operation", None)
         events = getattr(turn, "events", None)
         # Decremented across the whole walk: a bound re-read per turn would let
@@ -1164,95 +1178,65 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         replayable_answer = _account_neutral_replay_items(terminal_output)
         if not replayable_input or not replayable_answer:
             return None
-        if not _join_relocated_input(rebuilt_input, replayable_input):
-            return None
+        _join_relocated_input(rebuilt_input, replayable_input)
         rebuilt_input.extend(replayable_answer)
-    if expected_parent_response_id != anchor_response_id:
+    if expected_parent_response_id != anchor:
         return None
 
-    # Verbatim. Projection here would be the proxy editing a turn the user just
-    # wrote: it drops reasoning and settled search bookkeeping outright, and an
-    # item it drops is a message that never reaches the replacement account
-    # while the verdict still reports the turn as moved.
-    if not _join_relocated_input(rebuilt_input, cast(list[JsonValue], current_input)):
-        return None
     replay_payload = dict(current_payload)
-    replay_payload["input"] = cast(JsonValue, rebuilt_input)
     replay_payload.pop("previous_response_id", None)
+    carries_durable_items = False
+    if isinstance(current_input, list):
+        # Verbatim. Projection here would be the proxy editing a turn the user
+        # just wrote: it drops reasoning and settled search bookkeeping
+        # outright, and an item it drops is a message that never reaches the
+        # replacement account while the verdict still reports the turn as moved.
+        carries_durable_items = _join_relocated_input(rebuilt_input, cast(list[JsonValue], current_input)) > 0
+        replay_payload["input"] = cast(JsonValue, rebuilt_input)
     # Anything account-owned that survived projection still fails closed here.
     if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
         return None
-    return replay_payload
+    return RelocatedReplayBody(payload=replay_payload, carries_durable_items=carries_durable_items)
 
 
-def _join_relocated_input(accumulated: list[JsonValue], input_items: list[JsonValue]) -> bool:
-    """Fold one input into the conversation rebuilt so far, or refuse the rebuild."""
+def _join_relocated_input(accumulated: list[JsonValue], input_items: list[JsonValue]) -> int:
+    """Fold one input into the conversation rebuilt so far; return what survived of the chain.
 
-    join = _relocation_join(input_items)
-    if join == "refuse":
-        return False
-    if join == "supersede":
-        accumulated.clear()
+    The chain is this proxy's own reconstruction of turns the client is not
+    sending; ``input_items`` is what is being sent. Where the two overlap the
+    client's copy is authoritative, so the overlap comes off the accumulation
+    and every incoming item is appended whole. Dropping a chain turn the client
+    just re-supplied loses nothing -- the turn is still dispatched, in the
+    client's words -- while dropping a client item loses a message the user
+    wrote, silently, past every structural check downstream.
+
+    That asymmetry is the whole rule, and it needs no view about what the client
+    meant: a client re-sending its last exchange plus a new turn is
+    byte-identical to one whose conversation genuinely began at that exchange,
+    and both readings come out of here as the same conversation.
+    """
+
+    overlap = _tail_overlap_length(accumulated, input_items)
+    del accumulated[len(accumulated) - overlap :]
+    retained = len(accumulated)
     accumulated.extend(input_items)
-    return True
+    return retained
 
 
-def _relocation_join(input_items: list[JsonValue]) -> _RelocationJoin:
-    """How an input joins what precedes it, decided from the input alone.
+def _tail_overlap_length(accumulated: list[JsonValue], input_items: list[JsonValue]) -> int:
+    """The longest tail of ``accumulated`` that ``input_items`` restates from its start.
 
-    An input that restates nothing the model produced is that turn's delta and
-    appends unchanged, whatever it holds: the only way to find a boundary inside
-    it is to match its content against the history, and content equality cannot
-    tell a client restating a turn from a client that happened to write the same
-    words again. A self-contained transcript ending in the prior answer and a
-    fresh turn *is* the conversation as of its own position, so it replaces what
-    came before. Anything else restates part of the prior answer without
-    carrying what came before it, and is refused.
-
-    ``previous_response_id`` is deliberately not consulted. The proxy injects
-    anchors onto requests that did not arrive with one, and an anchored full
-    resend is a shape this repository already verifies, so the anchor on the
-    wire says nothing about what the input holds.
+    Anchored at both ends deliberately. A match anywhere else is a coincidence
+    -- a client whose new message happens to repeat something said earlier -- and
+    a coincidence must shorten nothing, because the item it would remove is one
+    the user just wrote. The longest match wins so that the boundary lands where
+    the restatement actually ends rather than inside it.
     """
 
-    restated_output_index = _last_retained_output_index(input_items)
-    if restated_output_index is None:
-        return "append"
-    if not responses_input_items_are_self_contained_fresh_replay(input_items):
-        return "refuse"
-    # The projection is an identity transform for input the predicate above
-    # already accepted, and it is the shared authority for recognizing the
-    # canonical Responses-Lite developer instruction behind an
-    # ``additional_tools`` bundle -- without that index the suffix walk would
-    # refuse every Lite resend.
-    projection = project_responses_input_for_account_neutral_fresh_replay(
-        input_items,
-        stored_count=restated_output_index,
-    )
-    if projection is None or not responses_input_suffix_retains_prior_output(
-        projection.input_items,
-        stored_count=projection.stored_prefix_count,
-        canonical_lite_developer_index=projection.canonical_lite_developer_index,
-    ):
-        return "refuse"
-    return "supersede"
-
-
-def _last_retained_output_index(input_items: list[JsonValue]) -> int | None:
-    """Where a restated conversation would hand over to the prior answer.
-
-    The same split the shipped full-resend proof takes: the last assistant
-    message is the only position at which the suffix walk can prove retained
-    prior output followed by fresh client input. Reading the role rather than
-    the message's validity keeps a malformed answer on the refusing side --
-    treating it as absent would append the restatement a second time.
-    """
-
-    for index in range(len(input_items) - 1, -1, -1):
-        item = input_items[index]
-        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
-            return index
-    return None
+    for length in range(min(len(accumulated), len(input_items)), 0, -1):
+        if accumulated[len(accumulated) - length :] == input_items[:length]:
+            return length
+    return 0
 
 
 def _durable_turn_byte_size(operation: object, events: object) -> int:

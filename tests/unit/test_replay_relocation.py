@@ -163,7 +163,7 @@ _PRODUCTION_FULL_RESEND_PAYLOAD: dict[str, JsonValue] = {
 }
 
 
-def _unanchored(transport: RelocationTransport, **overrides: object) -> RelocationInputs:
+def _client_input(transport: RelocationTransport, **overrides: object) -> RelocationInputs:
     return replace(
         RelocationInputs(transport=transport, payload=_UNANCHORED_PAYLOAD, evidence="definitive"),
         **overrides,
@@ -183,7 +183,7 @@ def _durable_transcript(transport: RelocationTransport, **overrides: object) -> 
 
 
 _SOURCE_BUILDERS = {
-    "unanchored": _unanchored,
+    "client_input": _client_input,
     "durable_transcript": _durable_transcript,
 }
 _AMBIGUITY_CLEARED: dict[str, object] = {
@@ -243,19 +243,21 @@ def test_durable_transcript_rebuilds_the_conversation_the_client_did_not_resend(
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_anchored_full_resend_supersedes_the_chain_it_restates(transport: RelocationTransport) -> None:
+def test_an_anchored_full_resend_dispatches_the_body_the_client_sent(transport: RelocationTransport) -> None:
     # The client resent the whole thread and anchored it as well, which is a
-    # shape this proxy already verifies. Joining the chain to it would send the
-    # replacement account every turn twice.
+    # shape this proxy already verifies. The overlap takes the entire chain, so
+    # what is dispatched is the client's own request -- and the verdict must say
+    # so, because there is not one rebuilt item in it.
     verdict = decide_relocation(_durable_transcript(transport, payload=_FULL_RESEND_PAYLOAD))
 
     assert verdict.movable is True
+    assert verdict.source == "client_input"
     assert verdict.body is not None
     assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_chain_turn_that_restated_the_conversation_supersedes_at_its_own_position(
+def test_a_chain_turn_that_restated_the_conversation_replaces_what_it_restates(
     transport: RelocationTransport,
 ) -> None:
     # The thread's second recorded turn carried everything before it, which is
@@ -292,12 +294,13 @@ def test_a_chain_turn_that_restated_the_conversation_supersedes_at_its_own_posit
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_anchored_tail_restatement_refuses_rather_than_repeating_the_answer(
+def test_an_anchored_tail_restatement_replaces_the_chains_copy_of_the_answer(
     transport: RelocationTransport,
 ) -> None:
-    # The client restated the last answer and nothing before it. Where that
-    # restatement ends is recoverable only by matching content against the
-    # chain, so the rebuild refuses instead of appending the answer twice.
+    # The client restated the last answer and nothing before it. That answer is
+    # the tail of the accumulation, so the chain's copy comes off and the
+    # client's stands in its place, with the question it answered still in front
+    # of it. The chain contributed that question, so the body is a rebuild.
     verdict = decide_relocation(
         _durable_transcript(
             transport,
@@ -305,9 +308,10 @@ def test_an_anchored_tail_restatement_refuses_rather_than_repeating_the_answer(
         ),
     )
 
-    assert verdict.movable is False
-    assert verdict.body is None
-    assert verdict.decline_reason == "no_account_neutral_body"
+    assert verdict.movable is True
+    assert verdict.source == "durable_transcript"
+    assert verdict.body is not None
+    assert verdict.body["input"] == [_user("hello"), _assistant("hi there"), _user("and now?")]
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
@@ -338,9 +342,9 @@ def test_a_chain_turn_stored_as_a_scalar_is_that_turns_own_material(transport: R
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_the_bridge_frame_seam_classifies_the_body_it_dispatches(transport: RelocationTransport) -> None:
+def test_the_bridge_frame_seam_joins_the_body_it_dispatches(transport: RelocationTransport) -> None:
     # The bridge decides on the exact frame it would have sent upstream, so the
-    # resend inside that frame has to supersede there too.
+    # resend inside that frame is the one the overlap is measured against.
     verdict = decide_relocation(
         _durable_transcript(
             transport,
@@ -355,7 +359,7 @@ def test_the_bridge_frame_seam_classifies_the_body_it_dispatches(transport: Relo
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_the_fenced_lane_spends_its_one_shot_on_a_superseded_body(transport: RelocationTransport) -> None:
+def test_the_fenced_lane_spends_its_one_shot_on_the_conversation_once(transport: RelocationTransport) -> None:
     # The ambiguous lane spends a budget that cannot be refilled, so the body it
     # spends it on must not be the conversation twice over.
     verdict = decide_relocation(
@@ -454,7 +458,7 @@ def test_ownership_facts_decline_every_source_on_every_transport(
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
 def test_routing_strategies_other_than_single_account_do_not_bind(transport: RelocationTransport) -> None:
-    verdict = decide_relocation(_unanchored(transport, routing_strategy="usage_weighted"))
+    verdict = decide_relocation(_client_input(transport, routing_strategy="usage_weighted"))
 
     assert verdict.movable is True
 
@@ -487,7 +491,7 @@ def test_an_ownership_fact_is_reported_before_any_evidence_is_consulted(
     # is told. An ownership fact is a binding no request body can neutralize;
     # reporting the evidence instead sends whoever reads the decision looking
     # for a failure that was never the reason this turn could not move.
-    verdict = decide_relocation(_unanchored(transport, **ownership_fact, **insufficient_evidence))
+    verdict = decide_relocation(_client_input(transport, **ownership_fact, **insufficient_evidence))
 
     assert verdict.movable is False
     assert verdict.decline_reason == expected_reason
@@ -495,7 +499,7 @@ def test_an_ownership_fact_is_reported_before_any_evidence_is_consulted(
 
 def test_concurrent_ownership_facts_report_the_most_binding_one() -> None:
     verdict = decide_relocation(
-        _unanchored(
+        _client_input(
             "http_bridge",
             routing_strategy="single_account",
             input_file_pinned=True,
@@ -540,14 +544,14 @@ class _PoisonedTranscript(list[object]):
         ),
     ],
 )
-def test_the_evidence_gate_runs_before_the_source_ladder_is_consulted(
+def test_the_evidence_gate_runs_before_any_body_is_assembled(
     transport: RelocationTransport,
     insufficient_evidence: dict[str, object],
     expected_reason: RelocationDeclineReason,
 ) -> None:
     # Both halves would decline, so only the order decides which reason the
-    # operator is told and whether the chain was walked to learn it. A ladder
-    # that ran first would report the body's problem and hide the evidence's.
+    # operator is told and whether the chain was walked to learn it. Building
+    # the body first would report its problem and hide the evidence's.
     verdict = decide_relocation(
         _durable_transcript(transport, durable_transcript=_PoisonedTranscript([object()]), **insufficient_evidence),
     )
@@ -604,13 +608,13 @@ def test_an_anchored_turn_without_any_source_stays_owner_bound(
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_a_production_resend_the_anchor_cannot_vouch_for_stays_owner_bound(
+def test_a_production_resend_no_account_can_serve_stays_owner_bound(
     transport: RelocationTransport,
 ) -> None:
     # A real Codex resend restates every item the owner account minted, ids and
-    # reasoning included. Nothing about that body is self-contained, so it can
-    # neither supersede the chain nor be appended to it, and the turn stays
-    # where it is rather than moving on a body edited to fit.
+    # reasoning included. The join carries it whole, as it must, and the strict
+    # predicate then refuses it: the turn stays where it is rather than moving
+    # on a body edited to fit.
     verdict = decide_relocation(
         RelocationInputs(
             transport=transport,
@@ -667,7 +671,7 @@ def test_a_body_the_strict_predicate_declines_is_not_a_source(
     unrelocatable_state: dict[str, JsonValue],
 ) -> None:
     verdict = decide_relocation(
-        _unanchored(transport, payload={**_UNANCHORED_PAYLOAD, **unrelocatable_state}),
+        _client_input(transport, payload={**_UNANCHORED_PAYLOAD, **unrelocatable_state}),
     )
 
     assert verdict.movable is False
@@ -683,7 +687,7 @@ def test_proof_that_upstream_ran_the_turn_blocks_an_ambiguous_relocation(
     transport: RelocationTransport,
     execution_evidence: dict[str, object],
 ) -> None:
-    verdict = decide_relocation(_unanchored(transport, **_AMBIGUITY_CLEARED, **execution_evidence))
+    verdict = decide_relocation(_client_input(transport, **_AMBIGUITY_CLEARED, **execution_evidence))
 
     assert verdict.movable is False
     assert verdict.decline_reason == "upstream_execution_observed"
@@ -696,7 +700,7 @@ def test_a_blank_response_id_is_not_proof_that_upstream_ran_the_turn(
     transport: RelocationTransport,
     blank_response_id: str | None,
 ) -> None:
-    verdict = decide_relocation(_unanchored(transport, **_AMBIGUITY_CLEARED, response_id=blank_response_id))
+    verdict = decide_relocation(_client_input(transport, **_AMBIGUITY_CLEARED, response_id=blank_response_id))
 
     assert verdict.movable is True
     assert verdict.requires_recovery_fence is True
@@ -712,7 +716,7 @@ def test_an_ambiguity_outside_the_window_is_not_relocated(
     seconds_since_dispatch: float | None,
 ) -> None:
     verdict = decide_relocation(
-        _unanchored(transport, evidence="ambiguous", seconds_since_dispatch=seconds_since_dispatch),
+        _client_input(transport, evidence="ambiguous", seconds_since_dispatch=seconds_since_dispatch),
     )
 
     assert verdict.movable is False
@@ -722,7 +726,7 @@ def test_an_ambiguity_outside_the_window_is_not_relocated(
 @pytest.mark.parametrize("transport", _TRANSPORTS)
 def test_the_ambiguity_window_boundary_still_relocates(transport: RelocationTransport) -> None:
     verdict = decide_relocation(
-        _unanchored(
+        _client_input(
             transport,
             evidence="ambiguous",
             seconds_since_dispatch=RELOCATION_AMBIGUITY_WINDOW_SECONDS,
@@ -738,7 +742,7 @@ def test_the_ambiguity_window_boundary_still_relocates(transport: RelocationTran
 def test_definitive_evidence_still_requires_that_upstream_emitted_nothing(
     transport: RelocationTransport,
 ) -> None:
-    verdict = decide_relocation(_unanchored(transport, spooled_event_count=1))
+    verdict = decide_relocation(_client_input(transport, spooled_event_count=1))
 
     assert verdict.movable is False
     assert verdict.decline_reason == "upstream_execution_observed"
@@ -754,8 +758,8 @@ def test_a_recorded_response_id_gates_both_lanes(transport: RelocationTransport)
     # that record the id relocate a turn upstream has already answered.
     acknowledged = {"response_id": "resp_owner_ack", "spooled_event_count": 0}
 
-    fenced = decide_relocation(_unanchored(transport, **_AMBIGUITY_CLEARED, **acknowledged))
-    unfenced = decide_relocation(_unanchored(transport, **acknowledged))
+    fenced = decide_relocation(_client_input(transport, **_AMBIGUITY_CLEARED, **acknowledged))
+    unfenced = decide_relocation(_client_input(transport, **acknowledged))
 
     assert (fenced.movable, fenced.decline_reason) == (False, "upstream_execution_observed")
     assert (unfenced.movable, unfenced.decline_reason) == (False, "upstream_execution_observed")
@@ -766,7 +770,7 @@ def test_definitive_evidence_needs_neither_the_window_nor_the_dedupe_contract(
     transport: RelocationTransport,
 ) -> None:
     verdict = decide_relocation(
-        _unanchored(
+        _client_input(
             transport,
             seconds_since_dispatch=None,
             arms_side_effect_replay_dedupe=False,
@@ -821,10 +825,10 @@ def test_a_rebuild_that_fails_is_not_reported_as_an_absent_transcript(transport:
 
 
 @pytest.mark.parametrize("transport", _TRANSPORTS)
-def test_an_anchor_never_leaves_through_the_unanchored_branch(transport: RelocationTransport) -> None:
-    # The unanchored rung strips ``previous_response_id`` and dispatches the new
-    # turn by itself. Reaching it with an anchored body would discard the
-    # conversation and still report the turn as moved.
+def test_an_anchored_delta_is_never_dispatched_by_itself(transport: RelocationTransport) -> None:
+    # The anchor names state the replacement account will not have and the
+    # client is not supplying. Stripping it and sending the new turn alone would
+    # discard the conversation and still report the turn as moved.
     verdict = decide_relocation(
         RelocationInputs(transport=transport, payload=_DELTA_PAYLOAD, evidence="definitive"),
     )
@@ -835,11 +839,13 @@ def test_an_anchor_never_leaves_through_the_unanchored_branch(transport: Relocat
 
 
 @pytest.mark.parametrize("blank_anchor", [None, "", "   "])
-def test_a_blank_anchor_is_unanchored(blank_anchor: str | None) -> None:
+def test_a_blank_anchor_names_no_prior_response(blank_anchor: str | None) -> None:
+    # Nothing is owed and nothing is joined: the dispatched frame carries no
+    # anchor, so the replacement account sees what the owner account would have.
     payload: dict[str, JsonValue] = {**_UNANCHORED_PAYLOAD, "previous_response_id": blank_anchor}
-    verdict = decide_relocation(_unanchored("http_bridge", payload=payload, durable_transcript=_TRANSCRIPT))
+    verdict = decide_relocation(_client_input("http_bridge", payload=payload, durable_transcript=_TRANSCRIPT))
 
-    assert verdict.source == "unanchored"
+    assert verdict.source == "client_input"
     assert verdict.body is not None
     assert verdict.body["input"] == [_user("hello")]
 
@@ -859,18 +865,17 @@ _RESENT_HISTORY: list[JsonValue] = [_user("hello"), _user("and now?"), _user("an
         {"payload": _DELTA_PAYLOAD},
     ],
 )
-def test_an_unanchored_resend_holding_no_assistant_turn_is_not_joined_to_the_chain(
+def test_a_resend_naming_no_prior_response_is_not_joined_to_the_chain(
     transport: RelocationTransport,
     carried_alongside: dict[str, object],
 ) -> None:
     # The client restated its whole history, and that history happens to hold no
     # model-authored item -- a thread of questions, or one whose answers the
-    # client does not keep. Reading "no assistant turn" as "this is a delta"
-    # joins the chain to a body that already holds it and doubles the
-    # conversation. The request carries no anchor, so it is the whole
-    # conversation by the wire contract and the chain has no part in it.
+    # client does not keep. The request names no prior response, so the chain a
+    # caller loaded for some other turn is not its history, and the body that
+    # goes upstream is the one the client wrote.
     verdict = decide_relocation(
-        _unanchored(
+        _client_input(
             transport,
             current_request_text=_frame({"model": "gpt-5.4", "input": _RESENT_HISTORY}),
             durable_transcript=_TRANSCRIPT,
@@ -879,7 +884,7 @@ def test_an_unanchored_resend_holding_no_assistant_turn_is_not_joined_to_the_cha
     )
 
     assert verdict.movable is True
-    assert verdict.source == "unanchored"
+    assert verdict.source == "client_input"
     assert verdict.body is not None
     assert verdict.body["input"] == _RESENT_HISTORY
 
@@ -907,17 +912,17 @@ def test_every_decline_reason_is_in_the_closed_vocabulary() -> None:
     reasons = {
         decide_relocation(inputs).decline_reason
         for inputs in (
-            _unanchored("http_bridge", downstream_output_visible=True),
-            _unanchored("http_bridge", routing_strategy="single_account"),
-            _unanchored("http_bridge", input_file_pinned=True),
-            _unanchored("http_bridge", turn_state_owned=True),
-            _unanchored("http_bridge", session_identity_bound=True),
-            _unanchored("http_bridge", evidence="none"),
+            _client_input("http_bridge", downstream_output_visible=True),
+            _client_input("http_bridge", routing_strategy="single_account"),
+            _client_input("http_bridge", input_file_pinned=True),
+            _client_input("http_bridge", turn_state_owned=True),
+            _client_input("http_bridge", session_identity_bound=True),
+            _client_input("http_bridge", evidence="none"),
             _durable_transcript("http_bridge", durable_transcript=None),
             _durable_transcript("http_bridge", durable_transcript=(_Turn(operation=_Operation(None), events=()),)),
-            _unanchored("http_bridge", **_AMBIGUITY_CLEARED, spooled_event_count=1),
-            _unanchored("http_bridge", evidence="ambiguous", arms_side_effect_replay_dedupe=True),
-            _unanchored("http_bridge", evidence="ambiguous", seconds_since_dispatch=1.0),
+            _client_input("http_bridge", **_AMBIGUITY_CLEARED, spooled_event_count=1),
+            _client_input("http_bridge", evidence="ambiguous", arms_side_effect_replay_dedupe=True),
+            _client_input("http_bridge", evidence="ambiguous", seconds_since_dispatch=1.0),
         )
     }
 
@@ -925,7 +930,7 @@ def test_every_decline_reason_is_in_the_closed_vocabulary() -> None:
 
 
 def test_a_relocatable_verdict_never_carries_a_decline_reason() -> None:
-    verdict = decide_relocation(_unanchored("websocket"))
+    verdict = decide_relocation(_client_input("websocket"))
 
     assert (verdict.movable, verdict.decline_reason) == (True, None)
     assert set(get_args(RelocationSource)) == set(_SOURCE_BUILDERS)

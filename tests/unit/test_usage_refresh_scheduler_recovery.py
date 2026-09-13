@@ -1824,9 +1824,11 @@ class StubHistoryUsageRepository(StubUsageRepository):
         self,
         *,
         history: dict[str, list[UsageHistory]] | None = None,
-        **latest: dict[str, UsageHistory] | None,
+        primary: dict[str, UsageHistory] | None = None,
+        secondary: dict[str, UsageHistory] | None = None,
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
-        super().__init__(**latest)
+        super().__init__(primary=primary, secondary=secondary, monthly=monthly)
         self._history = history or {}
         self.history_windows: list[str] = []
 

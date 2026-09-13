@@ -34,6 +34,14 @@
   not a completeness test; using it as one inverts the outcome for the full
   resends Codex actually sends (developer-instruction-led, tool-pair tail).
   Still pass the anchor in so the walk can verify it terminates there.
+- [ ] Build the comparison key from a POSITIVE enumeration of what identifies an
+  item. Two rounds subtracted a hand-listed set of per-recording fields and each
+  was defeated by a field nobody had listed — first `status`, then `phase` and
+  `internal_chat_message_metadata_passthrough`. A subtractive list can never be
+  finished; a positive one is bounded by what a turn is.
+- [ ] Bound the item count alongside turns and bytes. Neither existing cap bounds
+  items, so the worst legal input is the smallest legal item repeated until the
+  byte budget is spent.
 - [ ] Compute the overlap on the PROJECTED form of both sides while dispatching
   the client's verbatim items, and compute it in LINEAR time. Comparing
   projected chain items against verbatim client ones makes one allowlisted-field

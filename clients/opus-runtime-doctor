@@ -26,6 +26,7 @@ PROBE_INTERVAL_SECONDS = 6 * 60 * 60
 PROBE_TIMEOUT_SECONDS = 180
 EXPECTED_MODEL_DEFAULT = "claude-opus-5"
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,100}$")
+SAFE_METADATA = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
 TARGET_FD_SOFT_LIMIT = 8192
 
 
@@ -140,7 +141,7 @@ def _stderr_tags(stderr: str) -> list[str]:
     patterns = (
         ("permission_denied", ("permission denied", "eacces")),
         ("operation_not_permitted", ("operation not permitted", "eperm")),
-        ("auth", ("authentication", "unauthorized", "not logged in", "oauth")),
+        ("auth", ("authentication failed", "unauthorized", "not logged in", "invalid api key")),
         ("keychain", ("keychain", "security framework")),
         ("connection", ("connection refused", "could not connect", "network is unreachable", "timed out")),
         ("rate_limit", ("rate limit", "rate_limit", "429", "usage limit")),
@@ -154,7 +155,7 @@ def raise_fd_soft_limit() -> int | None:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     except (OSError, ValueError):
         return None
-    target = min(hard, TARGET_FD_SOFT_LIMIT)
+    target = TARGET_FD_SOFT_LIMIT if hard == resource.RLIM_INFINITY else min(hard, TARGET_FD_SOFT_LIMIT)
     if soft >= target:
         return int(soft)
     try:
@@ -193,12 +194,14 @@ def stream_diagnostics(stdout: str, stderr: str, *, fd_soft_limit: int | None = 
         event_count += 1
         event_type = event.get("type")
         event_subtype = event.get("subtype")
-        last_type = event_type if isinstance(event_type, str) else None
-        last_subtype = event_subtype if isinstance(event_subtype, str) else None
+        last_type = event_type if isinstance(event_type, str) and SAFE_METADATA.fullmatch(event_type) else None
+        last_subtype = (
+            event_subtype if isinstance(event_subtype, str) and SAFE_METADATA.fullmatch(event_subtype) else None
+        )
         if event_type == "result":
             terminal_subtype = last_subtype
         safe_session = event.get("session_id")
-        if session_id is None and isinstance(safe_session, str) and len(safe_session) <= 100:
+        if session_id is None and isinstance(safe_session, str) and SAFE_METADATA.fullmatch(safe_session):
             session_id = safe_session
         message = _message(event)
         model = _safe_model(message.get("model") if message else event.get("model"))

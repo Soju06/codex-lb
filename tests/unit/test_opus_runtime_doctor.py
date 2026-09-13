@@ -284,7 +284,7 @@ def test_stream_diagnostics_sanitizes_models_and_classifies_stderr() -> None:
             _event(type="result", subtype="error", is_error=True),
         ]
     )
-    evidence = doctor.stream_diagnostics(stdout, "OAuth keychain rate limit connection refused SECRET")
+    evidence = doctor.stream_diagnostics(stdout, "Unauthorized keychain rate limit connection refused SECRET")
 
     assert evidence["init_model"] == "claude-fable-5-1[1m]"
     assert evidence["session_id"] == "session-1"
@@ -293,6 +293,18 @@ def test_stream_diagnostics_sanitizes_models_and_classifies_stderr() -> None:
     assert evidence["terminal_subtype"] == "error"
     assert evidence["stderr_tags"] == ["auth", "keychain", "connection", "rate_limit"]
     assert "SECRET" not in json.dumps(evidence)
+
+
+def test_stream_diagnostics_rejects_unsafe_metadata_and_ignores_benign_oauth() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    evidence = doctor.stream_diagnostics(
+        _event(type="unsafe type SECRET", subtype="unsafe subtype", session_id="unsafe session SECRET"),
+        "OAuth/Max route selected",
+    )
+    assert evidence["last_event_type"] is None
+    assert evidence["last_event_subtype"] is None
+    assert evidence["session_id"] is None
+    assert evidence["stderr_tags"] == ["none"]
 
 
 def test_raise_fd_soft_limit_increases_without_lowering(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,6 +329,17 @@ def test_raise_fd_soft_limit_never_reduces_and_tolerates_failure(monkeypatch: py
     monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: (256, 100_000))
     monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: (_ for _ in ()).throw(OSError("denied")))
     assert doctor.raise_fd_soft_limit() == 256
+
+
+def test_raise_fd_soft_limit_handles_infinite_hard_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    limits = [(256, doctor.resource.RLIM_INFINITY), (8192, doctor.resource.RLIM_INFINITY)]
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: limits.pop(0))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+
+    assert doctor.raise_fd_soft_limit() == 8192
+    assert changes == [(8192, doctor.resource.RLIM_INFINITY)]
 
 
 def test_probe_command_disables_slash_commands() -> None:

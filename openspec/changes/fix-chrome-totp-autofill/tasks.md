@@ -1,0 +1,3 @@
+- [x] Add OTP autofill semantics
+- [x] Add regression test
+- [x] Run frontend checks; OpenSpec CLI is not installed in this environment

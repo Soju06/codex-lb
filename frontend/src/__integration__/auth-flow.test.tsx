@@ -57,7 +57,11 @@ describe("auth flow integration", () => {
 
     expect(await screen.findByText("Two-factor verification")).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("TOTP code"), "123456");
+    const totpInput = screen.getByLabelText("TOTP code");
+    expect(totpInput).toHaveAttribute("autocomplete", "one-time-code");
+    expect(totpInput).toHaveAttribute("inputmode", "numeric");
+
+    await user.type(totpInput, "123456");
 
     // Auto-submit triggers on 6-digit completion via onComplete
     await waitFor(() => {

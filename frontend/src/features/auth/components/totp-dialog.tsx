@@ -69,6 +69,10 @@ export function TotpDialog({ open }: TotpDialogProps) {
                     <InputOTP
                       maxLength={6}
                       autoFocus
+                      name="totp"
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
                       value={field.value}
                       onChange={field.onChange}
                       onComplete={() => form.handleSubmit(handleSubmit)()}

@@ -1,0 +1,1 @@
+Chrome on macOS requires explicit one-time-code autocomplete semantics for password-manager TOTP suggestions. Safari may autofill heuristically, but the dashboard must expose standards-based OTP metadata.

@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import resource
 import secrets
 import shlex
 import signal
@@ -25,6 +26,7 @@ PROBE_INTERVAL_SECONDS = 6 * 60 * 60
 PROBE_TIMEOUT_SECONDS = 180
 EXPECTED_MODEL_DEFAULT = "claude-opus-5"
 SAFE_MODEL = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,100}$")
+TARGET_FD_SOFT_LIMIT = 8192
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,27 @@ def _stderr_tags(stderr: str) -> list[str]:
     return [tag for tag, needles in patterns if any(needle in lowered for needle in needles)] or ["none"]
 
 
-def stream_diagnostics(stdout: str, stderr: str) -> dict[str, Any]:
+def raise_fd_soft_limit() -> int | None:
+    """Best-effort process-scoped lift inherited by the probe child."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+    target = min(hard, TARGET_FD_SOFT_LIMIT)
+    if soft >= target:
+        return int(soft)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        return int(soft)
+    try:
+        raised, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return int(target)
+    return int(raised)
+
+
+def stream_diagnostics(stdout: str, stderr: str, *, fd_soft_limit: int | None = None) -> dict[str, Any]:
     """Return bounded structural diagnostics without retaining stream text."""
     event_count = 0
     init_model: str | None = None
@@ -187,7 +209,7 @@ def stream_diagnostics(stdout: str, stderr: str) -> dict[str, Any]:
             child_models.add(model)
         elif model:
             parent_models.add(model)
-    return {
+    diagnostics = {
         "event_count": event_count,
         "malformed_lines": malformed_lines,
         "init_model": init_model,
@@ -199,6 +221,9 @@ def stream_diagnostics(stdout: str, stderr: str) -> dict[str, Any]:
         "child_models": sorted(child_models)[:10],
         "stderr_tags": _stderr_tags(stderr),
     }
+    if fd_soft_limit is not None:
+        diagnostics["fd_soft_limit"] = fd_soft_limit
+    return diagnostics
 
 
 def analyze_stream(stdout: str, nonce: str, expected_model: str) -> tuple[str, str | None, dict[str, Any]]:
@@ -379,6 +404,7 @@ def _probe_command(fable: Path, prompt: str, session_id: str) -> list[str]:
 
 def run_probe(*, canonical_retry: bool = False) -> ProbeOutcome:
     started = time.monotonic()
+    fd_soft_limit = raise_fd_soft_limit()
     expected_model = os.environ.get("AGENT_LB_OPUS_MODEL") or EXPECTED_MODEL_DEFAULT
     nonce = secrets.token_hex(16)
     directory = state_dir()
@@ -437,15 +463,15 @@ def run_probe(*, canonical_retry: bool = False) -> ProbeOutcome:
             return ProbeOutcome(
                 "FAIL",
                 "timeout",
-                stream_diagnostics(stdout, stderr),
+                stream_diagnostics(stdout, stderr, fd_soft_limit=fd_soft_limit),
                 time.monotonic() - started,
             )
         if process.returncode != 0:
-            evidence = stream_diagnostics(stdout, stderr)
+            evidence = stream_diagnostics(stdout, stderr, fd_soft_limit=fd_soft_limit)
             evidence["returncode"] = process.returncode
             return ProbeOutcome("FAIL", "nonzero_exit", evidence, time.monotonic() - started)
         status, error_class, evidence = analyze_stream(stdout, nonce, expected_model)
-        evidence.update(stream_diagnostics(stdout, stderr))
+        evidence.update(stream_diagnostics(stdout, stderr, fd_soft_limit=fd_soft_limit))
         return ProbeOutcome(status, error_class, evidence, time.monotonic() - started)
 
 

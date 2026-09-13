@@ -230,6 +230,7 @@ def test_transient_definition_failure_heals_on_single_retry(monkeypatch: pytest.
 def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     doctor = load_script("opus-runtime-doctor")
     monkeypatch.setenv("CLAUDE_LB_DOCTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(doctor, "raise_fd_soft_limit", lambda: 8192)
 
     class Process:
         pid = 43210
@@ -264,6 +265,7 @@ def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch
         "parent_models": [],
         "child_models": [],
         "stderr_tags": ["operation_not_permitted"],
+        "fd_soft_limit": 8192,
     }
 
 
@@ -291,6 +293,30 @@ def test_stream_diagnostics_sanitizes_models_and_classifies_stderr() -> None:
     assert evidence["terminal_subtype"] == "error"
     assert evidence["stderr_tags"] == ["auth", "keychain", "connection", "rate_limit"]
     assert "SECRET" not in json.dumps(evidence)
+
+
+def test_raise_fd_soft_limit_increases_without_lowering(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    limits = [(256, 100_000), (8192, 100_000)]
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: limits.pop(0))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+
+    assert doctor.raise_fd_soft_limit() == 8192
+    assert changes == [(8192, 100_000)]
+
+
+def test_raise_fd_soft_limit_never_reduces_and_tolerates_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: (16_384, 100_000))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+    assert doctor.raise_fd_soft_limit() == 16_384
+    assert changes == []
+
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: (256, 100_000))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: (_ for _ in ()).throw(OSError("denied")))
+    assert doctor.raise_fd_soft_limit() == 256
 
 
 def test_probe_command_disables_slash_commands() -> None:

@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""Hermetic runtime proof for the two canonical Opus Agent seats."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import math
+import os
+import secrets
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+PROBE_INTERVAL_SECONDS = 6 * 60 * 60
+PROBE_TIMEOUT_SECONDS = 180
+EXPECTED_MODEL_DEFAULT = "claude-opus-5"
+
+
+@dataclass(frozen=True)
+class ProbeOutcome:
+    status: str
+    error_class: str | None
+    evidence: dict[str, Any]
+    elapsed_seconds: float
+
+
+def state_dir() -> Path:
+    path = Path(os.environ.get("CLAUDE_LB_DOCTOR_STATE_DIR", str(Path.home() / ".agent-lb"))).expanduser()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _append_summary(path: Path, receipt: dict[str, Any]) -> None:
+    line = {
+        "at": receipt["finished_at"],
+        "mode": receipt["mode"],
+        "result": receipt["result"],
+        "attempts": len(receipt["attempts"]),
+        "errors": [attempt.get("error_class") for attempt in receipt["attempts"] if attempt.get("error_class")],
+    }
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _sibling(name: str) -> Path:
+    return Path(__file__).resolve().with_name(name)
+
+
+def run_definition_repair(*, quiet: bool = True) -> dict[str, Any]:
+    doctor = _sibling("agent-defs-doctor")
+    if not doctor.is_file():
+        return {"status": "missing", "returncode": 127}
+    command = [sys.executable, str(doctor), "--repair"]
+    if quiet:
+        command.append("--quiet")
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL if quiet else None,
+            stderr=subprocess.DEVNULL if quiet else None,
+            timeout=30,
+            env={**os.environ, "CLAUDE_LB_DOCTOR_SKIP": "1"},
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "returncode": None}
+    except OSError as error:
+        return {"status": "error", "returncode": None, "error_class": type(error).__name__}
+    return {"status": "ok" if completed.returncode == 0 else "failed", "returncode": completed.returncode}
+
+
+def _text_contains(value: Any, nonce: str) -> bool:
+    if isinstance(value, str):
+        return nonce in value
+    if isinstance(value, list):
+        return any(_text_contains(item, nonce) for item in value)
+    if isinstance(value, dict):
+        return any(_text_contains(item, nonce) for item in value.values())
+    return False
+
+
+def _message(event: dict[str, Any]) -> dict[str, Any] | None:
+    message = event.get("message")
+    return message if isinstance(message, dict) else None
+
+
+def _claimed_at(value: Any) -> float:
+    if not isinstance(value, dict):
+        return 0.0
+    claimed = value.get("claimed_at")
+    if isinstance(claimed, bool) or not isinstance(claimed, (int, float)):
+        return 0.0
+    value = float(claimed)
+    return value if math.isfinite(value) else 0.0
+
+
+def _model_base(model: str) -> str:
+    return model.removesuffix("[1m]")
+
+
+def analyze_stream(stdout: str, nonce: str, expected_model: str) -> tuple[str, str | None, dict[str, Any]]:
+    """Validate tool inputs, results, and forwarded child model metadata."""
+    events: list[dict[str, Any]] = []
+    for raw_line in stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            value = json.loads(raw_line)
+        except json.JSONDecodeError:
+            return "FAIL", "malformed_stream", {"event_count": len(events)}
+        if not isinstance(value, dict):
+            return "FAIL", "malformed_stream", {"event_count": len(events)}
+        events.append(value)
+
+    calls: list[dict[str, Any]] = []
+    results: dict[str, tuple[int, bool, bool]] = {}
+    child_models: dict[str, list[str]] = {}
+    child_reads: dict[str, set[str]] = {}
+    child_read_results: dict[str, set[str]] = {}
+    child_replies: dict[str, bool] = {}
+    result_metadata: dict[str, dict[str, Any]] = {}
+    terminal_success = False
+    for index, event in enumerate(events):
+        event_type = event.get("type")
+        message = _message(event)
+        content = message.get("content") if message else None
+        blocks = content if isinstance(content, list) else []
+        parent_id = event.get("parent_tool_use_id") or (message.get("parent_tool_use_id") if message else None)
+        model = message.get("model") if message else None
+        if event_type == "assistant" and isinstance(parent_id, str) and isinstance(model, str):
+            child_models.setdefault(parent_id, []).append(model)
+            if _text_contains(message.get("content"), nonce) and _text_contains(
+                message.get("content"), _model_base(expected_model)
+            ):
+                child_replies[parent_id] = True
+        if event.get("type") == "result":
+            terminal_success = event.get("subtype") == "success" and event.get("is_error") is False
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if event_type == "assistant" and block.get("type") == "tool_use" and block.get("name") == "Agent":
+                tool_id = block.get("id")
+                inputs = block.get("input")
+                if isinstance(tool_id, str) and isinstance(inputs, dict):
+                    calls.append({"id": tool_id, "index": index, "input": inputs})
+            if (
+                event_type == "assistant"
+                and isinstance(parent_id, str)
+                and block.get("type") == "tool_use"
+                and block.get("name") == "Read"
+                and isinstance(block.get("id"), str)
+            ):
+                child_reads.setdefault(parent_id, set()).add(block["id"])
+            if (
+                event_type == "user"
+                and block.get("type") == "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+            ):
+                tool_use_id = block["tool_use_id"]
+                results[tool_use_id] = (
+                    index,
+                    not bool(block.get("is_error")),
+                    _text_contains(block.get("content"), nonce),
+                )
+                if (
+                    isinstance(parent_id, str)
+                    and not bool(block.get("is_error"))
+                    and _text_contains(block.get("content"), nonce)
+                ):
+                    child_read_results.setdefault(parent_id, set()).add(tool_use_id)
+                metadata = event.get("tool_use_result")
+                if isinstance(metadata, dict):
+                    result_metadata[tool_use_id] = metadata
+
+    evidence: dict[str, Any] = {
+        "event_count": len(events),
+        "agent_call_count": len(calls),
+        "general_alias_seen": False,
+        "opus_seat_seen": False,
+        "sequential": False,
+        "nonce_results": 0,
+        "matched_child_models": 0,
+        "forwarded_model_metadata": False,
+        "child_nonce_reads": 0,
+        "completed_result_metadata": 0,
+        "child_identity_replies": 0,
+        "terminal_success": terminal_success,
+    }
+    if len(calls) != 2:
+        return "FAIL", "missing_or_extra_agent_calls", evidence
+    first, second = calls
+    first_input, second_input = first["input"], second["input"]
+    evidence["general_alias_seen"] = (
+        first_input.get("subagent_type") == "general-purpose"
+        and first_input.get("model") == "opus"
+        and first_input.get("run_in_background") is not True
+    )
+    evidence["opus_seat_seen"] = (
+        second_input.get("subagent_type") == "opus-seat"
+        and "model" not in second_input
+        and second_input.get("run_in_background") is not True
+    )
+    first_result, second_result = results.get(first["id"]), results.get(second["id"])
+    if first_result and second_result:
+        evidence["sequential"] = first["index"] < first_result[0] < second["index"] < second_result[0]
+        evidence["nonce_results"] = sum(1 for result in (first_result, second_result) if result[1] and result[2])
+    models = [child_models.get(first["id"], []), child_models.get(second["id"], [])]
+    evidence["forwarded_model_metadata"] = all(models)
+    expected_base = _model_base(expected_model)
+    evidence["matched_child_models"] = sum(
+        1 for values in models if values and all(_model_base(value) == expected_base for value in values)
+    )
+    evidence["child_nonce_reads"] = sum(
+        1
+        for call in (first, second)
+        if child_reads.get(call["id"], set()) & child_read_results.get(call["id"], set())
+    )
+    evidence["completed_result_metadata"] = sum(
+        1
+        for call in (first, second)
+        if result_metadata.get(call["id"], {}).get("status") == "completed"
+    )
+    evidence["child_identity_replies"] = sum(1 for call in (first, second) if child_replies.get(call["id"]))
+
+    if not evidence["general_alias_seen"] or not evidence["opus_seat_seen"]:
+        return "FAIL", "agent_call_contract", evidence
+    if not evidence["sequential"]:
+        return "FAIL", "agent_calls_not_sequential", evidence
+    if evidence["nonce_results"] != 2:
+        return "FAIL", "missing_successful_nonce_result", evidence
+    if evidence["child_nonce_reads"] != 2:
+        return "FAIL", "missing_child_nonce_read", evidence
+    if evidence["completed_result_metadata"] != 2:
+        return "FAIL", "missing_completed_result_metadata", evidence
+    if not evidence["forwarded_model_metadata"]:
+        return "BLOCKED", "forwarded_model_metadata_missing", evidence
+    if evidence["matched_child_models"] != 2:
+        return "FAIL", "unexpected_child_model", evidence
+    if evidence["child_identity_replies"] != 2:
+        return "FAIL", "missing_child_identity_reply", evidence
+    if not evidence["terminal_success"]:
+        return "FAIL", "missing_terminal_success", evidence
+    return "PASS", None, evidence
+
+
+def _probe_command(fable: Path, prompt: str, session_id: str) -> list[str]:
+    return [
+        sys.executable,
+        str(fable),
+        "-p",
+        prompt,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--forward-subagent-text",
+        "--max-turns",
+        "8",
+        "--effort",
+        "low",
+        "--tools",
+        "Agent,Read",
+        "--allowedTools",
+        "Agent,Read",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--settings",
+        '{"disableAllHooks":true}',
+        "--system-prompt",
+        "Runtime diagnostic only. Follow the user probe steps exactly and report no unrelated data.",
+        "--session-id",
+        session_id,
+    ]
+
+
+def run_probe(*, canonical_retry: bool = False) -> ProbeOutcome:
+    started = time.monotonic()
+    expected_model = os.environ.get("AGENT_LB_OPUS_MODEL") or EXPECTED_MODEL_DEFAULT
+    nonce = secrets.token_hex(16)
+    directory = state_dir()
+    fable = _sibling("fable")
+    if not fable.is_file():
+        return ProbeOutcome("FAIL", "fable_missing", {}, time.monotonic() - started)
+    with tempfile.TemporaryDirectory(prefix="opus-doctor-", dir=directory) as temp_name:
+        temp = Path(temp_name)
+        sentinel = temp / "sentinel.txt"
+        sentinel.write_text(nonce + "\n", encoding="utf-8")
+        prompt = (
+            f"Without reading it yourself, pass the absolute sentinel path {sentinel} to exactly two "
+            "sequential foreground Agent calls. "
+            "First call subagent_type general-purpose with model opus. After it finishes, call "
+            "subagent_type opus-seat with no model override. Each child must Read the sentinel and "
+            "report its nonce and its own system-context model identity. Return both tool results."
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "CLAUDE_LB_DOCTOR_SKIP": "1",
+                "CLAUDE_LB_AUTO_RESUME": "0",
+                "CLAUDE_LB_WAIT": "never",
+                "CLAUDE_LB_WAIT_FOR_LIMIT": "never",
+                "CLAUDE_LB_REQUIRE": "1",
+                "CLAUDE_LB_SESSION_ID": f"opus-doctor-{uuid.uuid4()}",
+            }
+        )
+        env.pop("CLAUDECODE", None)
+        env.pop("CLAUDE_CODE_SUBAGENT_MODEL", None)
+        if canonical_retry:
+            env["AGENT_LB_OPUS_MODEL"] = expected_model
+            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = expected_model
+        command = _probe_command(fable, prompt, str(uuid.uuid4()))
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=temp,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError as error:
+            return ProbeOutcome("FAIL", type(error).__name__, {}, time.monotonic() - started)
+        try:
+            stdout, _stderr = process.communicate(timeout=PROBE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            return ProbeOutcome("FAIL", "timeout", {}, time.monotonic() - started)
+        if process.returncode != 0:
+            return ProbeOutcome("FAIL", "nonzero_exit", {"returncode": process.returncode}, time.monotonic() - started)
+        status, error_class, evidence = analyze_stream(stdout, nonce, expected_model)
+        return ProbeOutcome(status, error_class, evidence, time.monotonic() - started)
+
+
+def _attempt_dict(outcome: ProbeOutcome, number: int) -> dict[str, Any]:
+    return {
+        "attempt": number,
+        "status": outcome.status,
+        "error_class": outcome.error_class,
+        "elapsed_seconds": round(outcome.elapsed_seconds, 3),
+        "evidence": outcome.evidence,
+    }
+
+
+def _notify_failure(receipt: dict[str, Any], directory: Path) -> None:
+    configured = os.environ.get("CLAUDE_LB_DOCTOR_NOTIFY")
+    if not configured:
+        receipt["notification"] = {"status": "not_configured"}
+        return
+    stamp = directory / "opus-doctor-notify.json"
+    now = time.time()
+    try:
+        previous = json.loads(stamp.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        previous = {}
+    if now - _claimed_at(previous) < PROBE_INTERVAL_SECONDS:
+        receipt["notification"] = {"status": "deduplicated"}
+        return
+    intent = {"claimed_at": now, "status": "intent", "run_id": receipt["run_id"]}
+    _atomic_json(stamp, intent)
+    receipt["notification"] = {"status": "intent"}
+    _atomic_json(directory / "doctor.json", receipt)
+    try:
+        command = shlex.split(configured)
+        if not command:
+            raise ValueError("empty notification command")
+        completed = subprocess.run(
+            [*command, "Agent LB Opus runtime doctor failed; inspect ~/.agent-lb/doctor.json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        receipt["notification"] = {"status": "unknown", "error_class": type(error).__name__}
+    else:
+        receipt["notification"] = {
+            "status": "accepted" if completed.returncode == 0 else "unknown",
+            "returncode": completed.returncode,
+        }
+    _atomic_json(stamp, {**intent, **receipt["notification"]})
+
+
+def run_doctor(*, nightly: bool, repair: bool, quiet: bool) -> int:
+    directory = state_dir()
+    lock_handle = (directory / "opus-doctor.lock").open("a+")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        if not quiet:
+            print("opus-runtime-doctor: another probe is running", file=sys.stderr)
+        return 75
+    started_wall = time.time()
+    _atomic_json(directory / "opus-doctor-scheduled.json", {"claimed_at": started_wall})
+    if nightly:
+        mode = "nightly"
+    elif os.environ.get("CLAUDE_LB_DOCTOR_BACKGROUND") == "1":
+        mode = "background"
+    else:
+        mode = "manual"
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": str(uuid.uuid4()),
+        "mode": mode,
+        "started_at": started_wall,
+        "finished_at": started_wall,
+        "result": "FAIL",
+        "definition_repairs": [],
+        "attempts": [],
+    }
+    definition_status = run_definition_repair(quiet=True) if repair else None
+    if definition_status is not None:
+        receipt["definition_repairs"].append(definition_status)
+    first = run_probe()
+    receipt["attempts"].append(_attempt_dict(first, 1))
+    terminal = first
+    if first.status != "PASS" or (definition_status is not None and definition_status.get("status") != "ok"):
+        receipt["definition_repairs"].append(run_definition_repair(quiet=True))
+        terminal = run_probe(canonical_retry=True)
+        receipt["attempts"].append(_attempt_dict(terminal, 2))
+    receipt["result"] = "PASS" if terminal.status == "PASS" else "FAIL"
+    if receipt["definition_repairs"] and receipt["definition_repairs"][-1].get("status") != "ok":
+        receipt["result"] = "FAIL"
+    receipt["finished_at"] = time.time()
+    receipt["elapsed_seconds"] = round(receipt["finished_at"] - started_wall, 3)
+    _atomic_json(directory / "doctor.json", receipt)
+    if nightly and receipt["result"] == "FAIL":
+        _notify_failure(receipt, directory)
+        _atomic_json(directory / "doctor.json", receipt)
+    _append_summary(directory / "doctor.log", receipt)
+    if not quiet:
+        print(f"opus-runtime-doctor: {receipt['result']}")
+    return 0 if receipt["result"] == "PASS" else 1
+
+
+def schedule() -> int:
+    directory = state_dir()
+    schedule_lock = (directory / "opus-doctor-schedule.lock").open("a+")
+    try:
+        fcntl.flock(schedule_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
+    stamp = directory / "opus-doctor-scheduled.json"
+    now = time.time()
+    try:
+        previous = json.loads(stamp.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        previous = {}
+    if now - _claimed_at(previous) < PROBE_INTERVAL_SECONDS:
+        return 0
+    claim = {"claimed_at": now, "claim_id": str(uuid.uuid4())}
+    _atomic_json(stamp, claim)
+    env = {**os.environ, "CLAUDE_LB_DOCTOR_SKIP": "1", "CLAUDE_LB_DOCTOR_BACKGROUND": "1"}
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--background", "--repair", "--quiet"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        try:
+            current = json.loads(stamp.read_text(encoding="utf-8"))
+            if current == claim:
+                stamp.unlink()
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pass
+        return 1
+    return 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--schedule", action="store_true", help="claim the six-hour slot and detach a probe")
+    modes.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
+    modes.add_argument("--nightly", action="store_true", help="run the nightly probe and notify on failure")
+    parser.add_argument("--repair", action="store_true", help="repair agent definitions before probing")
+    parser.add_argument("--quiet", action="store_true", help="suppress the result line")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.schedule:
+        return schedule()
+    if args.background:
+        stamp = state_dir() / "opus-doctor-scheduled.json"
+        try:
+            claimed_at = _claimed_at(json.loads(stamp.read_text(encoding="utf-8")))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return 0
+        if time.time() - claimed_at >= PROBE_INTERVAL_SECONDS:
+            return 0
+    return run_doctor(nightly=args.nightly, repair=True, quiet=args.quiet)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

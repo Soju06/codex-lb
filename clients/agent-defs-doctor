@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+"""Validate and safely normalize Claude agent definition frontmatter.
+
+Runtime integrations may load this extensionless module with ``SourceFileLoader``
+and call ``inspect_file(path, models=...)``, ``repair_file(path, models=...)``,
+or ``run_check(cwd=..., user_root=..., repair=...)``.  All APIs are offline and
+return JSON-serializable dictionaries.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+VERSION = "1"
+STATE_ENV = "CLAUDE_LB_DOCTOR_STATE_DIR"
+DEFAULT_MODELS = frozenset(
+    {
+        "inherit",
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable",
+        "claude-opus-5",
+        "claude-opus-5[1m]",
+        "claude-fable-5",
+        "claude-fable-5[1m]",
+        "claude-fable-5-1",
+        "claude-fable-5-1[1m]",
+        "claude-mythos-5",
+        "claude-planner",
+        "claude-opus-4-6",
+        "claude-opus-4-8",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-medium",
+        "gpt-5.6-sol-high",
+        "gpt-5.6-sol-xhigh",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-medium",
+        "gpt-5.6-luna",
+    }
+)
+_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]*(.*))?$")
+_BLOCK = re.compile(r"^[>|][+-]?(?:[1-9])?(?:[ \t]+#.*)?$")
+
+
+class FrontmatterError(ValueError):
+    pass
+
+
+def _scalar(text: str) -> str:
+    value = text.strip()
+    if not value:
+        return ""
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise FrontmatterError("invalid double-quoted scalar") from exc
+        if not isinstance(parsed, str):
+            raise FrontmatterError("scalar must be a string")
+        return parsed
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise FrontmatterError("invalid single-quoted scalar")
+        return value[1:-1].replace("''", "'")
+    # A comment begins only after whitespace, which keeps names containing '#'.
+    value = re.split(r"[ \t]+#", value, maxsplit=1)[0].rstrip()
+    if any(token in value for token in ("{", "}")):
+        raise FrontmatterError("unsupported YAML scalar")
+    return value
+
+
+def _split_flow_list(text: str) -> list[str]:
+    value = text.strip()
+    if not (value.startswith("[") and value.endswith("]")):
+        raise FrontmatterError("invalid flow list")
+    inner = value[1:-1]
+    parts: list[str] = []
+    start = 0
+    quote = ""
+    escaped = False
+    for index, char in enumerate(inner):
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == ",":
+            parts.append(inner[start:index])
+            start = index + 1
+        elif char in "[]{}":
+            raise FrontmatterError("nested flow collections are unsupported")
+    if quote:
+        raise FrontmatterError("unterminated quote in flow list")
+    parts.append(inner[start:])
+    if parts and not parts[-1].strip():
+        parts.pop()
+    result = [_scalar(part) for part in parts]
+    if any(not item for item in result):
+        raise FrontmatterError("empty flow-list item")
+    return result
+
+
+def _parse_value(key: str, head: str, continuation: list[str]) -> Any:
+    stripped = head.strip()
+    if key not in {"name", "description", "model", "tools"}:
+        # Other metadata is intentionally opaque, but require it to remain an
+        # indented YAML-shaped block so repair never swallows a malformed
+        # top-level line into an unrelated value.
+        for line in continuation:
+            if line.strip() and not line[0].isspace():
+                raise FrontmatterError(f"invalid indentation below {key}")
+            content = line.lstrip(" \t")
+            if content and not content.startswith(("#", "- ")) and not _KEY.fullmatch(content):
+                raise FrontmatterError(f"unsupported YAML below {key}")
+        return "\n".join([head, *continuation]).strip()
+    if key == "description" and _BLOCK.fullmatch(stripped):
+        content: list[str] = []
+        for line in continuation:
+            if line.strip() and not line[0].isspace():
+                raise FrontmatterError("invalid block scalar indentation")
+            content.append(line.lstrip(" \t"))
+        return "\n".join(content).strip()
+    combined = "\n".join([head, *continuation]).strip()
+    if key == "tools" and combined.startswith("["):
+        return _split_flow_list(combined)
+    if not stripped and continuation:
+        items: list[str] = []
+        for line in continuation:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            match = re.fullmatch(r"[ \t]+-[ \t]+(.+)", line)
+            if not match:
+                raise FrontmatterError(f"unsupported multiline value for {key}")
+            items.append(_scalar(match.group(1)))
+        if key == "tools":
+            return items
+        raise FrontmatterError(f"unsupported list value for {key}")
+    if continuation:
+        raise FrontmatterError(f"unexpected continuation for {key}")
+    return _scalar(head)
+
+
+def _parse_frontmatter(data: bytes) -> tuple[list[str], dict[str, Any], dict[str, tuple[int, int]], int]:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FrontmatterError("file is not valid UTF-8") from exc
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise FrontmatterError("missing opening frontmatter delimiter")
+    closing = next(
+        (i for i, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") in {"---", "..."}),
+        None,
+    )
+    if closing is None:
+        raise FrontmatterError("missing closing frontmatter delimiter")
+
+    fields: dict[str, Any] = {}
+    spans: dict[str, tuple[int, int]] = {}
+    index = 1
+    while index < closing:
+        raw = lines[index].rstrip("\r\n")
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            index += 1
+            continue
+        if raw[0].isspace():
+            raise FrontmatterError(f"unexpected indentation on line {index + 1}")
+        match = _KEY.fullmatch(raw)
+        if not match:
+            raise FrontmatterError(f"unsupported YAML on line {index + 1}")
+        key, head = match.group(1), match.group(2) or ""
+        if key in fields:
+            raise FrontmatterError(f"duplicate key: {key}")
+        end = index + 1
+        if head.strip().startswith("[") and not head.strip().endswith("]"):
+            while end < closing and "]" not in lines[end]:
+                end += 1
+            if end >= closing:
+                raise FrontmatterError(f"unterminated flow list for {key}")
+            end += 1
+        else:
+            while end < closing:
+                candidate = lines[end].rstrip("\r\n")
+                if candidate and not candidate[0].isspace():
+                    break
+                end += 1
+        continuation = [line.rstrip("\r\n") for line in lines[index + 1 : end]]
+        fields[key] = _parse_value(key, head, continuation)
+        spans[key] = (index, end)
+        index = end
+    return lines, fields, spans, closing
+
+
+def _validate(data: bytes, models: set[str]) -> tuple[list[dict[str, str]], tuple[Any, ...] | None]:
+    try:
+        parsed = _parse_frontmatter(data)
+    except FrontmatterError as exc:
+        return [{"field": "frontmatter", "code": "malformed", "message": str(exc)}], None
+    _, fields, _, _ = parsed
+    issues: list[dict[str, str]] = []
+    for key in ("name", "description"):
+        value = fields.get(key)
+        if not isinstance(value, str) or not value.strip():
+            issues.append({"field": key, "code": "missing", "message": f"{key} is required"})
+    model = fields.get("model")
+    if model is None:
+        issues.append({"field": "model", "code": "missing_inherited", "message": "model inherits implicitly"})
+    elif not isinstance(model, str) or model not in models:
+        issues.append({"field": "model", "code": "unknown", "message": f"unknown model: {model}"})
+    tools = fields.get("tools")
+    if tools is None:
+        issues.append({"field": "tools", "code": "missing_inherited", "message": "tools inherit implicitly"})
+    elif isinstance(tools, list):
+        if not tools or any(not isinstance(item, str) or not item for item in tools):
+            issues.append({"field": "tools", "code": "empty", "message": "tools list is empty"})
+    elif tools == "*":
+        pass
+    elif isinstance(tools, str) and tools.lower() == "all tools":
+        issues.append({"field": "tools", "code": "all_tools", "message": "use '*' for all tools"})
+    elif isinstance(tools, str) and not tools.strip():
+        issues.append({"field": "tools", "code": "empty", "message": "tools is empty"})
+    elif isinstance(tools, str) and "," in tools:
+        values = [part.strip() for part in tools.split(",")]
+        code = "comma_separated" if all(values) else "invalid"
+        issues.append({"field": "tools", "code": code, "message": "tools must be a YAML list or '*'"})
+    else:
+        issues.append({"field": "tools", "code": "invalid", "message": "tools must be a YAML list or '*'"})
+    return issues, parsed
+
+
+def inspect_file(path: str | Path, models: set[str] | None = None) -> dict[str, Any]:
+    """Inspect one definition without modifying it."""
+    source = Path(path)
+    try:
+        data = source.read_bytes()
+    except OSError as exc:
+        return {
+            "path": str(source),
+            "status": "error",
+            "issues": [{"field": "file", "code": "io", "message": str(exc)}],
+        }
+    issues, _ = _validate(data, set(models or DEFAULT_MODELS))
+    safe_codes = {"missing_inherited", "all_tools", "empty", "comma_separated"}
+    errors = [item for item in issues if item["code"] not in safe_codes]
+    unsafe_tools = any(item["code"] in {"all_tools", "empty", "comma_separated"} for item in issues)
+    status = "error" if errors else ("repairable" if unsafe_tools else ("normalizable" if issues else "ok"))
+    return {"path": str(source), "status": status, "issues": issues, "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _replacement_lines(fields: dict[str, Any], spans: dict[str, tuple[int, int]], newline: str) -> dict[str, list[str]]:
+    replacements: dict[str, list[str]] = {}
+    if "model" not in fields:
+        replacements["model"] = [f"model: inherit{newline}"]
+    tools = fields.get("tools")
+    if "tools" not in fields or tools == "" or tools == [] or (isinstance(tools, str) and tools.lower() == "all tools"):
+        replacements["tools"] = [f"tools: '*'{newline}"]
+    elif isinstance(tools, str) and "," in tools:
+        values = [part.strip() for part in tools.split(",")]
+        if all(values):
+            replacements["tools"] = ["tools: [" + ", ".join(json.dumps(value) for value in values) + f"]{newline}"]
+    return replacements
+
+
+def _backup_and_replace(path: Path, data: bytes) -> str:
+    target = path.resolve(strict=True) if path.is_symlink() else path
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    suffix = 0
+    while True:
+        backup = target.with_name(target.name + ".bak" + (f".{suffix}" if suffix else ""))
+        try:
+            with backup.open("xb") as handle:
+                handle.write(target.read_bytes())
+            os.chmod(backup, original_mode)
+            break
+        except FileExistsError:
+            suffix += 1
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, original_mode)
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(backup)
+
+
+def repair_file(path: str | Path, models: set[str] | None = None) -> dict[str, Any]:
+    """Repair only known-safe model/tools forms, after creating a backup."""
+    source = Path(path)
+    try:
+        original = source.read_bytes()
+    except OSError:
+        return inspect_file(source, models)
+    issues, parsed = _validate(original, set(models or DEFAULT_MODELS))
+    safe_codes = {"missing_inherited", "all_tools", "empty", "comma_separated"}
+    blocking = [item for item in issues if item["code"] not in safe_codes]
+    result = inspect_file(source, models)
+    if blocking or parsed is None:
+        return result
+    lines, fields, spans, closing = parsed
+    newline = "\r\n" if any(line.endswith("\r\n") for line in lines[: closing + 1]) else "\n"
+    replacements = _replacement_lines(fields, spans, newline)
+    if not replacements:
+        return result
+    # Insertions use the original delimiter index.  Do them before replacing
+    # variable-height spans so the inserted lines move with the delimiter.
+    missing = [key for key in ("model", "tools") if key in replacements and key not in spans]
+    for key in missing:
+        lines.insert(closing, replacements[key][0])
+        closing += 1
+    for key in sorted((key for key in replacements if key in spans), key=lambda item: spans[item][0], reverse=True):
+        start, end = spans[key]
+        lines[start:end] = replacements[key]
+    updated = "".join(lines).encode("utf-8")
+    try:
+        backup = _backup_and_replace(source, updated)
+    except OSError as exc:
+        result["status"] = "error"
+        result["issues"] = [{"field": "file", "code": "io", "message": str(exc)}]
+        return result
+    final = inspect_file(source, models)
+    final.update({"repaired": True, "backup": backup})
+    return final
+
+
+def _catalog(path: str | Path | None) -> tuple[set[str], str]:
+    models = set(DEFAULT_MODELS)
+    if path is None:
+        return models, hashlib.sha256(b"builtin").hexdigest()
+    data = Path(path).read_bytes()
+    decoded = json.loads(data)
+    if isinstance(decoded, list):
+        entries = decoded
+    elif isinstance(decoded, dict) and isinstance(decoded.get("models"), list):
+        entries = decoded["models"]
+    else:
+        raise ValueError("models catalog must be a JSON list or an object with a models list")
+    for entry in entries:
+        model_id = entry.get("id") if isinstance(entry, dict) else entry
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError("each catalog model must be a string or an object with a string id")
+        models.add(model_id)
+    return models, hashlib.sha256(data).hexdigest()
+
+
+def _definition_paths(cwd: Path, user_root: Path) -> list[Path]:
+    paths: dict[str, Path] = {}
+    project_directories: list[Path] = []
+    for candidate in (cwd, *cwd.parents):
+        project_directories.append(candidate / ".claude" / "agents")
+        if (candidate / ".git").exists():
+            break
+    else:
+        project_directories = [cwd / ".claude" / "agents"]
+    for directory in (user_root / ".claude" / "agents", *project_directories):
+        if directory.is_dir():
+            for path in directory.glob("*.md"):
+                paths[str(path.absolute())] = path
+    return [paths[key] for key in sorted(paths)]
+
+
+def _file_identity(
+    paths: list[Path], working: Path, home: Path, catalog_hash: str
+) -> tuple[str, list[list[str]]]:
+    file_hashes: list[list[str]] = []
+    for path in paths:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            digest = f"error:{exc}"
+        file_hashes.append([str(path.absolute()), digest])
+    identity = {
+        "version": VERSION,
+        "cwd": str(working),
+        "user_root": str(home),
+        "catalog": catalog_hash,
+        "files": file_hashes,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(), file_hashes
+
+
+def _write_cache(cache_path: Path, payload: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{cache_path.name}.", dir=cache_path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, cache_path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def run_check(
+    *,
+    cwd: str | Path | None = None,
+    user_root: str | Path | None = None,
+    repair: bool = False,
+    models_file: str | Path | None = None,
+    state_dir: str | Path | None = None,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    """Inspect both definition roots and optionally repair known-safe issues."""
+    working = Path(cwd or Path.cwd()).resolve()
+    home = Path(user_root or Path.home()).resolve()
+    models, catalog_hash = _catalog(models_file)
+    paths = _definition_paths(working, home)
+    cache_key, _ = _file_identity(paths, working, home, catalog_hash)
+    configured_state = state_dir or os.environ.get(STATE_ENV)
+    cache_root = Path(configured_state) if configured_state else Path.home() / ".agent-lb"
+    cache_path = cache_root / "agent-defs-doctor-state.json"
+    if use_cache:
+        try:
+            cached = json.loads(cache_path.read_text())
+            repair_eligible = not repair or cached.get("repair_clean") is True
+            if cached.get("key") == cache_key and repair_eligible:
+                result = cached["result"]
+                result["cached"] = True
+                return result
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            pass
+    files = [(repair_file(path, models) if repair else inspect_file(path, models)) for path in paths]
+    errors = sum(item["status"] == "error" for item in files)
+    repairs = sum(bool(item.get("repaired")) for item in files)
+    unresolved = sum(item["status"] in {"error", "repairable"} for item in files)
+    result = {
+        "version": VERSION,
+        "cached": False,
+        "files": files,
+        "summary": {
+            "checked": len(files),
+            "repaired": repairs,
+            "errors": errors,
+            "unresolved": unresolved,
+        },
+    }
+    if use_cache:
+        try:
+            if repair:
+                final_key, _ = _file_identity(paths, working, home, catalog_hash)
+                repair_clean = unresolved == 0 and all(item["status"] == "ok" for item in files)
+                if repair_clean:
+                    cached_result = json.loads(json.dumps(result))
+                    cached_result["summary"]["repaired"] = 0
+                    for item in cached_result["files"]:
+                        item.pop("repaired", None)
+                        item.pop("backup", None)
+                    _write_cache(
+                        cache_path,
+                        {"key": final_key, "repair_clean": True, "result": cached_result},
+                    )
+            else:
+                repair_clean = all(item["status"] == "ok" for item in files)
+                _write_cache(
+                    cache_path,
+                    {"key": cache_key, "repair_clean": repair_clean, "result": result},
+                )
+        except OSError:
+            pass
+    return result
+
+
+def _print_table(result: dict[str, Any]) -> None:
+    print(f"{'STATUS':10} {'PATH':45} DETAILS")
+    for item in result["files"]:
+        details = "; ".join(issue["message"] for issue in item["issues"]) or "valid"
+        print(f"{item['status']:10} {item['path']:45} {details}")
+    summary = result["summary"]
+    print(
+        f"checked={summary['checked']} repaired={summary['repaired']} "
+        f"errors={summary['errors']} unresolved={summary['unresolved']}"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repair", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--models-file")
+    parser.add_argument("--state-dir")
+    parser.add_argument("--cwd")
+    parser.add_argument("--user-root")
+    args = parser.parse_args(argv)
+    try:
+        result = run_check(
+            cwd=args.cwd,
+            user_root=args.user_root,
+            repair=args.repair,
+            models_file=args.models_file,
+            state_dir=args.state_dir,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"agent-defs-doctor: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.quiet:
+        summary = result["summary"]
+        if summary["repaired"] or summary["errors"] or summary["unresolved"]:
+            print(
+                f"agent-defs-doctor: repaired={summary['repaired']} "
+                f"errors={summary['errors']} unresolved={summary['unresolved']}"
+            )
+    else:
+        _print_table(result)
+    return 1 if result["summary"]["unresolved"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

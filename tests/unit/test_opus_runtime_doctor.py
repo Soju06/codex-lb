@@ -230,6 +230,7 @@ def test_transient_definition_failure_heals_on_single_retry(monkeypatch: pytest.
 def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     doctor = load_script("opus-runtime-doctor")
     monkeypatch.setenv("CLAUDE_LB_DOCTOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(doctor, "raise_fd_soft_limit", lambda: 8192)
 
     class Process:
         pid = 43210
@@ -240,7 +241,10 @@ def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch
             self.calls += 1
             if self.calls == 1:
                 raise subprocess.TimeoutExpired("probe", timeout)
-            return "", ""
+            return (
+                _event(type="system", subtype="init", model="claude-fable-5-1", session_id="safe-session") + "\n",
+                "Operation not permitted; secret details omitted",
+            )
 
     process = Process()
     killed: list[tuple[int, int]] = []
@@ -250,6 +254,98 @@ def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch
     outcome = doctor.run_probe()
     assert outcome.error_class == "timeout"
     assert killed == [(process.pid, doctor.signal.SIGKILL)]
+    assert outcome.evidence == {
+        "event_count": 1,
+        "malformed_lines": 0,
+        "init_model": "claude-fable-5-1",
+        "session_id": "safe-session",
+        "last_event_type": "system",
+        "last_event_subtype": "init",
+        "terminal_subtype": None,
+        "parent_models": [],
+        "child_models": [],
+        "stderr_tags": ["operation_not_permitted"],
+        "fd_soft_limit": 8192,
+    }
+
+
+def test_stream_diagnostics_sanitizes_models_and_classifies_stderr() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    stdout = "\n".join(
+        [
+            _event(type="system", subtype="init", model="claude-fable-5-1[1m]", session_id="session-1"),
+            _event(type="assistant", message={"model": "claude-opus-5", "content": []}),
+            _event(
+                type="assistant",
+                message={"model": "unsafe model with spaces SECRET", "content": []},
+                parent_tool_use_id="agent-1",
+            ),
+            _event(type="assistant", message={"model": "claude-opus-5", "content": []}, parent_tool_use_id="agent-1"),
+            _event(type="result", subtype="error", is_error=True),
+        ]
+    )
+    evidence = doctor.stream_diagnostics(stdout, "Unauthorized keychain rate limit connection refused SECRET")
+
+    assert evidence["init_model"] == "claude-fable-5-1[1m]"
+    assert evidence["session_id"] == "session-1"
+    assert evidence["parent_models"] == ["claude-opus-5"]
+    assert evidence["child_models"] == ["claude-opus-5"]
+    assert evidence["terminal_subtype"] == "error"
+    assert evidence["stderr_tags"] == ["auth", "keychain", "connection", "rate_limit"]
+    assert "SECRET" not in json.dumps(evidence)
+
+
+def test_stream_diagnostics_rejects_unsafe_metadata_and_ignores_benign_oauth() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    evidence = doctor.stream_diagnostics(
+        _event(type="unsafe type SECRET", subtype="unsafe subtype", session_id="unsafe session SECRET"),
+        "OAuth/Max route selected",
+    )
+    assert evidence["last_event_type"] is None
+    assert evidence["last_event_subtype"] is None
+    assert evidence["session_id"] is None
+    assert evidence["stderr_tags"] == ["none"]
+
+
+def test_raise_fd_soft_limit_increases_without_lowering(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    limits = [(256, 100_000), (8192, 100_000)]
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: limits.pop(0))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+
+    assert doctor.raise_fd_soft_limit() == 8192
+    assert changes == [(8192, 100_000)]
+
+
+def test_raise_fd_soft_limit_never_reduces_and_tolerates_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: (16_384, 100_000))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+    assert doctor.raise_fd_soft_limit() == 16_384
+    assert changes == []
+
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: (256, 100_000))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: (_ for _ in ()).throw(OSError("denied")))
+    assert doctor.raise_fd_soft_limit() == 256
+
+
+def test_raise_fd_soft_limit_handles_infinite_hard_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    doctor = load_script("opus-runtime-doctor")
+    limits = [(256, doctor.resource.RLIM_INFINITY), (8192, doctor.resource.RLIM_INFINITY)]
+    changes: list[tuple[int, int]] = []
+    monkeypatch.setattr(doctor.resource, "getrlimit", lambda which: limits.pop(0))
+    monkeypatch.setattr(doctor.resource, "setrlimit", lambda which, value: changes.append(value))
+
+    assert doctor.raise_fd_soft_limit() == 8192
+    assert changes == [(8192, doctor.resource.RLIM_INFINITY)]
+
+
+def test_probe_command_disables_slash_commands() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    command = doctor._probe_command(Path("/safe/fable"), "safe prompt", "session")
+    assert "--disable-slash-commands" in command
 
 
 def test_schedule_claims_before_detach_and_gates_six_hours(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

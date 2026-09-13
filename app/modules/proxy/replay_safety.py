@@ -130,6 +130,12 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 # ratchet is full.
 RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+# How the owner account recorded an item rather than what was said in it, and
+# the wire admits a restatement carrying neither, so neither may decide whether
+# one input restates another.
+_RESTATED_ITEM_BOOKKEEPING_FIELDS = frozenset({_ANNOTATIONS_FIELD, "status"})
+# Cannot collide with a comparison key: every key is JSON text.
+_OVERLAP_SENTINEL = "\x00"
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
 _ATTEMPT_START_EVENT_TYPE = "response.created"
@@ -1120,22 +1126,23 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     fetched the chain. Anything the rebuild cannot prove returns ``None``,
     leaving the caller on the owner-bound behaviour it has without a transcript.
 
-    Every input is folded in by ``_join_relocated_input``, the chain's stored
-    requests and the client's current turn alike, which is what makes a turn
-    that restated the conversation harmless: it replaces what it restates
-    instead of repeating it.
+    Every stored request is folded in by ``_join_relocated_input``, the chain's
+    and the client's alike, which is what makes a turn that restated the
+    conversation harmless: it replaces what it restates instead of repeating it.
+    A turn's answer is appended whole, because an answer restates nothing.
     """
 
     anchor = cast(str, anchor_response_id) if _is_nonblank_string(anchor_response_id) else None
     chain = transcript if anchor is not None else ()
     current_input = current_payload.get("input")
-    # A scalar input is the new prompt by itself, and there is no way to put
-    # turns in front of a string. With nothing to prepend it is the whole
-    # request and passes through as the client wrote it.
+    # A scalar input is the new prompt by itself and there is no way to put turns
+    # in front of a string, so an anchored turn has to send items. With nothing
+    # to prepend it passes through as the client wrote it, rather than being
+    # lifted into a message item the way a chain turn's stored scalar is.
     if len(chain) > max_turns or (chain and not (isinstance(current_input, list) and current_input)):
         return None
 
-    rebuilt_input: list[JsonValue] = []
+    rebuilt = _RelocationAccumulation(items=[], keys=[])
     remaining_bytes = max_bytes
     expected_parent_response_id: str | None = None
     linked_response_ids: set[str] = set()
@@ -1178,8 +1185,12 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         replayable_answer = _account_neutral_replay_items(terminal_output)
         if not replayable_input or not replayable_answer:
             return None
-        _join_relocated_input(rebuilt_input, replayable_input)
-        rebuilt_input.extend(replayable_answer)
+        _join_relocated_input(rebuilt, replayable_input)
+        # The join belongs to stored requests. An answer is what its turn
+        # produced, so one that reads like the accumulated tail is a coincidence,
+        # and shortening on it deletes a turn the conversation already holds.
+        rebuilt.items.extend(replayable_answer)
+        rebuilt.keys.extend(_relocation_comparison_key(item) for item in replayable_answer)
     if expected_parent_response_id != anchor:
         return None
 
@@ -1191,15 +1202,36 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         # just wrote: it drops reasoning and settled search bookkeeping
         # outright, and an item it drops is a message that never reaches the
         # replacement account while the verdict still reports the turn as moved.
-        carries_durable_items = _join_relocated_input(rebuilt_input, cast(list[JsonValue], current_input)) > 0
-        replay_payload["input"] = cast(JsonValue, rebuilt_input)
+        carries_durable_items = _join_relocated_input(rebuilt, cast(list[JsonValue], current_input)) > 0
+        replay_payload["input"] = cast(JsonValue, rebuilt.items)
+    dispatched_input = replay_payload.get("input")
+    # A body with nothing to send is not a turn another account can serve, and
+    # calling it movable spends a relocation attempt -- on the ambiguous lane the
+    # one-shot budget, which cannot be refilled -- on a dispatch that can only
+    # come back as an invalid request.
+    if not dispatched_input or (isinstance(dispatched_input, str) and not dispatched_input.strip()):
+        return None
     # Anything account-owned that survived projection still fails closed here.
     if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
         return None
     return RelocatedReplayBody(payload=replay_payload, carries_durable_items=carries_durable_items)
 
 
-def _join_relocated_input(accumulated: list[JsonValue], input_items: list[JsonValue]) -> int:
+@dataclass(slots=True)
+class _RelocationAccumulation:
+    """The conversation rebuilt so far, beside the key each of its items is compared on.
+
+    The keys travel with the items so each is canonicalized once: the caps bound
+    turns and bytes, not items, so a chain legal under both can carry six figures
+    of them, and re-deriving a key per comparison would put minutes of blocking
+    work inside a failover path that exists to be faster than losing the thread.
+    """
+
+    items: list[JsonValue]
+    keys: list[str]
+
+
+def _join_relocated_input(accumulated: _RelocationAccumulation, input_items: list[JsonValue]) -> int:
     """Fold one input into the conversation rebuilt so far; return what survived of the chain.
 
     The chain is this proxy's own reconstruction of turns the client is not
@@ -1214,29 +1246,79 @@ def _join_relocated_input(accumulated: list[JsonValue], input_items: list[JsonVa
     meant: a client re-sending its last exchange plus a new turn is
     byte-identical to one whose conversation genuinely began at that exchange,
     and both readings come out of here as the same conversation.
+
+    The overlap is measured on comparison keys while the dispatch carries
+    ``input_items`` themselves: normalizing to decide what was restated and
+    normalizing a body are different acts, and only the first is this one's.
     """
 
-    overlap = _tail_overlap_length(accumulated, input_items)
-    del accumulated[len(accumulated) - overlap :]
-    retained = len(accumulated)
-    accumulated.extend(input_items)
+    incoming_keys = [_relocation_comparison_key(item) for item in input_items]
+    overlap = _tail_overlap_length(accumulated.keys, incoming_keys)
+    del accumulated.items[len(accumulated.items) - overlap :]
+    del accumulated.keys[len(accumulated.keys) - overlap :]
+    retained = len(accumulated.items)
+    accumulated.items.extend(input_items)
+    accumulated.keys.extend(incoming_keys)
     return retained
 
 
-def _tail_overlap_length(accumulated: list[JsonValue], input_items: list[JsonValue]) -> int:
-    """The longest tail of ``accumulated`` that ``input_items`` restates from its start.
+def _relocation_comparison_key(item: JsonValue) -> str:
+    """The form both sides of a join are compared on -- never the form dispatched.
+
+    The chain's items have been through the account-neutral projection and the
+    client's have not, so comparing them as they stand makes the overlap turn on
+    how the owner account recorded an item rather than on what was said in it: an
+    assistant message restated without its ``status``, which the wire allows,
+    reads as a different item and doubles the whole conversation. Erring towards
+    forgiving is deliberate: only the chain's copies are ever discarded, so a key
+    that matches too readily costs at most a chain item the client's own copy
+    stands in for, while one that matches too rarely costs the conversation
+    twice over.
+    """
+
+    projected = _project_account_neutral_replay_item(item, preserve_developer_message_ids=False)
+    return json.dumps(_without_restated_bookkeeping(projected), sort_keys=True, separators=(",", ":"), default=repr)
+
+
+def _without_restated_bookkeeping(value: JsonValue) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {
+            name: _without_restated_bookkeeping(nested)
+            for name, nested in value.items()
+            if name not in _RESTATED_ITEM_BOOKKEEPING_FIELDS
+        }
+    return [_without_restated_bookkeeping(entry) for entry in value] if isinstance(value, list) else value
+
+
+def _tail_overlap_length(accumulated_keys: Sequence[str], incoming_keys: Sequence[str]) -> int:
+    """The longest tail of ``accumulated_keys`` that ``incoming_keys`` restates from its start.
 
     Anchored at both ends deliberately. A match anywhere else is a coincidence
     -- a client whose new message happens to repeat something said earlier -- and
     a coincidence must shorten nothing, because the item it would remove is one
     the user just wrote. The longest match wins so that the boundary lands where
     the restatement actually ends rather than inside it.
+
+    Read off the prefix function of ``incoming + sentinel + accumulated tail``,
+    whose last entry is that longest match by construction, since no border can
+    straddle a sentinel occurring in neither side. Cutting the accumulation to
+    the incoming length first -- no longer overlap can exist -- makes one fold
+    linear in what it was handed and the walk linear in the transcript's items,
+    the bound neither the turn cap nor the byte cap gives because neither counts
+    items.
     """
 
-    for length in range(min(len(accumulated), len(input_items)), 0, -1):
-        if accumulated[len(accumulated) - length :] == input_items[:length]:
-            return length
-    return 0
+    window = min(len(accumulated_keys), len(incoming_keys))
+    scanned = [*incoming_keys[:window], _OVERLAP_SENTINEL, *accumulated_keys[len(accumulated_keys) - window :]]
+    borders = [0] * len(scanned)
+    border = 0
+    for index in range(1, len(scanned)):
+        while border and scanned[index] != scanned[border]:
+            border = borders[border - 1]
+        if scanned[index] == scanned[border]:
+            border += 1
+        borders[index] = border
+    return border
 
 
 def _durable_turn_byte_size(operation: object, events: object) -> int:
@@ -1324,7 +1406,10 @@ def _transcript_turn_input_items(operation: object) -> list[JsonValue] | None:
     turn_input = payload.get("input")
     if isinstance(turn_input, str):
         # A stored scalar input is that turn's whole user message and loses
-        # nothing by taking the item form the rebuilt chain concatenates.
+        # nothing by taking the item form the rebuilt chain concatenates. The
+        # client's own scalar is left alone under the same lossless transform,
+        # because the chain is this proxy's reconstruction and its shape is the
+        # proxy's to choose, while the client's body is dispatched as written.
         message: JsonValue = {
             "type": "message",
             "role": "user",

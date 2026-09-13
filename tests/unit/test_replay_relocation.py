@@ -929,6 +929,128 @@ def test_every_decline_reason_is_in_the_closed_vocabulary() -> None:
     assert reasons == _DECLINE_REASONS
 
 
+def _wire_user(text: str) -> dict[str, JsonValue]:
+    """A user message as the wire carries it, without the ``type`` this file's tidier helper adds."""
+
+    return {"role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _owner_answer(text: str, response_id: str) -> dict[str, JsonValue]:
+    """That turn's answer as the spool holds it, minted by the account that produced it."""
+
+    return {
+        "type": "message",
+        "id": f"msg_{response_id}",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _restated_answer(text: str, *, status: str | None) -> dict[str, JsonValue]:
+    """The same answer as a client sends it back, with or without the status it was recorded under."""
+
+    item: dict[str, JsonValue] = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    return item if status is None else {**item, "status": status}
+
+
+_WIRE_CHAIN = tuple(
+    _Turn(
+        operation=_Operation(
+            request_text=_frame({"model": "gpt-5.4", "input": [_wire_user(f"q{index}")]}),
+            response_id=f"resp_{index}",
+            parent_response_id=None if index == 1 else f"resp_{index - 1}",
+        ),
+        events=(
+            _sse(
+                {
+                    "type": "response.completed",
+                    "response": {"id": f"resp_{index}", "output": [_owner_answer(f"a{index}", f"resp_{index}")]},
+                }
+            ),
+        ),
+    )
+    for index in range(1, 5)
+)
+
+
+def _wire_full_resend(*statuses: str | None) -> list[JsonValue]:
+    """The whole four-turn thread restated, each answer carrying the status named for it."""
+
+    resend: list[JsonValue] = []
+    for index, status in enumerate(statuses, start=1):
+        resend.extend((_wire_user(f"q{index}"), _restated_answer(f"a{index}", status=status)))
+    resend.append(_wire_user("q5"))
+    return resend
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        # The recorded spelling, then the two the wire also allows. All three
+        # name the same four exchanges.
+        ("completed", "completed", "completed", "completed"),
+        (None, None, None, None),
+        ("completed", "completed", "completed", None),
+    ],
+)
+def test_a_legal_field_difference_does_not_double_the_conversation(
+    transport: RelocationTransport,
+    statuses: tuple[str | None, ...],
+) -> None:
+    # ``status`` is how the owner account recorded the answer, not part of it,
+    # and a client restating a turn need not echo it. Comparing the chain's
+    # projected items against the client's verbatim ones makes a restatement
+    # that omits it read as new material, so the chain is kept as well and every
+    # turn is dispatched twice -- on the fenced lane, at the cost of the one
+    # relocation that operation will ever get.
+    resend = _wire_full_resend(*statuses)
+
+    verdict = decide_relocation(
+        RelocationInputs(
+            transport=transport,
+            payload={"model": "gpt-5.4", "input": resend, "previous_response_id": "resp_4"},
+            evidence="definitive",
+            durable_transcript=_WIRE_CHAIN,
+        ),
+    )
+
+    assert verdict.movable is True
+    assert verdict.source == "client_input"
+    assert verdict.body is not None
+    assert verdict.body["input"] == resend
+
+
+@pytest.mark.parametrize("transport", _TRANSPORTS)
+@pytest.mark.parametrize("empty_input", [[], "", "   "])
+def test_a_request_with_nothing_to_send_is_not_relocated(
+    transport: RelocationTransport,
+    empty_input: JsonValue,
+) -> None:
+    # An empty body is account-neutral by every structural reading, so it moves
+    # unless it is refused. The dispatch can only come back as an invalid
+    # request, and on the ambiguous lane it has spent the one-shot budget that
+    # covers this operation for the whole of its retention -- so the recovery the
+    # conversation will actually need is gone before it is asked for.
+    verdict = decide_relocation(
+        _client_input(
+            transport,
+            payload={"model": "gpt-5.4", "input": empty_input},
+            **_AMBIGUITY_CLEARED,
+        ),
+    )
+
+    assert verdict.movable is False
+    assert verdict.decline_reason == "no_account_neutral_body"
+    assert verdict.requires_recovery_fence is False
+    assert verdict.body is None
+
+
 def test_a_relocatable_verdict_never_carries_a_decline_reason() -> None:
     verdict = decide_relocation(_client_input("websocket"))
 

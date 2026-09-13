@@ -10,6 +10,7 @@ import pytest
 
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
+from app.modules.proxy import replay_safety as replay_safety_module
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
@@ -18,6 +19,7 @@ from app.modules.proxy.replay_safety import (
     RELOCATION_TRANSCRIPT_MAX_BYTES,
     RELOCATION_TRANSCRIPT_MAX_TURNS,
     RelocatedReplayBody,
+    _relocation_comparison_key,
     _tail_overlap_length,
     _terminal_response_output_items,
     _transcript_turn_input_items,
@@ -2763,6 +2765,37 @@ def _replayed_assistant_item(text: str, *, phase: str | None = None) -> dict[str
     return {**item, "content": cast(JsonValue, [{"type": "output_text", "text": text}])}
 
 
+def _wire_user_item(text: str) -> dict[str, JsonValue]:
+    """A user message in the shape tests/fixtures/passthrough_request_corpus.json records.
+
+    The wire omits ``type`` on user input and nothing in this proxy adds one, so
+    a chain turn's stored request and a client restating that turn both look
+    like this -- unlike ``_user_item``, which is this file's own tidier form.
+    """
+
+    return {"role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _restated_assistant_item(text: str, *, status: str | None = None) -> dict[str, JsonValue]:
+    """A prior answer as a client restates it, not as this proxy projected it.
+
+    The corpus records the assistant item a client holds carrying the owner's
+    ``id``, the ``annotations`` array and ``reasoning_content``. The strict
+    predicate refuses all three, so a restatement that can relocate at all
+    carries none of them, and ``status`` is the one difference left -- present
+    in what upstream spooled, optional in what the client sends back. Building
+    these rows from the projected form instead is what let a join that read
+    ``status`` as content look correct while doubling every conversation.
+    """
+
+    item: dict[str, JsonValue] = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    return item if status is None else {**item, "status": status}
+
+
 def _reasoning_item(item_id: str) -> dict[str, JsonValue]:
     return {"id": item_id, "type": "reasoning", "summary": []}
 
@@ -3082,6 +3115,30 @@ def test_durable_rebuild_refuses_a_chain_that_returns_to_a_turn_it_already_walke
     assert _rebuild(cycled, [_user_item("third")], anchor_response_id="resp_1") is None
 
 
+def test_durable_rebuild_refuses_a_cycle_that_runs_through_an_intermediate_turn() -> None:
+    # The cycle this rebuild has to survive is not only the one-step kind. Here
+    # the walk goes resp_1 -> resp_2 -> resp_1: no turn is its own parent, every
+    # link is well formed, and the chain still ends where it began, spending the
+    # opening turn twice in the conversation it assembles.
+    cycled = (
+        _transcript_turn([_user_item("first")], [_assistant_item("a", item_id="msg_1")]),
+        _transcript_turn(
+            [_user_item("second")],
+            [_assistant_item("b", item_id="msg_2")],
+            response_id="resp_2",
+            parent_response_id="resp_1",
+        ),
+        _transcript_turn(
+            [_user_item("again")],
+            [_assistant_item("c", item_id="msg_3")],
+            response_id="resp_1",
+            parent_response_id="resp_2",
+        ),
+    )
+
+    assert _rebuild(cycled, [_user_item("third")], anchor_response_id="resp_1") is None
+
+
 def test_durable_rebuild_accepts_a_turn_in_the_shape_the_bridge_actually_spools() -> None:
     # Every part of this is the shape the session bridge stores, not a reduced
     # stand-in: the owner's turn metadata on each item, its minted reasoning,
@@ -3215,9 +3272,16 @@ def test_an_input_that_restates_nothing_is_that_turns_delta(client_turn: list[Js
 
 # --- The join, row by row over the shapes a client actually sends -------------
 #
+# Every row is built from wire shapes -- the user item the corpus records, the
+# assistant item the bridge spools, and the restatement a client sends back --
+# rather than from the proxy's own post-projection normal form. A table written
+# in that normal form only ever proves the join works on input already shaped
+# like the chain, which is the one case where a comparison that reads recording
+# bookkeeping as content still looks correct.
+#
 # Each row dispatches ``expected_chain_prefix + client_input``: what the walk
 # accumulated, minus the tail the client is restating, then every item the
-# client sent, verbatim and last. The two invariants are asserted for every row
+# client sent, verbatim and last. The invariants are asserted for every row
 # rather than per row, because the rows that look harmless are exactly the ones
 # a boundary rule deletes a message from.
 
@@ -3240,7 +3304,7 @@ def _four_turn_chain(*opening_items: JsonValue) -> tuple[object, ...]:
 
     return tuple(
         _transcript_turn(
-            [*(opening_items if index == 1 else ()), _user_item(f"q{index}")],
+            [*(opening_items if index == 1 else ()), _wire_user_item(f"q{index}")],
             [_assistant_item(f"a{index}", item_id=f"msg_{index}")],
             response_id=f"resp_{index}",
             parent_response_id=None if index == 1 else f"resp_{index - 1}",
@@ -3254,50 +3318,87 @@ def _four_turn_accumulation(*opening_items: JsonValue) -> list[JsonValue]:
 
     accumulated: list[JsonValue] = list(opening_items)
     for index in range(1, 5):
-        accumulated.extend((_user_item(f"q{index}"), _replayed_assistant_item(f"a{index}")))
+        accumulated.extend((_wire_user_item(f"q{index}"), _replayed_assistant_item(f"a{index}")))
     return accumulated
+
+
+def _restated_exchange(index: int) -> list[JsonValue]:
+    """One exchange as the client sends it back: the question, then the answer without its ``status``."""
+
+    return [_wire_user_item(f"q{index}"), _restated_assistant_item(f"a{index}")]
 
 
 _CHAIN = _four_turn_chain()
 _ACCUMULATED = _four_turn_accumulation()
 _DEVELOPER_LED_CHAIN = _four_turn_chain(_DEVELOPER_INSTRUCTION)
 _DEVELOPER_LED_ACCUMULATION = _four_turn_accumulation(_DEVELOPER_INSTRUCTION)
+_RESTATED_THREAD = [item for index in range(1, 5) for item in _restated_exchange(index)]
 
-_JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue]]] = [
+_JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue], list[JsonValue]]] = [
     (
         "plain delta",
         _CHAIN,
-        [_user_item("q5")],
+        _ACCUMULATED,
+        [_wire_user_item("q5")],
         _ACCUMULATED,
     ),
     (
         "rolling window of one exchange",
         _CHAIN,
-        [_user_item("q4"), _replayed_assistant_item("a4"), _user_item("q5")],
+        _ACCUMULATED,
+        [*_restated_exchange(4), _wire_user_item("q5")],
         _ACCUMULATED[:6],
     ),
     (
         "rolling window of two exchanges",
         _CHAIN,
-        [
-            _user_item("q3"),
-            _replayed_assistant_item("a3"),
-            _user_item("q4"),
-            _replayed_assistant_item("a4"),
-            _user_item("q5"),
-        ],
+        _ACCUMULATED,
+        [*_restated_exchange(3), *_restated_exchange(4), _wire_user_item("q5")],
         _ACCUMULATED[:4],
+    ),
+    (
+        # The same window, restated with the ``status`` the spool carries. Both
+        # spellings are legal on the wire and both name the same exchange.
+        "rolling window restated with the recorded status",
+        _CHAIN,
+        _ACCUMULATED,
+        [
+            _wire_user_item("q4"),
+            _restated_assistant_item("a4", status="completed"),
+            _wire_user_item("q5"),
+        ],
+        _ACCUMULATED[:6],
     ),
     (
         "full resend",
         _CHAIN,
-        [*_ACCUMULATED, _user_item("q5")],
+        _ACCUMULATED,
+        [*_RESTATED_THREAD, _wire_user_item("q5")],
         [],
     ),
     (
         "developer-instruction-led full resend",
         _DEVELOPER_LED_CHAIN,
-        [*_DEVELOPER_LED_ACCUMULATION, _user_item("q5")],
+        _DEVELOPER_LED_ACCUMULATION,
+        [_DEVELOPER_INSTRUCTION, *_RESTATED_THREAD, _wire_user_item("q5")],
+        [],
+    ),
+    (
+        # No new question at the end: the client restated the last exchange and
+        # stopped, which is what a "carry on from here" turn looks like. Every
+        # other row ends on a fresh message, and a join that mishandles the final
+        # item survives all of them.
+        "restatement that ends the conversation",
+        _CHAIN,
+        _ACCUMULATED,
+        _restated_exchange(4),
+        _ACCUMULATED[:6],
+    ),
+    (
+        "full resend that ends the conversation",
+        _CHAIN,
+        _ACCUMULATED,
+        list(_RESTATED_THREAD),
         [],
     ),
     (
@@ -3306,13 +3407,15 @@ _JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue
         # accumulated tail, so neither shortens the chain.
         "tool-only history",
         _CHAIN,
-        [_user_item("q1"), _FRESH_TOOL_CALL, _FRESH_TOOL_OUTPUT, _user_item("q5")],
+        _ACCUMULATED,
+        [_wire_user_item("q1"), _FRESH_TOOL_CALL, _FRESH_TOOL_OUTPUT, _wire_user_item("q5")],
         _ACCUMULATED,
     ),
     (
         "window from the middle of the chain",
         _CHAIN,
-        [_user_item("q2"), _replayed_assistant_item("a2"), _user_item("q4")],
+        _ACCUMULATED,
+        [*_restated_exchange(2), _wire_user_item("q4")],
         _ACCUMULATED,
     ),
     (
@@ -3320,10 +3423,30 @@ _JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue
         # being equal is not a turn arriving twice: both copies are dispatched.
         "coincidental opening item",
         _CHAIN,
-        [_user_item("q1"), _replayed_assistant_item("a5"), _user_item("q5")],
+        _ACCUMULATED,
+        [_wire_user_item("q1"), _restated_assistant_item("a5"), _wire_user_item("q5")],
         _ACCUMULATED,
     ),
 ]
+
+
+def _restated_tail_length(accumulated: Sequence[JsonValue], client_input: Sequence[JsonValue]) -> int:
+    """The rule stated as a search: the longest tail of the chain the client restates.
+
+    Deliberately the slow reading of the requirement, so the fast one in the
+    module is checked against the rule rather than against itself.
+    """
+
+    chain_keys = [_relocation_comparison_key(item) for item in accumulated]
+    client_keys = [_relocation_comparison_key(item) for item in client_input]
+    return next(
+        (
+            length
+            for length in range(min(len(chain_keys), len(client_keys)), 0, -1)
+            if chain_keys[len(chain_keys) - length :] == client_keys[:length]
+        ),
+        0,
+    )
 
 
 def test_the_overlap_is_the_longest_restated_tail_not_the_shortest() -> None:
@@ -3331,31 +3454,46 @@ def test_the_overlap_is_the_longest_restated_tail_not_the_shortest() -> None:
     # one-item match exists as well as the three-item one. Stopping at the short
     # match leaves the first two of those three items behind and dispatches
     # them again in front of the input that restated them.
-    accumulated: list[JsonValue] = [_user_item("a"), _replayed_assistant_item("b"), _user_item("a")]
-    incoming: list[JsonValue] = [*accumulated, _user_item("c")]
+    accumulated: list[JsonValue] = [_wire_user_item("a"), _replayed_assistant_item("b"), _wire_user_item("a")]
+    incoming: list[JsonValue] = [*accumulated, _wire_user_item("c")]
 
-    assert _tail_overlap_length(accumulated, incoming) == 3
+    assert _tail_overlap_length(*_keys_of(accumulated, incoming)) == 3
 
 
-def _assert_join_invariants(dispatched: list[JsonValue], *, client_input: list[JsonValue]) -> None:
-    """No item the client sent is absent from the body; no turn is in it twice."""
+def _keys_of(*item_lists: Sequence[JsonValue]) -> list[list[str]]:
+    return [[_relocation_comparison_key(item) for item in items] for items in item_lists]
+
+
+def _assert_join_invariants(
+    dispatched: list[JsonValue],
+    *,
+    accumulated: Sequence[JsonValue],
+    client_input: Sequence[JsonValue],
+) -> None:
+    """Every client item is the body's final contiguous slice; the join left no turn in it twice.
+
+    "No turn twice" cannot be spelled as "the retained chain shares no tail with
+    the client's input": a chain ending ``[x, x]`` against an input opening
+    ``[x, y]`` legitimately retains one ``x``, and a helper that forbids it
+    rejects a correct join. What the requirement actually asks is that the join
+    shortens the chain by the whole of what the client restated and by nothing
+    else, so that is what is asserted.
+    """
 
     boundary = len(dispatched) - len(client_input)
-    assert dispatched[boundary:] == client_input
-    retained = dispatched[:boundary]
-    assert all(
-        retained[len(retained) - length :] != client_input[:length]
-        for length in range(1, min(len(retained), len(client_input)) + 1)
-    )
+    assert dispatched[boundary:] == list(client_input)
+    assert dispatched[:boundary] == list(accumulated[:boundary])
+    assert boundary == len(accumulated) - _restated_tail_length(accumulated, client_input)
 
 
 @pytest.mark.parametrize(
-    ("transcript", "client_input", "expected_chain_prefix"),
+    ("transcript", "accumulated", "client_input", "expected_chain_prefix"),
     [row[1:] for row in _JOIN_TABLE],
     ids=[row[0] for row in _JOIN_TABLE],
 )
 def test_the_join_drops_the_restated_tail_from_the_chain_and_keeps_the_clients_turn_whole(
     transcript: tuple[object, ...],
+    accumulated: list[JsonValue],
     client_input: list[JsonValue],
     expected_chain_prefix: list[JsonValue],
 ) -> None:
@@ -3364,7 +3502,7 @@ def test_the_join_drops_the_restated_tail_from_the_chain_and_keeps_the_clients_t
     assert rebuilt is not None
     dispatched = cast(list[JsonValue], rebuilt["input"])
     assert dispatched == [*expected_chain_prefix, *client_input]
-    _assert_join_invariants(dispatched, client_input=client_input)
+    _assert_join_invariants(dispatched, accumulated=accumulated, client_input=client_input)
 
 
 def test_a_full_resend_leaves_the_chain_with_nothing_to_contribute() -> None:
@@ -3460,19 +3598,19 @@ def test_a_chain_turn_that_restated_the_conversation_replaces_what_it_restates()
     )
 
     client_turn = [_user_item("third")]
-    rebuilt = _rebuild(transcript, client_turn)
-
-    assert rebuilt is not None
-    dispatched = cast(list[JsonValue], rebuilt["input"])
-    assert dispatched == [
+    accumulated: list[JsonValue] = [
         _user_item("first"),
         _replayed_assistant_item("answer"),
         _user_item("second"),
         _replayed_assistant_item("second answer"),
-        *client_turn,
     ]
+    rebuilt = _rebuild(transcript, client_turn)
+
+    assert rebuilt is not None
+    dispatched = cast(list[JsonValue], rebuilt["input"])
+    assert dispatched == [*accumulated, *client_turn]
     assert dispatched.count(_user_item("first")) == 1
-    _assert_join_invariants(dispatched, client_input=client_turn)
+    _assert_join_invariants(dispatched, accumulated=accumulated, client_input=client_turn)
 
 
 def test_durable_rebuild_keeps_a_repeated_message_the_chain_already_holds() -> None:
@@ -3804,6 +3942,51 @@ def test_a_turn_whose_events_are_not_a_sequence_of_frames_settles_nothing(unread
         )
         is None
     )
+
+
+def test_only_the_item_done_frame_contributes_an_item_to_the_accumulator() -> None:
+    # ``response.output_item.added`` carries the same ``item`` key and announces
+    # a skeleton the model has not written yet; the ``.done`` frame that follows
+    # carries the finished one. Accumulating on the presence of ``item`` rather
+    # than on the frame's own type puts both in the answer, so every item in
+    # every turn arrives twice -- once empty.
+    added = {"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress", "content": []}
+    events = (
+        _sse_block({"type": "response.output_item.added", "item": cast(JsonValue, added)}),
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("answer", item_id="msg_1")}),
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) == [_assistant_item("answer", item_id="msg_1")]
+
+
+def test_a_frame_with_no_readable_payload_is_skipped_rather_than_failing_the_turn() -> None:
+    # A spool holds whatever crossed the wire, and comment keepalives and the
+    # ``[DONE]`` sentinel both decode to nothing. Failing the turn on one refuses
+    # a rebuild the material fully supports, on the turns most likely to have
+    # needed a keepalive: the slow ones.
+    events = (
+        ": keepalive\n\n",
+        _sse_block({"type": "response.output_item.done", "item": _assistant_item("answer", item_id="msg_1")}),
+        "data: [DONE]\n\n",
+        _sse_block({"type": "response.completed", "response": {"id": "resp_1"}}),
+    )
+
+    assert _terminal_response_output_items(events) == [_assistant_item("answer", item_id="msg_1")]
+    rebuilt = _rebuild(
+        (
+            _TranscriptTurn(
+                operation=_TranscriptOperation(
+                    request_text=_request_frame({"model": "gpt-5.4", "input": [_user_item("first")]}),
+                ),
+                events=events,
+            ),
+        ),
+        [_user_item("second")],
+    )
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
 
 def test_a_malformed_item_frame_does_not_become_a_rebuilt_item() -> None:
@@ -4322,3 +4505,219 @@ def test_durable_rebuild_admits_material_inside_an_explicit_byte_cap() -> None:
     turn_bytes = len(turn.operation.request_text or "") + sum(len(event) for event in turn.events)
 
     assert _rebuild(transcript, [_user_item("next")], max_bytes=turn_bytes) is not None
+
+
+def test_durable_rebuild_refuses_material_one_byte_past_the_cap() -> None:
+    # The exact-fit case above and this one are the pair that pin the boundary:
+    # with only the first, a bound that admits one byte too many reads as
+    # correct, and a transcript is admitted at every cap the proxy sets.
+    transcript = _chain_of_turns(1)
+    turn = cast(_TranscriptTurn, transcript[0])
+    turn_bytes = len(turn.operation.request_text or "") + sum(len(event) for event in turn.events)
+
+    assert _rebuild(transcript, [_user_item("next")], max_bytes=turn_bytes - 1) is None
+
+
+def _utf8_turn(prompt: str, answer: str) -> _TranscriptTurn:
+    """A turn spooled the way upstream writes it: UTF-8 on the wire, not ``\\u`` escapes."""
+
+    return _TranscriptTurn(
+        operation=_TranscriptOperation(
+            request_text=json.dumps(
+                {"type": "response.create", "model": "gpt-5.4", "input": [_user_item(prompt)]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        ),
+        events=(
+            "event: response.completed\ndata: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_1", "output": [_assistant_item(answer, item_id="msg_1")]},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "answer"),
+    [
+        # One side non-ASCII at a time: with both, a bound that counts the
+        # request in characters and the spool in bytes still refuses, and the
+        # half that is wrong goes unseen.
+        ("처음 질문입니다", "answer"),
+        ("first question", "첫 번째 답변입니다"),
+    ],
+)
+def test_the_byte_bound_counts_the_bytes_the_spool_holds_not_the_characters(prompt: str, answer: str) -> None:
+    # A cap measured in characters is the cap it claims to be only for ASCII. A
+    # Korean or Japanese thread is three bytes per character, so the same
+    # transcript passes a bound it exceeds threefold -- and the 8 MiB ceiling
+    # that keeps a rebuild off the event loop becomes 24 MiB for the
+    # conversations most likely to be long.
+    transcript = (_utf8_turn(prompt, answer),)
+    stored = cast(_TranscriptTurn, transcript[0])
+    material = [stored.operation.request_text or "", *stored.events]
+    characters = sum(len(text) for text in material)
+    stored_bytes = sum(len(text.encode("utf-8")) for text in material)
+
+    assert characters < stored_bytes
+    assert _rebuild(transcript, [_user_item("next")], max_bytes=characters) is None
+    assert _rebuild(transcript, [_user_item("next")], max_bytes=stored_bytes) is not None
+
+
+@pytest.mark.parametrize("scalar_input", ["just this", "  padded  "])
+def test_an_unanchored_scalar_request_is_dispatched_as_the_client_wrote_it(scalar_input: str) -> None:
+    # The documented passthrough, and the one place a scalar survives as a
+    # scalar. Nothing precedes it, so there is nothing it has to become an item
+    # to sit behind -- and rewriting it anyway would edit the one body this
+    # rebuild promises to dispatch unaltered.
+    rebuilt = project_durable_transcript_for_account_neutral_fresh_replay(
+        (),
+        anchor_response_id=None,
+        current_payload={"model": "gpt-5.4", "input": scalar_input},
+    )
+
+    assert rebuilt is not None
+    assert rebuilt.payload["input"] == scalar_input
+    assert rebuilt.carries_durable_items is False
+
+
+@pytest.mark.parametrize("empty_input", [[], "", "   "])
+def test_a_request_with_nothing_to_send_is_not_relocatable(empty_input: JsonValue) -> None:
+    # An empty body is account-neutral by every structural reading, so it
+    # relocates unless it is refused here -- and the dispatch can only come back
+    # as an invalid request. On the definitive lane that wastes an attempt; on
+    # the ambiguous one it spends the one-shot budget for that operation's whole
+    # retention, so the conversation's real recovery is gone before it is asked
+    # for.
+    assert (
+        project_durable_transcript_for_account_neutral_fresh_replay(
+            (),
+            anchor_response_id=None,
+            current_payload={"model": "gpt-5.4", "input": empty_input},
+        )
+        is None
+    )
+
+
+def test_a_turns_answer_is_appended_whole_even_when_it_opens_on_the_accumulated_tail() -> None:
+    # The join belongs to stored requests: a request can restate the
+    # conversation, an answer cannot, because an answer is what its turn
+    # produced. So an answer whose first item reads like the accumulated tail is
+    # a coincidence, and shortening on it deletes the earlier answer the thread
+    # already holds. Here the second turn's stored request ends on the first
+    # answer and the model opens its reply by repeating that answer -- both
+    # copies belong in the conversation.
+    transcript = (
+        _transcript_turn([_user_item("first")], [_assistant_item("same answer", item_id="msg_1")]),
+        _transcript_turn(
+            [_user_item("first"), _replayed_assistant_item("same answer")],
+            [
+                _assistant_item("same answer", item_id="msg_2"),
+                _assistant_item("and more", item_id="msg_3"),
+            ],
+            response_id="resp_2",
+            parent_response_id="resp_1",
+        ),
+    )
+
+    rebuilt = _rebuild(transcript, [_user_item("third")])
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _user_item("first"),
+        _replayed_assistant_item("same answer"),
+        _replayed_assistant_item("same answer"),
+        _replayed_assistant_item("and more"),
+        _user_item("third"),
+    ]
+
+
+class _CountedKeys(Sequence[str]):
+    """A key sequence that records how many elements the search asked it for.
+
+    Reads are the honest measure of this search's cost. Comparisons are not: the
+    nested scan this replaced failed at the first element of nearly every
+    candidate length, so it compared O(n) times while copying a slice per length
+    -- quadratic work that a comparison counter cannot see and a clock reports
+    differently on every machine.
+    """
+
+    def __init__(self, keys: list[str]) -> None:
+        self._keys = keys
+        self.reads = 0
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __getitem__(self, index: Any) -> Any:
+        if isinstance(index, slice):
+            self.reads += len(range(*index.indices(len(self._keys))))
+        else:
+            self.reads += 1
+        return self._keys[index]
+
+
+def _overlap_search_reads(item_count: int) -> int:
+    """Elements read finding the overlap between a chain and a resend that restates none of it.
+
+    The doubling case, which is where the search does its most work: nothing
+    matches, so no candidate length can end it early.
+    """
+
+    accumulated = _CountedKeys([_relocation_comparison_key(_user_item(f"q{index}")) for index in range(item_count)])
+    incoming = _CountedKeys([_relocation_comparison_key(_user_item(f"other {index}")) for index in range(item_count)])
+
+    assert _tail_overlap_length(accumulated, incoming) == 0
+    return accumulated.reads + incoming.reads
+
+
+def test_the_overlap_search_is_linear_in_the_number_of_items() -> None:
+    # The caps bound turns and bytes; neither bounds items, and a nested scan is
+    # quadratic in exactly what they do not bound. At the item count an in-cap
+    # transcript reaches, that is minutes of blocking CPU on a single-worker
+    # event loop, inside the failover path whose whole purpose is to be quicker
+    # than losing the conversation.
+    small_reads = _overlap_search_reads(500)
+    large_reads = _overlap_search_reads(2000)
+
+    # Fourfold the items, so linear work grows fourfold and quadratic work
+    # sixteenfold; the allowance between them separates the two without being
+    # tight. The absolute bound is the same statement without the arithmetic:
+    # each side is read a bounded number of times, not once per candidate.
+    assert large_reads <= 6 * small_reads
+    assert large_reads <= 4 * 2 * 2000
+
+
+def test_the_join_canonicalizes_each_item_once_rather_than_once_per_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A linear search over keys rebuilt at every step is quadratic again, and in
+    # the expensive direction: canonicalizing is a JSON serialization per item,
+    # far dearer than the comparison it feeds.
+    canonical = replay_safety_module._relocation_comparison_key
+    keys_built = 0
+
+    def _counted(item: JsonValue) -> str:
+        nonlocal keys_built
+        keys_built += 1
+        return canonical(item)
+
+    questions: list[JsonValue] = [_user_item(f"q{index}") for index in range(500)]
+    transcript = (_transcript_turn(questions, [_assistant_item("answer", item_id="msg_1")]),)
+    client_input: list[JsonValue] = [*questions, _replayed_assistant_item("answer"), _user_item("next")]
+    monkeypatch.setattr(replay_safety_module, "_relocation_comparison_key", _counted)
+
+    rebuilt = _rebuild(transcript, client_input)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == client_input
+    # The chain's questions and its answer, then the client's copy of both plus
+    # the new question: one key each, and not one more.
+    assert keys_built == (500 + 1) + (500 + 2)

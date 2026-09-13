@@ -26,8 +26,9 @@ case "${1:-}" in
 esac
 
 # `cc` and `fable` use the canonical Fable driver. `opus` is the explicit
-# genuine-1M Opus driver. All three preserve the canonical seat lineup.
-CLIENT_NAMES=(cc fable opus)
+# genuine-1M Opus driver. The launcher and definition doctor are also public
+# commands; runtime-only helpers remain siblings in the reviewed source bundle.
+CLIENT_NAMES=(cc fable opus claude-lb-launch agent-defs-doctor)
 POLICY_SOURCE="$REPO_DIR/config/coding-agents"
 POLICY_INSTALLER="$POLICY_SOURCE/install-policy.py"
 HOOK_TARGET="$USER_HOME/.claude/hooks/ccdex-gpt-only.sh"

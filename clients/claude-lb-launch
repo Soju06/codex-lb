@@ -816,6 +816,72 @@ def lb_enabled() -> bool:
     return os.environ.get("CLAUDE_LB_DISABLE") != "1"
 
 
+def _doctor_path(name: str) -> Path:
+    return Path(__file__).resolve().with_name(name)
+
+
+def run_opus_doctor(nightly: bool = False) -> int:
+    doctor = _doctor_path("opus-runtime-doctor")
+    if not doctor.is_file():
+        print(f"cc: Opus runtime doctor is missing at {doctor}", file=sys.stderr)
+        return 127
+    command = [sys.executable, str(doctor)]
+    if nightly:
+        command.append("--nightly")
+    command.append("--repair")
+    try:
+        return subprocess.run(command, check=False).returncode
+    except OSError as error:
+        print(f"cc: Opus runtime doctor could not start ({type(error).__name__})", file=sys.stderr)
+        return 126
+
+
+def schedule_opus_doctor() -> None:
+    """Repair definitions every launch, then request a gated detached probe."""
+    if (
+        os.environ.get("CLAUDE_LB_DOCTOR_SKIP") == "1"
+        or os.environ.get("CLAUDE_LB_DISABLE") == "1"
+        or os.environ.get("CLAUDE_LB_DRY_RUN") == "1"
+        or CCGPT_MODE
+    ):
+        return
+    env = {**os.environ, "CLAUDE_LB_DOCTOR_SKIP": "1"}
+    definitions = _doctor_path("agent-defs-doctor")
+    if definitions.is_file():
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(definitions), "--repair", "--quiet"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                timeout=30,
+                text=True,
+                check=False,
+            )
+            summary = completed.stdout.strip()
+            if summary:
+                print(summary, file=sys.stderr)
+            if completed.returncode != 0 and not summary:
+                print(f"agent-defs-doctor: repair failed with exit {completed.returncode}", file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired):
+            print("agent-defs-doctor: repair could not complete", file=sys.stderr)
+    runtime = _doctor_path("opus-runtime-doctor")
+    if runtime.is_file():
+        try:
+            subprocess.run(
+                [sys.executable, str(runtime), "--schedule"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 def bypass_anthropic_proxy() -> None:
     """Keep plain-Claude fallback out of a configured shared desktop proxy."""
     for name in ("NO_PROXY", "no_proxy"):
@@ -1700,6 +1766,13 @@ def main() -> None:
         )
         return
 
+    if sys.argv[1:] == ["--doctor"]:
+        sys.exit(run_opus_doctor())
+    if sys.argv[1:] == ["--doctor-nightly"]:
+        sys.exit(run_opus_doctor(nightly=True))
+
+    schedule_opus_doctor()
+
     argv = sys.argv[1:]
     routed = False
     session_id = ""
@@ -1753,16 +1826,18 @@ def main() -> None:
             except RuntimeError as error:
                 print(f"cc: {error}", file=sys.stderr)
         if not routed:
-            if CCGPT_MODE:
-                print("ccgpt: refusing to bypass agent-lb or fall back to Claude", file=sys.stderr)
+            if CCGPT_MODE or os.environ.get("CLAUDE_LB_REQUIRE") == "1":
+                label = "ccgpt" if CCGPT_MODE else "cc"
+                print(f"{label}: refusing to bypass agent-lb or fall back to Claude", file=sys.stderr)
                 sys.exit(1)
             print(
                 "cc: falling back to plain claude (load balancer unavailable; using your normal Claude auth)",
                 file=sys.stderr,
             )
 
-    elif CCGPT_MODE:
-        print("ccgpt: CLAUDE_LB_DISABLE is not allowed for this fail-closed command", file=sys.stderr)
+    elif CCGPT_MODE or os.environ.get("CLAUDE_LB_REQUIRE") == "1":
+        label = "ccgpt" if CCGPT_MODE else "cc"
+        print(f"{label}: CLAUDE_LB_DISABLE is not allowed for this fail-closed command", file=sys.stderr)
         sys.exit(1)
 
     if not routed:

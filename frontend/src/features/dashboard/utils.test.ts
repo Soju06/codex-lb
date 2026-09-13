@@ -1619,3 +1619,84 @@ describe("buildDashboardView", () => {
     expect(convStat?.meta).toBe("Avg req/conv —");
   });
 });
+
+describe("buildDashboardView subscription-overflow tile", () => {
+  function overviewWithOverflow(
+    subscriptionOverflow: {
+      requests: number;
+      costUsd: number;
+      usageLessRequests: number;
+      livePins: number;
+    } | null,
+  ) {
+    const base = createDashboardOverview();
+    return {
+      ...base,
+      summary: { ...base.summary, ...(subscriptionOverflow === null ? {} : { subscriptionOverflow }) },
+    };
+  }
+
+  function overflowStat(overview: Parameters<typeof buildDashboardView>[0]) {
+    return buildDashboardView(overview, createDefaultRequestLogs(), false).stats.find((stat) =>
+      stat.label.startsWith("Overflow cost"),
+    );
+  }
+
+  it("adds no tile when the backend reports no overflow activity", () => {
+    expect(overflowStat(overviewWithOverflow(null))).toBeUndefined();
+
+    const base = createDashboardOverview();
+    const explicitlyNull = {
+      ...base,
+      summary: { ...base.summary, subscriptionOverflow: null },
+    } as Parameters<typeof buildDashboardView>[0];
+    expect(overflowStat(explicitlyNull)).toBeUndefined();
+  });
+
+  it("does not change the other tiles when overflow is absent", () => {
+    const withoutOverflow = buildDashboardView(
+      overviewWithOverflow(null),
+      createDefaultRequestLogs(),
+      false,
+    );
+    const withOverflow = buildDashboardView(
+      overviewWithOverflow({ requests: 3, costUsd: 1.5, usageLessRequests: 0, livePins: 2 }),
+      createDefaultRequestLogs(),
+      false,
+    );
+
+    expect(withOverflow.stats).toHaveLength(withoutOverflow.stats.length + 1);
+    expect(withOverflow.stats.slice(0, withoutOverflow.stats.length)).toEqual(withoutOverflow.stats);
+    // Appended last, so it never displaces an existing tile.
+    expect(withOverflow.stats[withOverflow.stats.length - 1]?.label).toContain("Overflow cost");
+  });
+
+  it("shows the windowed spend, the dispatch count and the live pins", () => {
+    const stat = overflowStat(
+      overviewWithOverflow({ requests: 12, costUsd: 3.25, usageLessRequests: 0, livePins: 4 }),
+    );
+
+    expect(stat?.value).toBe("$3.25");
+    expect(stat?.meta).toBe("12 dispatched · 4 pinned");
+    // No sparkline: there is no per-bucket series behind the slice.
+    expect(stat?.trend).toEqual([]);
+    expect(stat?.comparison).toBeUndefined();
+  });
+
+  it("surfaces rows whose source reported no usage instead of pricing them at zero", () => {
+    const stat = overflowStat(
+      overviewWithOverflow({ requests: 10, costUsd: 2, usageLessRequests: 3, livePins: 1 }),
+    );
+
+    expect(stat?.meta).toBe("10 dispatched · 1 pinned · 3 without reported usage");
+  });
+
+  it("uses a neutral empty state when the window holds no overflow", () => {
+    const stat = overflowStat(
+      overviewWithOverflow({ requests: 0, costUsd: 0, usageLessRequests: 0, livePins: 3 }),
+    );
+
+    expect(stat?.value).toBe("$0.00");
+    expect(stat?.meta).toBe("No overflow in 7d · 3 pinned");
+  });
+});

@@ -17,7 +17,9 @@ export type PasswordSettingsProps = {
 
 export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const { t } = useTranslation();
-  const passwordRequired = useAuthStore((s) => s.passwordRequired);
+  // Whether a password exists to change or remove; accounts that sign in through
+  // the reverse proxy alone must not turn this card into "Login to manage".
+  const passwordRequired = useAuthStore((s) => s.localPasswordConfigured);
   const authMode = useAuthStore((s) => s.authMode);
   const passwordManagementEnabled = useAuthStore((s) => s.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((s) => s.passwordSessionActive);

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LocalLoginPolicySchema, StrictLocalLoginPolicySchema } from "@/features/auth/schemas";
+
 const RoutingStrategySchema = z.enum([
   "usage_weighted",
   "round_robin",
@@ -147,7 +149,12 @@ export const DashboardSettingsSchema = z
     warmupModel: z.string().trim().min(1).optional().default("gpt-5.4-mini"),
     importWithoutOverwrite: z.boolean(),
     totpRequiredOnLogin: z.boolean(),
-    totpConfigured: z.boolean(),
+    // Defaults cover a mixed-version rollout against an older backend.
+    totpRequiredForAdminRole: z.boolean().optional().default(false),
+    // Who may still sign in with a local password; database only, never an env var.
+    localLoginPolicy: LocalLoginPolicySchema.optional().default("enabled"),
+    usersWithoutTotpCount: z.number().int().min(0).optional().default(0),
+    adminsWithoutTotpCount: z.number().int().min(0).optional().default(0),
     apiKeyAuthEnabled: z.boolean(),
     hideUpstreamQuotaFromApiKeys: z.boolean().optional().default(false),
     limitWarmupEnabled: z.boolean().optional().default(false),
@@ -221,6 +228,14 @@ export const DashboardSettingsSchema = z
     conversationArchiveEnabled: z.boolean().optional().default(false),
     conversationArchiveDir: z.string().nullable().optional().default(null),
     // end M5 conversation archive
+    // R2 spool retention: effective retention of the durable HTTP bridge
+    // operation spool (raw request payloads + response events) and the floor
+    // the API enforces, so the card can mirror the check before saving.
+    // `provenance.http_responses_session_bridge_operation_spool_retention_seconds`
+    // says which layer owns the value.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z.number().optional().default(604800),
+    httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds: z.number().optional().default(0),
+    // end R2 spool retention
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -289,6 +304,11 @@ export const SettingsUpdateRequestSchema = z
     warmupModel: z.string().trim().min(1).optional(),
     importWithoutOverwrite: z.boolean().optional(),
     totpRequiredOnLogin: z.boolean().optional(),
+    totpRequiredForAdminRole: z.boolean().optional(),
+    // Strict, unlike the response field: `updateSettings` parses an `unknown`
+    // payload, so a fallback here would turn a typo into a policy relaxation
+    // the backend would happily accept.
+    localLoginPolicy: StrictLocalLoginPolicySchema.optional(),
     apiKeyAuthEnabled: z.boolean().optional(),
     hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
     limitWarmupEnabled: z.boolean().optional(),
@@ -324,6 +344,16 @@ export const SettingsUpdateRequestSchema = z
     // the confirmation dialog.
     conversationArchiveEnabled: z.boolean().nullable().optional(),
     // end M5 conversation archive
+    // R2 spool retention: tri-state (omitted = unchanged, null = reset to
+    // inherited, value = dashboard value in seconds). The replay floor is
+    // enforced by the backend against the effective values.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z
+      .number()
+      .positive()
+      .max(315360000)
+      .nullable()
+      .optional(),
+    // end R2 spool retention
     // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
     // (inherit environment / default), value = store. Cross-field invariants
     // are enforced by the backend against the effective values.

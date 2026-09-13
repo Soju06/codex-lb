@@ -48,6 +48,7 @@ from app.core.metrics.prometheus import (
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import ensure_request_scope_id
 from app.db.models import (
+    DashboardSettings,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -1981,6 +1982,7 @@ class _HTTPBridgeMixin(
         require_preferred_account: bool = False,
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
+        dashboard_settings: DashboardSettings | None = None,
     ) -> None:
         request_state.response_create_sent_at = None
         goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
@@ -2023,7 +2025,15 @@ class _HTTPBridgeMixin(
             now=clock_for(self).monotonic(),
         )
         try:
-            settings = await _service_get_settings_cache().get()
+            # Callers that reconnect while holding a lock resolve this row
+            # before taking it and pass it in. The prewarm timeout recovery is
+            # one: it reconnects under ``prewarm_lock``, and a refresh behind
+            # this read runs a DB query under a process-global lock, so
+            # awaiting it there would suspend the critical section (issues
+            # #1971/#1972).
+            settings = (
+                dashboard_settings if dashboard_settings is not None else await _service_get_settings_cache().get()
+            )
             session.api_key = request_state.api_key
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)

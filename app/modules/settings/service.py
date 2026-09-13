@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from app.core.auth.dashboard_access import is_admin_level
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+    normalize_thread_cache_identity_mode,
+)
 from app.core.config.background_jobs import BACKGROUND_JOB_SETTINGS
 from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 
@@ -17,9 +22,12 @@ from app.core.config.inheritable import SettingScalar as SettingScalar
 from app.core.config.inheritable import SettingSource as SettingSource
 from app.core.config.inheritable import resolve_inheritable as resolve_inheritable
 from app.core.config.settings import Settings, get_settings
+from app.core.config.spool_retention import OPERATION_SPOOL_RETENTION_SETTING
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
-from app.db.models import DashboardSettings
+from app.db.models import DashboardSettings, LocalLoginPolicy
+from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
     normalize_additional_quota_key,
@@ -34,6 +42,9 @@ class DashboardSettingsData:
     upstream_stream_transport: str
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str
+    # Effective mode; ``provenance`` carries the source and the fallbacks.
+    thread_cache_identity_mode: str
+    thread_cache_identity_mode_override: str | None
     proxy_account_response_create_limit: int
     proxy_account_response_create_limit_override: int | None
     proxy_account_stream_limit: int
@@ -78,7 +89,10 @@ class DashboardSettingsData:
     warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
-    totp_configured: bool
+    totp_required_for_admin_role: bool
+    local_login_policy: str
+    users_without_totp_count: int
+    admins_without_totp_count: int
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -114,6 +128,11 @@ class DashboardSettingsData:
     # M5 conversation archive: effective toggle; provenance carries the source.
     conversation_archive_enabled: bool
     # end M5 conversation archive
+    # R2 spool retention: effective retention of the durable HTTP-bridge
+    # operation spool (dashboard column, else the deprecated env alias, else
+    # the code default); provenance carries the source.
+    http_responses_session_bridge_operation_spool_retention_seconds: float
+    # end R2 spool retention
     version: int
     # C2-1 timeouts: effective values (dashboard column, else environment,
     # else code default); the column values are exposed through ``provenance``.
@@ -141,6 +160,8 @@ class DashboardSettingsUpdateData:
     upstream_stream_transport: str
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str
+    thread_cache_identity_mode: str | None
+    clear_thread_cache_identity_mode: bool
     proxy_account_response_create_limit: int | None
     clear_proxy_account_response_create_limit: bool
     proxy_account_stream_limit: int | None
@@ -189,6 +210,8 @@ class DashboardSettingsUpdateData:
     warmup_model: str
     import_without_overwrite: bool
     totp_required_on_login: bool
+    totp_required_for_admin_role: bool
+    local_login_policy: str | None
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -229,6 +252,10 @@ class DashboardSettingsUpdateData:
     conversation_archive_enabled: bool | None = None
     clear_conversation_archive_enabled: bool = False
     # end M5 conversation archive
+    # R2 spool retention: tri-state like the C2-1 timeouts.
+    http_responses_session_bridge_operation_spool_retention_seconds: float | None = None
+    clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False
+    # end R2 spool retention
     # C2-1 timeouts (tri-state like the caps: value = store, clear = NULL,
     # neither = untouched).
     upstream_connect_timeout_seconds: float | None = None
@@ -259,29 +286,91 @@ class DashboardSettingsUpdateData:
     # end M1 stream/bridge budgets
 
 
+@dataclass(frozen=True, slots=True)
+class TotpEnrollmentSummary:
+    """Who still has to enrol, and whether the acting account already did."""
+
+    actor_configured: bool
+    users_without_totp: int
+    admins_without_totp: int
+
+
 class SettingsService:
     def __init__(self, repository: SettingsRepository) -> None:
         self._repository = repository
 
-    async def get_settings(self) -> DashboardSettingsData:
+    async def totp_enrollment(self, actor_user_id: str | None) -> TotpEnrollmentSummary:
+        users = await self._repository.list_active_password_users()
+        without_totp = [user for user in users if user.totp_secret_encrypted is None]
+        return TotpEnrollmentSummary(
+            actor_configured=any(user.id == actor_user_id and user.totp_secret_encrypted is not None for user in users),
+            users_without_totp=len(without_totp),
+            admins_without_totp=sum(1 for user in without_totp if is_admin_level(resolve_role_grants(user.role))),
+        )
+
+    async def get_settings(self, *, actor_user_id: str | None = None) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
-        return _settings_data(row)
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
 
     async def update_settings(
         self,
         payload: DashboardSettingsUpdateData,
         *,
+        actor_user_id: str | None = None,
         expected_version: int | None = None,
     ) -> DashboardSettingsData:
+        # The accounts lock is taken before this service reads anything and is
+        # held until ``update`` commits, so the count below and the policy write
+        # are one step. Acquiring it first keeps both dialects taking the lock
+        # at the same moment instead of relying on the in-transaction fallback
+        # of ``acquire_write_intent``. It is only taken when the payload could
+        # be a tightening, so an ordinary settings save is never queued behind
+        # account mutations.
+        if payload.local_login_policy not in (None, LocalLoginPolicy.ENABLED.value):
+            await self._repository.acquire_account_write_intent()
         current = await self._repository.get_or_create()
-        if payload.totp_required_on_login and current.totp_secret_encrypted is None:
-            raise ValueError("Configure TOTP before enabling login enforcement")
+        # Requiring TOTP of others starts with the acting account: whoever turns
+        # either requirement on must already hold a secret, or the next request
+        # would park them at the enrolment gate they just created.
+        enabling_global = payload.totp_required_on_login and not current.totp_required_on_login
+        enabling_admin_role = payload.totp_required_for_admin_role and not current.totp_required_for_admin_role
+        if enabling_global or enabling_admin_role:
+            enrollment = await self.totp_enrollment(actor_user_id)
+            if not enrollment.actor_configured:
+                raise ValueError("Set up your own TOTP before requiring it at sign-in")
+        # Closing the local password form is the most dangerous button in the
+        # product: it is also the setting that locks the install out when the
+        # identity provider is down. Only the tightening transition is gated
+        # (re-saving the stored value, and relaxing back to ``enabled``, never
+        # are), and the refusal names the account that would fix it. The count
+        # and the settings write are one atomic step: the accounts lock above
+        # is held until ``update`` commits, so no concurrent mutation can
+        # remove the last qualifying account in between.
+        tightening = (
+            payload.local_login_policy is not None
+            and payload.local_login_policy != current.local_login_policy
+            and payload.local_login_policy != LocalLoginPolicy.ENABLED.value
+        )
+        if tightening and await self._repository.count_qualifying_break_glass() == 0:
+            designated = await self._repository.list_break_glass_designations()
+            username = designated[0].username if designated else None
+            raise BreakGlassRequiresTotpError(
+                (
+                    f"Turn on two-factor for '{username}' before restricting local sign-in"
+                    if username is not None
+                    else "Designate an admin account with two-factor as the emergency account "
+                    "before restricting local sign-in"
+                ),
+                username=username,
+            )
         row = await self._repository.update(
             expected_version=expected_version,
             sticky_threads_enabled=payload.sticky_threads_enabled,
             upstream_stream_transport=payload.upstream_stream_transport,
             prohibit_fast_mode=payload.prohibit_fast_mode,
             http_downstream_transport_policy=payload.http_downstream_transport_policy,
+            thread_cache_identity_mode=payload.thread_cache_identity_mode,
+            clear_thread_cache_identity_mode=payload.clear_thread_cache_identity_mode,
             proxy_account_response_create_limit=payload.proxy_account_response_create_limit,
             clear_proxy_account_response_create_limit=payload.clear_proxy_account_response_create_limit,
             proxy_account_stream_limit=payload.proxy_account_stream_limit,
@@ -336,6 +425,8 @@ class SettingsService:
             warmup_model=payload.warmup_model,
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
+            totp_required_for_admin_role=payload.totp_required_for_admin_role,
+            local_login_policy=payload.local_login_policy,
             api_key_auth_enabled=payload.api_key_auth_enabled,
             hide_upstream_quota_from_api_keys=payload.hide_upstream_quota_from_api_keys,
             limit_warmup_enabled=payload.limit_warmup_enabled,
@@ -361,6 +452,14 @@ class SettingsService:
             conversation_archive_enabled=payload.conversation_archive_enabled,
             clear_conversation_archive_enabled=payload.clear_conversation_archive_enabled,
             # end M5 conversation archive
+            # R2 spool retention
+            http_responses_session_bridge_operation_spool_retention_seconds=(
+                payload.http_responses_session_bridge_operation_spool_retention_seconds
+            ),
+            clear_http_responses_session_bridge_operation_spool_retention_seconds=(
+                payload.clear_http_responses_session_bridge_operation_spool_retention_seconds
+            ),
+            # end R2 spool retention
             deterministic_failover_enabled=payload.deterministic_failover_enabled,
             clear_deterministic_failover_enabled=payload.clear_deterministic_failover_enabled,
             circuit_breaker_enabled=payload.circuit_breaker_enabled,
@@ -412,7 +511,13 @@ class SettingsService:
             ),
             # end M1 stream/bridge budgets
         )
-        return _settings_data(row)
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
+        return _settings_data(row, await self.totp_enrollment(actor_user_id))
+
+
+# Retention has no environment fallback: NULL = never set from the dashboard =
+# disabled; 0 = explicitly disabled.
+_RETENTION_DISABLED_DAYS = 0
 
 
 _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
@@ -420,6 +525,8 @@ _ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
 # Inheritable settings with an environment fallback: the ``dashboard_settings``
 # column, the ``Settings`` field and the provenance key share one name.
 _ENVIRONMENT_INHERITABLE_SETTINGS = (
+    # Thread cache identity mode (str): NULL inherits the env value, then "shared".
+    "thread_cache_identity_mode",
     "proxy_account_response_create_limit",
     "proxy_account_stream_limit",
     "proxy_account_stream_recovery_reserve",
@@ -436,6 +543,8 @@ _ENVIRONMENT_INHERITABLE_SETTINGS = (
     "http_responses_session_bridge_codex_prewarm_enabled",
     # end M3 codex prewarm
     CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive (bool, env alias)
+    # R2 spool retention: float; a NULL column inherits the deprecated env alias.
+    OPERATION_SPOOL_RETENTION_SETTING,
 )
 # Retention has no environment fallback: NULL = never set from the dashboard =
 # disabled; 0 = explicitly disabled.
@@ -494,6 +603,16 @@ def _resolve_inheritable_settings(
     resolved: dict[str, InheritableValue[Any]] = {
         name: _resolve_environment_inheritable(row, name) for name in _ENVIRONMENT_INHERITABLE_SETTINGS
     }
+    # A stale or hand-edited column value is not a valid decision, so it is
+    # normalized away before it can reach the pattern-constrained settings
+    # response and fail ``GET /api/settings`` for every setting at once. A
+    # NULL-equivalent column simply falls back to the environment/default legs.
+    resolved["thread_cache_identity_mode"] = resolve_inheritable(
+        normalize_thread_cache_identity_mode(row.thread_cache_identity_mode),
+        normalize_thread_cache_identity_mode(getattr(get_settings(), "thread_cache_identity_mode", None))
+        or THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+        THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+    )
     resolved["request_log_retention_days"] = resolve_inheritable(
         row.request_log_retention_days, None, _RETENTION_DISABLED_DAYS
     )
@@ -507,13 +626,15 @@ def _resolve_inheritable_settings(
     return resolved
 
 
-def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
+def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> DashboardSettingsData:
     resolved = _resolve_inheritable_settings(row)
     return DashboardSettingsData(
         sticky_threads_enabled=row.sticky_threads_enabled,
         upstream_stream_transport=row.upstream_stream_transport,
         prohibit_fast_mode=row.prohibit_fast_mode,
         http_downstream_transport_policy=row.http_downstream_transport_policy,
+        thread_cache_identity_mode=resolved["thread_cache_identity_mode"].value,
+        thread_cache_identity_mode_override=normalize_thread_cache_identity_mode(row.thread_cache_identity_mode),
         proxy_account_response_create_limit=resolved["proxy_account_response_create_limit"].value,
         proxy_account_response_create_limit_override=row.proxy_account_response_create_limit,
         proxy_account_stream_limit=resolved["proxy_account_stream_limit"].value,
@@ -566,7 +687,10 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         warmup_model=row.warmup_model,
         import_without_overwrite=row.import_without_overwrite,
         totp_required_on_login=row.totp_required_on_login,
-        totp_configured=row.totp_secret_encrypted is not None,
+        totp_required_for_admin_role=row.totp_required_for_admin_role,
+        local_login_policy=row.local_login_policy,
+        users_without_totp_count=totp.users_without_totp,
+        admins_without_totp_count=totp.admins_without_totp,
         api_key_auth_enabled=row.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=row.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=row.limit_warmup_enabled,
@@ -599,6 +723,11 @@ def _settings_data(row: DashboardSettings) -> DashboardSettingsData:
         # M5 conversation archive
         conversation_archive_enabled=bool(resolved[CONVERSATION_ARCHIVE_SETTING].value),
         # end M5 conversation archive
+        # R2 spool retention
+        http_responses_session_bridge_operation_spool_retention_seconds=float(
+            resolved[OPERATION_SPOOL_RETENTION_SETTING].value
+        ),
+        # end R2 spool retention
         version=row.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=float(resolved["upstream_connect_timeout_seconds"].value),

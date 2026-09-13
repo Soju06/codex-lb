@@ -36,7 +36,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsageHolder,
 )
 from app.modules.proxy import source_dispatch as dispatch_module
-from app.modules.proxy.model_source_pins import PinIntent, PinWrite
+from app.modules.proxy.model_source_pins import PinIntent, PinWrite, PinWriteExecutor, PinWriteOutcome
 from app.modules.proxy.source_admission import SourceAdmission, SourceBulkhead
 from app.modules.proxy.source_dispatch import (
     ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
@@ -2087,12 +2087,47 @@ async def test_on_first_content_commits_the_intent_resolved_against_the_source_r
     assert [write.pin_key for write in committed.writes] == ["thread\nabc", "anchor\nkey-1\nresp_source_1"]
     assert committed.writes[1].kind == "anchor"
     assert committed.writes[1].source_id == "src"
+    assert committed.anchor_resolved is True
     assert owner.pin_outcome == "written"
 
 
+class _IssueRecordingExecutor(PinWriteExecutor):
+    """The real ``commit`` (so its anchor pre-check and empty-write short-circuit run) over a stubbed statement phase.
+
+    ``_run`` is the first thing ``commit`` reaches once it has decided to issue
+    a statement, so an empty ``issued`` list is proof that nothing was written
+    -- which the module's own ``_ResolvingExecutor``/``_FakeExecutor`` doubles
+    cannot show, because they replace ``commit`` itself.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(session_factory=_unreachable_session_factory, writer_section=_unreachable_writer_section)
+        self.issued: list[str] = []
+
+    async def _run(self, operation: Any, verify: Any, *, scheduler: Any, action: str, kinds: str) -> PinWriteOutcome:
+        self.issued.append(kinds)
+        return "written"
+
+
+@contextlib.asynccontextmanager
+async def _unreachable_session_factory() -> AsyncIterator[Any]:
+    raise AssertionError("the stubbed statement phase must not open a session")
+    yield  # pragma: no cover - async generator marker
+
+
+@contextlib.asynccontextmanager
+async def _unreachable_writer_section() -> AsyncIterator[None]:
+    raise AssertionError("the stubbed statement phase must not enter the writer section")
+    yield  # pragma: no cover - async generator marker
+
+
 @pytest.mark.asyncio
-async def test_on_first_content_without_a_response_id_commits_the_thread_pin_only(recorder: _Recorder) -> None:
-    executor = _ResolvingExecutor()
+async def test_on_first_content_fails_closed_when_the_dispatch_owes_an_anchor_the_source_never_minted(
+    recorder: _Recorder,
+) -> None:
+    """Decision 78: ``store`` not ``false`` + no source ``response.id`` at the trigger -> nothing written, no frame."""
+
+    executor = _IssueRecordingExecutor()
     intent = PinIntent(
         writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
         thread_key="abc",
@@ -2100,8 +2135,32 @@ async def test_on_first_content_without_a_response_id_commits_the_thread_pin_onl
         anchor=True,
     )
     owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+
+    with pytest.raises(SourcePinCommitError) as excinfo:
+        await owner.on_first_content(SourceUsageHolder())
+
+    assert excinfo.value.outcome == "not_written"
+    assert owner.pin_outcome == "not_written"
+    assert owner.pin_failure_row_code == owner.pin_failure_error_code
+    assert executor.issued == [], "the thread pin must not be written either: nothing was delivered"
+
+
+@pytest.mark.asyncio
+async def test_on_first_content_commits_the_thread_pin_only_when_no_anchor_is_owed(recorder: _Recorder) -> None:
+    """The native ``store: false`` shape stays servable through its thread pin alone, without any response id."""
+
+    executor = _IssueRecordingExecutor()
+    intent = PinIntent(
+        writes=(PinWrite(pin_key="thread\nabc", kind="thread", source_id="src", api_key_id=None),),
+        thread_key="abc",
+        source_id="src",
+    )
+    owner = _owner(recorder, pin_intent=intent, pin_executor=executor)
+
     await owner.on_first_content(SourceUsageHolder())
-    assert [write.pin_key for write in executor.intents[0].writes] == ["thread\nabc"]
+
+    assert executor.issued == ["thread"]
+    assert owner.pin_outcome == "written"
 
 
 @pytest.mark.asyncio
@@ -2112,6 +2171,7 @@ async def test_on_first_content_store_false_intent_never_anchors(recorder: _Reco
     owner = _owner(recorder, pin_intent=_intent(), pin_executor=executor)
     await owner.on_first_content(SourceUsageHolder(response_id="resp_source_1"))
     assert [write.kind for write in executor.intents[0].writes] == ["thread"]
+    assert executor.intents[0].anchor_resolved is False
 
 
 # -- breaker trial: first output item and the terminal classification (design §8.3) ---------------------------

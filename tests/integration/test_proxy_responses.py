@@ -2218,7 +2218,11 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
     dashboard_settings = DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
-        upstream_stream_transport="websocket",
+        # The subject here is "the HTTP upstream does not slim", so the HTTP
+        # upstream is pinned explicitly. Before #2363 this test reached it only
+        # through the input_image transport pin, which no longer fires for a
+        # small inline image.
+        upstream_stream_transport="http",
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -2311,6 +2315,114 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
             "type": "input_image",
             "image_url": "data:image/png;base64," + ("B" * 1200),
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_without_http_bridge_websocket_upstream_keeps_small_inline_images(
+    async_client,
+    monkeypatch,
+):
+    # Regression for #2363: an operator's explicit websocket pin is precedence
+    # item 1, so a request carrying a small inline image must follow it instead
+    # of being forced onto upstream HTTP, and its image must survive verbatim.
+    email = "stream-ws-inline@example.com"
+    raw_account_id = "acc_stream_ws_inline"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=False,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        stream_idle_timeout_seconds=300.0,
+        proxy_response_create_limit=64,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="websocket",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+        http_downstream_transport_policy="smart",
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    class _CoreProxySettings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        proxy_request_budget_seconds = 75.0
+        trace_channels = frozenset()
+
+    captured: dict[str, object] = {}
+
+    async def fail_open_upstream_websocket(**kwargs):
+        del kwargs
+        raise AssertionError("HTTP /v1/responses must not open upstream websocket")
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        captured["payload"] = payload.to_payload()
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ws_stream_inline","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_client_module, "get_settings", lambda: _CoreProxySettings())
+    monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fail_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    inline_image = "data:image/png;base64," + ("B" * 1200)
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": inline_image},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_ws_stream_inline"
+    assert captured["transport"] == "websocket"
+    request_input = cast(dict[str, object], captured["payload"])["input"]
+    assert isinstance(request_input, list)
+    assert cast(dict[str, object], request_input[0])["content"] == [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "input_image", "image_url": inline_image},
     ]
 
 

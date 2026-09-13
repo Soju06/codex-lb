@@ -36,7 +36,6 @@ const BASE_SETTINGS: DashboardSettings = {
   ...LIMIT_WARMUP_DEFAULTS,
   stickyThreadsEnabled: false,
   preferEarlierResetAccounts: true,
-  totpConfigured: false,
 };
 const BASE_UPDATE_PAYLOAD = buildSettingsUpdateRequest(BASE_SETTINGS, {});
 

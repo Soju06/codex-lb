@@ -83,6 +83,79 @@ describe("DashboardOverviewSchema", () => {
     expect(parsed.accounts).toHaveLength(0);
     expect(parsed.summary.comparison?.previous.requests).toBe(250);
     expect(parsed.summary.metrics?.cancelledCount).toBe(3);
+    // Absent on backends older than WP-G, and on installs that never overflowed.
+    expect(parsed.summary.subscriptionOverflow ?? null).toBeNull();
+  });
+
+  it("parses the subscription-overflow summary when the backend reports it", () => {
+    const parsed = DashboardOverviewSchema.parse({
+      lastSyncAt: ISO,
+      timeframe: { key: "7d", windowMinutes: 10080, bucketSeconds: 21600, bucketCount: 28 },
+      accounts: [],
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: ISO,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 12.5 },
+        metrics: null,
+        subscriptionOverflow: {
+          requests: 7,
+          costUsd: 1.25,
+          usageLessRequests: 2,
+          livePins: 3,
+        },
+      },
+      windows: {
+        primary: { windowKey: "primary", windowMinutes: 300, accounts: [] },
+        secondary: null,
+      },
+      trends: EMPTY_TRENDS,
+    });
+
+    expect(parsed.summary.subscriptionOverflow).toEqual({
+      requests: 7,
+      costUsd: 1.25,
+      usageLessRequests: 2,
+      livePins: 3,
+    });
+  });
+
+  it("defaults the overflow counters a partial payload omits", () => {
+    const parsed = DashboardOverviewSchema.parse({
+      lastSyncAt: ISO,
+      timeframe: { key: "7d", windowMinutes: 10080, bucketSeconds: 21600, bucketCount: 28 },
+      accounts: [],
+      summary: {
+        primaryWindow: {
+          remainingPercent: 80,
+          capacityCredits: 100,
+          remainingCredits: 80,
+          resetAt: ISO,
+          windowMinutes: 300,
+        },
+        secondaryWindow: null,
+        cost: { currency: "USD", totalUsd: 0 },
+        metrics: null,
+        subscriptionOverflow: { requests: 0, costUsd: 0 },
+      },
+      windows: {
+        primary: { windowKey: "primary", windowMinutes: 300, accounts: [] },
+        secondary: null,
+      },
+      trends: EMPTY_TRENDS,
+    });
+
+    expect(parsed.summary.subscriptionOverflow).toEqual({
+      requests: 0,
+      costUsd: 0,
+      usageLessRequests: 0,
+      livePins: 0,
+    });
   });
 
   it("drops legacy request_logs field from parse result", () => {
@@ -627,6 +700,37 @@ describe("FilterStateSchema", () => {
     };
     const parsed = FilterStateSchema.parse(state);
     expect(parsed.conversationId).toBeNull();
+  });
+
+  it("defaults sources to an empty list when the URL carries none", () => {
+    const parsed = FilterStateSchema.parse({
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      limit: 25,
+      offset: 0,
+    });
+
+    expect(parsed.sources).toEqual([]);
+  });
+
+  it("keeps repeated source values in order", () => {
+    const parsed = FilterStateSchema.parse({
+      search: "",
+      timeframe: "all" as const,
+      accountIds: [],
+      apiKeyIds: [],
+      modelOptions: [],
+      statuses: [],
+      sources: ["subscription_overflow", "subscription_overflow_pinned"],
+      limit: 25,
+      offset: 0,
+    });
+
+    expect(parsed.sources).toEqual(["subscription_overflow", "subscription_overflow_pinned"]);
   });
 });
 

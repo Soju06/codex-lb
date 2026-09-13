@@ -36,6 +36,7 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
+from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 from app.modules.accounts.usage_rollup import (
     AccountUsageRollupRepository,
     deduped_usage_aggregate_stmt,
@@ -896,7 +897,8 @@ class AccountsRepository:
             .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
             .returning(RuntimeSentinel.name)
         )
-        try:
+
+        async def seed_once() -> int:
             async with sqlite_writer_section():
                 stamp_result = await self._session.execute(stamp_stmt)
                 stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
@@ -911,12 +913,24 @@ class AccountsRepository:
                 for account_id in account_ids:
                     await self._refresh_hard_sticky_outage_grace(account_id)
                 await self._session.commit()
+                return len(account_ids)
+
+        try:
+            # This stamp is the first statement of its transaction on a
+            # startup-fresh connection, so it can simply lose SQLite's writer
+            # slot (issue #1949) — retry the whole attempt, rolling the failed
+            # transaction back first so the next one starts clean. Exhausting
+            # the budget still raises and fails startup, as it always has.
+            return await retry_on_sqlite_lock(
+                seed_once,
+                what="hard-sticky outage grace startup seed",
+                before_retry=self._session.rollback,
+            )
         except OperationalError as exc:
             if not _is_missing_hard_sticky_seed_table(exc):
                 raise
             await self._session.rollback()
             return 0
-        return len(account_ids)
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
         session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)

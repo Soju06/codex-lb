@@ -303,12 +303,15 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
 ) -> None:
     """When the auth mode carries an identity, the dedicated event records it.
 
-    Password auth has no per-user identity yet, so `actor` is null there; the
-    field exists so an identity-carrying mode (and the RBAC work) fills it in.
+    A proxy-asserted identity is resolved to a dashboard account (provisioned on
+    first arrival), so the acting principal the event names is that account: its
+    username, which is the subject with ``@`` folded to ``.``. The companion
+    ``settings_changed`` row carries the same account in its actor columns.
     """
     from app.core.auth.dashboard_mode import DashboardAuthMode
     from app.core.config.settings import get_settings
     from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+    from app.modules.dashboard_users.identity_resolver import slugify_subject
 
     monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.TRUSTED_HEADER)
     monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
@@ -316,10 +319,11 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
     monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER", "Remote-User")
     get_settings.cache_clear()
 
+    subject = "alice@example.com"
     enabled = await async_client.put(
         "/api/settings",
         json={"conversationArchiveEnabled": True},
-        headers={"Remote-User": "alice@example.com"},
+        headers={"Remote-User": subject},
     )
     assert enabled.status_code == 200
 
@@ -327,9 +331,14 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
     assert event is not None
     assert event.details is not None
     details = json.loads(event.details)
-    assert details["actor"] == "alice@example.com"
+    assert details["actor"] == slugify_subject(subject) == "alice.example.com"
     assert details["actor_role"] == "admin"
     assert details["enabled"] is True
+
+    settings_changed = await _wait_for_settings_changed_audit_log()
+    assert settings_changed.actor_username == details["actor"]
+    assert settings_changed.actor_user_id is not None
+    assert settings_changed.auth_method == "trusted_header"
 
 
 @pytest.mark.asyncio

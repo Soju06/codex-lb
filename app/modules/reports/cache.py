@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 from datetime import date
 from time import monotonic
 
-from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse
+from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse, ThreadIdentityResponse
 
 
 @dataclass(frozen=True)
@@ -23,14 +23,14 @@ class ReportCacheKey:
     useragent: str
 
 
-class ReportCache[T]:
+class ReportCache[K: Hashable, T]:
     def __init__(self, *, ttl_seconds: float = 60, max_entries: int = 64) -> None:
         self._ttl = ttl_seconds
         self._capacity = max_entries
-        self._entries: OrderedDict[ReportCacheKey, tuple[float, T]] = OrderedDict()
+        self._entries: OrderedDict[K, tuple[float, T]] = OrderedDict()
         self._compute_slot = asyncio.Semaphore(1)
 
-    def _cached(self, key: ReportCacheKey) -> tuple[float, T] | None:
+    def _cached(self, key: K) -> tuple[float, T] | None:
         # All state access runs synchronously on the application's event loop.
         # No await occurs while inspecting, pruning or publishing entries.
         now = monotonic()
@@ -41,7 +41,7 @@ class ReportCache[T]:
             return self._entries[key]
         return None
 
-    async def get(self, key: ReportCacheKey, compute: Callable[[], Awaitable[T]]) -> T:
+    async def get(self, key: K, compute: Callable[[], Awaitable[T]]) -> T:
         cached = self._cached(key)
         if cached is not None:
             return cached[1]
@@ -59,7 +59,16 @@ class ReportCache[T]:
             return value
 
 
+# Thread identity scans raw request logs instead of the hourly rollup, so a
+# miss is seconds rather than milliseconds. The figures move slowly (they are
+# whole-window aggregates), so they tolerate a longer TTL than the cost report.
+_THREAD_IDENTITY_TTL_SECONDS = 300.0
+
+
 class ReportsCaches:
     def __init__(self) -> None:
-        self.reports = ReportCache[ReportsResponse]()
-        self.options = ReportCache[ReportsOptionsResponse]()
+        self.reports = ReportCache[ReportCacheKey, ReportsResponse]()
+        self.options = ReportCache[ReportCacheKey, ReportsOptionsResponse]()
+        self.thread_identity = ReportCache[ReportCacheKey, ThreadIdentityResponse](
+            ttl_seconds=_THREAD_IDENTITY_TTL_SECONDS
+        )

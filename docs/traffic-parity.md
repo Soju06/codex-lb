@@ -200,6 +200,233 @@ organization name. ASN parity is comparable only when A and C use the same
 observer and exact database digest; it does not guarantee that a different
 destination uses the same policy route.
 
+### Capture a Codex request body for the portability fixtures
+
+The provider-portability gate for the subscription-overflow Model Source
+classifies real Codex request bodies. Capturing one needs no ChatGPT
+credentials, no upstream contact and no quota — it is a different lane from the
+parity capture above, because the body is recorded *in the origin* rather than
+at a TLS boundary:
+
+```bash
+uv run python -m scripts.traffic_analysis.codex_body_capture \
+  --model gpt-5.5 --model gpt-5.6-sol --transport http \
+  --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
+```
+
+The script re-executes itself inside an unprivileged network namespace
+(`unshare --map-root-user --net`) and brings up loopback only, so external
+egress is kernel-impossible rather than merely unconfigured. It then *verifies*
+that: before capturing anything it asks the kernel which interfaces the
+namespace has (`socket.if_nameindex`, which is namespace-aware — `/sys/class/net`
+is not) and refuses if anything but loopback is reachable. The manifest records
+the interface list it observed, so `network_isolation` is evidence rather than a
+restatement of the flags the run was given. Inside it, an
+in-process origin serves the operator-pinned `/models` catalog and a
+deterministic Responses lifecycle, and `codex exec` runs against it with a
+throwaway `CODEX_HOME`, a provider declaring `requires_openai_auth = false`,
+and a disposable `env_key` token. The origin persists the decoded request bytes
+itself, reusing `origin_fixture.decode_request_body` for the zstd request
+encoding, so no mitmproxy addon, TLS endpoint or `capture_body_mode` is
+involved.
+
+The **capture** command needs `uv run`, like the origin fixture above: its
+in-process origin imports FastAPI, uvicorn and `zstandard` from the project
+environment, and a bare system interpreter fails at import — on many hosts
+`python` is not a command at all. The rebuild and the privacy scan are
+stdlib-only and run on any Python 3.11+; they are written with `uv run` below for
+consistency with the rest of this document. None of the three needs codex-lb
+*configured*: they read no settings and touch no database.
+
+`--transport websocket` sets `supports_websockets = true` on the generated
+provider and the origin serves both transports, because the configuration only
+*offers* websockets — the client decides. On 0.154.0 the websocket lane opens
+with a `generate: false` prewarm frame and only then sends the turn (carrying
+`previous_response_id` for the primed response), so the capture keeps the frame
+that carries the transcript as the body and writes the prewarm to a separate
+`prewarm-*.json`. Keeping both matters: on the Responses-Lite lane the turn
+frame is ~8 KB with no `additional_tools` item at all, because the tool bundle
+travelled in the prewarm. The artifact name, the run record and the manifest are
+all keyed by the transport the body *arrived* on, so a run that fell back to HTTP
+is never reported as a websocket capture. A websocket body is persisted
+verbatim, frame envelope included; the sanitiser removes the envelope on the way
+to a fixture.
+
+The catalog must be pinned to a file. The Codex model manager caches `/models`
+for 300 s and invalidates the cache on a `client_version` mismatch, so a run
+with a newer CLI always refetches from whatever base URL the provider names.
+`--catalog` therefore defaults to the committed reference catalog in
+[`scripts/traffic_analysis/catalogs/`](https://github.com/Soju06/codex-lb/tree/main/scripts/traffic_analysis/catalogs/README.md),
+the one that produced the fixture corpus: its SHA-256 is the `catalog_sha256`
+those provenance entries record, and the corpus gate pins the two together, so
+any operator can reproduce a capture and verify the recorded digest. To capture
+a different model set, pass a Codex `/models` response — the shape Codex itself
+caches as `$CODEX_HOME/models_cache.json`, an object with a `models` array whose
+entries the client deserialises strictly — and record its digest.
+
+The catalog does not fully determine the body: 0.154.0 layers bundled
+`model_info` overrides on top of the served catalog (a row saying
+`supports_search_tool: false` still produces a body with `web_search` and
+`tool_search` declarations), which is why the CLI version is the primary
+provenance key.
+
+Every refusal fires before any process starts: an `--out` inside the repository
+or under a temporary filesystem, an exported `CODEX_HOME` holding an
+`auth.json`, a shell
+carrying `CODEX_LB_*` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
+`CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` / `CODEX_API_BASE_URL` /
+`CODEX_SESSION_ID`, a shell carrying any outbound proxy variable
+(`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `WS_PROXY` / `WSS_PROXY` /
+`SOCKS_PROXY` / `FTP_PROXY` / `NO_PROXY`, either spelling), a non-loopback
+origin, and a repository config file or `.env` passed as the catalog.
+`--no-network-namespace` exists for hosts without `unshare` and requires the
+explicit `--i-accept-network-egress` companion. The isolation refusal is the one
+exception to "before any process starts", and necessarily so: it can only be
+made *inside* the namespace, so it fires in the re-executed child — still before
+the capture directory, the origin or `codex` exist.
+
+The proxy refusal is not tidiness. The Codex client routes even its
+`http://127.0.0.1:<port>/v1` POST through `HTTP_PROXY` and does not bypass
+loopback: a run in a proxied shell captures nothing, and a run that also passed
+`--no-network-namespace` would deliver the whole request body — cwd, `AGENTS.md`
+text, skills inventory, prompt — to whatever host the variable names.
+
+Then rebuild the body into a fixture, read it, and only then put it in the
+corpus:
+
+```bash
+# 1. rebuild to a scratch path
+uv run python -m scripts.traffic_analysis.codex_body_sanitize \
+  --in  <capture-dir>/body-gpt-5.5-http-<stamp>.json \
+  --out <capture-dir>/fixture.json \
+  --headers-in  <capture-dir>/headers-gpt-5.5-http-<stamp>.json \
+  --headers-out <capture-dir>/sanitised-headers.json \
+  --emit-redactions <capture-dir>/redactions.json
+
+# 2. read <capture-dir>/fixture.json, then copy it in
+uv run python -m scripts.traffic_analysis.codex_body_sanitize \
+  --in  <capture-dir>/fixture.json \
+  --out tests/fixtures/codex_bodies/<name>.json \
+  --i-have-read-the-sanitised-body
+
+uv run python -m scripts.traffic_analysis.fixture_privacy_scan \
+  --root tests/fixtures/codex_bodies --strict
+```
+
+The privacy scan runs as written on a pristine checkout, with no flags beyond
+the corpus root: the bodies allowed to keep bare Codex telemetry key names are
+read from `provenance.json` (`carries_client_telemetry`) and printed.
+`--allow-telemetry-keys` remains for a tree that has no provenance file. Also
+scan the raw capture directory, but *without* `--strict`: the raw body, header
+sidecar and manifest report findings by construction, which is the reminder to
+delete them rather than a gate.
+
+#### The fixture is rebuilt, not scrubbed
+
+`codex_body_sanitize` constructs the fixture from a structural allowlist. Every
+node of the captured body is matched against a rule, and a rule either
+**preserves** a closed domain the portability decision reads — an object key, a
+`type`/`role`/`status`/`effort`/`verbosity` discriminator, a JSON Schema
+keyword, a boolean, a bounded number, a model slug in slug shape, one of Codex's
+own tool names — or **synthesises** the value outright. Everything else is
+synthesised: `instructions`, message content text, a `function_call`'s
+`arguments`, a `function_call_output`'s `output`, a tool `description`, a JSON
+Schema property name, an `enum` value, a `metadata` key, a URL, every
+identifier. One exception, and it is in the code as a literal list: the eight
+account-scoped reference property names `replay_safety` keys on (`file_id`,
+`file_ids`, `container_id`, `vector_store_id`, `vector_store_ids`,
+`encrypted_content`, `image_url`, `file_url`) keep their names in a schema's
+`properties` and `required`, because renaming one moves the verdict under a
+`tool_search` declaration. The substitute is derived from the value's JSON path, so two
+operators rebuilding one capture produce one file. A replaced string leaves
+behind only: whether it was blank; for a URL, its scheme, which is what decides
+account-neutrality; for an identifier, which other identifiers it equalled; and
+for a `metadata` key or a JSON Schema property name, its alphabetical rank among
+its siblings, because the numbering follows sorted order so that a rebuild of a
+rebuild is byte-identical. A node no rule
+describes stops the run and names the path; nothing is dropped silently, because
+a missing key changes the key set the replay predicate validates.
+
+Item ids and `call_id`s are replaced with placeholders that stay referentially
+consistent, so a call and its output still pair; absence is preserved and no key
+is ever added, because a real Responses-Lite body has no `instructions`, `tools`
+or `stream_options` and the portability view declines unknown top-level fields.
+The rebuild is idempotent, and the gate asserts the recorded portability verdict
+is identical before and after it.
+
+This replaced a denylist that kept the captured text and rewrote the substrings
+a set of regexes recognised. It was bypassed twice; the second time measurably.
+A `function_call_output` carrying
+`PATH=/usr/local/bin:/home/jane/.local/bin` was rewritten to
+`PATH=/workspace/repo:/home/jane/.local/bin`, because the path pattern's
+lookbehind excluded a path sitting immediately after `:` — and the rewrite
+deleted the *only* substring the privacy scan could see, so the scan then
+reported a clean body with the operator's home directory in it. Neither failure
+mode has anywhere to happen now. Nothing rewrites a captured string, and a
+captured string reaches the fixture only where a rule names the closed domain it
+came from — object keys, discriminators, JSON Schema keywords, booleans,
+bounded numbers, a model slug in slug shape, Codex's own tool names, and the
+residue named above. Everything else is constructed.
+
+Numbers are bounded rather than merely preserved, because Python integers have
+no width and a JSON double carries 53 bits of mantissa: an unbounded
+`max_output_tokens`, `top_p` or JSON Schema `default` is an unbounded channel
+that no walk over *strings* can see. A preserved number must satisfy
+`|v| <= 2^31` with at most four decimal places, and every number inside a tool's
+schema is replaced with `0` — none of them is read by the portability decision.
+The model slug is the one operator-chosen token kept verbatim, and because a
+shape is not a closed domain the gate pins it twice: against the slug
+`provenance.json` records, and against the committed reference catalog.
+
+The cost is that the committed fixture is no longer readable as a transcript: it
+carries the shape of a real request and none of its prose. Nothing in the gate
+reads the prose. `tests/fixtures/codex_bodies/README.md` records what Codex
+actually sends, and says which of those facts the fixture no longer shows.
+
+The walk that enforces all of this (`surviving_captured_strings`) is a detector,
+not a proof: it reads strings only, and only tokens of three characters or more
+in the ASCII path/identifier alphabet. It runs in the CLI before a write and in
+the corpus gate over the committed bodies; `sanitize_body` itself does not run
+it, so a programmatic caller has to ask.
+
+#### The privacy scan is a second net
+
+`fixture_privacy_scan` adds a residual pass on top of `privacy_scan`'s
+credential shapes, which passes a tree full of live UUIDs and workspace paths on
+its own: a live UUID, a string-valued telemetry key, an email address, an
+absolute path, an account or host name, an `<environment_context>` tag or
+`<skills_instructions>` inventory whose value is not the corpus placeholder.
+
+It is pattern matching over bytes, and it is incomplete by construction — an
+operator path that arrives `\uXXXX`-escaped or base64-wrapped is invisible to
+it, both measured. It is worth running because it catches a hand-edited fixture
+and a body that never went through the rebuild, not because it clears one. Its
+ordering matters too: the sanitiser scans the **captured** body as well as the
+rebuilt one, and a kind present in the capture and absent afterwards is reported
+as evidence about the rebuild rather than as a pass — which is precisely what
+the previous version got wrong.
+
+Nothing in either tool is taken from the machine it runs on, so a capture
+rebuilds to the same fixture and a corpus reaches the same verdict on every host.
+
+#### The boundary is human diff review
+
+No tool here can tell you a fixture is the one you meant to commit. Writing into
+`tests/fixtures/codex_bodies/` therefore requires
+`--i-have-read-the-sanitised-body`, and the command refuses without it. That
+flag, and the reading it stands for, is the boundary; the allowlist is what
+makes the reading short enough to be real.
+
+Never commit a `headers-*.json`: it holds the `authorization` line even when
+the token was disposable, and the header sidecar is still a denylist — it is an
+operator aid, never a committed artifact. Delete the raw capture directory in
+the same session.
+
+The corpus contract, the per-fixture provenance and the recorded verdicts are
+documented in
+[`tests/fixtures/codex_bodies/README.md`](https://github.com/Soju06/codex-lb/tree/main/tests/fixtures/codex_bodies/README.md),
+and gated by `tests/unit/test_codex_body_fixtures.py`.
+
 ### Controlled failure-path matrix
 
 The fixture defaults to the normal success path. To compare failure behavior,
@@ -433,6 +660,22 @@ logic. Each run receives a new directory under
 pass, database/key/log cleanup completes, and the retained tree passes the
 credential-shape privacy scan. Overlap, command timeout, a missing scenario,
 or invalid result leaves the previous success unchanged.
+
+Before either runner starts, the suite stamps the isolated `auth.json`'s
+recorded refresh time to the current instant — every key the account importer
+accepts (`lastRefreshAt`, `last_refresh`), so no stale alias outranks the stamp
+— with mode 600 preserved and tokens untouched. An imported
+account inherits that timestamp, and codex-lb proactively exchanges a refresh
+token once the account is older than the fixed eight-day
+`TOKEN_REFRESH_INTERVAL_DAYS` window (`app/core/auth/refresh.py`). Without the
+stamp, a run started with a week-old isolated credential would exchange that
+real, single-use refresh token against `https://auth.openai.com` — the OAuth
+host is a protocol constant, so redirecting `CODEX_LB_UPSTREAM_BASE_URL` at the
+fixture does not cover it — rotating the credential into a database the suite
+deletes on cleanup and leaving every later run with a dead file. The stamp
+replaces the former `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS=365` pin, which is a
+removed setting; delete that line from host-local runner scripts to silence its
+startup WARN.
 
 The scheduled result is labelled `fast_canary`. It does not include the
 independently sampled HTTP JSON/SSE/WebSocket ClientHello cohorts and therefore

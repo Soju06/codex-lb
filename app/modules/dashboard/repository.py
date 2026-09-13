@@ -21,6 +21,10 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.settings.subscription_overflow import (
+    SubscriptionOverflowActivity,
+    load_subscription_overflow_activity,
+)
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     NormalizedUsageWindow,
@@ -302,3 +306,26 @@ class DashboardRepository:
 
     async def get_settings(self) -> DashboardSettings:
         return await self._settings_repo.get_or_create()
+
+    async def subscription_overflow_activity(
+        self,
+        *,
+        settings: DashboardSettings,
+        since: datetime,
+        until: datetime,
+        now: datetime,
+    ) -> SubscriptionOverflowActivity | None:
+        """Overflow spend and live pins for the overview tile (#2123 WP-G).
+
+        ``None`` when the installation has never overflowed and holds no live
+        pin, which is every install that never designated a source. ``settings``
+        gates the read and is the row the caller already loaded, so a ship-dark
+        install pays no statement for the tile -- not even the gate.
+        """
+        return await load_subscription_overflow_activity(
+            self._session,
+            settings=settings,
+            since=since,
+            until=until,
+            now=now,
+        )

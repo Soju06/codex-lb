@@ -182,14 +182,23 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert result.current_revision == head
     assert _revisions(database.engine) == (head,)
     merged = _state(database.engine)
-    # Revisions after the merge add nullable dashboard_settings columns (for
-    # example the resilience toggles); they must start NULL and are compared
-    # separately so this test keeps covering the two original branches.
+    # Revisions after the merge add dashboard_settings columns (the resilience
+    # toggles, the guest session counter, ...). Whether nullable or NOT NULL
+    # with a server default, each is backfilled uniformly, so it carries no
+    # per-row state: assert one value across rows and compare the rest
+    # separately, so this test keeps covering the two original branches.
     merged_settings = [dict(row) for row in merged["settings"]]
     added_columns = set(merged_settings[0]) - set(expected_settings[0])
-    for row in merged_settings:
-        for column in added_columns:
-            assert row.pop(column) is None
+    for column in added_columns:
+        backfilled = {row.pop(column) for row in merged_settings}
+        assert len(backfilled) == 1, (column, backfilled)
+    # Revisions after the merge also *retire* dashboard_settings columns (the
+    # legacy credential trio, once `dashboard_users` became the only authority).
+    # A column that no longer exists carries no per-row state either, and it is
+    # not a fact about the two branches this test covers.
+    for column in set(expected_settings[0]) - set(merged_settings[0]):
+        for row in expected_settings:
+            row.pop(column)
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])

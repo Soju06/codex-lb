@@ -10,6 +10,7 @@ from app.modules.shared.schemas import DashboardModel
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
 _WEEKLY_PACE_SMOOTHING_MINUTES = (15, 30, 60, 120, 240)
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
+_THREAD_CACHE_IDENTITY_MODE_PATTERN = r"^(shared|isolated)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -49,11 +50,19 @@ class SettingProvenance(DashboardModel):
     default: int | float | str | bool | None = None
 
 
+#: ``dashboard_settings.local_login_policy`` on the wire (PLAN §4.6).
+LocalLoginPolicyLiteral = Literal["enabled", "admins_only", "break_glass_only"]
+
+
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
+    # Effective mode; ``provenance.thread_cache_identity_mode`` says whether it
+    # came from the dashboard column, the environment or the code default.
+    thread_cache_identity_mode: str = Field(pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
+    thread_cache_identity_mode_override: str | None = Field(default=None, pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
     proxy_account_response_create_limit_environment_value: int = Field(ge=0)
     proxy_account_response_create_limit_override: int | None = Field(default=None, ge=0)
@@ -109,7 +118,14 @@ class DashboardSettingsResponse(DashboardModel):
     warmup_model: str = Field(min_length=1)
     import_without_overwrite: bool
     totp_required_on_login: bool
-    totp_configured: bool
+    totp_required_for_admin_role: bool
+    #: Who may still sign in with a local password (PLAN §4.6). Database
+    #: only: no environment variable can silently re-open a closed door.
+    local_login_policy: LocalLoginPolicyLiteral
+    #: Active password accounts without a TOTP secret; the second counts only
+    #: admin-level ones. Both say "N accounts will have to enrol at next sign-in".
+    users_without_totp_count: int = Field(ge=0)
+    admins_without_totp_count: int = Field(ge=0)
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
@@ -153,6 +169,18 @@ class DashboardSettingsResponse(DashboardModel):
     conversation_archive_enabled: bool
     conversation_archive_dir: str | None = None
     # end M5 conversation archive
+    # R2 spool retention: effective retention of the durable HTTP-bridge
+    # operation spool (raw request payloads + spooled response events);
+    # ``provenance[<name>]`` says whether the dashboard, the deprecated env
+    # alias or the code default supplied it. Unbounded here for the same reason
+    # as the C2-1 timeouts: an environment value ``Settings`` accepts must
+    # never make ``GET /api/settings`` fail.
+    http_responses_session_bridge_operation_spool_retention_seconds: float
+    # Lowest value the API would accept for the field above, derived from the
+    # longest window in which a spooled operation may still be replayed. The
+    # dashboard mirrors this floor client-side.
+    http_responses_session_bridge_operation_spool_retention_floor_seconds: float
+    # end R2 spool retention
     version: int = Field(ge=1)
     # C2-1 timeouts: effective values; ``provenance[<name>]`` says whether the
     # dashboard, the environment or the code default supplied each one. No
@@ -178,6 +206,22 @@ class DashboardSettingsResponse(DashboardModel):
     provenance: dict[str, SettingProvenance] = Field(default_factory=dict)
 
 
+#: ``DashboardSettingsUpdateRequest`` fields that change the security posture of
+#: the install. A request that changes any of them (value differs from the
+#: stored setting) requires ``security:write`` on top of the generic write gate.
+SECURITY_SETTINGS_FIELDS: frozenset[str] = frozenset(
+    {
+        "totp_required_on_login",
+        "totp_required_for_admin_role",
+        "local_login_policy",
+        "api_key_auth_enabled",
+        "guest_access_enabled",
+        "dashboard_session_ttl_seconds",
+        "hide_upstream_quota_from_api_keys",
+    }
+)
+
+
 class DashboardSettingsUpdateRequest(DashboardModel):
     """Partial update of the dashboard settings.
 
@@ -201,6 +245,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     http_downstream_transport_policy: str | None = Field(
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
+    )
+    # Tri-state like the caps below: omitted = unchanged, null = inherit the
+    # environment value or the ``shared`` code default, value = store.
+    thread_cache_identity_mode: str | None = Field(
+        default=None,
+        pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN,
     )
     proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)
@@ -250,6 +300,8 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     warmup_model: str | None = Field(default=None, min_length=1)
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
+    totp_required_for_admin_role: bool | None = None
+    local_login_policy: LocalLoginPolicyLiteral | None = None
     api_key_auth_enabled: bool | None = None
     hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None
@@ -286,6 +338,14 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     # for confirmation first and the API audits every effective on/off change.
     conversation_archive_enabled: bool | None = None
     # end M5 conversation archive
+    # R2 spool retention: tri-state like the C2-1 timeouts (absent = unchanged,
+    # null = clear and inherit the deprecated env alias / code default, value =
+    # store). The replay floor is enforced in the API layer against the
+    # effective value, because it depends on the other dashboard reuse windows.
+    http_responses_session_bridge_operation_spool_retention_seconds: float | None = Field(
+        default=None, gt=0, le=315360000
+    )
+    # end R2 spool retention
     # C2-1 timeouts: tri-state like the caps (absent = unchanged, null = clear
     # to inherit the environment / default, value = store). Cross-field timeout
     # invariants are checked against the effective values in the API handler.

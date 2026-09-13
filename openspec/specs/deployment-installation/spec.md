@@ -757,8 +757,20 @@ environment) whose
 deprecated alias that applies only while the column is NULL and that joins the
 removed-settings warning list in the next minor release. The bridge MUST
 resolve the switch before it takes a session's prewarm lock, from the dashboard
-overrides the request entry point already bound, and MUST NOT add a settings
-read under that lock.
+overrides the request entry point already bound. The prewarm's own helpers
+MUST NOT read the dashboard row for themselves while that lock is held: the
+values the response-create admission gate needs (account concurrency caps and
+routing tunables) and the row the reconnect on the prewarm timeout path
+resolves MUST come from one snapshot taken before the lock and passed in, and
+that snapshot MUST be resolved only when a warm-up will actually be sent. If
+that snapshot cannot be loaded, the bridge MUST fall back to the last
+dashboard row the replica loaded, exactly as the request entry point does, and
+where no row has ever been loaded it MUST skip the prewarm rather than serve
+it without a snapshot; a prewarm MUST NOT fail a request the bridge can
+otherwise serve. Work the recovery path reaches beyond those two helpers --
+account selection, token refresh, and upstream route resolution, each with its
+own settings read or database session -- is out of scope for this requirement
+and keeps its existing behaviour.
 `database_pool_size` and `database_max_overflow` MUST remain
 operator-configurable settings, and `soft_drain_enabled` and
 `deterministic_failover_enabled` MUST remain the failover subsystem's only
@@ -894,6 +906,34 @@ warning list in the next minor release.
 - **THEN** the session prewarm is attempted for that request
 - **AND** no request is excluded by canary sampling or an allow/deny cohort
 
+#### Scenario: A prewarm's own helpers read no settings under its lock
+
+- **GIVEN** the Codex session prewarm switch is on in the dashboard
+- **WHEN** a session prewarm runs its body under the prewarm lock -- the
+  warm-up request built, response-create admission taken for it, and the
+  warm-up sent upstream to a stream that completes
+- **THEN** the dashboard settings row is read once, before the lock is taken
+- **AND** the admission gate takes no settings read of its own while the lock
+  is held, and that path opens no database session
+
+#### Scenario: An unreadable settings row does not fail the request
+
+- **GIVEN** the Codex session prewarm switch is on and the settings row cannot
+  be loaded when a first-turn Codex bridge request arrives
+- **WHEN** the bridge resolves its pre-lock snapshot
+- **THEN** the last dashboard row this replica loaded is used and the prewarm
+  proceeds
+- **AND** where no row has ever been loaded, the prewarm records
+  `prewarm_status=skipped` and the request is still served
+
+#### Scenario: A payload with no warm-up resolves no snapshot
+
+- **GIVEN** the Codex session prewarm switch is on and a first-turn Codex
+  bridge request whose payload yields no warm-up to send
+- **WHEN** the bridge evaluates the prewarm
+- **THEN** it records `prewarm_status=skipped` without reading the dashboard
+  settings row at all
+
 #### Scenario: Prewarm env alias applies only until the dashboard sets a value
 
 - **GIVEN** `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED=true`
@@ -916,20 +956,28 @@ warning list in the next minor release.
 - **AND** clearing the dashboard value returns to the environment alias
   (`source: "env"`) until that alias is removed in the next minor release
 
-### Requirement: Helm pre-1.13 controller-migration shim is retained through 1.26 and its removal is announced
+### Requirement: Helm chart renders no pre-1.13 controller-migration shim
 
-The Helm chart MUST keep rendering the pre-1.13 controller-migration shim (the `pre-upgrade` legacy-prepare hook, the `post-upgrade` legacy-cleanup hook, the lookup-based `auto` Service selector mode and the `migration.serviceSelectorMode` value) on every chart release up to and including the 1.26 minor. The chart README MUST document the upgrade path from chart versions older than 1.13.0: what each hook does, what `migration.serviceSelectorMode` controls (the rendered selector only; the cleanup hook cuts the live Service over regardless), how to verify the cutover using the chart fullname, and that the first upgrade from a pre-1.13 release is not zero-downtime because Helm removes the legacy Deployment during the resource sync before the post-upgrade hook runs. The README MUST state the planned removal (the first minor release after 1.26) and the intermediate-upgrade path for releases still on a pre-1.13 chart before the removal ships. Removing the shim MUST be its own OpenSpec change that supersedes this requirement.
+The Helm chart MUST NOT render the pre-1.13 `Deployment` -> `StatefulSet` controller-migration shim. Specifically: no `legacy-prepare` `pre-upgrade` hook and no `legacy-cleanup` `post-upgrade` hook (nor their ServiceAccount, Role and RoleBinding), no `legacy` traffic-lane selector helper, and no `migration.serviceSelectorMode` value. The public Service's selector MUST be the StatefulSet workload lane unconditionally, on install and on upgrade alike, and MUST NOT depend on a `lookup` of the live Service. A `migration.serviceSelectorMode` key left over in an operator's values file MUST be inert.
 
-#### Scenario: Operator upgrades a release installed before chart 1.13.0
+The chart README's `Upgrading` section MUST state that the shim is removed in this release and MUST give releases still on a chart older than 1.13.0 the supported path: upgrade to a `1.24.x` chart first so the cutover runs there, verify that the Service selects the StatefulSet lane and the legacy `Deployment` is gone, then upgrade to this release. That section MUST NOT promise a future removal date for the shim.
 
-- **GIVEN** a release installed from a chart older than 1.13.0 and any chart up to the 1.26 minor
-- **WHEN** the operator runs `helm upgrade`
-- **THEN** the chart renders the legacy-prepare and legacy-cleanup hooks and the `auto` selector mode
-- **AND** the chart README tells the operator to plan a maintenance window, how to verify the cutover, and what `migration.serviceSelectorMode` does and does not control
+#### Scenario: Upgrade renders no migration-shim hooks
 
-#### Scenario: Operator reads the deprecation notice
+- **GIVEN** any release of the chart
+- **WHEN** the chart is rendered with `--is-upgrade`
+- **THEN** no `legacy-prepare` or `legacy-cleanup` Job, ServiceAccount, Role or RoleBinding is rendered
+- **AND** no rendered resource carries the `codex-lb.soju.dev/traffic: legacy` lane
 
-- **WHEN** an operator reads the chart README's `Upgrading` section
-- **THEN** it states that the shim is planned for removal in the first minor release after 1.26
-- **AND** it states that a release still on a pre-1.13 chart must first upgrade to a 1.13.0 - 1.26.x chart
+#### Scenario: Public Service always selects the StatefulSet lane
+
+- **WHEN** the public Service is rendered on install, on upgrade, or with a stale `migration.serviceSelectorMode` override
+- **THEN** its selector is exactly the workload selector labels, including `codex-lb.soju.dev/traffic: workload`
+
+#### Scenario: Operator on a pre-1.13 chart reads the upgrade path
+
+- **GIVEN** a release installed from a chart older than 1.13.0
+- **WHEN** the operator reads the chart README's `Upgrading` section
+- **THEN** it states that the shim is removed in this release
+- **AND** it tells the operator to upgrade to a `1.24.x` chart first, plan that step as a maintenance window, verify the cutover, and only then upgrade to this release
 

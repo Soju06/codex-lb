@@ -66,19 +66,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-StatefulSet workload selector labels. These are distinct from the legacy Deployment traffic lane.
+StatefulSet workload selector labels. The traffic lane is part of the StatefulSet's
+immutable selector, so it stays even though only one lane exists.
 */}}
 {{- define "codex-lb.workloadSelectorLabels" -}}
 {{- include "codex-lb.selectorLabels" . }}
 codex-lb.soju.dev/traffic: workload
-{{- end }}
-
-{{/*
-Legacy Deployment traffic selector labels used during controller migration cutover.
-*/}}
-{{- define "codex-lb.legacySelectorLabels" -}}
-{{- include "codex-lb.selectorLabels" . }}
-codex-lb.soju.dev/traffic: legacy
 {{- end }}
 
 {{/*

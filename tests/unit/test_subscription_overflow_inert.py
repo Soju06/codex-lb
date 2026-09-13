@@ -7,8 +7,12 @@ wiring so the ship-dark guarantee (design v3 I9) stays mechanical:
 * the designation identifier is spelled only by the decision module
   (``app/modules/proxy/overflow.py``), its WebSocket parity helper, the two
   route files that call them (``api.py`` and the websocket mixin's two call
-  sites), the metrics registry, the retention job (live-pin gauge) and the
-  dashboard-side settings/model-source modules that already owned it;
+  sites), the metrics registry, the retention job (live-pin gauge), the
+  dashboard-side settings/model-source modules that already owned it, and the
+  dashboard overview read added by WP-G -- its repository (which loads the
+  windowed spend and live-pin aggregate from the settings helper) plus the three
+  pass-through files that carry the resulting ``summary.subscriptionOverflow``
+  field (schemas, builders, service), which name the field and nothing else;
 * ``api.py`` reaches the feature only through ``app.modules.proxy.overflow``
   and calls each entry point from exactly the routes the design names:
   ``resolve_subscription_overflow`` from ``responses``/``v1_responses`` (after
@@ -68,20 +72,37 @@ _DASHBOARD_READERS = frozenset(
         "app/modules/settings/service.py",
         "app/modules/settings/subscription_overflow.py",
         "app/modules/model_sources/api.py",
+        # WP-G: the only dashboard-overview file that imports the settings
+        # helper (for the windowed spend and live-pin aggregate).
+        "app/modules/dashboard/repository.py",
+    }
+)
+# WP-G pass-through: these name ``summary.subscription_overflow`` and nothing
+# else -- no pin identifier, no import of the settings helper -- so they get the
+# designation identifier without the wider dashboard-reader grant.
+_OVERVIEW_FIELD_READERS = frozenset(
+    {
+        "app/modules/dashboard/schemas.py",
+        "app/modules/dashboard/builders.py",
+        "app/modules/dashboard/service.py",
     }
 )
 _ALEMBIC_PREFIX = "app/db/alembic/versions/"
 
 # Production files that may spell the designation identifier.
-_DESIGNATION_READERS = _DASHBOARD_READERS | frozenset(
-    {
-        _API_MODULE,
-        _OVERFLOW_MODULE,
-        _WS_OVERFLOW_MODULE,
-        _PIN_MODULE,
-        _METRICS_MODULE,
-        _RETENTION_JOB,
-    }
+_DESIGNATION_READERS = (
+    _DASHBOARD_READERS
+    | _OVERVIEW_FIELD_READERS
+    | frozenset(
+        {
+            _API_MODULE,
+            _OVERFLOW_MODULE,
+            _WS_OVERFLOW_MODULE,
+            _PIN_MODULE,
+            _METRICS_MODULE,
+            _RETENTION_JOB,
+        }
+    )
 )
 # Production files that may name the pin table / pin types.
 _PIN_READERS = _DASHBOARD_READERS | frozenset(

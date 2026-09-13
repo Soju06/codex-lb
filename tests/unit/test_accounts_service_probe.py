@@ -12,7 +12,6 @@ from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import (
-    DEFAULT_PROBE_MODEL,
     PROBE_MAX_OUTPUT_TOKENS,
     AccountNotProbableError,
     AccountsService,
@@ -249,7 +248,7 @@ async def test_probe_account_uses_default_model_when_omitted(monkeypatch):
 
     await service.probe_account(_ACCOUNT_ID)
 
-    assert captured_kwargs["model"] == DEFAULT_PROBE_MODEL
+    assert captured_kwargs["model"] == "gpt-5.6-luna"
 
 
 @pytest.mark.asyncio

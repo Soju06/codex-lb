@@ -25,6 +25,20 @@ def resolve_dashboard_session_ttl_seconds(request: HTTPConnection, configured_tt
     return REMOTE_DASHBOARD_SESSION_TTL_SECONDS
 
 
+def resolve_admin_dashboard_session_ttl_seconds(request: HTTPConnection, configured_ttl_seconds: int) -> int:
+    """Admin-role sessions are capped at 12 hours unless the request is a trusted local one.
+
+    Applies on top of :func:`resolve_dashboard_session_ttl_seconds`: shorter
+    configured lifetimes still win, and the same locality test that allows a
+    long session for everyone decides whether an admin may keep the full value.
+    """
+
+    ttl_seconds = resolve_dashboard_session_ttl_seconds(request, configured_ttl_seconds)
+    if ttl_seconds <= REMOTE_DASHBOARD_SESSION_TTL_SECONDS or _allows_long_local_dashboard_session(request):
+        return ttl_seconds
+    return REMOTE_DASHBOARD_SESSION_TTL_SECONDS
+
+
 def _allows_long_local_dashboard_session(request: HTTPConnection) -> bool:
     from app.core.auth.dashboard_mode import DashboardAuthMode
 

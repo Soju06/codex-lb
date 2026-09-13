@@ -3,12 +3,16 @@ import {
   AuthSessionSchema,
   GuestPasswordSetRequestSchema,
   type GuestLoginRequest,
+  type InviteAcceptRequest,
+  InviteDescriptionSchema,
   type GuestPasswordSetRequest,
   type LoginRequest,
   type PasswordChangeRequest,
   type PasswordRemoveRequest,
   type PasswordSetupRequest,
   StatusResponseSchema,
+  type StepUpRequest,
+  StepUpResponseSchema,
   TotpSetupConfirmRequestSchema,
   TotpSetupStartResponseSchema,
   TotpVerifyRequestSchema,
@@ -88,6 +92,34 @@ export function disableTotp(payload: unknown) {
   });
 }
 
+/** Re-verify the signed-in account for a sensitive change; the server picks the factors from the account. */
+export function stepUp(payload: StepUpRequest) {
+  return post(`${AUTH_BASE_PATH}/step-up`, StepUpResponseSchema, {
+    body: payload,
+    suppressUnauthorizedHandler: true,
+  });
+}
+
 export function logout() {
   return post(`${AUTH_BASE_PATH}/logout`, StatusResponseSchema);
+}
+
+/** Revokes every session of the signed-in account, including this one. */
+export function logoutAll() {
+  return post(`${AUTH_BASE_PATH}/logout-all`, StatusResponseSchema);
+}
+
+/** Public: what the acceptance screen may show for an invite token (404 for every invalid token). */
+export function describeInvite(token: string) {
+  return get(`${AUTH_BASE_PATH}/invite/${encodeURIComponent(token)}`, InviteDescriptionSchema, {
+    suppressUnauthorizedHandler: true,
+  });
+}
+
+/** Public: sets the invited account's password and signs it in (session cookie). */
+export function acceptInvite(payload: InviteAcceptRequest) {
+  return post(`${AUTH_BASE_PATH}/invite/accept`, AuthSessionSchema, {
+    body: payload,
+    suppressUnauthorizedHandler: true,
+  });
 }

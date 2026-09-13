@@ -157,6 +157,9 @@ def detached_runtime_snapshot(
             leases=None if runtime.leases is None else dict(runtime.leases),
             stream_key_inflight=None if runtime.stream_key_inflight is None else dict(runtime.stream_key_inflight),
             overload_rejections=None if runtime.overload_rejections is None else list(runtime.overload_rejections),
+            soft_overload_rejections=(
+                None if runtime.soft_overload_rejections is None else list(runtime.soft_overload_rejections)
+            ),
             outcome_buckets=(
                 None
                 if runtime.outcome_buckets is None

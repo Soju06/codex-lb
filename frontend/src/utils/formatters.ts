@@ -358,6 +358,12 @@ export function formatRelative(ms: number): string {
   return t("formatters.relative.days", { count: days });
 }
 
+/** Relative time until `iso`, or `null` once it has passed. */
+export function formatExpiresIn(iso: string): string | null {
+  const remaining = new Date(iso).getTime() - Date.now();
+  return remaining > 0 ? formatRelative(remaining) : null;
+}
+
 export function formatResetRelative(ms: number): string {
   if (ms <= 60_000) {
     return t("formatters.relative.minutes", { count: 1 });

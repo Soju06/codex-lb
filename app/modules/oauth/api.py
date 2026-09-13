@@ -5,8 +5,9 @@ import logging
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
+from app.core.auth.dashboard_access import Permission
 from app.core.auth.dependencies import (
-    require_dashboard_write_access,
+    require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
@@ -35,7 +36,7 @@ router = APIRouter(
 @router.post("/start", response_model=OauthStartResponse)
 async def start_oauth(
     request: OauthStartRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: OauthContext = Depends(get_oauth_context),
 ) -> OauthStartResponse | JSONResponse:
     try:
@@ -52,7 +53,11 @@ async def start_oauth(
         )
 
 
-@router.get("/status", response_model=OauthStatusResponse)
+@router.get(
+    "/status",
+    response_model=OauthStatusResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE))],
+)
 async def oauth_status(
     flow_id: str | None = Query(default=None, alias="flowId"),
     context: OauthContext = Depends(get_oauth_context),
@@ -63,7 +68,7 @@ async def oauth_status(
 @router.post("/complete", response_model=OauthCompleteResponse)
 async def complete_oauth(
     request: OauthCompleteRequest | None = Body(default=None),
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: OauthContext = Depends(get_oauth_context),
 ) -> OauthCompleteResponse | JSONResponse:
     try:
@@ -78,7 +83,7 @@ async def complete_oauth(
 @router.post("/manual-callback", response_model=ManualCallbackResponse)
 async def manual_callback(
     request: ManualCallbackRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: OauthContext = Depends(get_oauth_context),
 ) -> ManualCallbackResponse | JSONResponse:
     try:

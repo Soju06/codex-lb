@@ -12,6 +12,42 @@ kubectl port-forward svc/codex-lb 2455:2455
 
 Open [localhost:2455](http://localhost:2455) → Add account → Done.
 
+## Upgrading to the release that drops the legacy dashboard credential columns
+
+**Stop the old replicas first.** This release removes `dashboard_settings.password_hash`,
+`totp_secret_encrypted` and `totp_last_verified_step`; every earlier release maps those columns and
+loads the settings row as one entity, so a pod of an earlier release that is still serving when the
+migration commits fails on every settings read. The chart's migration Job is a `pre-upgrade` hook, so
+it runs *before* the new pods roll and therefore before the old ones drain: an ordinary
+`helm upgrade` leaves that window open. Close it in one of these ways:
+
+```bash
+# Scale to zero, upgrade, scale back up.
+kubectl scale deploy/codex-lb --replicas=0
+helm upgrade codex-lb oci://ghcr.io/soju06/charts/codex-lb
+```
+
+or run the migration by hand after the old colour is stopped
+(`--set migration.enabled=false`, then `kubectl run ... python -m app.db.migrate upgrade`), or stop
+the old colour of a blue/green pair before the upgrade. There is no supported window in which a pod
+of an earlier release runs against the post-drop schema.
+
+The upgrade says this itself, so this page is not the only warning: whenever the drop is about to run
+on a database that carries data, it logs one warning naming the drain requirement. It cannot see a
+*running* old replica — nothing reports one — so the order above is yours to enforce.
+
+**Skipping releases is fine; skipping the stop is not.** The revision that drops the columns descends
+from the one that copied the credentials onto the account rows, so a database last migrated by any
+older release reaches head in a single `helm upgrade` (or `python -m app.db.migrate upgrade head`)
+with those credentials intact. Nothing refuses the jump and no intermediate upgrade is needed — the
+only ordering requirement on this page is the one above.
+
+**Rollback is supported to the immediately previous release only.** Its downgrade re-creates the
+three columns and re-fills them from the bootstrap account, which the previous release ignores (it
+reads the account rows) and the release before that reads as the credential. If the bootstrap account
+was deleted there is nothing to re-fill from, and a build older than the previous release would read
+the empty columns as "never set up": an implicit local admin and a fresh bootstrap token.
+
 ## Multi-replica behavior
 
 The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica installs using a headless-service DNS name per pod. The default cluster domain is `cluster.local`; set Helm `clusterDomain` if your cluster uses a different suffix. Override `config.sessionBridgeAdvertiseBaseUrl` only if pods must be reached through a different internal address.

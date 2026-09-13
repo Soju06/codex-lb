@@ -25,6 +25,7 @@ export type RequestLogsListFilters = {
   apiKeyIds?: string[];
   statuses?: string[];
   modelOptions?: string[];
+  sources?: string[];
   timeframe?: Exclude<RequestLogTimeframe, "all">;
   since?: string;
   until?: string;
@@ -80,6 +81,7 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
   appendMany(query, "apiKeyId", params.apiKeyIds);
   appendMany(query, "status", params.statuses);
   appendMany(query, "modelOption", params.modelOptions);
+  appendMany(query, "source", params.sources);
   if (params.conversationId) {
     query.set("conversation_id", params.conversationId);
   }

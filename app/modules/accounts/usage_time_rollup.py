@@ -62,6 +62,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import SQLCoreOperations
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
@@ -141,15 +142,21 @@ _EXCLUDED_REQUEST_KINDS = WARMUP_REQUEST_KINDS
 CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 
 
-def conversation_id_expr() -> ColumnElement:
-    """Normalized conversation id: trimmed, with blank collapsed to NULL.
+def normalized_thread_key_expr(column: SQLCoreOperations[str | None]) -> ColumnElement:
+    """Trim a thread-identifying text column, collapsing blank to NULL.
 
     The single SQL definition shared by the conversation fold and every
     conversation reader (dashboard and reports repositories) — a drifted
-    variant would silently split one conversation into two.
+    variant would silently split one conversation into two. It is reused for
+    ``session_id`` so a session-keyed thread normalizes identically.
     """
-    trimmed = func.ltrim(func.rtrim(RequestLog.conversation_id, CONVERSATION_WHITESPACE), CONVERSATION_WHITESPACE)
+    trimmed = func.ltrim(func.rtrim(column, CONVERSATION_WHITESPACE), CONVERSATION_WHITESPACE)
     return func.nullif(trimmed, "")
+
+
+def conversation_id_expr() -> ColumnElement:
+    """Normalized conversation id."""
+    return normalized_thread_key_expr(RequestLog.conversation_id)
 
 
 # Stored stand-in for NULL account_id / api_key_id / service_tier /

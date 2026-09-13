@@ -6,10 +6,12 @@ let registeredUnauthorizedHandler: (() => void) | null = null;
 const getAuthSession = vi.fn();
 
 vi.mock("@/features/auth/api", () => ({
+  acceptInvite: vi.fn(),
   getAuthSession,
   loginGuest: vi.fn(),
   loginPassword: vi.fn(),
   logout: vi.fn(),
+  logoutAll: vi.fn(),
   verifyTotp: vi.fn(),
 }));
 
@@ -97,8 +99,11 @@ describe("useAuthStore unauthorized handler", () => {
     const next = useAuthStore.getState();
     expect(next.authenticated).toBe(false);
     expect(next.role).toBe("guest");
-    expect(next.permissions).toEqual(["read"]);
+    expect(next.permissions).toEqual([]);
     expect(next.canWrite).toBe(false);
+    expect(next.user).toBeNull();
+    // The gate stays on its spinner until the follow-up refresh settles.
+    expect(next.initialized).toBe(false);
   });
 
   it("keeps admin upgrade login visible after a failed password attempt", async () => {

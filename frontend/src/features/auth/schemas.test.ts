@@ -30,11 +30,167 @@ describe("AuthSessionSchema", () => {
       authMode: "trusted_header",
       passwordManagementEnabled: true,
       passwordSessionActive: false,
-      role: "admin",
-      permissions: ["read", "write"],
+      role: "guest",
+      permissions: [],
       guestAccessEnabled: false,
       guestPasswordRequired: false,
+      user: null,
+      authMethod: null,
+      mustChangePassword: false,
+      totpEnrollmentRequired: false,
+      login: {
+        usernameField: "hidden",
+        providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
+        localLogin: "enabled",
+        pendingIdentity: false,
+      },
+      accessSummary: null,
+      assignableRoleIds: [],
+      localPasswordConfigured: false,
+      stepUp: null,
+      breakGlassSession: false,
     });
+  });
+
+  it("falls back to the open policy rather than failing the whole session on an unknown value", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      login: { usernameField: "shown", providers: [], localLogin: "something_new", pendingIdentity: false },
+      accessSummary: {
+        usersTotal: 1,
+        usersActive: 1,
+        usersInvited: 0,
+        usersDisabled: 0,
+        pendingInvites: 0,
+        nonAdminUsers: 0,
+        customRoles: 0,
+        providersEnabled: ["password"],
+        roleMappings: 0,
+        scimTokens: 0,
+        auditSinks: 0,
+        localLoginPolicy: "something_new",
+      },
+    });
+
+    expect(parsed.login.localLogin).toBe("enabled");
+    expect(parsed.accessSummary?.localLoginPolicy).toBe("enabled");
+  });
+
+  it("reports a break-glass session when the server marks one", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      breakGlassSession: true,
+    });
+
+    expect(parsed.breakGlassSession).toBe(true);
+  });
+
+  it("defaults the account fields for payloads that predate them", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      role: "admin",
+      permissions: ["read", "write"],
+    });
+
+    expect(parsed.user).toBeNull();
+    expect(parsed.login.usernameField).toBe("hidden");
+    expect(parsed.accessSummary).toBeNull();
+    expect(parsed.assignableRoleIds).toEqual([]);
+    expect(parsed.totpEnrollmentRequired).toBe(false);
+    expect(parsed.mustChangePassword).toBe(false);
+  });
+
+  it("parses the account block, login hint and access summary", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      role: "admin",
+      permissions: ["read", "write", "users:manage:all"],
+      user: { id: "u1", username: "admin", displayName: null, role: { id: "r1", slug: "admin", name: "Admin", kind: "preset" } },
+      authMethod: "password",
+      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password" }], localLogin: "enabled" },
+      accessSummary: {
+        usersTotal: 2,
+        usersActive: 2,
+        usersInvited: 0,
+        usersDisabled: 0,
+        pendingInvites: 0,
+        nonAdminUsers: 1,
+        customRoles: 0,
+        providersEnabled: ["password"],
+        roleMappings: 0,
+        scimTokens: 0,
+        auditSinks: 0,
+        localLoginPolicy: "enabled",
+      },
+      assignableRoleIds: ["r1"],
+    });
+
+    expect(parsed.user?.username).toBe("admin");
+    expect(parsed.login.usernameField).toBe("shown");
+    expect(parsed.login.providers[0]?.loginUrl).toBeNull();
+    expect(parsed.accessSummary?.usersTotal).toBe(2);
+    expect(parsed.assignableRoleIds).toEqual(["r1"]);
+  });
+
+  it("treats an explicit null login hint as the hidden default", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: false,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      login: null,
+    });
+
+    expect(parsed.login.usernameField).toBe("hidden");
+  });
+
+  it("defaults role and permissions to least privilege when omitted", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: false,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+    });
+
+    expect(parsed.role).toBe("guest");
+    expect(parsed.permissions).toEqual([]);
+  });
+
+  it("accepts fine-grained permission strings alongside the coarse aliases", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      role: "admin",
+      permissions: ["read", "write", "accounts:export", "security:write"],
+    });
+
+    expect(parsed.permissions).toEqual(["read", "write", "accounts:export", "security:write"]);
+  });
+
+  it("rejects unknown roles", () => {
+    const result = AuthSessionSchema.safeParse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      role: "superuser",
+    });
+
+    expect(result.success).toBe(false);
   });
 
   it("rejects missing required fields", () => {
@@ -69,6 +225,11 @@ describe("LoginRequestSchema", () => {
         password: "strong-password",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts an optional username", () => {
+    const parsed = LoginRequestSchema.parse({ username: " alice ", password: "strong-password" });
+    expect(parsed.username).toBe("alice");
   });
 
   it("rejects empty password", () => {

@@ -4,7 +4,8 @@ import json
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -148,7 +149,7 @@ async def update_quota_planner_settings(
     request: Request,
     payload: QuotaPlannerSettingsUpdateRequest = Body(...),
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
 ) -> QuotaPlannerSettingsResponse:
     current = await context.repository.get_settings()
     updated = PlannerSettings(
@@ -190,6 +191,8 @@ async def update_quota_planner_settings(
     AuditService.log_async(
         "quota_planner_settings_changed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "quota_planner"),
         details={"mode": saved.mode},
     )
     return _settings_response(saved)

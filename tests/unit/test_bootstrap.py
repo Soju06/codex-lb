@@ -8,7 +8,9 @@ import pytest
 from cryptography.fernet import Fernet
 
 import app.core.bootstrap as bootstrap_module
+from app.core.bootstrap import SharedBootstrapState
 from app.core.crypto import TokenEncryptor
+from app.modules.dashboard_users.repository import LocalAuthState
 
 pytestmark = pytest.mark.unit
 
@@ -27,10 +29,18 @@ def _patch_shared_state(
     bootstrap_token_encrypted: bytes | None,
     bootstrap_token_hash: bytes | None,
 ) -> None:
+    # ``password_hash`` stands for "an active user holds a local password"; the
+    # bootstrap module never reads the legacy column itself.
     monkeypatch.setattr(
         bootstrap_module,
         "_get_shared_bootstrap_state",
-        AsyncMock(return_value=(password_hash, bootstrap_token_encrypted, bootstrap_token_hash)),
+        AsyncMock(
+            return_value=SharedBootstrapState(
+                local_password_configured=password_hash is not None,
+                bootstrap_token_encrypted=bootstrap_token_encrypted,
+                bootstrap_token_hash=bootstrap_token_hash,
+            )
+        ),
     )
 
 
@@ -143,13 +153,21 @@ async def test_ensure_auto_bootstrap_token_reuses_existing_encrypted_token(monke
 
     async def _get_settings() -> SimpleNamespace:
         return SimpleNamespace(
-            password_hash=None,
             bootstrap_token_encrypted=encrypted,
             bootstrap_token_hash=hashlib.sha256("shared-auto-token".encode("utf-8")).digest(),
         )
 
     repository = SimpleNamespace(
         get_settings=AsyncMock(side_effect=_get_settings),
+        get_local_auth_state=AsyncMock(
+            return_value=LocalAuthState(
+                any_user=False,
+                active_users=0,
+                active_local_password_users=0,
+                requires_auth=False,
+                sole_local_password_user_id=None,
+            )
+        ),
         clear_bootstrap_token=AsyncMock(),
         store_bootstrap_token_if_absent=AsyncMock(),
     )

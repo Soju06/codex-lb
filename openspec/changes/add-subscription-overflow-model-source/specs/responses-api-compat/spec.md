@@ -109,7 +109,7 @@ A subscription-overflow dispatch SHALL present the source's Responses lifecycle 
 
 #### Scenario: Pin failure yields one synthesized pair
 
-- **WHEN** the pin cannot be made durable before the first content-bearing source frame
+- **WHEN** the pin cannot be made durable before the first content-bearing source frame (including an anchor the dispatch owes that no source `response.id` could build)
 - **THEN** the client receives `response.created` followed by `response.failed` with `error.code` `subscription_overflow_pin_unavailable` and `error.type` `server_error`, and nothing else from the source
 - **AND** a non-streaming request in the same situation is answered HTTP `503` `subscription_overflow_pin_unavailable`
 

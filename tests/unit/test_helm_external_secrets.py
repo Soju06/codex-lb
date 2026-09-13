@@ -201,39 +201,38 @@ def test_external_secret_nulled_remote_refs_render_default_layout() -> None:
     ]
 
 
-def test_upgrade_renders_legacy_deployment_cleanup_hook_for_statefulset_migration() -> None:
-    rendered = _helm_template(
-        "--is-upgrade",
-        "--show-only",
-        "templates/legacy-deployment-cleanup-hook.yaml",
-    )
+def test_upgrade_renders_no_legacy_deployment_migration_hooks() -> None:
+    """The pre-1.13 Deployment -> StatefulSet shim is gone; upgrades render no hook Jobs for it."""
+    chart_files = {path.name for path in (_CHART_DIR / "templates").rglob("*.yaml")}
+    assert "legacy-deployment-prepare-hook.yaml" not in chart_files
+    assert "legacy-deployment-cleanup-hook.yaml" not in chart_files
 
-    assert "kind: Job" in rendered
-    assert '"helm.sh/hook": post-upgrade' in rendered
-    assert "LEGACY_DEPLOYMENT_NAME" in rendered
-    assert "PUBLIC_SERVICE_NAME" in rendered
-    assert "STATEFULSET_NAME" in rendered
-    assert "STATEFULSET_MIN_REPLICAS" in rendered
-    assert 'desired = int(spec.get("replicas") or int(os.environ.get("STATEFULSET_MIN_REPLICAS", "1")))' in rendered
-    assert "desired = max(desired, min(legacy_ready, max_replicas))" not in rendered
-    assert 'codex-lb.soju.dev/traffic": "workload"' in rendered
-    assert "if ready >= desired:" in rendered
+    rendered = _helm_template("--is-upgrade")
+
+    assert "legacy-prepare" not in rendered
+    assert "legacy-cleanup" not in rendered
+    assert "LEGACY_DEPLOYMENT_NAME" not in rendered
+    assert "codex-lb.soju.dev/traffic: legacy" not in rendered
 
 
-def test_upgrade_renders_legacy_deployment_prepare_hook() -> None:
-    rendered = _helm_template(
-        "--is-upgrade",
-        "--show-only",
-        "templates/legacy-deployment-prepare-hook.yaml",
-    )
+def test_public_service_always_selects_the_statefulset_workload_lane() -> None:
+    for extra_args in ((), ("--is-upgrade",)):
+        rendered = _helm_template(
+            *extra_args,
+            "--show-only",
+            "templates/service.yaml",
+        )
 
-    assert "kind: Job" in rendered
-    assert '"helm.sh/hook": pre-upgrade' in rendered
-    assert 'codex-lb.soju.dev/traffic": "legacy"' in rendered
-    assert "raise SystemExit(0)" in rendered
+        (service,) = _helm_documents(rendered)
+        assert service["spec"]["selector"] == {
+            "app.kubernetes.io/name": "codex-lb",
+            "app.kubernetes.io/instance": "codex-lb",
+            "codex-lb.soju.dev/traffic": "workload",
+        }
 
 
-def test_public_service_can_render_legacy_selector_for_cutover() -> None:
+def test_removed_service_selector_mode_value_no_longer_changes_the_selector() -> None:
+    """`migration.serviceSelectorMode` is gone: a stale value in an operator's values file is inert."""
     rendered = _helm_template(
         "--show-only",
         "templates/service.yaml",
@@ -241,30 +240,8 @@ def test_public_service_can_render_legacy_selector_for_cutover() -> None:
         "migration.serviceSelectorMode=legacy",
     )
 
-    assert "codex-lb.soju.dev/traffic: legacy" in rendered
-
-
-def test_public_service_can_render_workload_selector_after_cutover() -> None:
-    rendered = _helm_template(
-        "--show-only",
-        "templates/service.yaml",
-        "--set",
-        "migration.serviceSelectorMode=workload",
-    )
-
     assert "codex-lb.soju.dev/traffic: workload" in rendered
-
-
-def test_public_service_auto_mode_renders_legacy_selector_on_upgrade_without_lookup() -> None:
-    rendered = _helm_template(
-        "--is-upgrade",
-        "--show-only",
-        "templates/service.yaml",
-        "--set",
-        "migration.serviceSelectorMode=auto",
-    )
-
-    assert "codex-lb.soju.dev/traffic: legacy" in rendered
+    assert "codex-lb.soju.dev/traffic: legacy" not in rendered
 
 
 def test_statefulset_translates_legacy_recreate_strategy_to_rolling_update() -> None:
@@ -281,22 +258,10 @@ def test_statefulset_translates_legacy_recreate_strategy_to_rolling_update() -> 
     assert "type: Recreate" not in rendered
 
 
-def test_public_service_auto_mode_renders_workload_selector_on_install() -> None:
+def test_migration_hook_job_includes_image_pull_secrets() -> None:
     rendered = _helm_template(
         "--show-only",
-        "templates/service.yaml",
-        "--set",
-        "migration.serviceSelectorMode=auto",
-    )
-
-    assert "codex-lb.soju.dev/traffic: workload" in rendered
-
-
-def test_legacy_cleanup_hook_includes_image_pull_secrets() -> None:
-    rendered = _helm_template(
-        "--is-upgrade",
-        "--show-only",
-        "templates/legacy-deployment-cleanup-hook.yaml",
+        "templates/hooks/migration-job.yaml",
         "--set",
         "image.pullSecrets[0]=private-registry",
     )

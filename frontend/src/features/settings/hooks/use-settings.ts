@@ -122,7 +122,9 @@ export function useTelemetryPreview(enabled: boolean) {
   };
 }
 
-export function useUpstreamProxyAdmin() {
+// `enabled: false` keeps the admin query idle for principals the backend would
+// answer with 403 (read-only guests).
+export function useUpstreamProxyAdmin(options?: { enabled?: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -137,6 +139,7 @@ export function useUpstreamProxyAdmin() {
   } = useQuery({
     queryKey: ["settings", "upstream-proxy"],
     queryFn: getUpstreamProxyAdmin,
+    enabled: options?.enabled ?? true,
   });
   const upstreamProxyQuery = {
     data: upstreamProxyData,

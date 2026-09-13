@@ -13,6 +13,7 @@ const BASE_FILTERS: FilterState = {
   apiKeyIds: [],
   modelOptions: [],
   statuses: [],
+  sources: [],
   conversationId: null,
   limit: 25,
   offset: 0,
@@ -21,6 +22,7 @@ const BASE_FILTERS: FilterState = {
 function renderFilters(
   overrides: Partial<FilterState> = {},
   statusOptions: RequestFiltersProps["statusOptions"] = EMPTY_OPTIONS,
+  extraProps: Partial<RequestFiltersProps> = {},
 ) {
   const filters = { ...BASE_FILTERS, ...overrides };
   const props: RequestFiltersProps = {
@@ -29,6 +31,7 @@ function renderFilters(
     apiKeyOptions: EMPTY_OPTIONS,
     modelOptions: EMPTY_OPTIONS,
     statusOptions,
+    ...extraProps,
     onSearchChange: vi.fn(),
     onTimeframeChange: vi.fn(),
     onAccountChange: vi.fn(),
@@ -41,6 +44,21 @@ function renderFilters(
   render(<RequestFilters {...props} />);
   return props;
 }
+
+describe("RequestFilters API key filter", () => {
+  it("renders the API key filter by default", () => {
+    renderFilters();
+
+    expect(screen.getByRole("button", { name: "API Keys" })).toBeInTheDocument();
+  });
+
+  it("hides the API key filter when showApiKeyFilter is false", () => {
+    renderFilters({}, EMPTY_OPTIONS, { showApiKeyFilter: false });
+
+    expect(screen.queryByRole("button", { name: "API Keys" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accounts" })).toBeInTheDocument();
+  });
+});
 
 describe("RequestFilters conversation badge", () => {
   it("renders cancelled as a selectable status option", async () => {
@@ -137,5 +155,83 @@ describe("RequestFilters conversation badge", () => {
     const span = badge.closest("span");
     expect(span).toHaveAttribute("title", longId);
     expect(span).toHaveClass("truncate");
+  });
+});
+
+describe("RequestFilters source filter", () => {
+  const SOURCE_OPTIONS = [
+    { value: "subscription_overflow", label: "Overflow" },
+    { value: "subscription_overflow_pinned", label: "Overflow (pinned)" },
+  ];
+
+  function renderWithSources(
+    sourceOptions: RequestFiltersProps["sourceOptions"],
+    overrides: Partial<FilterState> = {},
+  ) {
+    const filters = { ...BASE_FILTERS, ...overrides };
+    const props: RequestFiltersProps = {
+      filters,
+      accountOptions: EMPTY_OPTIONS,
+      apiKeyOptions: EMPTY_OPTIONS,
+      modelOptions: EMPTY_OPTIONS,
+      statusOptions: EMPTY_OPTIONS,
+      sourceOptions,
+      onSearchChange: vi.fn(),
+      onTimeframeChange: vi.fn(),
+      onAccountChange: vi.fn(),
+      onApiKeyChange: vi.fn(),
+      onModelChange: vi.fn(),
+      onStatusChange: vi.fn(),
+      onSourceChange: vi.fn(),
+      onConversationDismiss: vi.fn(),
+      onReset: vi.fn(),
+    };
+    render(<RequestFilters {...props} />);
+    return props;
+  }
+
+  it("renders no source control on a default install", () => {
+    renderWithSources([]);
+
+    expect(screen.queryByRole("button", { name: "Source" })).not.toBeInTheDocument();
+  });
+
+  it("renders no source control when the prop is omitted entirely", () => {
+    renderFilters();
+
+    expect(screen.queryByRole("button", { name: "Source" })).not.toBeInTheDocument();
+  });
+
+  it("offers both overflow values once overflow has been observed", async () => {
+    const user = userEvent.setup();
+    const props = renderWithSources(SOURCE_OPTIONS);
+
+    await user.click(screen.getByRole("button", { name: "Source" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Overflow" }));
+
+    expect(screen.getByRole("menuitemcheckbox", { name: "Overflow (pinned)" })).toBeInTheDocument();
+    expect(props.onSourceChange).toHaveBeenCalledWith(["subscription_overflow"]);
+  });
+
+  it("deselects a chosen value on a second click", async () => {
+    const user = userEvent.setup();
+    const props = renderWithSources(SOURCE_OPTIONS, { sources: ["subscription_overflow"] });
+
+    await user.click(screen.getByRole("button", { name: "Overflow" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Overflow" }));
+
+    expect(props.onSourceChange).toHaveBeenCalledWith([]);
+  });
+
+  it("keeps a deep-linked source visible and clearable even with no options", async () => {
+    const user = userEvent.setup();
+    const props = renderWithSources([], { sources: ["subscription_overflow"] });
+
+    // Rendered as a `Stale` chip: the tile is hidden on this install, but the URL
+    // carries a filter, so it must not become invisible and un-clearable.
+    await user.click(screen.getByRole("button", { name: "subscription_overflow" }));
+    await user.click(screen.getByRole("button", { name: "Remove stale subscription_overflow" }));
+
+    expect(props.onSourceChange).toHaveBeenCalledWith([]);
   });
 });

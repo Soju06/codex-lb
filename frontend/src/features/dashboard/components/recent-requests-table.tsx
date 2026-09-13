@@ -42,8 +42,12 @@ import {
   type RequestLogColumnId,
   type RequestLogColumnWidths,
 } from "@/features/dashboard/request-log-columns";
+import {
+  requestLogSourceKind,
+  type RequestLogSourceKind,
+} from "@/features/dashboard/request-log-source";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { usePermission } from "@/features/auth/hooks/use-auth";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
@@ -78,6 +82,17 @@ const TRANSPORT_CLASS_MAP: Record<string, string> = {
   websocket: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
   automation:
     "bg-indigo-500/15 text-indigo-700 border-indigo-500/20 hover:bg-indigo-500/20 dark:text-indigo-300",
+};
+
+/**
+ * Subscription-overflow attribution (#2123 WP-G). Rendered in the account cell,
+ * which is otherwise the uninformative "Unassigned" for these rows (an overflow
+ * dispatch has no account), so no new column is introduced and every
+ * non-overflow row is byte-identical to before.
+ */
+const SOURCE_CLASS_MAP: Record<RequestLogSourceKind, string> = {
+  overflow: "bg-amber-500/15 text-amber-700 border-amber-500/20 hover:bg-amber-500/20 dark:text-amber-400",
+  overflowPinned: "bg-teal-500/15 text-teal-700 border-teal-500/20 hover:bg-teal-500/20 dark:text-teal-300",
 };
 
 const PLAN_CLASS_MAP: Record<string, string> = {
@@ -321,9 +336,11 @@ export function RecentRequestsTable({
   const { t } = useTranslation();
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
-  const isAdmin = useAuthStore((state) => state.role === "admin");
+  // User agent, client IP and the archive panel are served only with `conversations:read`.
+  const canReadConversations = usePermission("conversations:read");
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
+  const selectedSourceKind = requestLogSourceKind(selectedRequest?.source);
   const visibleColumns = configuredVisibleColumns ?? ALL_REQUEST_LOG_COLUMNS;
   const visibleColumnSet = useMemo(() => new Set(visibleColumns), [visibleColumns]);
   const hasConfiguredLayout =
@@ -421,6 +438,7 @@ export function RecentRequestsTable({
               const planLabel = planType ? formatSlug(planType) : "--";
               const upstreamTransport = request.upstreamTransport;
               const generationSpeed = formatGenerationSpeed(request);
+              const sourceKind = requestLogSourceKind(request.source);
 
               return (
                 <TableRow key={request.requestId}>
@@ -431,7 +449,16 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("account") ? <TableCell className="truncate align-top text-sm">
-                    {isEmailLabel && blurred ? (
+                    {sourceKind ? (
+                      <Badge
+                        variant="outline"
+                        className={SOURCE_CLASS_MAP[sourceKind]}
+                        title={t(`dashboard.requests.source.${sourceKind}Title`)}
+                        data-testid="request-log-source-chip"
+                      >
+                        {t(`dashboard.requests.source.${sourceKind}`)}
+                      </Badge>
+                    ) : isEmailLabel && blurred ? (
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
@@ -615,6 +642,24 @@ export function RecentRequestsTable({
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              {selectedSourceKind ? (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.source")}
+                    value={t(`dashboard.requests.source.${selectedSourceKind}`)}
+                  />
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.modelSourceId")}
+                    value={selectedRequest?.modelSourceId ?? "—"}
+                    mono
+                  />
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.modelSourceKind")}
+                    value={selectedRequest?.modelSourceKind ?? "—"}
+                    mono
+                  />
+                </div>
+              ) : null}
               {selectedRequest?.upstreamProxyRouteMode ||
               selectedRequest?.upstreamProxyPoolId ||
               selectedRequest?.upstreamProxyEndpointId ||
@@ -649,7 +694,7 @@ export function RecentRequestsTable({
                   ) : null}
                 </div>
               ) : null}
-              {isAdmin ? (
+              {canReadConversations ? (
                 <RequestDetailField
                   label={t("dashboard.requestDetails.userAgent")}
                   value={selectedRequest?.useragent ?? "—"}
@@ -658,7 +703,7 @@ export function RecentRequestsTable({
                   compactCopy
                 />
               ) : null}
-              {isAdmin ? (
+              {canReadConversations ? (
                 <div className="grid gap-3 sm:grid-cols-2">
                   <RequestDetailField
                     label={t("dashboard.requestDetails.clientIp")}
@@ -705,7 +750,7 @@ export function RecentRequestsTable({
               ) : null}
             </div>
 
-            {isAdmin ? (
+            {canReadConversations ? (
               <RequestArchivePanel
                 requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}
                 requestedAt={selectedRequest?.requestedAt}

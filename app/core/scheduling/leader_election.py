@@ -7,12 +7,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from sqlalchemy import Float, Result, bindparam, delete, text
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
+from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
 
 logger = logging.getLogger(__name__)
 
@@ -171,26 +171,6 @@ _SQLITE_RENEW_SQL = text(
 
 def _dialect_name(session: AsyncSession) -> str:
     return session.get_bind().dialect.name
-
-
-def _is_locked_error(exc: BaseException) -> bool:
-    """Return ``True`` for a transient SQLite ``database is locked``/``busy``.
-
-    A shared SQLite file has a single writer; even with the connection-level
-    ``busy_timeout`` a best-effort lease write (renewal or release) can still
-    lose the race for the write lock against the app's other DB work — or, in
-    the test suite, against schema teardown's ``DROP TABLE`` — and surface as
-    ``sqlite3.OperationalError: database is locked``. On the best-effort
-    shutdown paths this is not a lease-release failure: the lease simply expires
-    after its TTL (release) or is retried on the next cadence (renewal), so it
-    is swallowed and logged at DEBUG rather than spamming warnings. Only
-    ``OperationalError`` carrying the locked/busy text qualifies; every other
-    error keeps its original WARNING so genuine faults stay visible.
-    """
-    if not isinstance(exc, OperationalError):
-        return False
-    message = str(exc.orig if exc.orig is not None else exc).lower()
-    return "database is locked" in message or "database is busy" in message
 
 
 def _returned_remaining(result: Result[Any]) -> float | None:
@@ -464,16 +444,20 @@ class LeaderElection:
                 )
                 await session.commit()
         except Exception as exc:
-            # A transient ``database is locked`` while deleting the row is not a
-            # release failure: the row is simply left in place and the lease
-            # expires after its TTL, exactly the fallback the caller already
-            # tolerates. Swallow it at DEBUG so shutdown never spams warnings on
-            # SQLite write contention; surface anything else as before.
-            if _is_locked_error(exc):
+            # A transient SQLite write-lock failure while deleting the row is
+            # not a release failure: the row is simply left in place and the
+            # lease expires after its TTL, exactly the fallback the caller
+            # already tolerates. Swallow it at DEBUG so shutdown never spams
+            # warnings on SQLite write contention; surface anything else as
+            # before. Shutdown is one-shot — there is no next release — so this
+            # site deliberately does NOT retry; ``sqlite_errorname`` is logged
+            # so an occurrence still says which mechanism held the slot.
+            if is_sqlite_lock_error(exc):
                 logger.debug(
                     "Leader lease release contended on a locked database; leaving the row "
-                    "to expire after its TTL leader_id=%s",
+                    "to expire after its TTL leader_id=%s sqlite_errorname=%s",
                     self._leader_id,
+                    sqlite_error_name(exc),
                     exc_info=True,
                 )
                 return False
@@ -965,13 +949,18 @@ class LeaderElection:
         except Exception as exc:
             # This renewal is best-effort: the caller (the release keeper and the
             # drain loop) treats a ``False`` as "not renewed this cadence" and
-            # renews again on the next tick, so a transient ``database is locked``
-            # must not raise out of the shutdown path nor spam warnings. Log it at
-            # DEBUG and let the next cadence retry; surface other errors as before.
-            if _is_locked_error(exc):
+            # renews again on the next tick, so a transient SQLite write-lock
+            # failure must not raise out of the shutdown path nor spam warnings.
+            # Failing fast IS the retry here — an in-place retry would hold the
+            # cadence past its deadline — so log it at DEBUG with the driver's
+            # ``sqlite_errorname`` and let the next tick try; surface other
+            # errors as before.
+            if is_sqlite_lock_error(exc):
                 logger.debug(
-                    "Leader lease renewal contended on a locked database; will retry next cadence leader_id=%s",
+                    "Leader lease renewal contended on a locked database; will retry next cadence "
+                    "leader_id=%s sqlite_errorname=%s",
                     self._leader_id,
+                    sqlite_error_name(exc),
                     exc_info=True,
                 )
                 return False

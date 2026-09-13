@@ -62,6 +62,7 @@ from app.modules.proxy.model_source_pins import (
     ModelSourcePinRepository,
     PinIntent,
     PinWrite,
+    PinWriteOutcome,
     anchor_pin_key,
     thread_pin_key,
 )
@@ -2243,3 +2244,209 @@ async def test_database_outage_fails_thread_keyed_requests_closed_within_the_loo
     plain = await async_client.post(V1_ROUTE, json=_codex_body(), headers={"user-agent": "openai-python/1.99"})
     assert plain.status_code == 200, plain.text
     assert len(relayed) == 1
+
+
+# -- decision 78: an owed anchor must be durable before the first content frame -----------------------------
+
+
+def _release_hold_on_pin_commit(monkeypatch: pytest.MonkeyPatch, event: asyncio.Event) -> None:
+    """Let the stub's terminal frame out once the content-trigger pin write has committed.
+
+    The frame split is what matters: while ``event`` is unset the stub has
+    written the content frame and nothing else, so the pin hook runs with the
+    source id still unminted. Gating the release on ``commit`` itself -- rather
+    than on a wall-clock delay a slow fixture setup could outrun, which would
+    hand the hook an already-minted id and silently retire the case -- makes
+    that ordering deterministic. The release only keeps the *previous*
+    behaviour terminating (an unanchored delivery would otherwise wait out the
+    idle budget); on this head the turn is already refused when it fires.
+    """
+
+    commit = overflow_module.OverflowPinExecutor.commit
+
+    async def release_after_commit(
+        self: overflow_module.OverflowPinExecutor, *args: Any, **kwargs: Any
+    ) -> PinWriteOutcome:
+        try:
+            return await commit(self, *args, **kwargs)
+        finally:
+            event.set()
+
+    monkeypatch.setattr(overflow_module.OverflowPinExecutor, "commit", release_after_commit)
+
+
+@pytest.mark.asyncio
+async def test_sdk_turn_whose_source_mints_its_id_after_the_first_content_frame_fails_closed(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 78: ``store`` omitted + an id that only arrives in the terminal -> the synthesized pair, no rows.
+
+    The keyless SDK shape is the one with no other durable evidence: its
+    anchor is the whole pin transaction, so before this rule the turn was
+    delivered with zero rows in ``model_source_pins`` while ``commit``
+    reported ``written``, and the ``resp_late`` id the client then chained on
+    resolved nowhere.
+    """
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    counter = _spy_overflow_counter(monkeypatch)
+    hold = asyncio.Event()
+    scene = await _exhausted_scene(
+        async_client,
+        source_upstream,
+        tag="anchor_late",
+        frames=[_DELTA],
+        hold=hold,
+        after_hold=[_completed(_USAGE, "resp_late")],
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    _release_hold_on_pin_commit(monkeypatch, hold)
+    try:
+        response = await async_client.post(V1_ROUTE, json=_codex_body(), headers={"user-agent": "openai-python/1.99"})
+    finally:
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
+    await _drain(async_client)
+
+    assert response.status_code == 200, response.text  # the lifecycle is carried by the SSE terminal
+    events = _events(response.text)
+    assert [event["type"] for event in events] == ["response.created", "response.failed"]
+    assert events[1]["response"]["error"]["code"] == PIN_UNAVAILABLE_CODE
+    assert "hello from the source" not in response.text, "no source content may reach an unanchored client"
+    assert await _pin_rows() == []
+    rows = await _all_rows()
+    assert [(row.status, row.error_code, row.source) for row in rows] == [
+        ("error", PIN_UNAVAILABLE_CODE, REQUEST_LOG_SOURCE_FRESH)
+    ]
+    assert counter.outcomes == [
+        (ROUTE_V1_RESPONSES, "dispatched_fresh"),
+        (ROUTE_V1_RESPONSES, "pin_commit_failed"),
+    ]
+    assert get_source_bulkhead().in_flight(scene.source_id) == 0
+    assert attempts == []
+
+
+@pytest.mark.asyncio
+async def test_native_store_false_turn_pins_its_thread_without_any_source_response_id(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over-reach guard: ``store: false`` owes no anchor, so an id-less content frame is still delivered.
+
+    This is the contract the fail-closed rule must not touch -- every native
+    Codex turn reaches its content trigger with the thread pin as its only
+    write, and that write is legal on its own (design §6.3, §7.2).
+    """
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    thread_id = "thr_native_idless"
+    hold = asyncio.Event()
+    scene = await _exhausted_scene(
+        async_client,
+        source_upstream,
+        tag="native_idless",
+        frames=[_DELTA],
+        hold=hold,
+        after_hold=[_completed(_USAGE, "resp_native_late")],
+    )
+    _release_hold_on_pin_commit(monkeypatch, hold)
+    try:
+        response = await async_client.post(
+            CODEX_ROUTE, json={**_codex_body(), "store": False}, headers=_native_headers(thread_id)
+        )
+    finally:
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
+    await _drain(async_client)
+
+    assert response.status_code == 200, response.text
+    events = _events(response.text)
+    assert [event["type"] for event in events] == ["response.output_text.delta", "response.completed"]
+    assert "hello from the source" in response.text
+    assert [(pin.kind, pin.pin_key, pin.source_id) for pin in await _pin_rows()] == [
+        (PIN_KIND_THREAD, thread_pin_key(_thread_key(thread_id)), scene.source_id)
+    ]
+    rows = await _all_rows()
+    assert [(row.status, row.source) for row in rows] == [("success", REQUEST_LOG_SOURCE_FRESH)]
+    assert attempts == []
+
+
+@pytest.mark.asyncio
+async def test_anchored_continuation_with_a_late_source_id_fails_closed_and_keeps_its_anchor(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``pinned``/``anchored`` continuation writes nothing but still owes the new turn's anchor."""
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    hold = asyncio.Event()
+    scene = await _exhausted_scene(
+        async_client,
+        source_upstream,
+        tag="anchor_chain",
+        frames=[_DELTA],
+        hold=hold,
+        after_hold=[_completed(_USAGE, "resp_chain_late")],
+        handler_cancellation=True,
+        shutdown_timeout=1.0,
+    )
+    await _write_pin(anchor_pin_key(None, "resp_prev"), kind=PIN_KIND_ANCHOR, source_id=scene.source_id)
+    await _pool_is_healthy(async_client, tag="anchor_chain")
+    _release_hold_on_pin_commit(monkeypatch, hold)
+    try:
+        response = await async_client.post(
+            V1_ROUTE,
+            json={**_codex_body(), "previous_response_id": "resp_prev"},
+            headers={"user-agent": "openai-python/1.99"},
+        )
+    finally:
+        hold.set()  # safety net: unblock the stub even if the commit is never reached
+    await _drain(async_client)
+
+    events = _events(response.text)
+    assert [event["type"] for event in events] == ["response.created", "response.failed"]
+    assert events[1]["response"]["error"]["code"] == PIN_UNAVAILABLE_CODE
+    assert "hello from the source" not in response.text
+    # The continuation's own evidence survives a refused turn; no new anchor was minted.
+    assert [(pin.kind, pin.pin_key) for pin in await _pin_rows()] == [
+        (PIN_KIND_ANCHOR, anchor_pin_key(None, "resp_prev"))
+    ]
+    rows = await _all_rows()
+    assert [(row.status, row.error_code, row.source) for row in rows] == [
+        ("error", PIN_UNAVAILABLE_CODE, REQUEST_LOG_SOURCE_PINNED)
+    ]
+    assert attempts == []
+
+
+@pytest.mark.asyncio
+async def test_non_stream_answer_without_an_id_is_refused_instead_of_delivered_unanchored(
+    async_client, source_upstream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6.5: the non-stream site resolves the same intent, so it inherits the refusal (no route change)."""
+
+    attempts = _forbid_subscription_stream(monkeypatch)
+    state = _StubState()
+
+    async def idless_json(request: web.Request) -> web.StreamResponse:
+        state.requests.append(await request.json())
+        return web.json_response(
+            {
+                "object": "response",
+                "status": "completed",
+                "output": [{"id": "msg_1", "type": "message", "role": "assistant", "content": []}],
+                "usage": _USAGE,
+            }
+        )
+
+    await _exhausted_scene(async_client, source_upstream, tag="idless_json", handler=idless_json)
+
+    response = await async_client.post(V1_ROUTE, json={**_codex_body(), "stream": False})
+    await _drain(async_client)
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == PIN_UNAVAILABLE_CODE
+    assert response.headers.get("retry-after") == "2"
+    assert len(state.requests) == 1
+    assert await _pin_rows() == []
+    rows = await _all_rows()
+    assert [(row.status, row.error_code, row.source) for row in rows] == [
+        ("error", PIN_UNAVAILABLE_CODE, REQUEST_LOG_SOURCE_FRESH)
+    ]
+    assert attempts == []

@@ -3,7 +3,13 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders } from "@/test/utils";
-import { createDashboardOverview, createDashboardProjections } from "@/test/mocks/factories";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
+  createDashboardOverview,
+  createDashboardProjections,
+} from "@/test/mocks/factories";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
@@ -170,7 +176,7 @@ describe("DashboardPage", () => {
   beforeEach(() => {
     useAuthStore.setState({
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
       initialized: true,
     });
@@ -223,6 +229,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: [],
+        sources: [],
         limit: 25,
         offset: 0,
       },
@@ -465,11 +472,30 @@ describe("DashboardPage", () => {
     });
   });
 
+  it.each([
+    ["an operator", OPERATOR_PERMISSIONS, true],
+    ["a viewer", VIEWER_PERMISSIONS, false],
+  ])("hides Conversations from %s (no conversations:read) even though the wire role is admin", async (_label, permissions, canWrite) => {
+    const user = userEvent.setup();
+    useAuthStore.setState({ role: "admin", permissions, canWrite });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Request Logs" }));
+    expect(screen.queryByRole("menuitemradio", { name: "Conversations" })).not.toBeInTheDocument();
+    await waitFor(() => expect(window.location.search).not.toContain("view=conversations"));
+  });
+
   it("fails closed during auth hydration and preserves an admin bookmark until the guest is known", async () => {
     useAuthStore.setState({
       initialized: false,
       role: "admin",
-      permissions: ["read", "write"],
+      permissions: ADMIN_PERMISSIONS,
       canWrite: true,
     });
     window.history.pushState({}, "", "/dashboard?view=conversations");
@@ -497,6 +523,41 @@ describe("DashboardPage", () => {
       expect(window.location.search).not.toContain("view=conversations");
     });
     expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+  });
+
+  it("fails closed during auth hydration from the least-privilege boot state", async () => {
+    // The store now boots as guest with no permissions; the gate normally
+    // holds rendering until initialized, but the page must still fail closed
+    // if it is mounted before the session resolves.
+    useAuthStore.setState({
+      initialized: false,
+      role: "guest",
+      permissions: [],
+      canWrite: false,
+    });
+    window.history.pushState({}, "", "/dashboard?view=conversations");
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.getByRole("heading", { name: "Request Logs" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversations-view")).not.toBeInTheDocument();
+    expect(window.location.search).toContain("view=conversations");
+    expect(useConversationsMock.mock.calls.every(([options]) => options !== undefined && options.enabled === false)).toBe(true);
+
+    act(() => {
+      useAuthStore.setState({
+        initialized: true,
+        role: "admin",
+        permissions: ADMIN_PERMISSIONS,
+        canWrite: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("conversations-view")).toBeInTheDocument();
+    });
+    expect(window.location.search).toContain("view=conversations");
   });
 
   it("customizes and restores the request-log table without a global width control", async () => {
@@ -615,6 +676,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_page_badge",
         limit: 25,
         offset: 0,
@@ -671,6 +733,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_1"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_page_summary",
         limit: 25,
         offset: 0,
@@ -776,6 +839,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_missing"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["error"],
+        sources: [],
         conversationId: "conv_safety",
         limit: 25,
         offset: 0,
@@ -846,6 +910,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: [],
+        sources: [],
         conversationId: "conv_no_suffix",
         limit: 25,
         offset: 0,
@@ -906,6 +971,7 @@ describe("DashboardPage", () => {
         apiKeyIds: [],
         modelOptions: [],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_dismiss_preserve",
         limit: 25,
         offset: 0,
@@ -966,6 +1032,7 @@ describe("DashboardPage", () => {
         apiKeyIds: ["key_1"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
+        sources: [],
         conversationId: "conv_reset_all",
         limit: 25,
         offset: 5,
@@ -1017,7 +1084,75 @@ describe("DashboardPage", () => {
       apiKeyIds: [],
       modelOptions: [],
       statuses: [],
+      sources: [],
       conversationId: null,
+      offset: 0,
+    });
+  });
+
+  it("renders no source filter when the overview reports no overflow activity", () => {
+    mockReadyDashboard();
+
+    renderWithProviders(<DashboardPage />);
+
+    expect(screen.queryByRole("button", { name: "Source" })).not.toBeInTheDocument();
+  });
+
+  it("renders the source filter once the overview reports overflow activity", async () => {
+    const user = userEvent.setup();
+    const overview = mockReadyDashboard();
+    const updateFilters = vi.fn();
+    useDashboardMock.mockReturnValue({
+      data: {
+        ...overview,
+        summary: {
+          ...overview.summary,
+          subscriptionOverflow: { requests: 4, costUsd: 1.5, usageLessRequests: 0, livePins: 2 },
+        },
+      },
+      isFetching: false,
+      error: null,
+    } as ReturnType<typeof useDashboard>);
+    useRequestLogsMock.mockReturnValue({
+      filters: {
+        search: "",
+        timeframe: "all",
+        accountIds: [],
+        apiKeyIds: [],
+        modelOptions: [],
+        statuses: [],
+        sources: [],
+        conversationId: null,
+        limit: 25,
+        offset: 0,
+      },
+      listFilters: { limit: 25, offset: 0 },
+      facetFilters: {},
+      emptyStateFiltersApplied: false,
+      logsQuery: {
+        data: { requests: [], total: 0, hasMore: false },
+        isFetching: false,
+        error: null,
+        isLoading: false,
+        isPending: false,
+        isSuccess: true,
+        refetch: vi.fn(),
+      },
+      optionsQuery: {
+        data: { accountIds: [], apiKeys: [], modelOptions: [], statuses: [] },
+        error: null,
+      },
+      updateFilters,
+    } as unknown as ReturnType<typeof useRequestLogs>);
+
+    renderWithProviders(<DashboardPage />);
+
+    const sourceButton = screen.getByRole("button", { name: "Source" });
+    await user.click(sourceButton);
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Overflow (pinned)" }));
+
+    expect(updateFilters).toHaveBeenCalledWith({
+      sources: ["subscription_overflow_pinned"],
       offset: 0,
     });
   });

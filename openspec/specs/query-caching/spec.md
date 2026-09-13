@@ -3,7 +3,9 @@
 ## Purpose
 
 Define query caching and quota-key normalization contracts so selection and dashboard reads remain fast and consistent.
+
 ## Requirements
+
 ### Requirement: Additional usage persistence normalizes upstream aliases to canonical quota keys
 Persisted additional-usage rows MUST record one internal canonical `quota_key` even when upstream changes raw `limit_name` or `metered_feature` aliases.
 
@@ -64,7 +66,7 @@ Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking ov
 
 ### Requirement: Dashboard overview memoizes per-account depletion EWMA state
 
-`GET /api/dashboard/overview` MUST cache per-account EWMA depletion state in memory so repeated polls do not re-walk the full in-window `usage_history` slice in the depletion cache check when its content is unchanged. SQLite bulk history cache hits MUST avoid rebuilding or materializing the full cached history window when compact digest metadata proves older rows are unchanged; they MUST append newly inserted rows by monotonic row ID and reuse the cached grouped history for older rows. Repository-owned mutations that reassign or delete usage-history rows MUST clear the SQLite bulk history cache.
+`GET /api/dashboard/overview` MUST cache per-account EWMA depletion state in memory so repeated polls do not re-walk the full in-window `usage_history` slice in the depletion cache check when its content is unchanged. The attached compact content signature MUST be fixed-width regardless of history length (row count, first and latest row edge tuples, and one fixed-width content hash over every row's value-bearing fields); it MAY be process-local because the cache it guards is process memory only, and the cache MUST NOT retain a per-row signature structure. SQLite bulk history cache hits MUST avoid rebuilding or materializing the full cached history window when compact digest metadata proves older rows are unchanged; they MUST append newly inserted rows by monotonic row ID and reuse the cached grouped history for older rows. Repository-owned mutations that reassign or delete usage-history rows MUST clear the SQLite bulk history cache.
 
 #### Scenario: Repeated polls with unchanged history reuse cached EWMA state
 - **GIVEN** the dashboard service has previously computed depletion for an account
@@ -72,7 +74,7 @@ Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking ov
 - **WHEN** depletion is recomputed for the dashboard response
 - **THEN** the service MUST reuse the cached EWMA state for that account instead of replaying every history row
 - **AND** the depletion metrics for that account MUST match the previously returned values for rate-bearing fields
-- **AND** the cache hit check MUST use bounded signature metadata rather than building or retaining a per-row signature tuple
+- **AND** the cache hit check MUST compare fixed-width signature metadata and MUST NOT retain a per-row signature structure
 - **AND** the service MUST prune cached depletion state for account/window keys that are absent from the current dashboard history set
 
 #### Scenario: Memoized EWMA state is invalidated when a new usage row is appended
@@ -86,7 +88,7 @@ Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking ov
 - **AND** the cached state from the wider window MUST NOT influence the recomputed rate
 
 #### Scenario: Memoized EWMA state is invalidated when an existing usage row is corrected
-- **WHEN** a later dashboard request supplies the same account's in-window history with the same row count and endpoints but a corrected `used_percent`, `reset_at`, or `window_minutes` value on an existing row
+- **WHEN** a later dashboard request supplies the same account's in-window history with the same row count and endpoints but a corrected `used_percent`, `reset_at`, or `window_minutes` value on an existing row (including a value becoming or ceasing to be absent)
 - **THEN** the service MUST rebuild the EWMA state from the corrected history slice
 - **AND** the recomputed rate-bearing metrics MUST reflect the corrected row content
 
@@ -226,14 +228,12 @@ status, model, account, API key, and search filters. The filter MUST use a bound
 query parameter and MUST not change request routing or unrelated response data.
 
 #### Scenario: Conversation-only filtering returns matching rows
-
 - **GIVEN** request logs contain rows for `conv-a` and `conv-b`
 - **WHEN** the request-log listing is requested with
   `conversation_id=conv-a`
 - **THEN** only rows with conversation ID `conv-a` are returned
 
 #### Scenario: Conversation filtering composes with existing filters
-
 - **GIVEN** matching conversation rows differ by status, model, account, API
   key, timeframe, or search text
 - **WHEN** a conversation filter and existing filters are requested together
@@ -249,7 +249,6 @@ represented as zero. The top-level listing total MUST remain consistent with the
 filtered request count.
 
 #### Scenario: Aggregates ignore pagination
-
 - **GIVEN** a filtered conversation has twelve matching requests across multiple
   pages with a total stored cost of `1.23`
 - **WHEN** page one and a later page are requested with different limit or
@@ -258,14 +257,12 @@ filtered request count.
 - **AND** both responses report `conversation.aggregatedCostUsd` as `1.23`
 
 #### Scenario: No matching rows return zero aggregates
-
 - **GIVEN** a conversation filter and active filters match no request logs
 - **WHEN** the request-log listing is requested
 - **THEN** the response reports `conversation.requestCount` as `0`
 - **AND** the response reports `conversation.aggregatedCostUsd` as `0`
 
 #### Scenario: No conversation filter returns null metadata
-
 - **GIVEN** the request-log listing is requested without `conversation_id`
 - **WHEN** the response is generated
 - **THEN** the response's `conversation` metadata is null
@@ -277,7 +274,6 @@ addition to every existing filter dimension. Requests for different
 conversation IDs MUST not reuse one another's cached listing count.
 
 #### Scenario: Different conversation IDs have isolated cached totals
-
 - **GIVEN** two listing requests differ only by conversation ID
 - **WHEN** their listing counts are served through the cache
 - **THEN** each request uses its own cache entry and filtered total
@@ -291,7 +287,6 @@ equivalent database-specific expression with the same null-and-blank exclusion
 semantics.
 
 #### Scenario: Empty conversation IDs do not inflate aggregates
-
 - **GIVEN** the active filtered range contains repeated `conv-a` values and
   rows whose conversation IDs are null, `''`, and `'   '`
 - **WHEN** dashboard or report conversation aggregates are calculated
@@ -310,14 +305,12 @@ conversation appearing in both the folded segment and the raw tail of one
 display bucket still counts once.
 
 #### Scenario: One conversation across model groups counts once per bucket
-
 - **GIVEN** a bucket contains two non-warmup request logs for `conv-a` under
   different models and one log for `conv-b`
 - **WHEN** the dashboard conversation trend aggregate is calculated
 - **THEN** that bucket's conversation count is `2`
 
 #### Scenario: One conversation across the fold boundary counts once per bucket
-
 - **GIVEN** a display bucket containing rows for `conv-a` below the
   conversation watermark (rollup-served) and above it (raw-served)
 - **WHEN** the dashboard conversation trend aggregate is calculated
@@ -334,24 +327,32 @@ Additional usage latest-per-account reads on SQLite MUST avoid `row_number()` wi
 
 ### Requirement: Unfiltered request-log filter options avoid full DISTINCT passes
 
-When `GET /api/request-logs/options` is requested without user-supplied filters, each facet (account ids, model/reasoning-effort pairs, api-key ids, status/error-code pairs) MUST be computed with loose-index-scan probes bounded by the facet's distinct-value count, not by the size of `request_logs`. The returned option sets, their ordering, and the soft-delete/status-facet semantics MUST be identical to the unbounded `DISTINCT` results.
+When `GET /api/request-logs/options` is requested without user-supplied filters, each facet MUST traverse ordered distinct values with index probes rather than repeatedly scan the live request-log cohort or perform a full `DISTINCT` pass. A candidate value MUST be returned only when a row satisfies the endpoint's visibility and status predicates. Returned option sets, ordering, NULL handling, and soft-delete/status-facet semantics MUST match the unbounded `DISTINCT` results.
 
 #### Scenario: Unfiltered facets return identical option sets via bounded probes
 
-- **GIVEN** request logs spanning multiple accounts, models with and without reasoning effort, api keys, and statuses with and without error codes
+- **GIVEN** request logs spanning multiple accounts, models with and without reasoning effort, API keys, and statuses with and without error codes
 - **WHEN** the options endpoint is called with no filters
-- **THEN** each facet MUST be produced by per-distinct-value index probes (recursive skip scan) rather than a full `DISTINCT` pass
+- **THEN** each facet MUST advance through indexed distinct values rather than a full `DISTINCT` pass
 - **AND** the response MUST equal the legacy `DISTINCT` results, including `(value, NULL)` pairs and ordering
+
+#### Scenario: SQLite facet traversal does not require planner statistics
+
+- **GIVEN** SQLite request logs with many repeated visible rows, the standard facet indexes, and no planner statistics
+- **WHEN** the unfiltered options endpoint is called
+- **THEN** facet traversal MUST use the facet's ordered values and equality-constrained eligibility checks
+- **AND** adding duplicate visible rows MUST NOT cause each recursive step to rescan the entire live-row cohort
 
 #### Scenario: Soft-deleted rows stay excluded from skip-scanned facets
 
-- **GIVEN** request-log rows with `deleted_at` set
-- **WHEN** the options endpoint is called with no filters
-- **THEN** values appearing only on soft-deleted rows MUST NOT appear in any facet
+- **GIVEN** request-log values present only in rows with `deleted_at` set or an unsupported status
+- **WHEN** the options endpoint is called without filters
+- **THEN** those values MUST NOT be returned
+- **AND** a value shared by visible and invisible rows MUST be returned exactly once when a visible row qualifies
 
 #### Scenario: Filtered requests keep bounded DISTINCT semantics
 
-- **WHEN** the options endpoint is called with any user filter (`since`, `until`, account, api-key, model, or reasoning-effort constraints)
+- **WHEN** the options endpoint receives user filters such as time bounds, account, API-key, model, or reasoning-effort constraints
 - **THEN** the facets MUST apply those filters with unchanged semantics and results
 
 ### Requirement: Proxy API-key auth caching is invalidation-driven with a TTL backstop
@@ -410,6 +411,8 @@ The usage-summary endpoint MUST NOT hydrate the secondary-window request-log row
 
 Account request-usage summaries MUST NOT aggregate the full `request_logs` history per read. The read MUST combine persisted per-account rollup sums with a live aggregate constrained to rows newer than the rollup watermark, while preserving existing dedupe semantics (latest row id per `(account_id, request_id, requested_at)`) and existing filters (warmup kinds and soft-deleted rows excluded) on the live portion.
 
+The merged summaries MAY be served from a process-local cache keyed by the requested account-id signature for a small fixed TTL, because the displayed lifetime totals tolerate short staleness. Account deletion and duplicate-identity consolidation MUST clear the cache in the process that performed them (they re-attribute or remove usage rather than append to it). A non-positive TTL MUST bypass the cache entirely so tests and precision-sensitive callers observe exact totals.
+
 #### Scenario: Summary read does not scan folded history
 
 - **GIVEN** rollup rows exist with watermark `folded_through = T`
@@ -438,6 +441,21 @@ Account request-usage summaries MUST NOT aggregate the full `request_logs` histo
 - **THEN** both MUST come from a single database snapshot (one statement)
 - **AND** no qualifying request-log row's contribution may be absent from both the rollup sums and the live-tail aggregate of that read
 
+#### Scenario: Cached summaries are served within the TTL per signature
+
+- **GIVEN** a positive summary cache TTL
+- **AND** summaries were computed for one account-id signature
+- **WHEN** the same signature is requested again within the TTL
+- **THEN** the cached summaries MAY be returned without touching the database
+- **AND** a different account-id signature MUST NOT be served from that entry
+
+#### Scenario: Account deletion invalidates cached summaries
+
+- **GIVEN** cached summaries that include an account
+- **WHEN** that account is deleted, or a duplicate-identity consolidation removes it
+- **THEN** the cache MUST be cleared so the next read reflects the new attribution
+- **AND** a summary computation already in flight when the invalidation happens MUST NOT re-populate the cache with its pre-invalidation result
+
 ### Requirement: A background fold job advances the account usage rollup safely
 
 A periodic background job MUST fold request-log rows into `account_usage_rollups` and advance the watermark. Folding MUST be restricted to rows older than a safety lag, MUST apply the dedupe and filtering semantics of the summary query within the folded window, MUST run on at most one instance at a time, and MUST be idempotent under repeated or concurrent invocation.
@@ -447,7 +465,14 @@ A periodic background job MUST fold request-log rows into `account_usage_rollups
 - **WHEN** a fold pass runs at time `now`
 - **THEN** it MUST NOT fold any row with `requested_at > now − lag`
 - **AND** rows younger than the lag remain covered by the live-tail aggregate
-- **AND** the lag MUST exceed the maximum possible request duration, because a log row is inserted at stream end but dated at request start and a row landing below the watermark would otherwise vanish from totals
+- **AND** the lag MUST exceed the maximum possible distance between a row's `requested_at` and the moment its insert becomes visible — `requested_at` is stamped at write time inside the log insert path, so this distance is bounded by replica clock skew, insert-commit latency, and process stalls, not by request duration — because a row landing below the watermark would otherwise vanish from totals
+- **AND** post-insert mutations of folded rows MUST NOT rely on the lag: they are fenced by the watermark (skipped below it) or run under the fold-state lock while mirroring the folded sums
+
+#### Scenario: Widening the lag gap is absorbed as ordinary backfill
+
+- **GIVEN** a deployment whose persisted watermark trails `now − lag` by more than one fold cadence (for example after the lag constant is shortened)
+- **WHEN** the next fold passes run
+- **THEN** the gap MUST be folded in the bounded backfill slices with reported totals unchanged
 
 #### Scenario: Duplicate rows never split across the fold boundary
 
@@ -552,29 +577,26 @@ Every process-local cache that serves security, authorization, or routing decisi
 - **THEN** each peer converges no later than that cache's documented fallback TTL
 
 ### Requirement: Cache invalidation bumps and polling are resilient and observable
-`bump()` MUST retry transient write failures (including SQLite "database is locked") with a short backoff; on final failure it MUST log at ERROR with the namespace, increment `codex_lb_cache_invalidation_bump_failures_total{namespace}`, and MUST NOT fail the originating mutation. Coalesced (`request_bump`) namespaces MUST remain pending and be retried on subsequent poll cycles until a bump succeeds, and a `request_bump` arriving while a flush for the same namespace is already awaiting its bump MUST be preserved and produce a later bump. When any invalidation callback for a namespace fails, the poller MUST NOT acknowledge the observed version and MUST re-run that namespace's callbacks on subsequent poll cycles until they succeed. The poller MUST escalate consecutive poll failures above debug level after a bounded count (WARNING after 3, ERROR after 10) and increment `codex_lb_cache_invalidation_poll_failures_total`.
+
+`bump()` MUST retry transient write failures (including SQLite "database is locked") with a short backoff; on final failure it MUST log at ERROR with the namespace, increment `codex_lb_cache_invalidation_bump_failures_total{namespace}`, and MUST NOT fail the originating mutation. Coalesced (`request_bump`) namespaces MUST remain pending and be retried on subsequent poll cycles until a bump succeeds, including when the write aborts rather than merely failing: an aborted write MUST restore the pending marker regardless of whether the database had already accepted its commit. A write that raises MUST NOT prevent the remaining pending namespaces from flushing in the same cycle. A `request_bump` arriving while a flush for the same namespace is already awaiting its bump MUST be preserved and produce a later bump. When any invalidation callback for a namespace fails, the poller MUST NOT acknowledge the observed version and MUST re-run that namespace's callbacks on subsequent poll cycles until they succeed. The poller MUST escalate consecutive poll failures above debug level after a bounded count (WARNING after 3, ERROR after 10) and increment `codex_lb_cache_invalidation_poll_failures_total`. After a startup baseline read fails, a process that continues without a recorded baseline MUST treat each positive version first observed for a registered namespace by the next successful background poll as changed, run that namespace's registered callbacks, and acknowledge the version only after those callbacks succeed. This recovery MAY cause a redundant invalidation for a version that predates startup; it MUST NOT silently absorb a peer bump into a callback-less baseline.
 
 #### Scenario: Bump failure under database lock is observable and does not fail the mutation
-
 - **GIVEN** the database rejects cache-invalidation writes with a lock error for longer than the retry budget
 - **WHEN** a mutation attempts a durable namespace bump
 - **THEN** the mutation itself still succeeds
 - **AND** an ERROR log naming the namespace is emitted and the bump-failure counter increments
 
 #### Scenario: Pending coalesced namespace flushes on the next successful cycle
-
 - **GIVEN** a coalesced `request_bump` namespace failed to flush during a poll cycle
 - **WHEN** the database becomes writable again
 - **THEN** the next poll cycle flushes the pending namespace and increments its version
 
 #### Scenario: Bump requested during an in-flight flush produces a later bump
-
 - **GIVEN** a coalesced flush is awaiting the bump write for a namespace
 - **WHEN** another mutation commits and requests a bump for the same namespace before the flush completes
 - **THEN** the namespace is re-queued and flushed again on a subsequent cycle, incrementing the version beyond the in-flight bump
 
 #### Scenario: Failed invalidation callback keeps the version unacknowledged and is retried
-
 - **GIVEN** a replica observes an `account_routing` version bump
 - **AND** its routing snapshot refresh fails with a transient database error
 - **WHEN** the poll cycle completes
@@ -582,17 +604,82 @@ Every process-local cache that serves security, authorization, or routing decisi
 - **AND** the refresh is retried on subsequent poll cycles until it succeeds
 
 #### Scenario: Consecutive poll failures escalate above debug
-
 - **GIVEN** a replica's poller cannot read the `cache_invalidation` table
 - **WHEN** three consecutive polls fail
 - **THEN** a WARNING is logged and the poll-failure counter increments
 
+#### Scenario: Failed startup prime cannot absorb a route-cache bump
+- **GIVEN** replica B's startup cache-invalidation baseline read fails and no `upstream_route` version is recorded
+- **AND** replica B continues serving traffic and warms an upstream-route resolution cache entry
+- **WHEN** replica A commits a route-input mutation and advances `upstream_route` before replica B's first successful version read
+- **THEN** replica B's first successful background poll MUST run the registered `upstream_route` invalidation callback before acknowledging the observed version
+- **AND** the warmed route entry MUST be cleared in that poll instead of remaining stale until its TTL or a later bump
+
+#### Scenario: An aborted bump write keeps its namespace queued
+
+- **GIVEN** a coalesced flush has cleared a namespace's pending marker and is awaiting its bump write
+- **WHEN** that write aborts — cancelled or raised — before the database accepts its commit
+- **THEN** the namespace is restored to the pending set for a later cycle, and no version is written
+
+#### Scenario: A raising namespace does not starve the others
+
+- **GIVEN** two pending namespaces where the first (in sort order) raises on every bump attempt
+- **WHEN** a flush cycle runs
+- **THEN** the raising namespace stays pending with no version written
+- **AND** the other namespace is bumped in that same cycle
+
+#### Scenario: An abort after the commit was accepted still restores the namespace
+
+- **GIVEN** a bump write aborts — cancelled, or the driver raises — after the database accepted its commit but before completion is reported
+- **WHEN** the abort is handled
+- **THEN** the namespace is restored to the pending set and bumped on a later cycle
+- **AND** the resulting duplicate version increment is accepted
+
 ### Requirement: Projection history reads are bounded per account
 The dashboard projections history fetch MUST NOT widen every account's
 lookback to the widest account window. On PostgreSQL the bulk usage-history
-read MUST bound rows per account by that account's own window cutoff; the
-returned per-account histories MUST equal the previous shared-floor fetch
-after the existing per-account trimming.
+read MUST bound rows per account by that account's own window cutoff, and
+MUST additionally bound each account's rows older than an uncapped recent
+floor to a newest-first per-account row cap supplied by the projections
+caller. Because live snapshot ingestion writes a row per proxied request
+whenever the usage fingerprint changes, no fixed row cap can guarantee
+coverage of a fixed time window; the fetch MUST therefore exempt rows at or
+after the uncapped recent floor from the cap so every row an equal-weight
+consumer reads is returned regardless of write density. The projections
+caller MUST derive the floor as the wider of the configured pace-smoothing
+window and the weekly-pace fleet-burn window, and MUST supply the cap and
+the floor on every projections bulk fetch, including the primary-window
+fetch (weekly-only accounts sourced from the primary stream feed the weekly
+pace from it). The cap MUST be sized to the tail-weighted consumers' EWMA
+decay rather than to a time window at an assumed write cadence: the first
+tail row only seeds the EWMA, so a cap-row tail performs cap-minus-one
+updates, and with the EWMA smoothing factor in use the pre-tail state's
+residual on the replayed rate MUST be bounded by the retained weight after
+cap-minus-one updates times the largest per-second sample slope (below
+about 1e-12 percent per second at the theoretical 100-percent-per-second
+step). The EWMA advances once per distinct recorded second (its epoch
+resolution), so that bound holds whenever the returned tail spans at least
+cap-many distinct recorded seconds; a tail packed into fewer distinct
+seconds (a same-second write burst older than the floor) MAY diverge from
+the full replay. Returned slices MUST keep the
+newest in-cutoff rows and MUST remain ordered oldest-first. For accounts
+whose in-cutoff rows do not exceed the cap, the returned histories MUST
+equal the shared-floor fetch after the existing per-account trimming; for
+accounts over the cap, the returned history MUST be exactly the union of
+every in-cutoff row at or after the uncapped recent floor and the newest
+cap-many in-cutoff rows older than the floor. Consumers that weigh every
+sample in a fixed time window equally MUST read only rows at or after the
+floor and MUST produce values identical to the uncapped fetch; consumers
+that replay a count-decaying EWMA MAY read the capped tail and, whenever
+the tail spans at least cap-many distinct recorded seconds, MUST produce an
+EWMA rate equal to the uncapped fetch within that residual bound (an
+absolute bound on the rate); fields derived from the rate (burn rate, risk,
+exhaustion ETA) MUST agree within that residual propagated through their
+formulas (the burn rate scales it by seconds-until-reset over remaining
+percent), and the exhaustion ETA fields, which are emitted only for a
+strictly positive rate, MAY be absent from the capped replay when the
+uncapped replay retains a positive ghost rate below the residual (an
+account flat at its limit).
 
 #### Scenario: One weekly account does not widen the fetch for short-window accounts
 - **GIVEN** one account with a 7-day window and several accounts with 5-hour windows
@@ -600,10 +687,60 @@ after the existing per-account trimming.
 - **THEN** rows for the 5-hour accounts MUST be bounded by their own cutoff in SQL
 - **AND** each account's resulting history slice MUST equal the slice the shared-floor fetch produced after per-account trimming
 
+#### Scenario: A dense account returns only its newest rows
+- **GIVEN** an account whose in-cutoff usage-history rows exceed the per-account row cap
+- **WHEN** the projections history fetch runs on PostgreSQL
+- **THEN** the account's slice MUST be exactly the in-cutoff rows at or after the uncapped recent floor plus the newest cap-many in-cutoff rows older than the floor, ordered oldest-first
+- **AND** accounts whose in-cutoff rows do not exceed the cap MUST return their full trimmed slice unchanged
+
+#### Scenario: Equal-weight consumers are exempt from the cap on every fetch
+- **GIVEN** the configured pace-smoothing window and the fixed weekly-pace fleet-burn window
+- **WHEN** the projections history fetch runs for the primary and the secondary window
+- **THEN** both bulk fetches MUST supply the per-account row cap
+- **AND** both MUST supply an uncapped recent floor equal to now minus the wider of the two windows
+- **AND** a weekly-only account whose history source is the primary stream MUST receive the same cap and floor on the primary fetch whether or not the caller requested primary-window depletion
+
+#### Scenario: A write burst inside an equal-weight window is never truncated
+- **GIVEN** an account that wrote more usage-history rows inside the smoothing or fleet-burn window than the per-account row cap
+- **WHEN** the projections history fetch runs on PostgreSQL
+- **THEN** every in-cutoff row at or after the floor MUST be returned
+- **AND** the weekly-pace smoothed values and fleet burn rate MUST equal the values the uncapped fetch would produce
+
+#### Scenario: EWMA consumers agree with the full replay over the tail
+- **GIVEN** an account with thousands of in-cutoff rows older than the floor
+- **AND** the newest cap-many of those rows span at least cap-many distinct recorded seconds
+- **WHEN** depletion or the weekly-pace recent burn rate is computed from the capped fetch and from the uncapped fetch
+- **THEN** the EWMA rates MUST agree within the retained weight after cap-minus-one updates times the largest per-second sample slope in the history (an absolute bound on the rate)
+- **AND** burn rate, risk, and exhaustion ETA MUST agree within that residual propagated through their formulas
+- **AND** when a usage drop or window reset lands inside the returned tail the results MUST be identical
+
+#### Scenario: The seed row bounds the tail residual
+- **GIVEN** an account whose rows older than the floor are one step from zero to a high usage followed by cap-many flat rows one recorded second apart, so the uncapped replay retains a positive ghost rate while the capped tail decays to exactly zero
+- **WHEN** depletion is computed from the capped fetch and from the uncapped fetch
+- **THEN** the rates MAY differ, and the difference MUST NOT exceed the retained weight after cap-minus-one updates times the step's per-second slope
+- **AND** the burn rate MAY differ by that residual scaled by seconds-until-reset over remaining percent
+
+#### Scenario: A saturated account may lose its exhaustion ETA under the capped fetch
+- **GIVEN** an account that reached its limit and has held a flat usage for longer than the floor, so the uncapped replay still carries a positive ghost rate that has decayed below the residual while the capped tail replays only flat rows
+- **WHEN** depletion is computed from the capped fetch and from the uncapped fetch
+- **THEN** risk and burn rate MUST be identical
+- **AND** the capped replay MAY report no exhaustion ETA where the uncapped replay reports an immediate one, because the ETA is emitted only for a strictly positive rate
+
+#### Scenario: A same-second write burst older than the floor bounds the tail guarantee
+- **GIVEN** an account whose newest rows older than the floor were written several per recorded second, so the cap-many returned tail rows span fewer distinct recorded seconds than the cap
+- **WHEN** depletion is computed from the capped fetch and from the uncapped fetch
+- **THEN** the EWMA replays MAY diverge, because each recorded second contributes one EWMA update regardless of how many rows share it
+- **AND** a tail whose rows span cap-many distinct recorded seconds MUST meet the residual bound however many rows share each second
+
+#### Scenario: Capped probes stay index-only
+- **GIVEN** usage history rows for multiple accounts and a populated visibility map
+- **WHEN** the capped per-account probe shape is EXPLAINed on PostgreSQL with sequential and bitmap scans disabled
+- **THEN** the plan MUST serve each probe as an Index Only Scan over the covering indexes with no sequential scan of `usage_history`
+
 #### Scenario: SQLite snapshot cache keeps the shared floor
 - **GIVEN** the SQLite backend serves the projections history fetch through its snapshot cache
-- **WHEN** per-account cutoffs are supplied
-- **THEN** the SQLite read MAY keep the shared floor
+- **WHEN** per-account cutoffs, a per-account row cap, and an uncapped recent floor are supplied
+- **THEN** the SQLite read MAY keep the shared floor and MAY ignore the row cap and the floor
 - **AND** per-account trimming in the caller MUST still bound each account's slice
 
 ### Requirement: Request-log listing totals are cached and rollup-served
@@ -684,7 +821,9 @@ The system SHALL maintain a permanent conversation presence satellite `request_c
 
 ### Requirement: Distinct-conversation reads combine the presence rollup with a raw live tail in one statement
 
-The dashboard conversation activity metrics (`conversation_count`, `conversation_request_count`), the dashboard conversation trend buckets, and the UNFILTERED reports summary and per-day conversation counts MUST serve folded history from the presence satellite and the remainder from raw `request_logs`, merged in a single statement per read: the fold watermark joined into both branches of a UNION so the folded segment, its exact raw complement, and the watermark come from one database snapshot, and `COUNT(DISTINCT ...)` deduplicates across the fold boundary. Merged results MUST equal the legacy full-raw aggregation whenever the underlying raw rows still exist. With an epoch or missing watermark the reads MUST degrade to exactly the legacy raw queries (no kill switch). Reports reads carrying account, model, or useragent filters MUST keep the legacy raw statement (the satellite has no such dimensions), and non-hour-multiple dashboard display buckets MUST keep the full-raw path. This reverses the `add-request-log-usage-rollups` non-goal that kept distinct conversation counts raw-bound: conversation statistics over folded history now survive request-log retention pruning, except the documented raw-bound residues (sub-hour window edges, filtered reports reads, and daily-report day-row membership, which stays raw-driven).
+The dashboard conversation activity metrics (`conversation_count`, `conversation_request_count`) and hour-multiple conversation trend buckets MUST serve folded history from the conversation presence satellite and the remainder from raw `request_logs` in one statement. The watermark and both UNION branches MUST share a database snapshot, and `COUNT(DISTINCT ...)` MUST deduplicate across the fold boundary. Missing or epoch watermarks MUST degrade to raw reads. Non-hour-multiple dashboard buckets MUST keep the full-raw path.
+
+Reports summary and daily conversation counts, including account, API-key, model and User-Agent filtered reads, MUST use the permanent report history source specified by `report-aggregation`. Their distinct counts and daily row membership MUST survive raw retention after the report fold has covered the period, subject to the documented partial-hour edge limitation.
 
 #### Scenario: Switched conversation reads equal legacy reads while raw exists
 
@@ -695,14 +834,20 @@ The dashboard conversation activity metrics (`conversation_count`, `conversation
 #### Scenario: Conversation statistics survive raw pruning
 
 - **GIVEN** folded conversation presence whose source raw rows have been pruned by retention
-- **WHEN** the dashboard conversation activity metrics, hour-multiple conversation trend buckets, or the unfiltered reports summary conversation count are read over that period
+- **WHEN** the dashboard conversation activity metrics or hour-multiple conversation trend buckets are read over that period
 - **THEN** the distinct-conversation values equal those reported before the pruning (modulo the documented sub-bucket window edges)
 
 #### Scenario: Filtered reports reads stay raw-bound
 
-- **GIVEN** a reports summary or daily read filtered by account, model, or useragent group
+- **GIVEN** a filtered report and a missing or epoch report-fold watermark
 - **WHEN** the read executes
-- **THEN** it uses the legacy raw statement and reaches only as far back as raw retention keeps rows
+- **THEN** it uses only raw rows until the report fold has covered history
+
+#### Scenario: Filtered reports preserve folded history
+
+- **GIVEN** a report filtered by account, API key, model or User-Agent and a completed report fold
+- **WHEN** source raw rows are pruned
+- **THEN** report totals, distinct conversations and daily buckets remain available from the report history source
 
 #### Scenario: Non-hour-multiple conversation buckets degrade to full raw
 
@@ -850,3 +995,49 @@ single-session ownership constraint.
 - **THEN** each database read MUST complete before the next read starts on the shared session
 - **AND** the returned payload remains schema- and value-compatible for equivalent rows
 
+### Requirement: Request-log endpoints accept server-authoritative timeframes
+
+`GET /api/request-logs` and `/api/request-logs/options` MUST accept
+`timeframe=1h|24h|7d` and derive each effective lower bound from the server UTC
+clock. Symbolic requests MUST NOT require a browser timestamp. `timeframe` and
+`since` MUST NOT be supplied together. Existing standalone `since` and `until`
+MUST retain behavior; `until` MAY accompany a timeframe.
+
+#### Scenario: Symbolic timeframe advances on refresh
+
+- **WHEN** the server clock advances and a client refetches `timeframe=1h`
+- **THEN** listing and options derive a fresh lower bound
+- **AND** all other filters remain intact
+
+#### Scenario: Ambiguous lower bounds are rejected
+
+- **WHEN** a caller supplies both `timeframe` and `since`
+- **THEN** the endpoint returns HTTP 422
+
+### Requirement: Request-log total cache uses semantic window identity
+
+In symbolic mode, total-cache identity MUST use `("timeframe", timeframe)`.
+Legacy mode MUST use `("since", effective_since)`. Membership rows MUST always
+use the live derived timestamp.
+
+#### Scenario: Repeated timeframe requests reuse count metadata
+
+- **GIVEN** two requests use the same filters and timeframe within cache TTL
+- **WHEN** their derived timestamps differ
+- **THEN** the count query executes once
+- **AND** each membership query uses its live timestamp
+
+### Requirement: Conversation collection URLs preserve trailing-slash behavior
+
+`GET /api/conversations` and `GET /api/conversations/` MUST both serve the
+conversation collection response with identical filtering, pagination, and
+default-window behavior. The detail route MUST require a non-empty detail
+segment so the trailing-slash collection URL cannot be interpreted as an
+empty conversation ID and return a detail not-found response.
+
+#### Scenario: Trailing-slash collection URL lists conversations
+
+- **GIVEN** the conversation collection is requested with a trailing slash
+- **WHEN** the API handles `GET /api/conversations/`
+- **THEN** it returns the same collection envelope as `GET /api/conversations`
+- **AND** it does not invoke detail lookup for an empty conversation ID

@@ -27,7 +27,7 @@ Session `S` is mapped to account A. A has all response-create slots in use, whil
 
 Under the default `proxy_account_caps_scope = "partitioned"`, `proxy_account_stream_limit` (default 8) and `proxy_account_response_create_limit` are **cluster-wide targets**, not per-replica values. Each replica derives its own share of a positive cap locally from the sorted bridge-ring membership: `max(1, floor(cap / R) + 1 extra when its rank < cap mod R)` (`app/modules/proxy/cap_partitioning.py`). A cap of `0` stays unlimited everywhere. With the default stream cap of 8 and three replicas the shares are 3/3/2 — a single account can hold at most 2–3 concurrent streams per replica, which surprises operators who read the setting as per-replica. `proxy_account_caps_scope = "replica"` is the supported opt-out: every replica then enforces the full configured cap with no partitioning.
 
-The effective caps are the **dashboard-persisted** values (`configured_account_concurrency_caps`); the environment settings only seed the initial dashboard row, and there is no dashboard path back to an unset state — so on an initialized deployment the cap is changed from the dashboard, and an env change alone never takes effect.
+The effective caps are the **dashboard-persisted** values (`configured_account_concurrency_caps`) resolved as environment value < stored dashboard override. A fresh install seeds the four overrides as `NULL`, so the environment value is effective and an env change is honoured until an operator stores an override. A stored override (including the seeded value on rows created before the NULL-seed change) wins over the environment until it is cleared with an explicit `null` update, which returns the cap to inheriting the environment.
 
 Sizing guidance:
 

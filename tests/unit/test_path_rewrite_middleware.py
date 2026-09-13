@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config.settings import get_settings
 from app.core.middleware.path_rewrite import (
     BackendApiCodexV1AliasMiddleware,
     _canonicalize_backend_api_codex_path,
@@ -350,6 +351,7 @@ async def test_trusted_proxy_projection_precedes_live_scope_redaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    get_settings.cache_clear()
     inner = _RecordingApp()
     middleware = TrustedProxyHeadersMiddleware(BackendApiCodexV1AliasMiddleware(inner))
     original_path = "/v1/live/not/a-valid-call-id"

@@ -4,7 +4,9 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.auth import refresh as refresh_module
 from app.core.auth.refresh import (
+    TOKEN_REFRESH_INTERVAL_DAYS,
     RefreshError,
     classify_refresh_error,
     is_refresh_claim_contention,
@@ -86,6 +88,23 @@ def test_should_refresh_after_interval():
 def test_should_refresh_within_interval():
     last = utcnow() - timedelta(days=1)
     assert should_refresh(last) is False
+
+
+def test_should_refresh_reads_the_module_constant_at_call_time(monkeypatch):
+    """The fixed window stays injectable: tests patch the module attribute.
+
+    ``CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS`` is gone (issue #1340 /
+    PRINCIPLES.md P2), so this attribute is the only seam left.
+    """
+    assert TOKEN_REFRESH_INTERVAL_DAYS == 8
+    last = utcnow() - timedelta(days=5)
+    assert should_refresh(last) is False
+
+    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 3)
+    assert should_refresh(last) is True
+
+    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 365)
+    assert should_refresh(utcnow() - timedelta(days=30)) is False
 
 
 def test_classify_refresh_error_permanent():

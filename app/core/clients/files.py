@@ -37,6 +37,7 @@ import aiohttp
 
 from app.core.clients.codex import CodexClient, create_codex_session, require_route_or_direct_egress_opt_in
 from app.core.clients.http import lease_http_session
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
@@ -189,7 +190,7 @@ async def create_file(
     ``file_name`` / ``file_size`` / ``use_case`` so the upstream contract
     is preserved verbatim.
     """
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files"
     upstream_headers = _build_files_headers(headers, access_token, account_id)
@@ -297,7 +298,7 @@ async def finalize_file(
     - Returns immediately on any non-retry status (``success`` /
       ``failed``).
     """
-    settings = get_settings()
+    settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     url = f"{upstream_base}/files/{file_id}/uploaded"
     upstream_headers = _build_files_headers(headers, access_token, account_id)

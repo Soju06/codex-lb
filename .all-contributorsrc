@@ -1265,6 +1265,17 @@
       ]
     },
     {
+      "login": "NikitaMGrimm",
+      "name": "Nikita Maximilian Grimm",
+      "avatar_url": "https://avatars.githubusercontent.com/u/65914808?v=4",
+      "profile": "https://github.com/NikitaMGrimm",
+      "contributions": [
+        "code",
+        "doc",
+        "test"
+      ]
+    },
+    {
       "login": "BrenticusMaximus",
       "name": "BrenticusMaximus",
       "avatar_url": "https://avatars.githubusercontent.com/u/32489248?v=4",
@@ -1435,6 +1446,56 @@
         "code",
         "test",
         "doc"
+      ]
+    },
+    {
+      "login": "VictorStatko",
+      "name": "Victor Statko",
+      "avatar_url": "https://avatars.githubusercontent.com/u/34319599?v=4",
+      "profile": "https://github.com/VictorStatko",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "janaki-sasidhar",
+      "name": "flameboy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/42799643?v=4",
+      "profile": "https://github.com/janaki-sasidhar",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "elmakus",
+      "name": "elmakus",
+      "avatar_url": "https://avatars.githubusercontent.com/u/76910687?v=4",
+      "profile": "https://github.com/elmakus",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "Abaddollyon",
+      "name": "Abaddollyon",
+      "avatar_url": "https://avatars.githubusercontent.com/u/31712865?v=4",
+      "profile": "https://github.com/Abaddollyon",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mjakl",
+      "name": "Markus Jakl",
+      "avatar_url": "https://avatars.githubusercontent.com/u/40384?v=4",
+      "profile": "https://github.com/mjakl",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
       ]
     }
   ],

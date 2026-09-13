@@ -816,7 +816,7 @@ async def test_bundle_validation_permanent_refresh_failure_preserves_quarantine_
         lambda: SimpleNamespace(invalidate=lambda: selection_invalidations.append(True)),
     )
 
-    result = await updater.force_refresh_result(account, ignore_refresh_disabled=True)
+    result = await updater.force_refresh_result(account)
 
     assert result.fetch_succeeded is False
     assert account.status == AccountStatus.PAUSED
@@ -840,7 +840,7 @@ async def test_bundle_validation_forced_refresh_log_redacts_exception_details(ca
     account = cast(Account, SimpleNamespace(id="safe-destination-id", status=AccountStatus.PAUSED))
 
     with caplog.at_level("WARNING", logger="app.modules.usage.updater"):
-        result = await updater.force_refresh_result(account, ignore_refresh_disabled=True)
+        result = await updater.force_refresh_result(account)
 
     assert result.fetch_succeeded is False
     assert "safe-destination-id" in caplog.text

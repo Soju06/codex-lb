@@ -66,15 +66,31 @@ def _make_bridge_session(
 def _eventless_settings(
     *,
     keepalive_interval_seconds: float = 0.001,
-    stuck_gate_retire_after_seconds: float = 0.002,
     stream_idle_timeout_seconds: float = 7200.0,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         sse_keepalive_interval_seconds=keepalive_interval_seconds,
         stream_idle_timeout_seconds=stream_idle_timeout_seconds,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
         http_responses_session_bridge_request_budget_seconds=60.0,
-        http_responses_session_bridge_anchor_poison_failure_threshold=7,
+    )
+
+
+def _install_eventless_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stuck_gate_retire_after_seconds: float = 0.002,
+    stream_idle_timeout_seconds: float = 7200.0,
+) -> None:
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _eventless_settings(stream_idle_timeout_seconds=stream_idle_timeout_seconds),
+    )
+    # The stuck gate is a fixed module constant; scale it down for the test clock.
+    monkeypatch.setattr(
+        http_bridge_helpers_module,
+        "HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS",
+        stuck_gate_retire_after_seconds,
     )
 
 
@@ -87,7 +103,7 @@ def test_http_bridge_eventless_budget_is_named_and_settings_derived() -> None:
         fallback_seconds=60.0,
     )
     keepalive_interval = settings.sse_keepalive_interval_seconds
-    stuck_gate = settings.http_responses_session_bridge_stuck_gate_retire_after_seconds
+    stuck_gate = http_bridge_helpers_module.HTTP_BRIDGE_STUCK_GATE_RETIRE_AFTER_SECONDS
 
     # Timeout invariants relating the knobs the audit named.
     assert budget_seconds <= stuck_gate
@@ -113,7 +129,6 @@ def test_http_bridge_eventless_budget_is_named_and_settings_derived() -> None:
     tight = SimpleNamespace(
         sse_keepalive_interval_seconds=10.0,
         stream_idle_timeout_seconds=45.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=300.0,
         http_responses_session_bridge_request_budget_seconds=600.0,
     )
     assert http_bridge_helpers_module._http_bridge_eventless_budget_seconds(tight, fallback_seconds=60.0) == 45.0
@@ -135,7 +150,7 @@ async def test_http_bridge_pre_response_silence_is_bridge_eventless_timeout(
     """Fix 1: pre-response-start kills are not stream_idle_timeout anywhere."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _eventless_settings())
+    _install_eventless_settings(monkeypatch)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
@@ -225,7 +240,7 @@ async def test_http_bridge_eventless_timeout_without_liveness_promises_safe_retr
     """
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _eventless_settings())
+    _install_eventless_settings(monkeypatch)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
@@ -292,11 +307,7 @@ async def test_http_bridge_post_response_start_still_uses_stream_idle_timeout(
     """Fix 1 counterpart: after response.created the old classification stands."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings",
-        lambda: _eventless_settings(stream_idle_timeout_seconds=0.002),
-    )
+    _install_eventless_settings(monkeypatch, stream_idle_timeout_seconds=0.002)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
 

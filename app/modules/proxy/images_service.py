@@ -20,10 +20,10 @@ import time
 from collections.abc import AsyncIterator, Mapping
 from typing import Final, cast
 
-from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.images import (
+    DEFAULT_PUBLIC_IMAGE_MODEL,
     V1ImageData,
     V1ImageResponse,
     V1ImagesEditsForm,
@@ -286,12 +286,11 @@ def images_edit_to_responses_request(
 def resolve_public_image_model(requested: str | None) -> str:
     """Return the publicly-effective ``gpt-image-*`` model.
 
-    Falls back to the configured ``images_default_model`` when the client
+    Falls back to the fixed ``DEFAULT_PUBLIC_IMAGE_MODEL`` when the client
     omits ``model``. The returned value is always validated against the
-    ``gpt-image-*`` allowlist to catch a misconfigured default early.
+    ``gpt-image-*`` allowlist.
     """
-    settings = get_settings()
-    resolved = requested or settings.images_default_model
+    resolved = requested or DEFAULT_PUBLIC_IMAGE_MODEL
     if not is_supported_image_model(resolved):
         raise ClientPayloadError(
             f"Unsupported image model '{resolved}'. Use a 'gpt-image-*' model.",

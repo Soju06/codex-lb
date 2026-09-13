@@ -7,11 +7,7 @@ from pydantic import Field, field_validator
 
 from app.modules.shared.schemas import DashboardModel
 
-AUTOMATION_SCHEDULE_TYPES = ("daily",)
 AUTOMATION_WEEKDAY_CODES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-AUTOMATION_RUN_STATUSES = ("running", "success", "failed", "partial")
-AUTOMATION_RUN_TRIGGERS = ("scheduled", "manual")
-AUTOMATION_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 AutomationWeekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 

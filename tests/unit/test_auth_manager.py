@@ -971,11 +971,7 @@ async def test_ensure_fresh_reuses_recent_failure_without_reissuing_refresh(monk
         raise RefreshError("invalid_grant", "refresh failed", False)
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
-    monkeypatch.setattr(
-        auth_manager_module,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
-    )
+    monkeypatch.setattr(auth_manager_module, "_REFRESH_FAILURE_COOLDOWN_SECONDS", 30.0)
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)
@@ -1011,11 +1007,7 @@ async def test_ensure_fresh_does_not_reuse_recent_transport_failure(monkeypatch)
         raise RefreshError("transport_error", "temporary dns failure", False, transport_error=True)
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
-    monkeypatch.setattr(
-        auth_manager_module,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
-    )
+    monkeypatch.setattr(auth_manager_module, "_REFRESH_FAILURE_COOLDOWN_SECONDS", 30.0)
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)
@@ -1063,11 +1055,7 @@ async def test_ensure_fresh_retry_after_persist_conflict_re_exchanges(monkeypatc
         raise RefreshError("token_persist_conflict", "cas never landed", False, transport_error=True)
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
-    monkeypatch.setattr(
-        auth_manager_module,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
-    )
+    monkeypatch.setattr(auth_manager_module, "_REFRESH_FAILURE_COOLDOWN_SECONDS", 30.0)
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)
@@ -1108,11 +1096,7 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
         raise RefreshError("invalid_grant", f"refresh failed for {refresh_token}", False)
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
-    monkeypatch.setattr(
-        auth_manager_module,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_refresh_failure_cooldown_seconds=30.0),
-    )
+    monkeypatch.setattr(auth_manager_module, "_REFRESH_FAILURE_COOLDOWN_SECONDS", 30.0)
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)

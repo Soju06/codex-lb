@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { ApiError } from "@/lib/api-client";
+
 import {
   createAutomation,
   deleteAutomation,
@@ -93,6 +95,13 @@ export function useAutomations(
       await invalidate();
     },
     onError: (error: Error) => {
+      // M2 background jobs: the backend refuses manual runs while the
+      // automations scheduler is paused; say so instead of echoing the raw
+      // conflict message.
+      if (error instanceof ApiError && error.code === "automations_paused") {
+        toast.error(t("automations.toasts.runRefusedPaused"));
+        return;
+      }
       toast.error(error.message || t("automations.toasts.runFailed"));
     },
   });

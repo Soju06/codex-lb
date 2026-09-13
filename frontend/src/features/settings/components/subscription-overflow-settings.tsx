@@ -79,7 +79,6 @@ export function SubscriptionOverflowSettings({
         <div className="space-y-1">
           <p className="text-sm font-medium">{label}</p>
           <p className="text-xs text-muted-foreground">{t("settings.routing.subscriptionOverflow.description")}</p>
-          <p className="text-xs text-muted-foreground">{t("settings.routing.subscriptionOverflow.stagedNotice")}</p>
         </div>
         <Select
           value={selectedSourceId ?? SUBSCRIPTION_OVERFLOW_OFF_VALUE}

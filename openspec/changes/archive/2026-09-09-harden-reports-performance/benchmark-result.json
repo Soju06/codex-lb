@@ -1,0 +1,13 @@
+{
+  "raw_rows": 300000,
+  "rollup_rows": 8152,
+  "database_size": "409 MB",
+  "raw_90d_seconds": 7.119176928885281,
+  "rollup_90d_seconds": 1.6223818343132734,
+  "raw_options_seconds": 0.1400104002095759,
+  "rollup_options_seconds": 0.015605537220835686,
+  "fold_slices": 360,
+  "fold_total_seconds": 26.460380143485963,
+  "fold_max_slice_seconds": 0.3888058322481811,
+  "parity": true
+}

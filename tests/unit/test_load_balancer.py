@@ -28,6 +28,7 @@ from app.core.balancer import (
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy.load_balancer import (
     RuntimeState,
     _additional_quota_applies_to_plan,
@@ -6290,3 +6291,52 @@ def test_select_account_fill_first_primary_dominates_over_secondary():
     assert result.account is not None
     # Primary still wins -- only ties break on secondary.
     assert result.account.account_id == "high-secondary"
+
+
+def test_background_recovery_state_from_account_follows_the_dashboard_soft_drain_and_tunables(monkeypatch):
+    """Usage-refresh recovery builds its state from the values the caller resolved from its dashboard row."""
+    import app.modules.proxy.load_balancer as load_balancer_module
+
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    account = _make_test_account(status=AccountStatus.ACTIVE)
+    draining_primary = _make_test_usage(
+        window="primary",
+        used_percent=DRAIN_PRIMARY_THRESHOLD_PCT + 5.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 10),
+        window_minutes=300,
+    )
+    captured: list[dict[str, object]] = []
+    original_state_from_account = load_balancer_module._state_from_account
+
+    def recording_state_from_account(**kwargs):
+        captured.append(kwargs)
+        return original_state_from_account(**kwargs)
+
+    monkeypatch.setattr(load_balancer_module, "_state_from_account", recording_state_from_account)
+    dashboard_tunables = RoutingTunables(inflight_penalty_pct=37.5)
+
+    # Environment layer (soft drain defaults on): the account above the fixed threshold drains.
+    assert (
+        background_recovery_state_from_account(
+            account=account,
+            primary_entry=draining_primary,
+            secondary_entry=None,
+        ).health_tier
+        == 1
+    )
+    # The dashboard value the caller resolved wins: soft drain off keeps the account healthy.
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=draining_primary,
+        secondary_entry=None,
+        routing_tunables=dashboard_tunables,
+        soft_drain_enabled=False,
+    )
+    assert state.health_tier == 0
+    assert captured[-1]["soft_drain_enabled"] is False
+    assert captured[-1]["routing_tunables"] is dashboard_tunables
+    assert captured[0]["soft_drain_enabled"] is None
+    assert captured[0]["routing_tunables"] is None

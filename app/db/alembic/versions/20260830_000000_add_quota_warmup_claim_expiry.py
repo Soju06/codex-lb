@@ -16,11 +16,13 @@ branch_labels = None
 depends_on = None
 
 
-# Mirrors the runtime lease floor: _warmup_claim_ttl_seconds() floors the
-# claim TTL at http_responses_stream_request_budget_seconds (default 7200) so
+# Default mirror of the runtime lease floor: _warmup_claim_ttl_seconds() floors
+# the claim TTL at the effective http_responses_stream_request_budget_seconds
+# (code default 7200; since the budget became dashboard-managed the live value
+# may differ, but a migration must not read Settings or dashboard_settings) so
 # a healthy probe provably outlives its lease. Legacy probes ran under the
-# same default stream budget, so a lease window of this length anchored to
-# the claim timestamp outlives any legacy probe that can still be in flight.
+# default stream budget, so a lease window of this length anchored to the
+# claim timestamp outlives any legacy probe that can still be in flight.
 _LEGACY_CLAIM_LEASE_WINDOW_SECONDS = 7200
 
 

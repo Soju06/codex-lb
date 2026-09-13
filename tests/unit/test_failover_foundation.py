@@ -3,18 +3,22 @@ from __future__ import annotations
 import pytest
 
 from app.core.balancer.logic import (
+    BURST_SAME_ACCOUNT_BASE_SECONDS,
+    BURST_SAME_ACCOUNT_MAX_RETRIES,
+    BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     ROUTING_POLICY_BURN_FIRST,
     AccountState,
+    burst_same_account_backoff_seconds,
     evaluate_health_tier,
     failover_decision,
     select_account,
 )
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import FailureClass, UpstreamError
 from app.db.models import AccountStatus
-from app.modules.proxy.helpers import classify_upstream_failure
+from app.modules.proxy.helpers import classify_upstream_failure, is_upstream_burst_rejection
 
 pytestmark = pytest.mark.unit
 
@@ -193,6 +197,41 @@ class TestClassifyUpstreamFailure:
             phase="connect",
         )
         assert result["failure_class"] == "retryable_transient"
+
+
+class TestIsUpstreamBurstRejection:
+    def test_truth_table(self) -> None:
+        # Only a code-less HTTP 429 (classified retryable_transient) is a burst.
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=429) is True
+        assert is_upstream_burst_rejection(failure_class="rate_limit", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="quota", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="non_retryable", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=500) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=503) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=None) is False
+
+    def test_composes_with_classify_for_the_prod_shape(self) -> None:
+        # Prod: upstream 429 body carries only a message -> code normalizes to
+        # ``upstream_error`` -> retryable_transient -> burst. Note that
+        # ``classify_upstream_failure`` itself is unchanged: a bare
+        # ``upstream_error`` with http_status=429 is still classified by the
+        # transient code table, not by the status.
+        codeless = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="Rate limit exceeded"),
+            http_status=429,
+            phase="connect",
+        )
+        assert codeless["failure_class"] == "retryable_transient"
+        assert is_upstream_burst_rejection(failure_class=codeless["failure_class"], http_status=codeless["http_status"])
+        coded = classify_upstream_failure(
+            error_code="rate_limit_exceeded",
+            error=UpstreamError(message="Try again in 1.5s"),
+            http_status=429,
+            phase="connect",
+        )
+        assert coded["failure_class"] == "rate_limit"
+        assert not is_upstream_burst_rejection(failure_class=coded["failure_class"], http_status=coded["http_status"])
 
 
 class TestFailoverDecision:
@@ -498,3 +537,98 @@ class TestSelectAccountHealthTier:
         result = select_account(states, routing_strategy="capacity_weighted", deterministic_probe=True)
         assert result.account is not None
         assert result.account.account_id == "healthy"
+
+
+class TestFailoverDecisionOwnerBound:
+    """Owner-bound requests never fail over: retry the same account or surface."""
+
+    @pytest.mark.parametrize("failure_class", ["rate_limit", "quota", "retryable_transient", "non_retryable"])
+    def test_owner_bound_without_same_account_retry_surfaces(self, failure_class: FailureClass) -> None:
+        assert (
+            failover_decision(
+                failure_class=failure_class,
+                downstream_visible=False,
+                candidates_remaining=5,
+                owner_bound=True,
+            )
+            == "surface"
+        )
+
+    def test_owner_bound_with_same_account_retry_retries_same_account(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=0,
+                owner_bound=True,
+                same_account_retry_available=True,
+            )
+            == "retry_same_account"
+        )
+
+    def test_downstream_visible_overrides_owner_bound_retry(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=True,
+                candidates_remaining=3,
+                owner_bound=True,
+                same_account_retry_available=True,
+            )
+            == "surface"
+        )
+
+    def test_same_account_retry_flag_is_ignored_when_not_owner_bound(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=2,
+                owner_bound=False,
+                same_account_retry_available=True,
+            )
+            == "failover_next"
+        )
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=0,
+                owner_bound=False,
+                same_account_retry_available=True,
+            )
+            == "surface"
+        )
+
+    def test_defaults_keep_legacy_positional_free_callers(self) -> None:
+        # websocket/mixin.py and compact.py call without the new keywords.
+        assert (
+            failover_decision(
+                failure_class="rate_limit",
+                downstream_visible=False,
+                candidates_remaining=1,
+            )
+            == "failover_next"
+        )
+
+
+class TestBurstSameAccountBackoffSeconds:
+    def test_exponential_schedule_without_retry_after(self) -> None:
+        assert [
+            burst_same_account_backoff_seconds(index, retry_after_seconds=None)
+            for index in range(1, BURST_SAME_ACCOUNT_MAX_RETRIES + 1)
+        ] == [1.0, 2.0, 4.0]
+        assert BURST_SAME_ACCOUNT_BASE_SECONDS == 1.0
+
+    def test_retry_after_is_a_floor_not_a_ceiling(self) -> None:
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=3) == 3.0
+        assert burst_same_account_backoff_seconds(3, retry_after_seconds=3) == 4.0
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=0) == 1.0
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=-7) == 1.0
+
+    def test_wait_is_capped(self) -> None:
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=120) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
+        assert burst_same_account_backoff_seconds(10, retry_after_seconds=None) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
+
+    def test_retry_index_below_one_is_clamped(self) -> None:
+        assert burst_same_account_backoff_seconds(0, retry_after_seconds=None) == 1.0

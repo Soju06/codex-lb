@@ -45,15 +45,16 @@ Telemetry uses informed opt-out consent. With no override or saved decision, it 
 the dashboard presents a one-time dialog with the current payload. Enabling or disabling saves
 the decision, and the Settings toggle can change it later.
 
-For a headless or deployment-level kill switch, set:
+For a headless opt-out before the first dashboard visit, set:
 
 ```bash
 CODEX_LB_TELEMETRY_ENABLED=false
 ```
 
-An environment value overrides the saved dashboard setting. When telemetry resolves to
-disabled, codex-lb opens no connection to the telemetry endpoint. The environment kill switch
-is always completely silent.
+The environment value applies only while no dashboard decision has been saved; a saved
+dashboard decision always takes precedence over it. The Settings toggle shows a notice while
+the environment value is the one in effect. When telemetry resolves to disabled, codex-lb opens
+no connection to the telemetry endpoint. The environment opt-out is always completely silent.
 
 When a dashboard decision changes telemetry from active to inactive, codex-lb makes one final
 signed request to `POST /v1/optout` so aggregate opt-out counts remain accurate. If the instance
@@ -75,8 +76,7 @@ Its canonical JSON body is:
 
 This single decision-time notice is the only exception to disabled telemetry silence. It is
 sent only for a dashboard-driven active-to-inactive transition; setting
-`CODEX_LB_TELEMETRY_ENABLED=false`, or changing a saved decision while either environment
-override value controls telemetry, never sends it.
+`CODEX_LB_TELEMETRY_ENABLED=false` never sends it.
 
 ## Retention and failures
 

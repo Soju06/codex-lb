@@ -1,4 +1,5 @@
-import { del, get, handleUnauthorizedResponse, patch, post, put } from "@/lib/api-client";
+import { z } from "zod";
+import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
@@ -52,18 +53,11 @@ export function importAccount(file: File) {
 }
 
 export async function exportAccountBundle(accountIds: string[] | null, passphrase: string) {
-  const response = await fetch(`${ACCOUNTS_BASE_PATH}/bundle/export`, {
-    method: "POST",
-    credentials: "same-origin",
+  return post(`${ACCOUNTS_BASE_PATH}/bundle/export`, z.instanceof(Blob), {
     cache: "no-store",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accountIds, passphrase }),
+    responseType: "blob",
+    body: { accountIds, passphrase },
   });
-  handleUnauthorizedResponse(response);
-  if (!response.ok) {
-    throw new Error(await safeBundleError(response));
-  }
-  return response.blob();
 }
 
 export function preflightAccountBundle(file: File, passphrase: string) {
@@ -93,15 +87,6 @@ export function commitAccountBundle(params: {
     body: formData,
     cache: "no-store",
   });
-}
-
-async function safeBundleError(response: Response): Promise<string> {
-  try {
-    const payload = await response.json() as { error?: { message?: unknown } };
-    return typeof payload.error?.message === "string" ? payload.error.message : "Account bundle request failed";
-  } catch {
-    return "Account bundle request failed";
-  }
 }
 
 export function pauseAccount(accountId: string) {

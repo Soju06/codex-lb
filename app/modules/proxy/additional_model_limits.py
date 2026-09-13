@@ -35,10 +35,6 @@ def get_additional_quota_key_for_model_id(model: str | None) -> str | None:
     return resolved.quota_key if resolved is not None else None
 
 
-def get_additional_limit_name_for_model(model: str | None) -> str | None:
-    return get_additional_quota_key_for_model_id(model)
-
-
 def get_additional_display_label_for_model(model: str | None) -> str | None:
     quota_key = get_additional_quota_key_for_model(model)
     return get_additional_display_label_for_quota_key(quota_key)

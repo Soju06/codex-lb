@@ -139,10 +139,11 @@ Interpretation:
 
 ## Step 3: Verify `Codex CLI` Through Local `codex-lb`
 
-Start a local proxy instance on a spare port:
+Start a local proxy instance on a spare port (from a `codex-lb` checkout; the
+background usage/model-registry loops may run and do not affect the probe):
 
 ```bash
-cd /home/egor/services/codex-lb-defin85 && env CODEX_LB_USAGE_REFRESH_ENABLED=false CODEX_LB_MODEL_REGISTRY_ENABLED=false .venv/bin/python -m app.cli --host 127.0.0.1 --port 2460
+.venv/bin/python -m app.cli --host 127.0.0.1 --port 2460
 ```
 
 Prepare an isolated `HOME` for the CLI:
@@ -205,7 +206,7 @@ Dashboard shortcut:
 - If native Codex websocket reconnects are flaky, verify the client is replaying that same `x-codex-turn-state` header.
 - `403` / `404` websocket handshake failures should now stay visible as websocket errors; they should no longer disappear behind automatic HTTP fallback.
 - In HTTP bridge logs, idle eviction should prefer prompt-cache sessions before Codex-session bridges when both are idle.
-- On Codex-affinity HTTP bridges, an internal `generate=false` prewarm only appears when the dedicated Codex bridge prewarm flag is enabled.
+- On Codex-affinity HTTP bridges, an internal `generate=false` prewarm only appears when the dedicated Codex bridge prewarm switch is on — the dashboard setting `http_responses_session_bridge_codex_prewarm_enabled` (`GET /api/settings` reports its `provenance`), or its deprecated `CODEX_LB_*` alias while the dashboard value is unset. Flipping it in the dashboard applies to the next new Codex session on every replica without a restart.
 - For HTTP `/v1/responses` and `/backend-api/codex/responses`, capture response headers and verify clients that need stronger continuity replay the returned `x-codex-turn-state` on later calls.
 - Compare backend Codex HTTP vs websocket cache ratios after bridge rollout; if backend HTTP still lags materially while websocket remains healthy, investigate prompt-prefix instability or missing client continuity signals before revisiting transport continuity.
 
@@ -301,7 +302,7 @@ If you cannot guarantee front-door affinity, configure the deterministic bridge 
 
 Codex clients send each Responses turn as one websocket text message. After a reconnect (connection loss, the upstream 60-minute connection limit, or a new client process) the official client resends the entire conversation history — inline base64 screenshots included — in that single message, with no client-side size guard or chunking. If the server closes the connection at the protocol layer (`1009 message too big`), the client burns 5 full-payload retries and then permanently downgrades the session to HTTP transport, where the same body must pass any front-proxy body-size limit.
 
-- The downstream websocket ingress budget defaults to 128 MiB (parity with `max_decompressed_responses_body_bytes`) and is configurable via `--ws-max-size` / `UVICORN_WS_MAX_SIZE`. The budget applies to the decompressed message size; `permessage-deflate` stays negotiated on the client-facing socket (the client always offers it and compresses outbound frames when accepted).
+- The downstream websocket ingress budget defaults to 128 MiB (the same `MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` constant in `app/core/ingress_limits.py` that bounds the Responses HTTP body, so the two cannot drift) and is configurable via `--ws-max-size` / `UVICORN_WS_MAX_SIZE`. The budget applies to the decompressed message size; `permessage-deflate` stays negotiated on the client-facing socket (the client always offers it and compresses outbound frames when accepted).
 - Requests that exceed the upstream websocket budget after historical slimming fail locally with status `400` and `error.code = "payload_too_large"`. The official client surfaces `400` immediately as a non-retryable invalid request and stays on websocket transport; `413` would instead trigger 5 full-payload resends followed by a sticky session-wide websocket→HTTP downgrade.
 - Front proxies must size the HTTP path for the client's websocket→HTTP fallback and for remote-compaction POSTs, which carry full history. For nginx: `client_max_body_size 128m;` (matching codex-lb's own cap), plus websocket upgrade passthrough (`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`) and a `proxy_read_timeout` comfortably above idle turn gaps (websocket connections live up to 60 minutes).
 

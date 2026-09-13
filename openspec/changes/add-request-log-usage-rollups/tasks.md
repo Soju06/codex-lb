@@ -20,7 +20,7 @@
 - [x] 4.1 Add `lock_fold_state()` to `AccountsRepository.delete()` and mirror soft delete (bucket-wise merge-add to `(account_id='', is_deleted=true)` then delete source rows) and hard delete (row deletion) across all three rollup tables in the same transaction.
 - [x] 4.2 Mirror duplicate-account consolidation (bucket-wise merge-add dup→canonical, delete dup rows) in the existing consolidation transaction.
 - [x] 4.3 Document the history-rewrite discipline (fold-state lock + rollup mirror for any mutation below the watermark) in the module docstring.
-- [x] 4.4 Gate `_prune_request_logs` on `min(folded_through, hourly_folded_through)` including the two-fold-lag currency check; tests for the three branches (hourly missing/behind → skip, both current → prune below min−lag, one stalled → skip) and post-prune statistics invariance.
+- [x] 4.4 Add `hourly_folded_through` to the `_prune_request_logs` watermark minimum (`min(folded_through, hourly_folded_through)` at the time this task ran; main has since added the conversation and report watermarks to the same minimum) including the two-fold-lag currency check; tests for the three branches (hourly missing/behind → skip, both current → prune below min−lag, one stalled → skip) and post-prune statistics invariance.
 - [x] 4.5 Lifecycle tests: soft delete preserves totals under the deleted dimension, hard delete removes them, consolidation reattributes them; fold/mirror interleaving is serialized (two sessions).
 
 ## 5. Read-path switch (PR2)

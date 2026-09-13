@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncByteStream, AsyncClient
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Receive, Scope, Send
 
+import app.core.middleware.request_body_limit as request_body_limit_module
 import app.core.middleware.request_decompression as request_decompression_module
 from app.core.middleware.request_body_limit import add_request_body_limit_middleware
 from app.core.middleware.request_decompression import (
@@ -204,7 +205,7 @@ async def test_request_decompression_rejects_raw_encoded_body_over_limit(
 ):
     payload = {"input": "x" * 512}
     encoded = encode(json.dumps(payload).encode("utf-8"))
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", str(len(encoded) - 1))
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", len(encoded) - 1)
 
     transport = ASGITransport(app=_build_echo_app())
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -237,7 +238,7 @@ async def test_request_decompression_allows_exact_decoded_boundary(
     payload = {"input": "x" * 512}
     body = json.dumps(payload).encode("utf-8")
     encoded = encode(body)
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", str(len(body)))
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", len(body))
 
     transport = ASGITransport(app=_build_echo_app())
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -269,7 +270,7 @@ async def test_request_decompression_rejects_one_byte_over_decoded_boundary(
 ):
     body = json.dumps({"input": "x" * 512}).encode("utf-8")
     encoded = encode(body)
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", str(len(body) - 1))
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", len(body) - 1)
 
     transport = ASGITransport(app=_build_echo_app())
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -322,8 +323,8 @@ async def test_zstd_streams_without_one_shot_allocation_attempt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_request_decompression_uses_openai_envelope_for_unsupported_encoding(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "2048")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 2048)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     transport = ASGITransport(app=_build_echo_app())
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -343,8 +344,8 @@ async def test_request_decompression_uses_openai_envelope_for_unsupported_encodi
 
 @pytest.mark.asyncio
 async def test_request_decompression_uses_openai_envelope_for_malformed_body(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "2048")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 2048)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     transport = ASGITransport(app=_build_echo_app())
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -364,8 +365,8 @@ async def test_request_decompression_uses_openai_envelope_for_malformed_body(mon
 
 @pytest.mark.asyncio
 async def test_request_decompression_uses_openai_envelope_for_expanded_overflow(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "128")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 128)
     body = json.dumps({"input": "x" * 512}).encode("utf-8")
     compressed = zstd.ZstdCompressor().compress(body)
     assert len(compressed) < 128 < len(body)
@@ -388,8 +389,8 @@ async def test_request_decompression_uses_openai_envelope_for_expanded_overflow(
 
 @pytest.mark.asyncio
 async def test_request_decompression_allows_larger_responses_payload(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     app = _build_echo_app()
 
@@ -413,8 +414,8 @@ async def test_request_decompression_allows_larger_responses_payload(monkeypatch
 
 @pytest.mark.asyncio
 async def test_request_decompression_allows_larger_responses_payload_under_root_path(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     payload = {"input": "x" * 512}
     body = json.dumps(payload).encode("utf-8")
@@ -435,8 +436,8 @@ async def test_request_decompression_allows_larger_responses_payload_under_root_
 
 @pytest.mark.asyncio
 async def test_request_decompression_allows_larger_trailing_slash_responses_payload(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     app = _build_echo_app()
 
@@ -460,8 +461,8 @@ async def test_request_decompression_allows_larger_trailing_slash_responses_payl
 
 @pytest.mark.asyncio
 async def test_request_decompression_keeps_default_limit_for_other_routes(monkeypatch):
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "128")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "2048")
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 128)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 2048)
 
     app = _build_echo_app()
 

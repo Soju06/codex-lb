@@ -4,12 +4,15 @@ import asyncio
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.proxy.load_balancer import effective_routing_tunables
 
 pytestmark = pytest.mark.unit
 
@@ -1582,3 +1585,53 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
     assert invalidations == 1
     assert open_sessions == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recoverable_account_statuses_builds_states_from_the_dashboard_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recovery state build resolves soft drain and the routing tunables from the cycle's dashboard row."""
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    candidate = _make_account(
+        "acc_rate_limited",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now + 3600),
+        blocked_at=int(now - 30),
+    )
+    captured: list[dict[str, Any]] = []
+    original_state_from_account = refresh_scheduler_module.background_recovery_state_from_account
+
+    def recording_state_from_account(**kwargs: Any):
+        captured.append(kwargs)
+        return original_state_from_account(**kwargs)
+
+    monkeypatch.setattr(
+        refresh_scheduler_module, "background_recovery_state_from_account", recording_state_from_account
+    )
+    environment_soft_drain = resolve_resilience_toggles(None).soft_drain_enabled
+    environment_penalty = effective_routing_tunables(None).inflight_penalty_pct
+    dashboard_row = SimpleNamespace(
+        soft_drain_enabled=not environment_soft_drain,
+        proxy_account_inflight_penalty_pct=environment_penalty + 35.0,
+    )
+
+    async def reconcile(dashboard_settings: object | None) -> int:
+        return await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+            accounts_repo=StubAccountsRepository([candidate]),
+            usage_repo=StubUsageRepository(),
+            accounts=[candidate],
+            dashboard_settings=dashboard_settings,
+        )
+
+    assert await reconcile(dashboard_row) == 0
+    assert captured[-1]["soft_drain_enabled"] is (not environment_soft_drain)
+    assert captured[-1]["routing_tunables"].inflight_penalty_pct == environment_penalty + 35.0
+
+    # Without a row (callers outside the refresh cycle) the environment layer still applies.
+    assert await reconcile(None) == 0
+    assert captured[-1]["soft_drain_enabled"] is environment_soft_drain
+    assert captured[-1]["routing_tunables"].inflight_penalty_pct == environment_penalty

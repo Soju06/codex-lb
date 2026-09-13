@@ -593,6 +593,97 @@ describe("useRequestLogs", () => {
   });
 });
 
+describe("useRequestLogs source filter", () => {
+  it("round-trips repeated source params through the URL and the list query", async () => {
+    const sourceCalls: string[][] = [];
+    const facetCalls: string[][] = [];
+    const locations: string[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        sourceCalls.push(new URL(request.url).searchParams.getAll("source"));
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+      http.get("/api/request-logs/options", ({ request }) => {
+        facetCalls.push(new URL(request.url).searchParams.getAll("source"));
+        return HttpResponse.json({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(
+      queryClient,
+      "/dashboard?source=subscription_overflow",
+      (search) => locations.push(search),
+    );
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.filters.sources).toEqual(["subscription_overflow"]));
+    expect(result.current.listFilters.sources).toEqual(["subscription_overflow"]);
+    await waitFor(() =>
+      expect(sourceCalls.some((sources) => sources.includes("subscription_overflow"))).toBe(true),
+    );
+    // The facet query is untouched: `/options` has no source dimension.
+    expect(facetCalls.every((sources) => sources.length === 0)).toBe(true);
+
+    act(() => {
+      result.current.updateFilters({
+        sources: ["subscription_overflow", "subscription_overflow_pinned"],
+        offset: 0,
+      });
+    });
+
+    await waitFor(() =>
+      expect(result.current.filters.sources).toEqual([
+        "subscription_overflow",
+        "subscription_overflow_pinned",
+      ]),
+    );
+    await waitFor(() =>
+      expect(sourceCalls[sourceCalls.length - 1]).toEqual([
+        "subscription_overflow",
+        "subscription_overflow_pinned",
+      ]),
+    );
+    await waitFor(() => {
+      const latest = new URLSearchParams(locations[locations.length - 1]);
+      expect(latest.getAll("source")).toEqual([
+        "subscription_overflow",
+        "subscription_overflow_pinned",
+      ]);
+    });
+
+    act(() => {
+      result.current.updateFilters({ sources: [], offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.sources).toEqual([]));
+    await waitFor(() => expect(sourceCalls[sourceCalls.length - 1]).toEqual([]));
+    await waitFor(() => {
+      const latest = new URLSearchParams(locations[locations.length - 1]);
+      expect(latest.getAll("source")).toEqual([]);
+    });
+  });
+
+  it("defaults to no source filter", async () => {
+    const sourceCalls: string[][] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        sourceCalls.push(new URL(request.url).searchParams.getAll("source"));
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+    );
+
+    const { result } = renderHook(() => useRequestLogs(), {
+      wrapper: createWrapper(createTestQueryClient(), "/dashboard"),
+    });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.sources).toEqual([]);
+    expect(sourceCalls.every((sources) => sources.length === 0)).toBe(true);
+  });
+});
+
 describe("requestLogFiltersApplied", () => {
   const defaults = {
     search: "",
@@ -601,6 +692,7 @@ describe("requestLogFiltersApplied", () => {
     apiKeyIds: [],
     modelOptions: [],
     statuses: [],
+    sources: [],
     conversationId: null,
     limit: 25,
     offset: 0,
@@ -614,5 +706,8 @@ describe("requestLogFiltersApplied", () => {
     expect(requestLogFiltersApplied({ ...defaults, timeframe: "24h" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
+    expect(
+      requestLogFiltersApplied({ ...defaults, sources: ["subscription_overflow"] }),
+    ).toBe(true);
   });
 });

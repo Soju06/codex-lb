@@ -7,7 +7,7 @@ from datetime import datetime
 
 import pytest
 
-from app.core.auth import DEFAULT_EMAIL, generate_unique_account_id, parse_auth_json
+from app.core.auth import DEFAULT_EMAIL, generate_unique_account_id
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse, UsageFetchError
 from app.core.crypto import TokenEncryptor
@@ -227,8 +227,8 @@ async def test_account_usage_reset_consume_consumes_credit_and_refreshes(async_c
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
-            refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}")
+        async def force_refresh(self, account: Account) -> bool:
+            refreshed_account_ids.append(account.id)
             return True
 
     monkeypatch.setattr(
@@ -252,7 +252,7 @@ async def test_account_usage_reset_consume_consumes_credit_and_refreshes(async_c
     assert call["redeem_request_id"]
     assert call["route"] is None
     assert call["allow_direct_egress"] is True
-    assert refreshed_account_ids == [f"{expected_account_id}:True"]
+    assert refreshed_account_ids == [expected_account_id]
     assert get_rate_limit_reset_credits_store().get(expected_account_id) is None
 
 
@@ -305,8 +305,7 @@ async def test_account_usage_reset_consume_refreshes_usage_with_post_401_account
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
-            assert ignore_refresh_disabled is True
+        async def force_refresh(self, account: Account) -> bool:
             refreshed_access_tokens.append(encryptor.decrypt(account.access_token_encrypted))
             return True
 
@@ -585,56 +584,6 @@ async def test_update_account_limit_warmup_opt_in(async_client):
     assert matched is not None
     assert matched["limitWarmupEnabled"] is True
     assert matched["limitWarmup"] is None
-
-
-@pytest.mark.asyncio
-async def test_export_account_returns_latest_codex_auth_json_with_no_store_headers(async_client):
-    email = "export@example.com"
-    raw_account_id = "acc_export"
-    payload = {
-        "email": email,
-        "chatgpt_account_id": raw_account_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
-    }
-    auth_json = {
-        "tokens": {
-            "idToken": _encode_jwt(payload),
-            "accessToken": "access",
-            "refreshToken": "refresh",
-            "accountId": raw_account_id,
-        },
-    }
-
-    expected_account_id = generate_unique_account_id(raw_account_id, email)
-    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
-    assert response.status_code == 200
-
-    export = await async_client.post(f"/api/accounts/{expected_account_id}/export")
-    assert export.status_code == 200
-    assert export.headers["cache-control"] == "no-store, no-cache, must-revalidate, private"
-    assert export.headers["pragma"] == "no-cache"
-    assert export.headers["expires"] == "0"
-
-    payload = export.json()
-    assert payload["accountId"] == expected_account_id
-    assert payload["email"] == email
-    assert payload["planType"] == "plus"
-    assert payload["status"] == "active"
-
-    parsed_auth = parse_auth_json(payload["authJson"].encode("utf-8"))
-    assert parsed_auth.tokens.access_token == "access"
-    assert parsed_auth.tokens.refresh_token == "refresh"
-    assert parsed_auth.tokens.account_id == raw_account_id
-    assert parsed_auth.last_refresh_at is not None
-
-
-@pytest.mark.asyncio
-async def test_export_missing_account_returns_404(async_client):
-    response = await async_client.post("/api/accounts/missing/export")
-    assert response.status_code == 404
-    payload = response.json()
-    assert payload["error"]["code"] == "account_not_found"
 
 
 @pytest.mark.asyncio

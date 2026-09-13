@@ -220,15 +220,6 @@ def is_weekly_window_minutes(window_minutes: int | None) -> bool:
     return window_minutes == secondary_default
 
 
-def is_monthly_window_minutes(window_minutes: int | None) -> bool:
-    if window_minutes is None:
-        return False
-    monthly_default = default_window_minutes("monthly")
-    if monthly_default is None:
-        return False
-    return window_minutes == monthly_default
-
-
 def is_primary_window_minutes(window_minutes: int | None) -> bool:
     if window_minutes is None:
         return False

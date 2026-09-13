@@ -1,0 +1,92 @@
+name: Release guards
+
+# The release PR guards live outside ci.yml on purpose.
+#
+# The beta guard (scripts/guard_beta_release.py) reads the PR body: release
+# candidate validation evidence (the checked checklist plus the exact head SHA)
+# is recorded by editing the release PR description, so the guard has to re-run
+# on `pull_request: edited`. While these jobs lived in ci.yml, that meant every
+# PR title/body edit — agents finalizing descriptions, review bots rewriting
+# summaries — cancelled the in-flight matrix (ci.yml is cancel-in-progress) and
+# re-queued ~30 jobs for an unchanged head. Both guards are stdlib-only and
+# finish in seconds, so re-running them on metadata edits costs nothing.
+#
+# Check context names ("Beta release guard", "Stable release guard") are the
+# same as when the jobs lived in ci.yml. They no longer feed ci.yml's
+# "CI Required" aggregate (cross-workflow `needs` is impossible); require them
+# in the ruleset directly if they must gate merges. The publish-time guard in
+# publish-beta-release.yml remains the hard gate for tags either way.
+#
+# push/merge_group are kept for parity with the former ci.yml jobs: the guards
+# are no-ops without a pull_request payload, and a context that has never
+# reported on main cannot be added to the required-checks ruleset.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  beta-release-guard:
+    name: Beta release guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
+
+      - name: Require validated canonical beta release PRs
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python -m scripts.guard_beta_release \
+            --mode pr \
+            --base-ref "origin/${BASE_REF}" \
+            --head-ref "${HEAD_REF}"
+
+  stable-release-guard:
+    name: Stable release guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" --force
+
+      - name: Require complete release-please stable promotions
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          python -m scripts.guard_stable_release \
+            --base-ref "origin/${BASE_REF}" \
+            --head-ref "${HEAD_REF}"

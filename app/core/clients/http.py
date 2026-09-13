@@ -18,7 +18,8 @@ from aiohappyeyeballs.types import AddrInfoType
 from aiohttp_retry import RetryClient
 from aiohttp_socks import ProxyConnector
 
-from app.core.config.settings import get_settings
+from app.core.config.settings import Settings, get_settings
+from app.core.types import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,11 @@ class HttpClient:
     session: aiohttp.ClientSession
     websocket_session: aiohttp.ClientSession
     retry_client: RetryClient
+    # Dedicated connector for OpenAI-compatible model sources (#2123 WP-C1,
+    # design v3 §8.4): a stalled source must never occupy the ChatGPT
+    # connector. Built and rotated with the generation; ``None`` (test
+    # constructors) falls back to ``session``.
+    model_source_session: aiohttp.ClientSession | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,15 +197,15 @@ class HttpClientLease:
         await _release_http_client(self._managed_client)
 
 
-async def _build_http_client() -> HttpClient:
-    settings = get_settings()
-    ssl_context = _shared_ssl_context()
-    proxy_env = (
-        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
-    )
-    socks_config = _socks_proxy_config(proxy_env)
+def _build_pooled_connector(
+    settings: Settings,
+    ssl_context: ssl.SSLContext,
+    socks_config: _SocksProxyConfig | None,
+) -> aiohttp.TCPConnector | ProxyConnector:
+    """Connector for a pooled HTTP session, sized by the shared connector limits (SOCKS-aware)."""
+
     if socks_config:
-        connector = ProxyConnector.from_url(
+        return ProxyConnector.from_url(
             socks_config.connector_url,
             limit=settings.http_connector_limit,
             limit_per_host=settings.http_connector_limit_per_host,
@@ -207,20 +213,29 @@ async def _build_http_client() -> HttpClient:
             rdns=socks_config.rdns,
             socket_factory=_keepalive_socket_factory,
         )
-    else:
-        connector = aiohttp.TCPConnector(
-            limit=settings.http_connector_limit,
-            limit_per_host=settings.http_connector_limit_per_host,
-            ssl=ssl_context,
-            # aiohttp defaults (15s keepalive, 10s DNS TTL) are shorter than
-            # typical interactive Codex turn gaps, so nearly every turn paid a
-            # fresh DNS lookup + TCP/TLS handshake to the upstream host
-            # (~100-300ms of TTFT). Keep idle connections and resolved names
-            # around across turns instead.
-            keepalive_timeout=90,
-            ttl_dns_cache=300,
-            socket_factory=_keepalive_socket_factory,
-        )
+    return aiohttp.TCPConnector(
+        limit=settings.http_connector_limit,
+        limit_per_host=settings.http_connector_limit_per_host,
+        ssl=ssl_context,
+        # aiohttp defaults (15s keepalive, 10s DNS TTL) are shorter than
+        # typical interactive Codex turn gaps, so nearly every turn paid a
+        # fresh DNS lookup + TCP/TLS handshake to the upstream host
+        # (~100-300ms of TTFT). Keep idle connections and resolved names
+        # around across turns instead.
+        keepalive_timeout=90,
+        ttl_dns_cache=300,
+        socket_factory=_keepalive_socket_factory,
+    )
+
+
+async def _build_http_client() -> HttpClient:
+    settings = get_settings()
+    ssl_context = _shared_ssl_context()
+    proxy_env = (
+        settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
+    )
+    socks_config = _socks_proxy_config(proxy_env)
+    connector = _build_pooled_connector(settings, ssl_context, socks_config)
     session = aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=None),
@@ -252,6 +267,23 @@ async def _build_http_client() -> HttpClient:
         except BaseException:
             await asyncio.shield(ws_connector.close())
             raise
+        try:
+            # OpenAI-compatible model sources get their own pool: a source that
+            # accepts connections and stalls must not consume the ChatGPT
+            # connector's per-host slots (design v3 §8.4, I12).
+            model_source_connector = _build_pooled_connector(settings, ssl_context, socks_config)
+            try:
+                model_source_session = aiohttp.ClientSession(
+                    connector=model_source_connector,
+                    timeout=aiohttp.ClientTimeout(total=None),
+                    trust_env=not socks_config,
+                )
+            except BaseException:
+                await asyncio.shield(model_source_connector.close())
+                raise
+        except BaseException:
+            await asyncio.shield(websocket_session.close())
+            raise
     except BaseException:
         await asyncio.shield(session.close())
         raise
@@ -260,14 +292,19 @@ async def _build_http_client() -> HttpClient:
         session=session,
         websocket_session=websocket_session,
         retry_client=retry_client,
+        model_source_session=model_source_session,
     )
 
 
 async def _close_client(client: HttpClient) -> None:
     try:
-        await client.websocket_session.close()
+        if client.model_source_session is not None:
+            await client.model_source_session.close()
     finally:
-        await client.retry_client.close()
+        try:
+            await client.websocket_session.close()
+        finally:
+            await client.retry_client.close()
 
 
 async def _close_managed_client(managed_client: _ManagedHttpClient) -> None:
@@ -347,6 +384,20 @@ async def lease_http_session(
 
 
 @contextlib.asynccontextmanager
+async def lease_model_source_session() -> AsyncIterator[aiohttp.ClientSession]:
+    """Lease the model-source session of the current client generation (falls back to ``session`` when ``None``).
+
+    The lease is the same generation lease as ``lease_http_session``: rotation
+    defers closing the retired generation, including its model-source pool,
+    until every in-flight source exchange has released.
+    """
+
+    async with lease_http_client() as client:
+        session = client.model_source_session
+        yield session if session is not None else client.session
+
+
+@contextlib.asynccontextmanager
 async def lease_retry_client(
     client: RetryClient | None = None,
 ) -> AsyncIterator[RetryClient]:
@@ -394,6 +445,7 @@ async def refresh_http_client_after_network_failure(
             failed_session is not None
             and failed_session is not current.client.session
             and failed_session is not current.client.websocket_session
+            and failed_session is not current.client.model_source_session
         ):
             return "already_rotated"
         now = time.monotonic()
@@ -436,3 +488,12 @@ def get_http_client() -> HttpClient:
     if _http_client is None:
         raise RuntimeError("HTTP client not initialized")
     return _http_client.client
+
+
+async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:
+    try:
+        data = await resp.json(content_type=None)
+    except Exception:
+        text = await resp.text()
+        return {"error": {"message": text.strip()}}
+    return data if isinstance(data, dict) else {"error": {"message": str(data)}}

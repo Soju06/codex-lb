@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass
+from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from typing import cast
 
@@ -12,13 +14,21 @@ from starlette.requests import HTTPConnection
 from app.core.auth import generate_unique_account_id
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_access import (
+    STEP_UP_PERMISSIONS,
     DashboardPermission,
     DashboardPrincipal,
-    DashboardRole,
+    Permission,
+    Scope,
     admin_principal,
     guest_principal,
+    scope_satisfies,
+    totp_policy_applies,
+    user_principal,
 )
-from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth, get_dashboard_request_auth
+from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
+from app.core.auth.external_identity import resolve_trusted_header_request
+from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, is_step_up_fresh, step_up_methods
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -29,16 +39,41 @@ from app.core.request_locality import is_local_request
 from app.core.socket_peer import raw_socket_peer_host
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
-from app.db.models import AccountStatus
+from app.db.models import AccountStatus, DashboardSettings, DashboardUser, DashboardUserStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyInvalidError, ApiKeysService
-from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_dashboard_session_store
+from app.modules.dashboard_auth.service import (
+    DASHBOARD_SESSION_COOKIE,
+    DashboardSessionState,
+    get_dashboard_session_store,
+    get_step_up_cookie_store,
+    session_clock,
+)
+from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.break_glass import break_glass_second_factor_required, local_login_admits
 
 logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
+#: The only routes an account that still has to enrol a TOTP secret may reach
+#: (an explicit allow-list, not the module prefix: guest-password management,
+#: password removal and TOTP disable live under the same prefix and stay closed).
+TOTP_ENROLLMENT_ALLOWED_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/dashboard-auth/session",
+        "/api/dashboard-auth/totp/setup/start",
+        "/api/dashboard-auth/totp/setup/confirm",
+        "/api/dashboard-auth/totp/verify",
+        "/api/dashboard-auth/logout",
+        "/api/dashboard-auth/logout-all",
+        "/api/dashboard-auth/me",
+        "/api/dashboard-auth/password/change",
+    }
+)
+#: ``auth_method`` of the implicit admin on a local install without a password.
+AUTH_METHOD_LOCAL_BOOTSTRAP = "local_bootstrap"
 _CODEX_USAGE_IDENTITY_INACTIVE_WORKSPACE_STATUSES = {
     AccountStatus.PAUSED,
     AccountStatus.DEACTIVATED,
@@ -162,20 +197,154 @@ def _get_cached_dashboard_principal(request: Request) -> DashboardPrincipal | No
     return principal if isinstance(principal, DashboardPrincipal) else None
 
 
+async def _resolve_session_user(
+    state: DashboardSessionState | None, users_cache: DashboardUsersCache
+) -> DashboardUser | None:
+    """The account behind a user cookie, or ``None`` when the cookie no longer binds to one.
+
+    A missing, disabled, or invited account and a stale ``session_generation``
+    all fail the same way; the caller answers ``authentication_required``.
+    """
+
+    if state is None or not state.is_user or state.user_id is None:
+        return None
+    user = await users_cache.get_user(state.user_id)
+    if user is None or user.status != DashboardUserStatus.ACTIVE.value:
+        return None
+    if user.session_generation != state.session_generation:
+        return None
+    return user
+
+
+def _user_session_principal(
+    request: Request,
+    user: DashboardUser,
+    state: DashboardSessionState,
+    *,
+    settings: DashboardSettings,
+) -> DashboardPrincipal:
+    grants = resolve_role_grants(user.role)
+    # An emergency account that holds a secret always presents it, whatever
+    # the two toggles say: the account a tightened policy relies on must never
+    # be reachable on a password alone.
+    totp_required = totp_policy_applies(
+        required_on_login=settings.totp_required_on_login,
+        required_for_admin_role=settings.totp_required_for_admin_role,
+        grants=grants,
+    ) or break_glass_second_factor_required(user)
+    totp_configured = user.totp_secret_encrypted is not None
+    if totp_required and totp_configured and not state.totp_verified:
+        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
+    totp_enrollment_required = totp_required and not totp_configured
+    # Routes guarded only by this dependency (account inventory, request logs,
+    # ...) assume a reader who may see everything. Until the self-service phase
+    # makes own-scoped routes declare their own requirement (this guard then
+    # moves to route level), a role without dashboard:read at scope `all`
+    # (e.g. member) is refused outright rather than admitted to all-scope views.
+    if not scope_satisfies(grants.get(Permission.DASHBOARD_READ), Scope.ALL):
+        raise DashboardPermissionError(
+            f"Dashboard permission '{Permission.DASHBOARD_READ.value}' is required",
+            code="permission_required",
+            param=Permission.DASHBOARD_READ.value,
+        )
+    principal = user_principal(
+        user,
+        grants,
+        auth_method=state.auth_method,
+        totp_enrollment_required=totp_enrollment_required,
+        step_up_verified_at=state.step_up_verified_at,
+    )
+    # An account that still has to enrol may only reach the self-service routes
+    # listed above; those routes gate themselves, so every other route that
+    # reaches this dependency is refused here.
+    if totp_enrollment_required and request.url.path not in TOTP_ENROLLMENT_ALLOWED_PATHS:
+        raise DashboardPermissionError(
+            "TOTP enrollment is required before dashboard access",
+            code="totp_enrollment_required",
+        )
+    return _set_dashboard_principal(request, principal)
+
+
+async def _password_fallback_principal(request: Request) -> DashboardPrincipal | None:
+    """A password-verified cookie the local login policy admits, so an emergency
+    account stays reachable while the proxy asserts an identity the resolver refuses.
+
+    ``local_login_policy`` decides which cookie counts: ``enabled`` (the
+    default) admits every active account, which is what shipped before this
+    change; ``admins_only`` admits the admin preset; ``break_glass_only``
+    admits only a designated emergency account. One function, so the gate and
+    the session response that advertises the fallback cannot disagree.
+    """
+
+    users_cache = get_dashboard_users_cache()
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    session_user = await _resolve_session_user(state, users_cache)
+    if state is None or session_user is None or not state.password_verified:
+        return None
+    settings = await get_settings_cache().get()
+    if not local_login_admits(session_user, settings.local_login_policy):
+        return None
+    return _user_session_principal(request, session_user, state, settings=settings)
+
+
+async def _trusted_header_principal(request: Request, request_auth: DashboardRequestAuth) -> DashboardPrincipal:
+    """The account behind the proxy-asserted identity, or a 401 naming why there is none.
+
+    Unknown identities become accounts through the provider's
+    ``unknown_identity_role_id`` (admin by default, D10). A refused identity
+    answers ``identity_not_provisioned`` and a disabled account
+    ``account_disabled`` -- unless a password-verified cookie rides along, in
+    which case that account is served (a resolved header account always wins
+    over the cookie). The TOTP policy is not applied to header sessions yet:
+    there is no cookie to carry a verified step, so applying it would lock
+    every header user out (the step-up change wires it, honouring the
+    provider's ``idp_mfa_enforced``).
+    """
+
+    resolution = await resolve_trusted_header_request(request, request_auth)
+    if resolution is None:
+        raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    if resolution.user is None:
+        fallback = await _password_fallback_principal(request)
+        if fallback is not None:
+            return fallback
+        if resolution.denial == "account_disabled":
+            raise DashboardAuthError("This account is disabled", code="account_disabled")
+        raise DashboardAuthError(
+            "Your account is not ready yet; ask an administrator to add you", code="identity_not_provisioned"
+        )
+    grants = resolve_role_grants(resolution.user.role)
+    if not scope_satisfies(grants.get(Permission.DASHBOARD_READ), Scope.ALL):
+        raise DashboardPermissionError(
+            f"Dashboard permission '{Permission.DASHBOARD_READ.value}' is required",
+            code="permission_required",
+            param=Permission.DASHBOARD_READ.value,
+        )
+    return user_principal(
+        resolution.user, grants, auth_method=request_auth.mode.value, auth_mode=DashboardAuthMode.TRUSTED_HEADER
+    )
+
+
 async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     cached = _get_cached_dashboard_principal(request)
     if cached is not None:
         return cached
 
     request_auth = get_dashboard_request_auth(request)
+    if request_auth is not None and request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
+        return _set_dashboard_principal(request, await _trusted_header_principal(request, request_auth))
     if request_auth is not None:
         return _set_dashboard_principal(
             request,
-            admin_principal(auth_mode=request_auth.mode, actor=request_auth.actor),
+            admin_principal(auth_mode=request_auth.mode, actor=request_auth.actor, auth_method=request_auth.mode.value),
         )
 
     settings = await get_settings_cache().get()
-    password_required = bool(settings.password_hash)
+    users_cache = get_dashboard_users_cache()
+    auth_state = await users_cache.local_auth_state()
+    password_required = auth_state.requires_auth
+    # The admin-role requirement binds accounts only, so on its own it never
+    # turns a passwordless install into one that demands a login.
     requires_auth = password_required or settings.totp_required_on_login
     guest_access_enabled = settings.guest_access_enabled
     guest_password_required = guest_access_enabled and settings.guest_password_hash is not None
@@ -187,26 +356,31 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     )
     session_id = request.cookies.get(DASHBOARD_SESSION_COOKIE)
     state = get_dashboard_session_store().get(session_id)
+    session_user = await _resolve_session_user(state, users_cache)
 
-    has_admin_fallback_session = (
-        state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified
+    # Behind a reverse proxy a header-less request only gets in on a password
+    # cookie the local login policy still admits (the same decision
+    # ``_password_fallback_principal`` makes for a refused identity).
+    has_password_fallback_session = (
+        state is not None
+        and session_user is not None
+        and state.password_verified
+        and local_login_admits(session_user, settings.local_login_policy)
     )
-    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_admin_fallback_session:
+    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_password_fallback_session:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
+    # A guest cookie is only ever minted under the current guest generation, so
+    # a matching generation proves it passed whatever guest credential applied.
     if (
         state is not None
-        and state.role == DashboardRole.GUEST
+        and state.is_guest
         and guest_access_enabled
-        and ((not guest_password_required and passwordless_guest_fallback_allowed) or state.guest_verified)
+        and state.guest_session_generation == settings.guest_session_generation
+        and (guest_password_required or passwordless_guest_fallback_allowed)
     ):
         return _set_dashboard_principal(request, guest_principal())
-    if state is not None and state.role == DashboardRole.ADMIN and password_required and state.password_verified:
-        if settings.totp_required_on_login and not state.totp_verified:
-            raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
-        return _set_dashboard_principal(
-            request,
-            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
-        )
+    if state is not None and session_user is not None and state.password_verified:
+        return _user_session_principal(request, session_user, state, settings=settings)
 
     if not requires_auth:
         if not is_local_request(request):
@@ -220,30 +394,19 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
             )
         return _set_dashboard_principal(
             request,
-            admin_principal(auth_mode=DashboardAuthMode.STANDARD),
+            admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method=AUTH_METHOD_LOCAL_BOOTSTRAP),
         )
 
     if guest_access_enabled and not guest_password_required and passwordless_guest_fallback_allowed:
         return _set_dashboard_principal(request, guest_principal())
 
-    if not password_required and settings.totp_required_on_login:
+    if auth_state.active_local_password_users == 0 and settings.totp_required_on_login:
         logger.warning(
-            "dashboard_auth_migration_inconsistency password_hash is NULL"
+            "dashboard_auth_migration_inconsistency no active local password user"
             " while totp_required_on_login=true metric=dashboard_auth_migration_inconsistency"
         )
 
-    if state is None:
-        raise DashboardAuthError("Authentication is required")
-    if state.role != DashboardRole.ADMIN:
-        raise DashboardAuthError("Authentication is required")
-    if password_required and not state.password_verified:
-        raise DashboardAuthError("Authentication is required")
-    if settings.totp_required_on_login and not state.totp_verified:
-        raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
-    return _set_dashboard_principal(
-        request,
-        admin_principal(auth_mode=DashboardAuthMode.STANDARD),
-    )
+    raise DashboardAuthError("Authentication is required")
 
 
 async def require_dashboard_write_access(request: Request) -> DashboardPrincipal:
@@ -256,18 +419,157 @@ async def require_dashboard_write_access(request: Request) -> DashboardPrincipal
     return principal
 
 
-def ensure_dashboard_admin_access(principal: DashboardPrincipal) -> None:
-    if principal.role != DashboardRole.ADMIN:
-        raise DashboardPermissionError(
-            "Admin dashboard access is required to view sensitive data",
-            code="admin_access_required",
+@dataclass(frozen=True, slots=True)
+class PermissionRequirement:
+    """Declares the permission a route dependency enforces.
+
+    Attached to the dependency callables produced by
+    :func:`require_dashboard_permission` so route-authorization audits can read
+    the requirement without invoking the dependency.
+    """
+
+    permission: Permission
+    minimum_scope: Scope = Scope.ALL
+
+
+def ensure_dashboard_permission(
+    principal: DashboardPrincipal,
+    permission: Permission,
+    *,
+    minimum_scope: Scope = Scope.ALL,
+) -> None:
+    if principal.has(permission, minimum_scope=minimum_scope):
+        return
+    raise DashboardPermissionError(
+        f"Dashboard permission '{permission.value}' is required",
+        code="permission_required",
+        param=permission.value,
+    )
+
+
+_SAFE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def recorded_step_up(request: Request, user: DashboardUser) -> int | None:
+    """The most recent step-up this request carries for ``user``, wherever it rides.
+
+    A trusted-header account has no session cookie, so its step-up rides in
+    the separate step-up cookie — or in a fallback password session of the
+    same account that happens to accompany the request. Both are bound to the
+    account's ``session_generation``, so revoking its sessions or resetting
+    its TOTP voids the proof instead of leaving it usable for the rest of the
+    window. Enforcement and the session response read the same sources, so
+    what the dashboard reports is what the gate accepts.
+    """
+
+    from_cookie = get_step_up_cookie_store().get(
+        request.cookies.get(STEP_UP_COOKIE),
+        user_id=user.id,
+        session_generation=user.session_generation,
+    )
+    state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
+    from_session = (
+        state.step_up_verified_at
+        if state is not None
+        and state.is_user
+        and state.user_id == user.id
+        and state.password_verified
+        and state.session_generation == user.session_generation
+        else None
+    )
+    recorded = [value for value in (from_cookie, from_session) if value is not None]
+    return max(recorded) if recorded else None
+
+
+async def ensure_step_up(request: Request, principal: DashboardPrincipal, permission: Permission) -> None:
+    """Require a fresh step-up (PLAN §5 H5) before a mutation guarded by ``permission``.
+
+    Reads are never gated. Principals without an account (the implicit local
+    admin, the disabled-auth principal) have no credential to re-verify and are
+    exempt; every account is held to it, whatever provider signed it in. A
+    stale or missing step-up answers ``403 step_up_required`` naming the
+    factors the account can present; an account with no factor at all answers
+    ``403 step_up_unavailable``.
+    """
+
+    if request.method in _SAFE_METHODS or principal.user_id is None:
+        return
+    user = await get_dashboard_users_cache().get_user(principal.user_id)
+    # The principal's own claim came from a cookie this request already
+    # validated against the account's generation; the other sources are
+    # checked against it inside recorded_step_up.
+    recorded = [principal.step_up_verified_at] if principal.step_up_verified_at is not None else []
+    if user is not None:
+        recorded += [value for value in (recorded_step_up(request, user),) if value is not None]
+    if recorded and is_step_up_fresh(max(recorded), now=session_clock()):
+        return
+    methods = step_up_methods(user) if user is not None else []
+    if not methods:
+        raise DashboardPermissionError(STEP_UP_UNAVAILABLE_MESSAGE, code="step_up_unavailable", param=permission.value)
+    raise DashboardPermissionError(
+        "Confirm your identity to continue",
+        code="step_up_required",
+        param=permission.value,
+        details={"methods": list(methods)},
+    )
+
+
+class DashboardPermissionDependency:
+    """Route dependency: validate the dashboard session, then enforce one permission.
+
+    Mutations guarded by a :data:`STEP_UP_PERMISSIONS` member also require a
+    recent step-up. Instances are callable so FastAPI can resolve them with
+    ``Depends`` while route-authorization audits read :attr:`requirement`
+    without invoking them.
+    """
+
+    __slots__ = ("requirement",)
+
+    def __init__(self, requirement: PermissionRequirement) -> None:
+        self.requirement = requirement
+
+    async def __call__(self, request: Request) -> DashboardPrincipal:
+        principal = await validate_dashboard_session(request)
+        ensure_dashboard_permission(
+            principal,
+            self.requirement.permission,
+            minimum_scope=self.requirement.minimum_scope,
         )
+        if self.requirement.permission in STEP_UP_PERMISSIONS:
+            await ensure_step_up(request, principal, self.requirement.permission)
+        return principal
+
+
+@lru_cache(maxsize=None)
+def _dependency_for(requirement: PermissionRequirement) -> DashboardPermissionDependency:
+    return DashboardPermissionDependency(requirement)
+
+
+def require_dashboard_permission(
+    permission: Permission,
+    *,
+    minimum_scope: Scope = Scope.ALL,
+) -> DashboardPermissionDependency:
+    """Return the shared dependency enforcing ``permission`` at ``minimum_scope``.
+
+    Cached per :class:`PermissionRequirement` (not per call spelling) so every
+    router shares one callable per requirement, keeping dependency overrides
+    and OpenAPI stable.
+    """
+
+    return _dependency_for(PermissionRequirement(permission=permission, minimum_scope=minimum_scope))
+
+
+def ensure_dashboard_admin_access(principal: DashboardPrincipal) -> None:
+    """Backward-compatible alias for the ``conversations:read`` requirement."""
+
+    ensure_dashboard_permission(principal, Permission.CONVERSATIONS_READ)
 
 
 async def require_dashboard_admin_access(request: Request) -> DashboardPrincipal:
-    principal = await validate_dashboard_session(request)
-    ensure_dashboard_admin_access(principal)
-    return principal
+    """Backward-compatible alias for ``require_dashboard_permission(CONVERSATIONS_READ)``."""
+
+    return await require_dashboard_permission(Permission.CONVERSATIONS_READ)(request)
 
 
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:

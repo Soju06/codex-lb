@@ -7,6 +7,7 @@ from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import app.main as main
+from app.core.config.settings import get_settings
 from app.core.middleware.trusted_proxy_headers import TrustedProxyHeadersMiddleware
 from app.core.socket_peer import raw_socket_peer_host
 
@@ -35,6 +36,7 @@ async def test_projection_preserves_raw_peer_for_http_and_websocket(
     expected_scheme: str,
 ) -> None:
     monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    get_settings.cache_clear()
     observed = await _run(
         scope_type,
         client=("127.0.0.1", 43120),
@@ -69,6 +71,7 @@ async def test_forwarded_allow_ips_keeps_uvicorn_trust_semantics(
         monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
     else:
         monkeypatch.setenv("FORWARDED_ALLOW_IPS", trusted_hosts)
+    get_settings.cache_clear()
 
     observed = await _run(
         "http",

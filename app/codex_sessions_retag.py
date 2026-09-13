@@ -485,10 +485,3 @@ def _next_backup_dir(base_dir: Path) -> Path:
         suffix += 1
         candidate = base_dir / f"{stamp}-{suffix}"
     return candidate
-
-
-def _write_text_atomically(path: Path, text: str) -> None:
-    with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        handle.write(text)
-        temp_path = Path(handle.name)
-    temp_path.replace(path)

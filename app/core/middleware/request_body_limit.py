@@ -9,8 +9,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.config.settings import get_settings
 from app.core.errors import dashboard_error, openai_error
+from app.core.ingress_limits import MAX_DECOMPRESSED_BODY_BYTES, MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 from app.core.middleware.multipart_content_encoding import (
     is_route_owned_multipart_operation,
     multipart_content_encoding_gate_was_applied,
@@ -41,10 +41,9 @@ class _RequestBodyTooLarge(Exception):
 
 
 def request_body_limit_for_path(path: str) -> int:
-    settings = get_settings()
     if path.rstrip("/") in _RESPONSES_INGRESS_PATHS:
-        return max(settings.max_decompressed_body_bytes, settings.max_decompressed_responses_body_bytes)
-    return settings.max_decompressed_body_bytes
+        return max(MAX_DECOMPRESSED_BODY_BYTES, MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)
+    return MAX_DECOMPRESSED_BODY_BYTES
 
 
 def _path_belongs_to(path: str, prefix: str) -> bool:

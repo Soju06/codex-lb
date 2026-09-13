@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.auth import generate_unique_account_id
+from app.core.auth.dashboard_access import Permission
+from app.core.auth.dependencies import require_dashboard_permission
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardPermissionError
 from app.core.utils.time import utcnow
@@ -14,7 +16,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
 from app.modules.accounts.repository import ACCOUNT_PENDING_DELETION_REASON, BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
 
-from .test_account_opencode_auth_export import _make_auth_json
+from .test_account_auth_export import _make_auth_json
 
 pytestmark = pytest.mark.integration
 
@@ -112,7 +114,8 @@ async def test_account_bundle_export_authenticates_before_reading_body(async_cli
         body_read = True
         yield json.dumps({"accountIds": [], "passphrase": synthetic_value}).encode()
 
-    app_instance.dependency_overrides[accounts_api_module.require_dashboard_write_access] = deny_write_access
+    dependency = require_dashboard_permission(Permission.ACCOUNTS_EXPORT)
+    app_instance.dependency_overrides[dependency] = deny_write_access
     try:
         response = await async_client.post(
             "/api/accounts/bundle/export",
@@ -120,7 +123,7 @@ async def test_account_bundle_export_authenticates_before_reading_body(async_cli
             headers={"content-type": "application/json"},
         )
     finally:
-        app_instance.dependency_overrides.pop(accounts_api_module.require_dashboard_write_access, None)
+        app_instance.dependency_overrides.pop(dependency, None)
 
     assert response.status_code == 403
     assert body_read is False

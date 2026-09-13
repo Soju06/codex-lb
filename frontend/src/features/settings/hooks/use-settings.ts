@@ -7,11 +7,14 @@ import {
   addUpstreamProxyPoolMember,
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
+  deleteModelContextWindowOverride,
+  getModelContextWindowOverrides,
   getSettings,
   getSubscriptionOverflowPreflight,
   getTelemetryConsent,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
+  putModelContextWindowOverride,
   testUpstreamProxyEndpoint,
   updateSettings,
   updateTelemetryConsent,
@@ -119,7 +122,9 @@ export function useTelemetryPreview(enabled: boolean) {
   };
 }
 
-export function useUpstreamProxyAdmin() {
+// `enabled: false` keeps the admin query idle for principals the backend would
+// answer with 403 (read-only guests).
+export function useUpstreamProxyAdmin(options?: { enabled?: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -134,6 +139,7 @@ export function useUpstreamProxyAdmin() {
   } = useQuery({
     queryKey: ["settings", "upstream-proxy"],
     queryFn: getUpstreamProxyAdmin,
+    enabled: options?.enabled ?? true,
   });
   const upstreamProxyQuery = {
     data: upstreamProxyData,
@@ -217,4 +223,43 @@ export function useUpstreamProxyAdmin() {
     testEndpointMutation,
     accountBindingMutation,
   };
+}
+
+// M4 model catalogue: per-model context window overrides. The list merges
+// dashboard rows with the environment fallback per slug; writes go to one slug.
+export function useModelContextWindowOverrides() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const queryKey = ["settings", "model-context-window-overrides"] as const;
+
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
+    queryKey,
+    queryFn: getModelContextWindowOverrides,
+  });
+  const overridesQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
+
+  const upsertMutation = useMutation({
+    mutationFn: ({ slug, contextWindow }: { slug: string; contextWindow: number }) =>
+      putModelContextWindowOverride(slug, { contextWindow }),
+    onSuccess: () => {
+      toast.success(t("settings.modelCatalogue.toasts.saved"));
+      void queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("settings.modelCatalogue.toasts.saveFailed"));
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (slug: string) => deleteModelContextWindowOverride(slug),
+    onSuccess: () => {
+      toast.success(t("settings.modelCatalogue.toasts.removed"));
+      void queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("settings.modelCatalogue.toasts.removeFailed"));
+    },
+  });
+
+  return { overridesQuery, upsertMutation, deleteMutation };
 }

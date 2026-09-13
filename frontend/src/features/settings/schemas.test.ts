@@ -8,13 +8,13 @@ import {
   TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
-import { createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
+import { createDashboardSettings, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 
 describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       upstreamProxyRoutingEnabled: true,
       upstreamProxyDefaultPoolId: "pool_1",
       preferEarlierResetAccounts: false,
@@ -57,7 +57,7 @@ describe("DashboardSettingsSchema", () => {
     });
 
     expect(parsed.stickyThreadsEnabled).toBe(true);
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(true);
     expect(parsed.upstreamProxyDefaultPoolId).toBe("pool_1");
     expect(parsed.routingStrategy).toBe("relative_availability");
@@ -93,6 +93,19 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.limitWarmupStaggeredIdleEnabled).toBe(true);
   });
 
+  it("reads an inherited in-flight penalty above the dashboard write cap", () => {
+    // The environment field has no upper bound; only dashboard writes cap at 100.
+    const parsed = DashboardSettingsSchema.parse({
+      ...createDashboardSettings(),
+      proxyAccountInflightPenaltyPct: 150,
+      provenance: { proxy_account_inflight_penalty_pct: { source: "env", envValue: 150, default: 2.5 } },
+    });
+    expect(parsed.proxyAccountInflightPenaltyPct).toBe(150);
+    expect(parsed.provenance?.proxy_account_inflight_penalty_pct?.source).toBe("env");
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: 150 }).success).toBe(false);
+    expect(SettingsUpdateRequestSchema.safeParse({ proxyAccountInflightPenaltyPct: null }).success).toBe(true);
+  });
+
   it("parses legacy settings payload and applies defaults for missing routing fields", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
@@ -105,7 +118,7 @@ describe("DashboardSettingsSchema", () => {
       hideUpstreamQuotaFromApiKeys: false,
     });
 
-    expect(parsed.upstreamStreamTransport).toBe("default");
+    expect(parsed.upstreamStreamTransport).toBe("auto");
     expect(parsed.upstreamProxyRoutingEnabled).toBe(false);
     expect(parsed.upstreamProxyDefaultPoolId).toBeNull();
     expect(parsed.routingStrategy).toBe("usage_weighted");
@@ -138,7 +151,7 @@ describe("DashboardSettingsSchema", () => {
   it("falls back to the legacy sticky threshold during mixed-version rollout", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -157,7 +170,7 @@ describe("DashboardSettingsSchema", () => {
   it("uses local defaults when mixed-version settings omit sticky thresholds", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -635,7 +648,7 @@ describe("subscription overflow fields", () => {
   it("defaults the designation and drain deadline to null for older backends", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -654,7 +667,7 @@ describe("subscription overflow fields", () => {
   it("round-trips a designation, an ISO drain deadline and the derived pin expiry", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
-      upstreamStreamTransport: "default",
+      upstreamStreamTransport: "auto",
       preferEarlierResetAccounts: false,
       routingStrategy: "round_robin",
       openaiCacheAffinityMaxAgeSeconds: 300,
@@ -722,5 +735,37 @@ describe("subscription overflow fields", () => {
       source: null,
       maxOutputTokens: null,
     });
+  });
+});
+
+describe("local login policy", () => {
+  it("falls an unknown policy back to the open default when reading a response", () => {
+    const parsed = DashboardSettingsSchema.parse({
+      stickyThreadsEnabled: true,
+      upstreamStreamTransport: "auto",
+      preferEarlierResetAccounts: false,
+      routingStrategy: "round_robin",
+      openaiCacheAffinityMaxAgeSeconds: 300,
+      dashboardSessionTtlSeconds: 43200,
+      importWithoutOverwrite: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: false,
+      apiKeyAuthEnabled: false,
+      localLoginPolicy: "a_policy_this_build_does_not_know",
+    });
+
+    expect(parsed.localLoginPolicy).toBe("enabled");
+  });
+
+  it("rejects an unknown policy on an update request instead of relaxing it", () => {
+    // `updateSettings` takes `unknown`, so this schema is the only thing
+    // between a bad value and the wire. A fallback here would turn a typo into
+    // "everyone may sign in with a password" and the backend would accept it.
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "a_policy_this_build_does_not_know" })).toThrow();
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "" })).toThrow();
+    expect(SettingsUpdateRequestSchema.parse({ localLoginPolicy: "break_glass_only" }).localLoginPolicy).toBe(
+      "break_glass_only",
+    );
+    expect(SettingsUpdateRequestSchema.parse({}).localLoginPolicy).toBeUndefined();
   });
 });

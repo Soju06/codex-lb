@@ -6,6 +6,7 @@
 ## 2. Backend workflow
 
 - [x] 2.1 Add authorized export, preflight, and commit endpoints with no-store/attachment headers and secret-free audits.
+- [x] 2.1a Integrate current dashboard RBAC: export requires accounts:export and step-up, import requires accounts:write, audit records identify the actor, and the UI gates export independently.
 - [x] 2.2 Reuse account-slot identity matching and add validation-before-write skip/replace persistence with destination encryption and explicit confirmation.
 - [x] 2.3 Add focused backend and distinct-key round-trip coverage without network calls or real credentials.
 

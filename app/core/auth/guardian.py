@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import random
 import time
@@ -10,9 +9,16 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Protocol, TypeVar, cast
+from typing import Protocol, cast
 
 from app.core.auth.refresh import RefreshError
+from app.core.config.background_jobs import auth_guardian_blocked_by_topology, background_job_enabled
+from app.core.scheduling.leader_election_handle import (
+    LeaderElectionLike as _LeaderElectionLike,
+)
+from app.core.scheduling.leader_election_handle import (
+    get_leader_election as _get_leader_election,
+)
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import get_background_session
@@ -37,13 +43,6 @@ _FAILURE_BACKOFF_MAX_SECONDS = 3600.0
 # RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
 # reconciliation, then become guardian-eligible within the max-age window.
 _AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
-
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _AccountsRepositoryLike(Protocol):
@@ -85,6 +84,14 @@ class AuthGuardianScheduler:
     # Defaults to True so directly constructed schedulers skip the dynamic
     # check; build_auth_guardian_scheduler wires the real setting.
     leader_election_enabled: bool = True
+    # M2 background jobs: the loop always runs; each pass reads the effective
+    # ``auth_guardian_enabled`` toggle (dashboard column, else the deprecated
+    # env alias, else the default) from the settings cache and skips while it is
+    # False, so a dashboard change applies on the next tick without a restart.
+    # ``topology_blocked`` is the static multi-replica-without-election gate
+    # computed at build time; the dashboard toggle cannot override it.
+    dashboard_enabled: Callable[[], Awaitable[bool]] = field(default_factory=lambda: _dashboard_guardian_enabled)
+    topology_blocked: bool = False
     live_replica_count: Callable[[], Awaitable[int]] = field(default_factory=lambda: _count_live_bridge_ring_members)
     leader_election_factory: _LeaderElectionFactory = field(default_factory=lambda: _get_leader_election)
     repo_factory: _RepoFactory = field(default_factory=lambda: _default_accounts_repo_factory)
@@ -131,6 +138,17 @@ class AuthGuardianScheduler:
                 continue
 
     async def _refresh_once(self) -> None:
+        if not await self.dashboard_enabled():
+            logger.debug("Auth Guardian skipped refresh pass: disabled in the dashboard settings")
+            return
+        if self.topology_blocked:
+            # The builder already logged this once at WARNING; repeating it
+            # every pass for a static condition would only be noise.
+            logger.debug(
+                "Auth Guardian skipped refresh pass: multi-replica deployment without leader election; "
+                "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
+            )
+            return
         if not self.leader_election_enabled:
             live_replicas = await self.live_replica_count()
             if live_replicas > 1:
@@ -265,20 +283,21 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
     from app.core.config.settings import get_settings
 
     settings = get_settings()
-    multi_replica = len(settings.http_responses_session_bridge_instance_ring) > 1
     # Deliberate exception to the "disabled election means every replica is
     # leader" escape hatch: concurrent force token refreshes across replicas
     # can invalidate rotated refresh tokens, so without election the guardian
-    # must not run in a multi-replica ring at all.
-    enabled = settings.auth_guardian_enabled and (settings.leader_election_enabled or not multi_replica)
-    if settings.auth_guardian_enabled and not enabled:
+    # must not run in a multi-replica ring at all. The loop still starts (M2:
+    # the dashboard toggle is read at every pass), but every pass skips.
+    topology_blocked = auth_guardian_blocked_by_topology(settings)
+    if topology_blocked:
         logger.warning(
             "Auth Guardian disabled: multi-replica deployment without leader election; "
             "set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated"
         )
     return AuthGuardianScheduler(
         interval_seconds=_INTERVAL_SECONDS,
-        enabled=enabled,
+        enabled=True,
+        topology_blocked=topology_blocked,
         max_age_seconds=_MAX_REFRESH_AGE_SECONDS,
         batch_size=_BATCH_SIZE,
         concurrency=_CONCURRENCY,
@@ -301,9 +320,8 @@ def _auth_guardian_account_is_stale_eligible(
     return age > timedelta(seconds=max_age_seconds)
 
 
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
+async def _dashboard_guardian_enabled() -> bool:
+    return await background_job_enabled("auth_guardian_enabled")
 
 
 async def _count_live_bridge_ring_members() -> int:

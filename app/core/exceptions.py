@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from app.core.types import JsonValue
+
 
 class AppError(Exception):
     """Base exception for all domain errors."""
@@ -14,9 +18,13 @@ class AppError(Exception):
         *,
         code: str | None = None,
         param: str | None = None,
+        details: Mapping[str, JsonValue] | None = None,
     ) -> None:
         self.message = message or self.__class__.message
         self.param = param
+        #: Structured hints for the client (dashboard envelope only), e.g. the
+        #: step-up methods a principal may use.
+        self.details = details
         if code is not None:
             self.code = code
         super().__init__(self.message)

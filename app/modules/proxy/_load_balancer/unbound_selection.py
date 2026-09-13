@@ -28,6 +28,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
 )
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
@@ -73,12 +74,16 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     traffic_class: TrafficClass
     concurrency_caps: AccountConcurrencyCaps
     redact_sensitive_details: bool
+    # C2-2 routing/overload: dashboard snapshot resolved once by the caller.
+    routing_tunables: RoutingTunables
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +118,7 @@ async def run_unbound_selection_path(
     traffic_class = request.traffic_class
     caps = request.concurrency_caps
     redact_sensitive_details = request.redact_sensitive_details
+    routing_tunables = request.routing_tunables
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
     allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
@@ -153,6 +159,8 @@ async def run_unbound_selection_path(
                 selection_inputs,
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
+                routing_tunables=routing_tunables,
+                model=request.model,
             )
             effective_routing_costs = (
                 routing_costs_by_account_id

@@ -1,6 +1,7 @@
 //! Interpret framed HTTP Responses events without owning request policy.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use serde::Deserialize;
@@ -22,6 +23,17 @@ pub struct StreamEvent<'a> {
     pub text: Cow<'a, str>,
     pub event_type: Option<String>,
     pub python_normalization: bool,
+}
+
+impl StreamEvent<'_> {
+    /// These response terminals end both SDK and native HTTP streams.
+    /// Bare errors still require the caller's normalization policy.
+    pub fn completes_http_stream(&self) -> bool {
+        matches!(
+            self.event_type.as_deref(),
+            Some("response.completed" | "response.failed" | "response.incomplete")
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -81,6 +93,125 @@ pub fn interpret(block: &str) -> StreamEvent<'_> {
         event_type,
         python_normalization,
     }
+}
+
+/// The raw object is embedded in IPC, so Python's IPC decoder supplies the
+/// policy payload without another JSON parse or any numeric conversion here.
+pub struct WebSocketEvent {
+    pub payload: Box<RawValue>,
+    pub event_type: Option<String>,
+    /// Payload-only precedence; validated lifecycle IDs remain caller policy.
+    pub payload_response_id: Option<String>,
+    pub sequence_number: Option<Box<RawValue>>,
+}
+
+/// Match Python's WebSocket classification: a string type wins, otherwise an
+/// object error classifies as "error". WebSocket relay preserves aliases and
+/// original text; HTTP SSE alias rewriting remains a separate boundary.
+pub fn interpret_websocket(text: &str) -> Option<WebSocketEvent> {
+    // IPC lines are capped at 24 MiB. Metadata duplicates the payload and may
+    // expand text/type escaping; larger frames retain the existing opaque path.
+    const MAX_INTERPRETED_BYTES: usize = 1024 * 1024;
+    if text.len() > MAX_INTERPRETED_BYTES || !text.trim_start().starts_with('{') {
+        return None;
+    }
+    // A map preserves Python's last-key precedence, including escaped keys.
+    // Raw values preserve large ints, floats, and escaped surrogate values.
+    let fields: BTreeMap<String, &RawValue> = serde_json::from_str(text).ok()?;
+    let event_type = match fields.get("type") {
+        Some(kind) if kind.get().starts_with('"') => {
+            Some(serde_json::from_str::<String>(kind.get()).ok()?)
+        }
+        _ if fields
+            .get("error")
+            .is_some_and(|error| error.get().starts_with('{')) =>
+        {
+            Some("error".to_owned())
+        }
+        _ => None,
+    };
+    Some(WebSocketEvent {
+        payload_response_id: payload_response_id(&fields).ok()?,
+        sequence_number: fields.get("sequence_number").and_then(|value| {
+            let token = value.get();
+            let digits = token.strip_prefix('-').unwrap_or(token);
+            (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| (*value).to_owned())
+        }),
+        payload: RawValue::from_string(compact_json_whitespace(text)?).ok()?,
+        event_type,
+    })
+}
+
+fn payload_response_id(fields: &BTreeMap<String, &RawValue>) -> Result<Option<String>, ()> {
+    fn stripped_id(value: Option<&&RawValue>) -> Result<Option<String>, ()> {
+        let Some(value) = value.filter(|value| value.get().starts_with('"')) else {
+            return Ok(None);
+        };
+        let value: String = serde_json::from_str(value.get()).map_err(|_| ())?;
+        // Python str.strip also treats these four information separators as whitespace.
+        let value = value
+            .trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch));
+        Ok((!value.is_empty()).then(|| value.to_owned()))
+    }
+    if let Some(id) = stripped_id(fields.get("response_id"))? {
+        return Ok(Some(id));
+    }
+    let Some(response) = fields
+        .get("response")
+        .filter(|value| value.get().starts_with('{'))
+    else {
+        return Ok(None);
+    };
+    let response: BTreeMap<String, &RawValue> =
+        serde_json::from_str(response.get()).map_err(|_| ())?;
+    stripped_id(response.get("id"))
+}
+
+// RawValue emits bytes verbatim. Strip only JSON whitespace outside strings so
+// a pretty-printed object cannot split the newline-delimited IPC record. Numeric
+// tokens, duplicate keys, string escapes and all string content stay untouched.
+// Keep integers beyond Python's minimum configurable digit limit opaque: any
+// such token (including nested or overwritten values) could fail the shared IPC
+// decoder before Python can attribute the failure to an individual exchange.
+fn compact_json_whitespace(text: &str) -> Option<String> {
+    const MAX_PYTHON_INTEGER_DIGITS: usize = 640;
+    let mut result = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_string {
+            result.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            result.push(ch);
+        } else if ch == '-' || ch.is_ascii_digit() {
+            let start = result.len();
+            result.push(ch);
+            while let Some(next) =
+                chars.next_if(|next| matches!(next, '0'..='9' | '.' | 'e' | 'E' | '+' | '-'))
+            {
+                result.push(next);
+            }
+            let token = &result[start..];
+            if !token.contains(['.', 'e', 'E'])
+                && token.strip_prefix('-').unwrap_or(token).len() > MAX_PYTHON_INTEGER_DIGITS
+            {
+                return None;
+            }
+        } else if !matches!(ch, ' ' | '\t' | '\r' | '\n') {
+            result.push(ch);
+        }
+    }
+    Some(result)
 }
 
 fn alias(kind: &str) -> Option<&'static str> {

@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from app.core.config.settings import get_settings
 from app.modules.settings.api import _resolve_runtime_connect_address
 
 pytestmark = pytest.mark.unit
@@ -43,18 +44,21 @@ def _fake_request(hostname: str | None) -> Any:
 
 def test_env_override_wins_over_request_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_CONNECT_ADDRESS", "lb.internal.example:2455")
+    get_settings.cache_clear()
     request = _fake_request("10.0.0.5")
     assert _resolve_runtime_connect_address(request) == "lb.internal.example:2455"
 
 
 def test_env_override_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_CONNECT_ADDRESS", "  lb.internal:2455  ")
+    get_settings.cache_clear()
     request = _fake_request("127.0.0.1")
     assert _resolve_runtime_connect_address(request) == "lb.internal:2455"
 
 
 def test_env_override_ignored_when_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODEX_LB_CONNECT_ADDRESS", "   ")
+    get_settings.cache_clear()
     request = _fake_request("10.0.0.5")
     assert _resolve_runtime_connect_address(request) == "10.0.0.5"
 
@@ -64,6 +68,7 @@ def test_env_override_ignored_when_empty_string(monkeypatch: pytest.MonkeyPatch)
 
 def test_non_loopback_ipv4_host_returned_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     request = _fake_request("192.168.1.42")
     # No need to mock getaddrinfo — the helper must short-circuit before
     # calling it for an IPv4 host.
@@ -89,6 +94,7 @@ def _patch_resolver(monkeypatch: pytest.MonkeyPatch, mapping: dict[str, list[str
 
 def test_resolvable_hostname_returns_resolved_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     _patch_resolver(monkeypatch, {"lb.internal": ["10.0.0.5"]})
     request = _fake_request("lb.internal")
     assert _resolve_runtime_connect_address(request) == "10.0.0.5"
@@ -98,6 +104,7 @@ def test_resolvable_hostname_skips_loopback_ip(monkeypatch: pytest.MonkeyPatch) 
     """If DNS returns 127.0.0.1 alongside a real IP, the real IP wins;
     if it returns only loopback IPs, the hostname is returned verbatim."""
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     _patch_resolver(monkeypatch, {"lb.internal": ["127.0.0.1", "10.0.0.5"]})
     request = _fake_request("lb.internal")
     assert _resolve_runtime_connect_address(request) == "10.0.0.5"
@@ -107,6 +114,7 @@ def test_hostname_resolving_only_to_loopback_falls_back_to_hostname(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     _patch_resolver(monkeypatch, {"lb.internal": ["127.0.0.1"]})
     request = _fake_request("lb.internal")
     assert _resolve_runtime_connect_address(request) == "lb.internal"
@@ -114,6 +122,7 @@ def test_hostname_resolving_only_to_loopback_falls_back_to_hostname(
 
 def test_unresolvable_hostname_falls_back_to_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     _patch_resolver(monkeypatch, {})  # empty mapping -> OSError for any host
     request = _fake_request("lb.unknown")
     assert _resolve_runtime_connect_address(request) == "lb.unknown"
@@ -128,17 +137,20 @@ def test_unresolvable_hostname_falls_back_to_hostname(monkeypatch: pytest.Monkey
 )
 def test_loopback_host_returns_placeholder(monkeypatch: pytest.MonkeyPatch, hostname: str) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     request = _fake_request(hostname)
     assert _resolve_runtime_connect_address(request) == "<codex-lb-ip-or-dns>"
 
 
 def test_missing_host_returns_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     request = _fake_request(None)
     assert _resolve_runtime_connect_address(request) == "<codex-lb-ip-or-dns>"
 
 
 def test_empty_host_returns_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CODEX_LB_CONNECT_ADDRESS", raising=False)
+    get_settings.cache_clear()
     request = _fake_request("")
     assert _resolve_runtime_connect_address(request) == "<codex-lb-ip-or-dns>"

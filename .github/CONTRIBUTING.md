@@ -27,9 +27,9 @@ that's the easiest first contribution.
 
 ## Code of conduct
 
-Participation in this project is governed by the
-[Contributor Covenant Code of Conduct](../CODE_OF_CONDUCT.md). By participating,
-you agree to uphold it.
+This project does not ship a formal code of conduct document. Be respectful
+and constructive in issues, discussions, and reviews; maintainers may moderate
+or remove content that is not.
 
 ## Ways to contribute
 
@@ -213,8 +213,11 @@ Before a PR is squash-merged into `main`:
    fine" is not a green CI; rerun, fix, or wait. The Helm / migration /
    PostgreSQL test jobs are part of the gate, not optional. The
    `CI Required` check is the branch-protection check to require: it
-   depends on every CI job and also runs for merge queue synthetic merge
-   groups, so a stale PR head cannot bypass a broken merge result.
+   depends on every `ci.yml` job and also runs for merge queue synthetic merge
+   groups, so a stale PR head cannot bypass a broken merge result. The release
+   guards (`Beta release guard`, `Stable release guard`) run from
+   `release-guards.yml` so an edited release PR body re-checks them without
+   restarting the matrix; they are separate contexts, not part of `CI Required`.
 2. **Actionable CodeRabbit findings must be fixed or explicitly addressed
    or dismissed in-thread on the merge-target head.** Review the current-head
    CodeRabbit findings before merging; no finding may be silently skipped.
@@ -236,17 +239,16 @@ Before a PR is squash-merged into `main`:
    resolves an issue, so the issue close stays automatic and the merge
    stays traceable. Use `Refs #N` / `Related to #N` for partial cover.
 6. **Simplicity gates must pass** (see
-   [Simplicity gates](#simplicity-gates)): the five simplicity rules
-   (PRINCIPLES.md P1-P5). Budget exceptions need the
+   [Simplicity gates](#simplicity-gates)): the six simplicity rules
+   (PRINCIPLES.md P1-P6). Budget exceptions need the
    maintainer-applied `simplicity-budget-approved` label.
 
 ### Simplicity gates
 
 These implement [PRINCIPLES.md](../PRINCIPLES.md); the normative spec is
-`openspec/specs/contribution-simplicity/spec.md` (created when the
-codify-simplicity-principles change is archived). Reviewers apply them to
-every PR (budget checks are enforced by CI as of the
-`ci-simplicity-budgets` change; reviewer-enforced before that):
+`openspec/specs/contribution-simplicity/spec.md`. Reviewers apply them to
+every PR (budget checks are enforced by CI via
+`.github/workflows/simplicity-budgets.yml`):
 
 1. **New features default to off or zero-config.** No new required
    setup step (env var, migration action, external account, manual
@@ -256,16 +258,22 @@ every PR (budget checks are enforced by CI as of the
    The PR body answers "why can't this be a hardcoded default?" for
    each new setting; internals-only knobs stay out of `.env.example`.
 3. **README, `.env.example`, and dashboard nav are budgeted.** The
-   caps live in `.github/simplicity-budgets.toml` (introduced by the
-   `ci-simplicity-budgets` change; until that manifest exists on
-   `main`, reviewers judge growth of these surfaces directionally
-   rather than against numeric caps). Exceeding a cap requires the
-   maintainer-applied `simplicity-budget-approved` label before merge.
+   caps live in `.github/simplicity-budgets.toml`. Exceeding a cap
+   requires the maintainer-applied `simplicity-budget-approved` label
+   before merge.
 4. **Feature docs go to `docs/` + OpenSpec, never new README
    sections.** Each spec-governed docs page links back to its
    `openspec/specs/<capability>/` entry.
 5. **Dashboard-visible PRs include before/after screenshots** (or a
    short recording) in the PR body.
+6. **The dashboard is the primary configuration surface** (PRINCIPLES.md
+   P6). Every new setting names its tier (T0 bootstrap / T1 instance
+   topology / T2 secret / T3 behaviour tunable / T4 incident debug) in the
+   PR body; a T3 setting has a `dashboard_settings` column, not an
+   env-only home; precedence stays code default < env < dashboard with no
+   env-wins paths. Machine-checked by `scripts/check_settings_tiers.py`
+   under `make lint`; the normative spec is linked from
+   [PRINCIPLES.md P6](../PRINCIPLES.md#p6--the-dashboard-is-the-primary-configuration-surface).
 
 ### Collaborator rules
 
@@ -371,8 +379,7 @@ dataset — they run at startup and block serving until they finish. Changelog
 titles do not reveal backfills.
 
 The normative requirements live in
-[`openspec/specs/release-management/`](../openspec/specs/release-management/)
-(delta: `openspec/changes/require-beta-soak-before-stable/`).
+[`openspec/specs/release-management/`](../openspec/specs/release-management/).
 
 ## Security issues
 

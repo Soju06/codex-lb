@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import sqlite3
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -9,6 +11,8 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from app.core.usage import pricing_catalog
+from app.core.usage.pricing import DEFAULT_PRICING_MODELS
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -21,6 +25,7 @@ from app.db.models import (
     ModelSource,
     UsageHistory,
 )
+from app.db.sqlite_lock_retry import is_sqlite_lock_error
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import (
     _UNSET,
@@ -43,7 +48,6 @@ from app.modules.api_keys.service import (
     LimitRuleInput,
     _build_api_key_trends,
     _hash_key,
-    _is_sqlite_database_locked,
     _normalize_usage_sections,
 )
 from app.modules.usage.repository import UsageRepository
@@ -60,8 +64,11 @@ pytestmark = pytest.mark.unit
         "SQLITE_BUSY_SNAPSHOT",
     ],
 )
-def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
-    assert _is_sqlite_database_locked(OperationalError("sqlite busy", {}, Exception(message))) is True
+def test_usage_writes_still_classify_every_transient_lock_message(message: str) -> None:
+    # These four messages were matched by this module's own predicate before it
+    # was replaced by the shared one; the shared predicate must keep matching
+    # every one of them or a usage-reservation write stops retrying.
+    assert is_sqlite_lock_error(OperationalError("sqlite busy", {}, Exception(message))) is True
 
 
 class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
@@ -156,6 +163,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
+        thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
@@ -179,6 +187,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_service_tier": enforced_service_tier,
             "traffic_class": traffic_class,
             "transport_policy_override": transport_policy_override,
+            "thread_cache_identity_override": thread_cache_identity_override,
             "usage_sections": usage_sections,
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "source_assignment_scope_enabled": source_assignment_scope_enabled,
@@ -1714,7 +1723,7 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="busy-retry-key",
@@ -1845,7 +1854,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="busy-lazy-reset-retry-key",
@@ -1972,6 +1981,41 @@ async def test_update_key_retries_after_sqlite_snapshot_conflict(lock_message: s
 
     assert updated.name == "retried-key"
     assert repo.commit_calls == 2
+    assert repo.rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_key_does_not_retry_a_wrapper_without_driver_evidence() -> None:
+    # The spec-governed PATCH retry (api-keys "API Key update") owes a retry to
+    # "a transient SQLite lock or snapshot conflict". A wrapper with no driver
+    # exception carries no such evidence: the only text left to match is the
+    # rendered statement and its bound parameters, and matching those is exactly
+    # the false positive the shared predicate exists to remove. So this must
+    # propagate on the first attempt instead of spending the budget on it.
+    class _OrigLessPatchRepo(_FakeApiKeysRepository):
+        fail_commits = False
+        failed_commits = 0
+
+        async def commit(self) -> None:
+            if self.fail_commits:
+                self.failed_commits += 1
+                raise OperationalError(
+                    "UPDATE api_keys SET name = ?",
+                    {"name": "database is locked"},
+                    cast(BaseException, None),
+                )
+            await super().commit()
+
+    repo = _OrigLessPatchRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="orig-less-key", allowed_models=None))
+    repo.fail_commits = True
+
+    with pytest.raises(OperationalError):
+        await service.update_key(created.id, ApiKeyUpdateData(name="retried-key", name_set=True))
+
+    # One attempt, not the four a classified lock failure would have spent.
+    assert repo.failed_commits == 1
     assert repo.rollback_calls == 1
 
 
@@ -2204,7 +2248,10 @@ async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
     model: str,
     expected_reserved_microdollars: int,
     expected_final_microdollars: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Exercise reservation/settlement against fixed rates, independent of daily catalog updates.
+    monkeypatch.setattr(pricing_catalog, "_prices", dict(DEFAULT_PRICING_MODELS))
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(
@@ -2381,7 +2428,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-finalize-busy-key",
@@ -2429,7 +2476,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
-    monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
     created = await service.create_key(
         ApiKeyCreateData(
             name="reservation-release-busy-key",
@@ -2722,3 +2769,73 @@ async def test_create_key_rejects_invalid_usage_sections() -> None:
                 usage_sections="bad_section",
             )
         )
+
+
+class _NamedDriverLockError(sqlite3.OperationalError):
+    """The driver-raised shape: ``sqlite3`` sets ``sqlite_errorname`` itself."""
+
+    def __init__(self, error_name: str) -> None:
+        super().__init__("database is locked")
+        self.sqlite_errorname = error_name
+
+
+@pytest.mark.asyncio
+async def test_update_key_retry_names_the_lock_mechanism(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ``database is locked`` is emitted both for an instant
+    # SQLITE_BUSY_SNAPSHOT (retrying is the whole fix) and for a SQLITE_BUSY
+    # returned only after the full busy timeout (a foreign writer held the
+    # slot, so the retry budget is beside the point). The retry decision must
+    # record which one it saw or the next production hit is unclassifiable.
+    class _BusyPatchRepo(_FakeApiKeysRepository):
+        fail_next_commit = False
+
+        async def commit(self) -> None:
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise OperationalError("UPDATE api_keys", {}, _NamedDriverLockError("SQLITE_BUSY_SNAPSHOT"))
+            await super().commit()
+
+    repo = _BusyPatchRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+    created = await service.create_key(ApiKeyCreateData(name="busy-key", allowed_models=None))
+    repo.fail_next_commit = True
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        updated = await service.update_key(created.id, ApiKeyUpdateData(name="retried-key", name_set=True))
+
+    assert updated.name == "retried-key"
+    assert any(
+        "what=update_key" in record.getMessage() and "sqlite_errorname=SQLITE_BUSY_SNAPSHOT" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_touch_usage_reservation_reports_the_exhausted_lock_budget(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Control flow is unchanged: a lock that outlives the budget still
+    # propagates to the caller. What is new is that the give-up says which
+    # mechanism it was.
+    class _AlwaysBusyRepo(_FakeApiKeysRepository):
+        async def touch_usage_reservation(self, reservation_id: str) -> bool:
+            raise OperationalError("touch reservation", {}, _NamedDriverLockError("SQLITE_BUSY"))
+
+    repo = _AlwaysBusyRepo()
+    service = ApiKeysService(repo)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        with pytest.raises(OperationalError):
+            await service.touch_usage_reservation("reservation-1")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "budget exhausted" in message
+        and "what=touch_usage_reservation" in message
+        and "sqlite_errorname=SQLITE_BUSY" in message
+        for message in warnings
+    )

@@ -203,9 +203,8 @@ async def test_delete_api_marks_and_hides_immediately(async_client, db_setup):
 
     # Credential exports must not keep serving decrypted tokens during the
     # drain window: the synchronous delete 404'd here immediately.
-    for export_path in ("export", "export/auth", "export/opencode-auth"):
-        export = await async_client.post(f"/api/accounts/acc_bg_mark/{export_path}")
-        assert export.status_code == 404, export_path
+    export = await async_client.post("/api/accounts/acc_bg_mark/export/auth")
+    assert export.status_code == 404
 
     # Every other ID-based account route treats the marked row as gone too —
     # the synchronous delete returned 404 on all of them once the row was

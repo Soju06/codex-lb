@@ -8,7 +8,8 @@ from httpx import AsyncByteStream
 from starlette.datastructures import UploadFile
 
 import app.modules.accounts.api as accounts_api_module
-from app.core.auth.dependencies import require_dashboard_write_access
+from app.core.auth.dashboard_access import Permission
+from app.core.auth.dependencies import require_dashboard_permission
 from app.core.exceptions import DashboardPermissionError
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
@@ -16,7 +17,7 @@ from app.db.session import SessionLocal
 from app.modules.accounts.repository import ACCOUNT_PENDING_DELETION_REASON
 from app.modules.accounts.schemas import AccountImportResponse
 
-from .test_account_opencode_auth_export import _encode_jwt
+from .test_account_auth_export import _encode_jwt
 
 pytestmark = pytest.mark.integration
 
@@ -93,7 +94,7 @@ async def test_account_import_auth_failure_does_not_read_multipart_body(
         )
 
     stream = _NeverReadStream()
-    app_instance.dependency_overrides[require_dashboard_write_access] = reject_write_access
+    app_instance.dependency_overrides[require_dashboard_permission(Permission.ACCOUNTS_WRITE)] = reject_write_access
     try:
         response = await async_client.post(
             "/api/accounts/import",
@@ -101,7 +102,7 @@ async def test_account_import_auth_failure_does_not_read_multipart_body(
             headers={"content-type": "multipart/form-data; boundary=never-read"},
         )
     finally:
-        app_instance.dependency_overrides.pop(require_dashboard_write_access, None)
+        app_instance.dependency_overrides.pop(require_dashboard_permission(Permission.ACCOUNTS_WRITE), None)
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "read_only_access"

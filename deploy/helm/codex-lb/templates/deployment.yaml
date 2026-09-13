@@ -291,7 +291,9 @@ spec:
                   key: {{ .Values.auth.secretKeys.databaseUrl }}
             - name: CODEX_LB_ENCRYPTION_KEY_FILE
               value: /var/lib/codex-lb/encryption.key
-            {{- if .Values.config.sessionBridgeEnabled }}
+            # Pod identity is injected unconditionally: the bridge instance id and
+            # advertise URL are replica topology (T1), independent of the bridge
+            # kill switch.
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -308,7 +310,6 @@ spec:
               value: "$(POD_NAME)"
             - name: CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL
               value: {{ default (printf "http://$(POD_NAME).%s.$(POD_NAMESPACE).svc.%s:%v" (include "codex-lb.bridgeHeadlessServiceName" .) .Values.clusterDomain .Values.service.port) .Values.config.sessionBridgeAdvertiseBaseUrl | quote }}
-            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

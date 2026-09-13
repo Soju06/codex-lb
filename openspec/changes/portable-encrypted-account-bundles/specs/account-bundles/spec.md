@@ -1,5 +1,13 @@
 ## ADDED Requirements
 
+### Requirement: Bundle permissions match dashboard role grants
+Bundle export MUST require `accounts:export`, including the dashboard's existing recent step-up policy, before reading the body. Bundle import preflight and commit MUST require `accounts:write` before reading the body. The dashboard bundle export action MUST be gated independently by `accounts:export`, not by account-write access.
+
+#### Scenario: Account writer cannot export credentials
+- **GIVEN** a principal has `accounts:write` but lacks `accounts:export`
+- **WHEN** the principal requests bundle export
+- **THEN** the server denies access before reading the request body and the dashboard does not offer bundle export
+
 ### Requirement: Visible destination identity and legacy email compatibility
 Bundle preflight and commit MUST exclude rows with a non-null `delete_requested_at` from every destination identity path, including direct-id and email fallbacks. A pending-deletion row MUST NOT be skipped, replaced, or revived by bundle import. If its id collides with a new record, commit MUST allocate a distinct visible slot and preserve the pending-deletion row unchanged. Ordinary single-account import MUST retain its existing revival behavior.
 
@@ -15,7 +23,7 @@ Destination email lookup MUST apply the database's `lower` function to both stor
 
 ### Requirement: Portable account bundles are encrypted, bounded, and complete
 
-The system MUST export zero, one, all, or an explicit subset of accounts in a documented v1 envelope encrypted using scrypt and AES-256-GCM with fresh salt and nonce and authenticated envelope metadata. It MUST include only usable credentials, stable identity/workspace claims, alias, plan type, routing policy, limit-warmup enabled, and security-work authorization. It MUST exclude installation encryption material and destination-local or transient account state. Missing or incomplete selected credentials MUST fail safely per account and MUST NOT be silently omitted. Export MUST authenticate and require write access before reading or parsing its request body. The configured account-bundle byte limit MUST be enforced against declared, streamed, encrypted, and decrypted sizes; a streamed request chunk that would make the accumulated body exceed the limit MUST be rejected before that chunk is appended to or retained by the body buffer.
+The system MUST export zero, one, all, or an explicit subset of accounts in a documented v1 envelope encrypted using scrypt and AES-256-GCM with fresh salt and nonce and authenticated envelope metadata. It MUST include only usable credentials, stable identity/workspace claims, alias, plan type, routing policy, limit-warmup enabled, and security-work authorization. It MUST exclude installation encryption material and destination-local or transient account state. Missing or incomplete selected credentials MUST fail safely per account and MUST NOT be silently omitted. Export MUST authenticate and require `accounts:export` with the existing dashboard step-up policy before reading or parsing its request body. The configured account-bundle byte limit MUST be enforced against declared, streamed, encrypted, and decrypted sizes; a streamed request chunk that would make the accumulated body exceed the limit MUST be rejected before that chunk is appended to or retained by the body buffer.
 
 #### Scenario: Bundle moves between different installation keys
 

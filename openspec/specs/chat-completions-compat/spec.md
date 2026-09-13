@@ -23,6 +23,7 @@ payload. Invalid payloads MUST return a 4xx response with an OpenAI error envelo
 #### Scenario: Minimal valid chat request
 - **WHEN** the client sends `{ "model": "gpt-4.1", "messages": [{"role":"user","content":"hi"}] }`
 - **THEN** the service accepts the request and begins a response (streaming or non-streaming based on `stream`)
+
 ### Requirement: Enforce message content type rules
 The service MUST enforce role-specific message content rules: `system` and `developer` messages MUST contain text-only content, while `user` messages MAY contain text, image, or file content parts per OpenAI chat spec. Unsupported content types MUST return an OpenAI error envelope.
 
@@ -98,6 +99,7 @@ definitions and `tool_choice`, including built-in Responses tools accepted by `/
 #### Scenario: web_search_preview tool normalized in mapping
 - **WHEN** the client sends `tools=[{"type":"web_search_preview"}]`
 - **THEN** the mapped Responses request includes a tool with type `web_search`
+
 ### Requirement: Reject file_id in Chat Completions
 The service MUST reject chat `file` content parts that include `file_id` and return a 4xx OpenAI invalid_request_error with message "Invalid request payload".
 
@@ -275,3 +277,200 @@ When a Responses-shaped chat payload uses a flat Responses function tool, strict
   `strict: true` but a violating `parameters` schema
 - **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].parameters"`
 - **AND** no upstream connection is opened
+
+### Requirement: Chat Completions reject truncated upstream Responses streams
+
+`POST /v1/chat/completions` MUST classify upstream Responses iterator
+exhaustion before a terminal `response.completed`, `response.incomplete`,
+`response.failed`, or `error` event as `upstream_stream_truncated`. The error
+MUST use OpenAI error type `server_error`. Partial content received before the
+exhaustion MUST NOT be presented as a successfully completed non-streaming Chat
+Completion.
+
+#### Scenario: Streaming upstream EOF emits error and done
+
+- **WHEN** a streaming Chat Completions request receives zero or more
+  non-terminal upstream Responses events
+- **AND** the upstream iterator reaches EOF before a terminal event
+- **THEN** the proxy MUST emit an OpenAI error chunk with code
+  `upstream_stream_truncated`
+- **AND** the proxy MUST terminate the stream with `data: [DONE]`
+
+#### Scenario: Collected upstream EOF returns an error envelope
+
+- **WHEN** a non-streaming Chat Completions request receives zero or more
+  non-terminal upstream Responses events
+- **AND** the upstream iterator reaches EOF before a terminal event
+- **THEN** the proxy MUST return HTTP 502
+- **AND** the response body MUST be an OpenAI error envelope with code
+  `upstream_stream_truncated` and type `server_error`
+- **AND** the proxy MUST NOT return a `chat.completion` success object
+
+#### Scenario: Explicit terminal events retain existing behavior
+
+- **WHEN** the upstream iterator emits `response.completed`,
+  `response.incomplete`, `response.failed`, or `error`
+- **THEN** the proxy MUST preserve the existing Chat Completions mapping for
+  that event
+- **AND** the proxy MUST preserve existing usage, tool-call, and upstream
+  generator cleanup behavior
+
+### Requirement: Chat Completions passthrough fields are shape-checked, not deep-validated
+
+The service MUST treat the `messages`, `tools` and `input` fields of `/v1/chat/completions` requests as opaque JSON: it MUST NOT re-validate or coerce their nested values against a per-field type schema. Message structure MUST be enforced by the chat mapping rules (messages are objects with a string `role` from the supported set; content, `tool_calls` and `tool_call_id` rules) and each violation MUST return a 4xx OpenAI `invalid_request_error`; because these rules run at the request level, such envelopes carry no per-item `error.param` path. Message keys the mapping does not inspect MUST NOT be rejected for their type: `refusal` of any non-string type is ignored (it contributes a refusal content part only when it is a non-empty string), `name`/`call_id`/`tool_call_id` values are type-checked only where the mapping for that role consumes them, and an assistant `tool_calls` of `null` is treated as omitted (a present, non-null `tool_calls` MUST still be an array). `tools` MUST be an array and `messages` MUST be an array when present, and neither may nest objects/arrays deeper than 200 levels; violations MUST return HTTP 400 with `error.param` naming the field. Non-finite numbers (for example `1e400`) inside these fields serialize as `null` in the mapped payload. Tool definitions MUST reach the mapped Responses tools byte-for-byte apart from the documented chat-to-Responses tool normalization.
+
+#### Scenario: Non-array chat tools are rejected with the tools param
+
+- **WHEN** a client sends `/v1/chat/completions` with `tools` set to `null`, a string, a number, or an object
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param = "tools"`
+
+#### Scenario: Non-array chat messages are rejected with the messages param
+
+- **WHEN** a client sends `/v1/chat/completions` with `messages` set to a string, a number, or an object
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param = "messages"`
+
+#### Scenario: Deeply nested chat fields are rejected with the field param
+
+- **WHEN** a client sends `/v1/chat/completions` with `messages` content or `tools[].function.parameters` nested more than 200 levels deep
+- **THEN** the proxy returns HTTP 400 with `error.type = "invalid_request_error"` and `error.param` naming `messages` or `tools`
+
+#### Scenario: Uninspected assistant keys are accepted regardless of type
+
+- **WHEN** a client sends an assistant message with string `content` and `"refusal"` set to `null`, a number, a boolean, an array or an object, or with `"tool_calls": null`
+- **THEN** the request is accepted
+- **AND** the mapped Responses input is identical to the same message without that key
+
+#### Scenario: Malformed message shapes are still rejected
+
+- **WHEN** a client sends a message that is not an object, has a non-string `role`, an assistant message whose `tool_calls` is present, non-null and not an array, or a tool message whose `tool_call_id` is not a non-empty string
+- **THEN** the proxy returns a 4xx OpenAI `invalid_request_error`
+
+#### Scenario: Chat tool parameter schemas are forwarded verbatim
+
+- **GIVEN** a chat function tool whose `function.parameters` schema contains nested objects, arrays, floats, booleans and nulls
+- **WHEN** the service maps the request to Responses
+- **THEN** the mapped tool's `parameters` is byte-identical to the client's JSON
+
+### Requirement: Daybreak capability intent fails closed on Chat Completions
+
+`POST /v1/chat/completions` MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present, even when deployment-wide API-key authentication is disabled. After authentication it MUST return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before model-source lookup, usage reservation, account selection, Responses conversion, or upstream dispatch. Headerless Chat Completions requests MUST retain their existing behavior.
+
+#### Scenario: Authenticated carrier is denied before chat routing
+
+- **WHEN** a valid proxy API key sends a Chat Completions request with the Daybreak capability carrier
+- **THEN** the route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no model source, reservation, account, Responses request, or upstream attempt is selected
+
+#### Scenario: Headerless chat behavior remains unchanged
+
+- **WHEN** a Chat Completions request omits the required-capability carrier
+- **THEN** the route retains its existing authentication, validation, routing, and response behavior
+
+### Requirement: Chat Completions shares API-key reasoning allowlist enforcement
+
+Before Chat Completions traffic selects a subscription account or an external
+model source, the service MUST convert reasoning controls to the internal
+Responses representation and apply the authenticated API key's
+`allowedReasoningEfforts` policy. A rejected effort MUST produce the same
+OpenAI-compatible `403` `reasoning_effort_not_allowed` result as a native
+Responses request and MUST NOT call the external source.
+The `thinking` string alias MUST recognize every selectable effort, including
+`minimal`, before allowlist evaluation.
+A snake-case `reasoning_effort` MUST still participate in authorization when a
+separate `reasoning` object contains only metadata such as `summary`.
+An inactive `thinking` control MUST NOT mask a separate enabled reasoning
+alias during authorization.
+Reasoning metadata inside `thinking` MUST be merged with enabled controls before
+allowlist evaluation and MUST NOT hide their implicit `medium` effort.
+
+After a source-routed Chat Completions request passes the policy, any accepted
+`ultra` value MUST use the upstream wire value `max` regardless of whether the
+client expressed it through `reasoning_effort`, `reasoningEffort`,
+`reasoning.effort`, or `thinking`. If several reasoning spellings conflict,
+every retained outbound spelling MUST be aligned to the authorized client-plane
+effort. Other allowed client-plane efforts MUST remain unchanged for the
+external source. A sole `enable_thinking: true` control authorized as `medium`
+MUST remain enabled on source egress.
+When source selection replaces an effort-bearing model alias with a canonical
+source model slug and the client supplied no separate reasoning control, the
+service MUST materialize that authorized effort as `reasoning_effort`. This
+applies whether the alias came from the client model or the API key's enforced
+model.
+
+#### Scenario: Source-routed chat request is rejected before forwarding
+
+- **GIVEN** a source-routed chat model and an API key with
+  `allowedReasoningEfforts: ["low", "medium", "high"]`
+- **WHEN** a Chat Completions client supplies `reasoning_effort: "ultra"`
+- **THEN** the service returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Minimal thinking alias is evaluated before forwarding
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies `thinking: "minimal"`
+- **THEN** the service returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Reasoning metadata does not mask snake-case effort
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies `reasoning_effort: "max"` and
+  `reasoning: {"summary": "auto"}`
+- **THEN** the service returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Disabled thinking does not mask an enabled alias
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies `thinking: false` and
+  `enable_thinking: true`
+- **THEN** the service evaluates the enabled alias as `medium`
+- **AND** returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Thinking metadata does not mask its enabled state
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies
+  `thinking: {"summary": "auto", "enabled": true}`
+- **THEN** the service evaluates the enabled control as `medium`
+- **AND** returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Source-routed chat aliases use the ultra wire value
+
+- **GIVEN** a source-routed chat model and an API key that allows `ultra`
+- **WHEN** a Chat Completions client supplies `thinking: "ultra"`
+- **THEN** the source receives `thinking: "max"`
+
+#### Scenario: Source-routed chat preserves an allowed client-plane effort
+
+- **GIVEN** a source-routed chat model and an API key that allows `minimal`
+- **WHEN** a Chat Completions client supplies `reasoning_effort: "minimal"`
+- **THEN** the source receives `reasoning_effort: "minimal"`
+
+#### Scenario: Source-routed chat preserves an authorized thinking toggle
+
+- **GIVEN** a source-routed chat model and an API key that allows `medium`
+- **WHEN** a Chat Completions client supplies only `enable_thinking: true`
+- **THEN** the source receives `enable_thinking: true`
+
+#### Scenario: Canonical source retains effort from a model alias
+
+- **GIVEN** a source registered for `gpt-5.6-sol` and an API key that allows
+  `xhigh`
+- **WHEN** a Chat Completions client requests `gpt-5.6-sol-xhigh` without a
+  separate reasoning control
+- **THEN** the source receives model `gpt-5.6-sol`
+- **AND** it receives `reasoning_effort: "xhigh"`
+
+#### Scenario: Canonical source retains effort from an enforced model alias
+
+- **GIVEN** a source registered for `gpt-5.6-sol` and an API key that enforces
+  `gpt-5.6-sol-xhigh` and allows `xhigh`
+- **WHEN** a Chat Completions client requests canonical `gpt-5.6-sol` without a
+  separate reasoning control
+- **THEN** the source receives model `gpt-5.6-sol`
+- **AND** it receives `reasoning_effort: "xhigh"`
+

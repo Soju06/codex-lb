@@ -27,7 +27,7 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
-import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { usePermission } from "@/features/auth/hooks/use-auth";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -57,9 +57,15 @@ export function AccountsPage() {
     invalidateAccounts,
   } = useAccounts();
   const { settingsQuery } = useSettings();
-  const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin();
+  const canWrite = usePermission("accounts:write");
+  const canExport = usePermission("accounts:export");
+  // Upstream-proxy administration is an `ops:write` read on the backend; cached
+  // data from an earlier admin session must not be rendered either.
+  const canReadUpstreamProxy = usePermission("ops:write");
+  const { upstreamProxyQuery, accountBindingMutation, testEndpointMutation } = useUpstreamProxyAdmin({
+    enabled: canReadUpstreamProxy,
+  });
   const oauth = useOauth();
-  const canWrite = useAuthStore((state) => state.canWrite);
 
   const importDialog = useDialogState();
   const importBundleDialog = useDialogState();
@@ -188,7 +194,7 @@ export function AccountsPage() {
                 showResetCreditBadges={showResetCreditBadges}
                 onOpenImport={() => importDialog.show()}
                 onOpenImportBundle={() => importBundleDialog.show()}
-                onOpenExportBundle={() => exportBundleDialog.show()}
+                onOpenExportBundle={canExport ? () => exportBundleDialog.show() : undefined}
                 onOpenOauth={() => {
                   setOauthAccountId(null);
                   oauthDialog.show();
@@ -244,7 +250,7 @@ export function AccountsPage() {
                 securityWorkAuthorized: enabled,
               })
             }
-            upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
+            upstreamProxyAdmin={canReadUpstreamProxy ? (upstreamProxyQuery.data ?? null) : null}
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })
             }
@@ -267,7 +273,7 @@ export function AccountsPage() {
       />
 
       <ExportAccountBundleDialog
-        open={exportBundleDialog.open}
+        open={canExport && exportBundleDialog.open}
         accounts={accounts}
         onOpenChange={exportBundleDialog.onOpenChange}
       />

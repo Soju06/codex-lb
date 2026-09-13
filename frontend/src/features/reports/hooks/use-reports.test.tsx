@@ -307,3 +307,37 @@ describe("useReports", () => {
     ).toEqual(["key_2"]);
   });
 });
+
+it("uses a lightweight catalog key that does not change with model or useragent selections", async () => {
+  const { useReportsOptions } = await import("./use-reports");
+  getMock.mockClear();
+  const client = createTestQueryClient();
+  const { result, rerender } = renderHook(({ model, useragent }) => useReportsOptions({
+    startDate: "2026-06-01", endDate: "2026-08-29", accountId: ["account"], apiKeyId: ["key"], model, useragent,
+  }, "Asia/Seoul"), { wrapper: createWrapper(client), initialProps: { model: "m1", useragent: "CLI" } });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(getMock).toHaveBeenCalledTimes(1);
+  const url = new URL(getMock.mock.calls[0]![0], "http://localhost");
+  expect(url.pathname).toBe("/api/reports/options");
+  expect(url.searchParams.get("account_id")).toBe("account");
+  expect(url.searchParams.get("api_key_id")).toBe("key");
+  expect(url.searchParams.has("model")).toBe(false);
+  expect(url.searchParams.has("useragent_group")).toBe(false);
+  rerender({ model: "m2", useragent: "SDK" });
+  expect(getMock).toHaveBeenCalledTimes(1);
+  client.clear();
+});
+
+it("caches reports without periodic polling or automatic retries", async () => {
+  getMock.mockClear();
+  const client = createTestQueryClient();
+  const filters = { startDate: "2026-06-01", endDate: "2026-06-07", accountId: [], model: "" };
+  const { result, unmount } = renderHook(() => useReports(filters, "UTC"), { wrapper: createWrapper(client) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  const options = client.getQueryCache().getAll()[0]?.options as { staleTime: number; refetchInterval: unknown; retry: unknown };
+  expect(options.staleTime).toBe(300_000);
+  expect(options.refetchInterval).toBe(false);
+  expect(options.retry).toBe(false);
+  unmount();
+  client.clear();
+});

@@ -6,14 +6,6 @@ from typing import Any
 from app.modules.shared.schemas import DashboardModel
 
 
-class ConversationArchiveFileResponse(DashboardModel):
-    name: str
-    date: str | None
-    size_bytes: int
-    compressed: bool
-    modified_at: datetime
-
-
 class ConversationArchiveRecordResponse(DashboardModel):
     file_name: str | None = None
     timestamp: datetime | None

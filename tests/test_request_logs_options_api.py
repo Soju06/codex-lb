@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -542,3 +544,183 @@ async def test_request_logs_options_unfiltered_issues_no_distinct_statements(asy
     assert options_statements, "expected captured facet statements"
     assert not any(re.search(r"SELECT\s+DISTINCT\b", stmt, re.IGNORECASE) for stmt in options_statements)
     assert any("facet_skip" in stmt for stmt in options_statements)
+
+
+# PostgreSQL plan pin for the live-row partial facet indexes. Seed shape
+# mirrors production: thousands of live rows spread over several models, api
+# keys and statuses (so a full pass over any live-row index, including the
+# partial ``idx_logs_dash_usage_covering``, is materially costlier than a
+# probe), soft-deleted rows sharing the live values, and a large soft-deleted
+# cohort on values no live row carries, sorting before or between the live
+# values (``key_ghost`` < ``key_live_*``, ``gpt-5.1`` < ``gpt-ghost`` <
+# ``o4-mini``, ``ghost_error`` < ``rate_limit_exceeded``) so a non-partial
+# facet index walks the whole cohort before reaching the next live value
+# (measured: 20k ``Rows Removed by Filter`` on ``idx_logs_model_effort_time``
+# without the live index versus one index step with it).
+_LIVE_FACET_SEED_ROWS = 3_000
+_DEAD_SHARED_SEED_ROWS = 3_000
+_DEAD_COHORT_SEED_ROWS = 20_000
+# Each probe is a single btree step (``LIMIT 1`` MinMax form) on the live-row
+# index; the bound is a constant, never the soft-deleted cohort size.
+_PROBE_ROW_BOUND = 1
+# Statement -> live-row index it must be served by. Every facet statement
+# carries the status clause, so the status/error-code pair is matched last;
+# account probes have no live index (soft deletion detaches account_id).
+_LIVE_FACET_INDEX_BY_COLUMN: tuple[tuple[str, str | None], ...] = (
+    ("request_logs.api_key_id", "idx_logs_live_api_key"),
+    ("request_logs.model", "idx_logs_live_model_effort"),
+    ("request_logs.account_id", None),
+    ("request_logs.status", "idx_logs_live_status_error"),
+)
+
+
+_LIVE_FACET_INDEX_NAMES = tuple(name for _column, name in _LIVE_FACET_INDEX_BY_COLUMN if name is not None)
+
+
+def _expected_live_index(sql: str) -> str | None:
+    for column, index_name in _LIVE_FACET_INDEX_BY_COLUMN:
+        if column in sql:
+            return index_name
+    raise AssertionError(f"unrecognised facet statement: {sql}")
+
+
+async def _seed_live_facet_corpus() -> None:
+    """Bulk-seed the plan-pin corpus with PostgreSQL ``generate_series``."""
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_facets", "facets@example.com"))
+        session.add(ApiKey(id="key_live_a", name="Live A", key_hash="hash_live_a", key_prefix="sk-la"))
+        session.add(ApiKey(id="key_live_b", name="Live B", key_hash="hash_live_b", key_prefix="sk-lb"))
+        await session.commit()
+        live_values = (
+            "(ARRAY['key_live_a', 'key_live_b'])[1 + n % 2], "
+            "(ARRAY['gpt-4o', 'gpt-5.1', 'o4-mini'])[1 + n % 3], "
+            "CASE WHEN (n / 3) % 2 = 0 THEN 'high' END, "
+            "(ARRAY['success', 'error', 'cancelled'])[1 + (n / 6) % 3], "
+            "CASE WHEN (n / 6) % 3 = 1 AND n % 2 = 0 THEN 'rate_limit_exceeded' END"
+        )
+        columns = (
+            "(account_id, api_key_id, request_id, requested_at, deleted_at, "
+            "model, reasoning_effort, status, error_code)"
+        )
+        await session.execute(
+            text(
+                f"INSERT INTO request_logs {columns} "
+                "SELECT 'acc_facets', k, 'req_live_' || n, now() - n * interval '1 second', NULL, m, e, s, c "
+                f"FROM generate_series(1, :rows) AS n, LATERAL (SELECT {live_values}) AS v(k, m, e, s, c)"
+            ),
+            {"rows": _LIVE_FACET_SEED_ROWS},
+        )
+        # Soft-deleted rows sharing the live values, older than the live rows.
+        await session.execute(
+            text(
+                f"INSERT INTO request_logs {columns} "
+                "SELECT NULL, k, 'req_dead_shared_' || n, now() - interval '30 days' - n * interval '1 second', "
+                "now(), m, e, s, c "
+                f"FROM generate_series(1, :rows) AS n, LATERAL (SELECT {live_values}) AS v(k, m, e, s, c)"
+            ),
+            {"rows": _DEAD_SHARED_SEED_ROWS},
+        )
+        # Soft-deleted cohort on values no live row carries.
+        await session.execute(
+            text(
+                f"INSERT INTO request_logs {columns} "
+                "SELECT NULL, 'key_ghost', 'req_dead_cohort_' || n, "
+                "now() - interval '30 days' - n * interval '1 second', now(), "
+                "'gpt-ghost', 'high', 'error', 'ghost_error' FROM generate_series(1, :rows) AS n"
+            ),
+            {"rows": _DEAD_COHORT_SEED_ROWS},
+        )
+        await session.commit()
+    autocommit_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+    async with autocommit_engine.connect() as conn:
+        await conn.execute(text("VACUUM (ANALYZE) request_logs"))
+
+
+def _plan_nodes(plan: dict) -> list[dict]:
+    nodes = [plan]
+    for child in plan.get("Plans", ()):
+        nodes.extend(_plan_nodes(child))
+    return nodes
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(engine.dialect.name != "postgresql", reason="PostgreSQL-only query plan test")
+async def test_request_logs_options_facet_probes_use_live_row_indexes_postgresql(async_client, db_setup):
+    """Every production ``facet_skip`` statement (leading skip scan, per-value
+    second-column skip scan and ``(value, NULL)`` probe) for the model, api-key
+    and status facets is served by its live-row partial index: no rows removed
+    by filter and a constant number of index entries per probe, independent of
+    the soft-deleted cohort. The statements are captured from the real options
+    call and re-run under EXPLAIN ANALYZE rather than hand-written."""
+    from sqlalchemy import event
+    from sqlalchemy.sql import Select
+
+    await _seed_live_facet_corpus()
+
+    captured: list[str] = []
+
+    def _capture(conn, clauseelement, multiparams, params, execution_options):
+        if isinstance(clauseelement, Select):
+            compiled = clauseelement.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
+            captured.append(str(compiled))
+
+    event.listen(engine.sync_engine, "before_execute", _capture)
+    try:
+        response = await async_client.get("/api/request-logs/options")
+    finally:
+        event.remove(engine.sync_engine, "before_execute", _capture)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accountIds"] == ["acc_facets"]
+    assert sorted({option["model"] for option in payload["modelOptions"]}) == ["gpt-4o", "gpt-5.1", "o4-mini"]
+    assert [key["id"] for key in payload["apiKeys"]] == ["key_live_a", "key_live_b"]
+    assert payload["statuses"] == ["ok", "cancelled", "rate_limit", "error"]
+
+    facet_statements = [sql for sql in captured if "FROM request_logs" in sql]
+    assert any("facet_skip" in sql for sql in facet_statements)
+    # Leading skip scans, second-column skip scans and (value, NULL) probes.
+    assert any("request_logs.reasoning_effort IS NULL" in sql for sql in facet_statements)
+    assert any("min(request_logs.reasoning_effort)" in sql for sql in facet_statements)
+    assert any("min(request_logs.error_code)" in sql for sql in facet_statements)
+
+    async with SessionLocal() as session:
+        live_row_indexes = {
+            str(name)
+            for (name,) in (
+                await session.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes WHERE tablename = 'request_logs' "
+                        "AND indexdef LIKE '%WHERE (deleted_at IS NULL)'"
+                    )
+                )
+            ).all()
+        }
+        assert set(_LIVE_FACET_INDEX_NAMES) <= live_row_indexes
+        for sql in facet_statements:
+            expected_index = _expected_live_index(sql)
+            plan_rows = await session.execute(
+                text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql.replace(":", r"\:"))
+            )
+            plan_document = plan_rows.scalar_one()
+            if isinstance(plan_document, str):
+                plan_document = json.loads(plan_document)
+            scans = [
+                node for node in _plan_nodes(plan_document[0]["Plan"]) if node.get("Relation Name") == "request_logs"
+            ]
+            assert scans, f"no request_logs scan in plan for {sql}"
+            if expected_index is None:
+                continue
+            index_names = {node.get("Index Name") for node in scans}
+            if "min(" not in sql:
+                # ``(value, NULL)`` existence probe: LIMIT-1 costed, so the
+                # planner may take any index whose predicate excludes the
+                # soft-deleted rows (the facet index or the partial covering
+                # index); either way the cohort is never walked.
+                assert index_names <= live_row_indexes, f"{sql}: {scans}"
+                assert all(int(node.get("Actual Rows", 0)) <= _PROBE_ROW_BOUND for node in scans), f"{sql}: {scans}"
+                continue
+            assert index_names == {expected_index}, f"{sql}: {scans}"
+            assert sum(int(node.get("Rows Removed by Filter", 0)) for node in scans) == 0, f"{sql}: {scans}"
+            assert all(int(node.get("Actual Rows", 0)) <= _PROBE_ROW_BOUND for node in scans), f"{sql}: {scans}"

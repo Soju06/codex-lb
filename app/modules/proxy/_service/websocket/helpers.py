@@ -15,6 +15,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.native_egress import NativeWebSocketRoutingMetadata
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     ImageFetchSession,
@@ -696,18 +697,41 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
+    """Drop the completed-response anchor and the state that only exists for it."""
+    continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_input_count = 0
+    continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.last_pending_function_call_ids = []
+    continuity_state.last_pending_tool_call_types = {}
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
+    api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
         return None
     previous_response_id = continuity_state.last_completed_response_id
     if previous_response_id is None:
+        return None
+    if _is_websocket_stale_previous_response(previous_response_id=previous_response_id, api_key_id=api_key_id):
+        # Upstream already denied this anchor (``previous_response_not_found``)
+        # and the fail-closed path remembered it. Injecting it again would
+        # fail the client's retry identically (#1921): retire it from session
+        # continuity so the full-context resend goes unanchored, and so the
+        # same id cannot return once the negative cache entry expires.
+        _retire_websocket_continuity_anchor(continuity_state)
+        _facade().logger.info(
+            "websocket_session_anchor_retired response_id=%s reason=stale_previous_response",
+            previous_response_id,
+        )
         return None
     stored_count = continuity_state.last_completed_input_count
     if not _facade()._input_prefix_matches_stored_context(
@@ -785,12 +809,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
-        continuity_state.last_completed_response_id = None
-        continuity_state.last_completed_input_count = 0
-        continuity_state.last_completed_input_prefix_fingerprint = None
-        continuity_state.last_pending_function_call_ids = []
-        continuity_state.last_pending_tool_call_types = {}
+        _retire_websocket_continuity_anchor(continuity_state)
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -834,9 +855,16 @@ def _record_websocket_responses_lite_acceptance(
     )
 
 
-def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
+def _websocket_response_id(
+    event: OpenAIEvent | None,
+    payload: dict[str, JsonValue] | None,
+    *,
+    routing: NativeWebSocketRoutingMetadata | None = None,
+) -> str | None:
     if event is not None and event.response is not None and event.response.id:
         return event.response.id
+    if routing is not None:
+        return routing.payload_response_id
     if not isinstance(payload, dict):
         return None
     direct_response_id = payload.get("response_id")
@@ -1829,6 +1857,15 @@ def _draining_websocket_request_states(
     return [request_state for request_state in pending_requests if request_state.draining_until_terminal]
 
 
+def _is_response_output_event(event_type: str | None) -> bool:
+    """A ``response.*`` frame that is neither a terminal nor an error carries response output."""
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("response.")
+        and event_type not in {"response.completed", "response.failed", "response.incomplete"}
+    )
+
+
 def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1837,6 +1874,7 @@ def _match_websocket_request_state_for_anonymous_event(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
+    event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -1845,6 +1883,18 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    if _is_response_output_event(event_type):
+        # Output frames carry no response id. On a pipelined socket they belong
+        # to the one response upstream has already created, whether that request
+        # is still visible or draining, never to a sibling still waiting for its
+        # own response.created (issue #2350). Vendor telemetry such as
+        # ``codex.rate_limits`` keeps the pre-created ownership below.
+        created_requests = [
+            request_state for request_state in pending_requests if request_state.response_id is not None
+        ]
+        if len(created_requests) == 1:
+            return created_requests[0]
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

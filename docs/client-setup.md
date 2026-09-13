@@ -143,14 +143,12 @@ different eligibility path; see the [Images compatibility context](https://githu
 
 ### WebSocket transport
 
-Optional: enable native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling:
-
-```bash
-export CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket
-```
+Optional: pin native upstream WebSockets for Codex streaming while keeping `codex-lb` pooling.
+The upstream stream transport is a dashboard setting: Settings → Routing → Upstream stream
+transport (`auto`, `http`, or `websocket`). It applies without a restart and is the only place
+this value is configured; there is no environment variable for it.
 
 `auto` is the default and uses native WebSockets for native Codex headers or models that prefer them.
-You can also switch this in the dashboard under Settings → Routing → Upstream stream transport.
 
 Note: Codex itself does not currently expose a stable documented
 `wire_api = "websocket"` or WebSocket-only provider mode.

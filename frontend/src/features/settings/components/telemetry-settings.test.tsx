@@ -35,11 +35,19 @@ describe("TelemetrySettings", () => {
     await waitFor(() => expect(putBody).toEqual({ enabled: false }));
   });
 
-  it("disables the toggle and explains the environment override", async () => {
+  it("keeps the toggle usable and explains the environment fallback", async () => {
+    const user = userEvent.setup();
+    let putBody: unknown = null;
     server.use(
       http.get("/api/settings/telemetry", () =>
         HttpResponse.json(createTelemetryConsent({ state: "disabled", source: "env", active: false })),
       ),
+      http.put("/api/settings/telemetry", async ({ request }) => {
+        putBody = await request.json();
+        return HttpResponse.json(
+          createTelemetryConsent({ state: "enabled", source: "persisted", active: true }),
+        );
+      }),
     );
 
     renderWithProviders(<TelemetrySettings disabled={false} />);
@@ -48,8 +56,14 @@ describe("TelemetrySettings", () => {
     await waitFor(() =>
       expect(screen.getByText(/CODEX_LB_TELEMETRY_ENABLED/)).toBeInTheDocument(),
     );
-    expect(toggle).toBeDisabled();
+    // The environment only decides while no dashboard decision is saved, so
+    // the operator must still be able to persist one from here.
+    expect(toggle).toBeEnabled();
     expect(toggle).not.toBeChecked();
+
+    await user.click(toggle);
+
+    await waitFor(() => expect(putBody).toEqual({ enabled: true }));
   });
 
   it("keeps the toggle disabled for read-only sessions", async () => {

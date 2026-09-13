@@ -1057,10 +1057,7 @@ async def test_additional_quota_selection_does_not_persist_canonical_account_sta
 
 @pytest.mark.asyncio
 async def test_select_account_requires_fresh_additional_usage_data(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "app.core.config.settings.get_settings",
-        lambda: SimpleNamespace(usage_refresh_interval_seconds=600),
-    )
+    monkeypatch.setattr("app.core.usage.refresh_policy.USAGE_REFRESH_INTERVAL_SECONDS", 600)
 
     account_stale = _make_account("acc-additional-stale", email="stale@example.com")
     account_fresh = _make_account("acc-additional-fresh", email="fresh@example.com")

@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Protocol, TypeVar, cast
+from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
-from app.core.config.settings import get_settings
 from app.core.plan_types import normalize_account_plan_type
+from app.core.resilience.toggles import resolve_resilience_toggles
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.usage import capacity_for_plan
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.db.session import detach_session_objects, get_background_session
@@ -26,7 +27,7 @@ from app.modules.limit_warmup.service import (
     usage_reset_confirmed,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.proxy.load_balancer import background_recovery_state_from_account
+from app.modules.proxy.load_balancer import background_recovery_state_from_account, effective_routing_tunables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -40,18 +41,11 @@ _RECOVERABLE_ACCOUNT_STATUSES = frozenset({AccountStatus.RATE_LIMITED, AccountSt
 _BLOCK_RESET_MATCH_TOLERANCE_SECONDS = 5
 
 
-_T = TypeVar("_T")
-
-
 @dataclass(frozen=True, slots=True)
 class _MonthlyResetEvidence:
     baseline: UsageHistory
     before: UsageHistory
     after: UsageHistory
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
 
 
 class _RecoverableAccountsRepository(Protocol):
@@ -96,6 +90,7 @@ class _BackgroundLimitWarmupRepository:
         attempted_at: datetime,
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
+        require_no_prior_attempt: bool = False,
     ) -> AccountLimitWarmup | None:
         async with get_background_session() as session:
             attempt = await LimitWarmupRepository(session).try_create_attempt(
@@ -106,6 +101,7 @@ class _BackgroundLimitWarmupRepository:
                 attempted_at=attempted_at,
                 status=status,
                 reset_at_tolerance_seconds=reset_at_tolerance_seconds,
+                require_no_prior_attempt=require_no_prior_attempt,
             )
             detach_session_objects(session)
             return attempt
@@ -135,11 +131,6 @@ class _BackgroundRequestLogsRepository:
     async def add_log(self, *args: Any, **kwargs: Any) -> object:
         async with get_background_session() as session:
             return await RequestLogsRepository(session).add_log(*args, **kwargs)
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)
@@ -261,6 +252,7 @@ class UsageRefreshScheduler:
                             usage_repo=UsageRepository(session),
                             accounts=refreshed_selected_accounts,
                             monthly_reset_evidence=monthly_reset_evidence,
+                            dashboard_settings=dashboard_settings,
                         )
                     warmup_service = LimitWarmupService(
                         cast(Any, _BackgroundLimitWarmupRepository()),
@@ -308,11 +300,7 @@ class UsageRefreshScheduler:
 
 
 def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
-    settings = get_settings()
-    return UsageRefreshScheduler(
-        interval_seconds=settings.usage_refresh_interval_seconds,
-        enabled=settings.usage_refresh_enabled,
-    )
+    return UsageRefreshScheduler(interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS, enabled=True)
 
 
 def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
@@ -352,10 +340,21 @@ async def reconcile_recoverable_account_statuses(
     usage_repo: _LatestUsageRepository,
     accounts: list[Account],
     monthly_reset_evidence: dict[str, _MonthlyResetEvidence] | None = None,
+    dashboard_settings: object | None = None,
 ) -> int:
+    """Repair recoverable account statuses from the latest usage evidence.
+
+    ``dashboard_settings`` is the dashboard-settings row the refresh cycle
+    already read; the state builds below resolve soft drain and the routing
+    tunables from it once, so the health tier they compute follows the
+    dashboard toggle exactly like a request-path state build (``None`` = the
+    environment layer, for callers without a row).
+    """
     candidates = [account for account in accounts if account.status in _RECOVERABLE_ACCOUNT_STATUSES]
     if not candidates:
         return 0
+    routing_tunables = effective_routing_tunables(dashboard_settings)
+    soft_drain_enabled = resolve_resilience_toggles(dashboard_settings).soft_drain_enabled
 
     candidate_ids = [account.id for account in candidates]
     latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=candidate_ids)
@@ -382,6 +381,8 @@ async def reconcile_recoverable_account_statuses(
                     monthly_entry=monthly_entry,
                     secondary_entry=latest_secondary.get(account.id),
                 ),
+                routing_tunables=routing_tunables,
+                soft_drain_enabled=soft_drain_enabled,
             )
             if state.status != AccountStatus.ACTIVE:
                 continue

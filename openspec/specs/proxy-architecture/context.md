@@ -38,8 +38,6 @@ folder packages with their own internal structure:
 ```text
 app/modules/proxy/
 ├── service.py                    # public façade / compatibility surface
-├── _support.py                   # compatibility shim
-├── _warmup.py                    # compatibility shim
 └── _service/                     # private implementation package
     ├── support.py
     ├── warmup.py
@@ -73,7 +71,9 @@ current decomposition direction and prevent accidental regression:
 
 - `service.py` must stay below the accepted line-count threshold
 - `ProxyService` maximum method span must not grow beyond the accepted threshold
-- `_support.py` and `_warmup.py` must remain compatibility shims only
+- `_support.py` and `_warmup.py` remained re-export-only compatibility shims
+  until every importer migrated; both shims were removed in 2026-09 once they
+  had zero importers, and the shim-only ratchet retired with them
 - `service.py` must preserve required façade re-exports for existing consumers
 - `_service/*` modules must not form arbitrary cross-domain dependencies
 
@@ -91,7 +91,9 @@ current decomposition direction and prevent accidental regression:
 - Future proxy work should add new domain behavior under `_service/`, not directly
   into `service.py`
 - Compatibility shims may remain while internal consumers migrate, but they must
-  not gain new behavior
+  not gain new behavior; once a shim has no importers it is deleted rather than
+  kept as a permanent surface (the `_support.py`/`_warmup.py` shims were removed
+  this way)
 - Large domain migrations should prefer complete package cutovers with targeted
   characterization tests over shallow helper movement
 - CI can enforce architectural ratchets through `scripts/check_proxy_architecture.py`
@@ -123,7 +125,7 @@ It keeps no numeric ratchet copies in Python source.
 
 The parser fails closed when the block is missing, duplicated, malformed,
 incomplete, or contains unknown or invalid values. A definition failure skips
-only checks that need the limits; independent AST, façade, package, shim, and
+only checks that need the limits; independent AST, façade, package, and
 import-boundary checks continue so one spec error cannot hide unrelated
 violations.
 

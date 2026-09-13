@@ -39,15 +39,22 @@ class TelemetryIdentity:
 
 
 def resolve_consent(telemetry_enabled: bool | None, persisted_state: str) -> ResolvedConsent:
-    if telemetry_enabled is not None:
-        state: ConsentState = "enabled" if telemetry_enabled else "disabled"
-        return ResolvedConsent(state=state, source="env", active=telemetry_enabled)
+    """Resolve effective telemetry consent: dashboard decision > env > default.
+
+    A persisted dashboard decision is authoritative. ``CODEX_LB_TELEMETRY_ENABLED``
+    only decides while no decision has been saved (``undecided``), so a headless
+    opt-out set before first boot still works and a later dashboard decision is
+    never silently overridden by the environment.
+    """
     if persisted_state not in _VALID_STATES:
         raise ValueError(f"invalid telemetry consent state: {persisted_state}")
     state = cast("ConsentState", persisted_state)
-    if state == "undecided":
-        return ResolvedConsent(state="undecided", source="default", active=True)
-    return ResolvedConsent(state=state, source="persisted", active=state == "enabled")
+    if state != "undecided":
+        return ResolvedConsent(state=state, source="persisted", active=state == "enabled")
+    if telemetry_enabled is not None:
+        env_state: ConsentState = "enabled" if telemetry_enabled else "disabled"
+        return ResolvedConsent(state=env_state, source="env", active=telemetry_enabled)
+    return ResolvedConsent(state="undecided", source="default", active=True)
 
 
 class TelemetryConsentStore:

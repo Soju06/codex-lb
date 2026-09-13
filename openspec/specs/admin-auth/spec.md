@@ -119,20 +119,28 @@ explicit provider-facing error code/message.
 
 ### Requirement: Dashboard guest access is read-only
 
-The system SHALL support a dashboard `guest` role with read permission and without write permission. The system SHALL continue to treat password-authenticated, trusted-header, disabled-auth, and local bootstrap users as `admin` principals with read and write permissions.
+The system SHALL support a dashboard `guest` role with read permission and without write permission. The system SHALL continue to treat password-authenticated, trusted-header, disabled-auth, and local bootstrap users as `admin` principals with read and write permissions. Guest read permission covers only guest-safe dashboard data: full conversation archives and request-log filtering by a dedicated conversation identifier MUST require an `admin` principal.
 
 #### Scenario: Guest can read dashboard APIs
-
-- **WHEN** guest access is enabled and a guest principal requests a dashboard GET endpoint
+- **WHEN** guest access is enabled and a guest principal requests a guest-safe dashboard GET endpoint
 - **THEN** the request succeeds using read-only dashboard access
 - **AND** the session response identifies the principal as `guest`
 - **AND** the session response includes only the `read` permission
 
 #### Scenario: Guest cannot mutate dashboard state
-
 - **WHEN** guest access is enabled and a guest principal requests a dashboard mutating endpoint
 - **THEN** the system returns HTTP 403 with error code `read_only_access`
 - **AND** no dashboard state is changed
+
+#### Scenario: Guest cannot read conversation archives
+- **WHEN** a guest principal requests any conversation-archive endpoint
+- **THEN** the system returns HTTP 403 with error code `admin_access_required`
+- **AND** no archive file metadata, payload, headers, or other archive record data is returned
+
+#### Scenario: Guest cannot filter request logs by conversation identifier
+- **WHEN** a guest principal requests request logs with the dedicated `conversation_id` filter
+- **THEN** the system returns HTTP 403 with error code `admin_access_required`
+- **AND** no filtered rows, request count, or aggregated conversation cost is returned
 
 ### Requirement: Guest access may be enabled without a guest password
 
@@ -316,3 +324,39 @@ read-only write restrictions SHALL remain unchanged.
 
 - **WHEN** an admin principal requests a conversation list or detail route
 - **THEN** the request succeeds with the existing conversation response contract
+
+### Requirement: Trusted-header identity evidence is singular
+
+The system MUST create a trusted-header dashboard principal only when a trusted raw proxy peer supplies exactly one occurrence of the configured identity field and its trimmed value is non-empty. The system MUST treat two or more occurrences as ambiguous regardless of field-name casing, field order, value equality, or whether another occurrence is empty. Ambiguous identity evidence MUST NOT produce an authenticated principal or actor.
+
+#### Scenario: Duplicate trusted identity fields are rejected
+
+- **WHEN** a trusted raw proxy peer sends two or more occurrences of the configured dashboard identity field
+- **THEN** a protected dashboard request returns HTTP 401 with error code `proxy_auth_required`
+- **AND** no trusted-header principal or actor is produced
+
+#### Scenario: One non-empty trusted identity field authenticates
+
+- **WHEN** a trusted raw proxy peer sends exactly one configured dashboard identity field with a non-empty trimmed value
+- **THEN** the system authenticates an admin principal with that trimmed value as the actor
+
+### Requirement: Security audit reads require an admin principal
+
+The dashboard security-audit route MUST require an admin principal. A guest
+MUST receive HTTP 403 with `admin_access_required` and MUST NOT receive an audit
+row, actor IP, identifying detail, or request ID. An admin MUST retain the
+existing response contract including `actorIp`, `details`, and `requestId`.
+
+#### Scenario: Guest cannot read security-audit records
+
+- **GIVEN** an audit row contains identifying fields
+- **WHEN** a guest requests `GET /api/audit-logs`
+- **THEN** the response is HTTP 403 `admin_access_required`
+- **AND** no identifying audit value is returned
+
+#### Scenario: Admin retains security-audit detail
+
+- **WHEN** an admin requests the same row
+- **THEN** the request succeeds
+- **AND** actor IP, details, and request ID remain present
+

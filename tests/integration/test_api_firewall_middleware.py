@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 
+from app.core.config.settings import get_settings
 from app.db.session import get_background_session
 from app.modules.firewall.repository import FirewallRepository
 
@@ -22,6 +23,7 @@ def test_protected_websocket_route_denies_unlisted_raw_peer_after_projection(
 ) -> None:
     # Given: the real app stack projects an allowlisted forwarded client over an unlisted raw peer.
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    get_settings.cache_clear()
     with TestClient(app_instance, client=("127.0.0.1", 50001)) as client:
         assert client.portal is not None
         client.portal.call(_add_firewall_ip, "203.0.113.9")

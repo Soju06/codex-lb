@@ -321,7 +321,6 @@ def _patch_transport_settings(
     monkeypatch: pytest.MonkeyPatch,
     *,
     dashboard_transport: str,
-    base_transport: str = "auto",
 ) -> None:
     monkeypatch.setattr(
         proxy_api_module,
@@ -329,11 +328,6 @@ def _patch_transport_settings(
         lambda: SimpleNamespace(
             get=AsyncMock(return_value=SimpleNamespace(upstream_stream_transport=dashboard_transport))
         ),
-    )
-    monkeypatch.setattr(
-        proxy_api_module,
-        "get_settings",
-        lambda: SimpleNamespace(upstream_stream_transport=base_transport),
     )
 
 
@@ -397,11 +391,6 @@ def _bridge_service(
         lambda: SimpleNamespace(
             get=AsyncMock(return_value=SimpleNamespace(upstream_stream_transport=dashboard_transport))
         ),
-    )
-    monkeypatch.setattr(
-        http_bridge_streaming_module,
-        "_service_get_settings",
-        lambda: SimpleNamespace(upstream_stream_transport="auto"),
     )
     monkeypatch.setattr(
         http_bridge_streaming_module,
@@ -657,7 +646,6 @@ def _connect_settings() -> Any:
         upstream_base_url="https://chatgpt.com/backend-api",
         upstream_connect_timeout_seconds=7.0,
         proxy_downstream_websocket_idle_timeout_seconds=120.0,
-        max_sse_event_bytes=4321,
         upstream_websocket_trust_env=False,
     )
 
@@ -1006,7 +994,7 @@ async def test_bridge_connect_failure_records_prepared_anchor_provenance(
             SimpleNamespace(
                 get=AsyncMock(
                     return_value=SimpleNamespace(
-                        upstream_stream_transport="default",
+                        upstream_stream_transport="auto",
                         sticky_threads_enabled=False,
                         openai_cache_affinity_max_age_seconds=1800,
                         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.selectable import CTE
 
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -25,6 +26,47 @@ from app.db.models import (
 )
 
 DEFAULT_AUTOMATION_SCHEDULE_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# A running claim is reclaimable once it has been held for the larger of the
+# compact request budget it was claimed under and the current budget, plus this
+# grace, never sooner than the floor. A dashboard change can therefore only
+# widen a live claim's window, never narrow it.
+RUN_CLAIM_GRACE_SECONDS = 30.0
+RUN_CLAIM_MIN_TIMEOUT_SECONDS = 30.0
+
+
+def effective_compact_request_budget_seconds() -> float:
+    """The compact request budget currently in effect (dashboard value when bound)."""
+    return with_dashboard_overrides(get_settings()).compact_request_budget_seconds
+
+
+def run_claim_timeout_seconds(claim_budget_seconds: float | None, *, fallback_budget_seconds: float) -> float:
+    """Reclaim window for a claim made under ``claim_budget_seconds``.
+
+    The window covers the larger of the pinned budget and
+    ``fallback_budget_seconds`` (the current effective budget): lowering the
+    dashboard budget cannot shrink the window under an in-flight run, and a
+    raised budget still covers an attempt started by a writer that advanced
+    ``started_at`` without refreshing the pin (pre-pin replica during a rolling
+    deploy). ``None`` marks a row that never had a pin; it uses the current
+    budget alone.
+    """
+    budget = (
+        fallback_budget_seconds if claim_budget_seconds is None else max(claim_budget_seconds, fallback_budget_seconds)
+    )
+    return max(RUN_CLAIM_MIN_TIMEOUT_SECONDS, budget + RUN_CLAIM_GRACE_SECONDS)
+
+
+def run_stale_started_before(
+    *,
+    now_utc: datetime,
+    claim_budget_seconds: float | None,
+    fallback_budget_seconds: float,
+) -> datetime:
+    """Latest ``started_at`` at which a claim under ``claim_budget_seconds`` counts as stale at ``now_utc``."""
+    return now_utc - timedelta(
+        seconds=run_claim_timeout_seconds(claim_budget_seconds, fallback_budget_seconds=fallback_budget_seconds)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +90,7 @@ class AutomationRunRecord:
     error_code: str | None
     error_message: str | None
     attempt_count: int
+    claim_budget_seconds: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +461,7 @@ class AutomationsRepository:
             status="running",
             account_id=account_id,
             attempt_count=0,
+            claim_budget_seconds=effective_compact_request_budget_seconds(),
         )
         self._session.add(run)
         try:
@@ -462,6 +506,7 @@ class AutomationsRepository:
                     "status",
                     "account_id",
                     "attempt_count",
+                    "claim_budget_seconds",
                 ],
                 select(
                     literal(run_id),
@@ -479,6 +524,7 @@ class AutomationsRepository:
                     literal("running"),
                     literal(account_id),
                     literal(0),
+                    literal(effective_compact_request_budget_seconds()),
                 ).where(
                     exists(
                         select(AutomationRunCycleAccount.account_id)
@@ -568,24 +614,32 @@ class AutomationsRepository:
         if not candidates:
             return []
         cycle_keys = [cycle.cycle_key for cycle in candidates]
-        stale_started_before = _automation_run_execution_claim_stale_started_before(now_utc)
+        fallback_budget_seconds = effective_compact_request_budget_seconds()
         result = await self._session.execute(
             select(
                 AutomationRun.cycle_key,
-                AutomationRun.account_id,
                 AutomationRun.slot_key,
                 AutomationRun.status,
                 AutomationRun.finished_at,
                 AutomationRun.started_at,
                 AutomationRun.scheduled_for,
+                AutomationRun.claim_budget_seconds,
             ).where(AutomationRun.cycle_key.in_(cycle_keys))
         )
         occupied_slot_keys_by_cycle_key: dict[str, set[str]] = {}
-        for cycle_key, _account_id, slot_key, status, finished_at, started_at, scheduled_for in result.all():
+        for cycle_key, slot_key, status, finished_at, started_at, scheduled_for, claim_budget_seconds in result.all():
             is_stale_running = (
                 status == "running"
                 and finished_at is None
-                and (started_at <= scheduled_for or started_at < stale_started_before)
+                and (
+                    started_at <= scheduled_for
+                    or started_at
+                    < run_stale_started_before(
+                        now_utc=now_utc,
+                        claim_budget_seconds=claim_budget_seconds,
+                        fallback_budget_seconds=fallback_budget_seconds,
+                    )
+                )
             )
             if is_stale_running:
                 continue
@@ -702,6 +756,7 @@ class AutomationsRepository:
             )
             for index, (account_id, scheduled_for) in enumerate(accounts)
         ]
+        claim_budget_seconds = effective_compact_request_budget_seconds()
         claimed_runs = [
             AutomationRun(
                 id=f"run_{uuid4().hex}",
@@ -719,6 +774,7 @@ class AutomationsRepository:
                 status="running",
                 account_id=account_id,
                 attempt_count=0,
+                claim_budget_seconds=claim_budget_seconds,
             )
             for slot_key, scheduled_for, account_id in runs
         ]
@@ -807,33 +863,18 @@ class AutomationsRepository:
             for run, job_name, model, reasoning_effort in result.all()
         ]
 
-    async def list_runs_for_manual_cycle(
-        self,
-        *,
-        job_id: str,
-        slot_key_prefix: str,
-    ) -> list[AutomationRunRecord]:
-        result = await self._session.execute(
-            select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .where(AutomationRun.job_id == job_id)
-            .where(AutomationRun.trigger == "manual")
-            .where(AutomationRun.slot_key.like(f"{slot_key_prefix}%"))
-            .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc())
-        )
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
-
     async def list_due_manual_runs(
         self,
         *,
         now_utc: datetime,
-        stale_started_before: datetime,
         cycle_key: str | None = None,
         limit: int = 500,
     ) -> list[AutomationRunRecord]:
+        # The SQL bound is the shortest reclaim window any row can have; the
+        # exact per-row window (pinned at claim time, current budget for
+        # legacy NULL rows) is applied to the fetched candidates below.
+        earliest_stale_started_before = now_utc - timedelta(seconds=RUN_CLAIM_MIN_TIMEOUT_SECONDS)
+        fallback_budget_seconds = effective_compact_request_budget_seconds()
         stmt = (
             select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
             .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
@@ -851,7 +892,7 @@ class AutomationsRepository:
             .where(
                 or_(
                     AutomationRun.started_at <= AutomationRun.scheduled_for,
-                    AutomationRun.started_at < stale_started_before,
+                    AutomationRun.started_at < earliest_stale_started_before,
                 )
             )
             .order_by(
@@ -860,15 +901,34 @@ class AutomationsRepository:
                 AutomationRun.started_at.asc(),
                 AutomationRun.id.asc(),
             )
-            .limit(limit)
         )
         if cycle_key is not None:
             stmt = stmt.where(AutomationRun.cycle_key == cycle_key)
-        result = await self._session.execute(stmt)
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
+        # Page through the candidates so claims still inside their own window
+        # never consume ``limit`` slots owed to eligible rows behind them.
+        due_runs: list[AutomationRunRecord] = []
+        offset = 0
+        while len(due_runs) < limit:
+            result = await self._session.execute(stmt.offset(offset).limit(limit))
+            rows = result.all()
+            due_runs.extend(
+                run
+                for run in (
+                    self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
+                    for run, job_name, model, reasoning_effort in rows
+                )
+                if run.started_at <= run.scheduled_for
+                or run.started_at
+                < run_stale_started_before(
+                    now_utc=now_utc,
+                    claim_budget_seconds=run.claim_budget_seconds,
+                    fallback_budget_seconds=fallback_budget_seconds,
+                )
+            )
+            if len(rows) < limit:
+                break
+            offset += limit
+        return due_runs[:limit]
 
     async def claim_manual_run_execution(
         self,
@@ -892,7 +952,10 @@ class AutomationsRepository:
                     AutomationRun.started_at < stale_started_before,
                 )
             )
-            .values(started_at=claimed_started_at)
+            .values(
+                started_at=claimed_started_at,
+                claim_budget_seconds=effective_compact_request_budget_seconds(),
+            )
             .returning(AutomationRun)
         )
         run = result.scalar_one_or_none()
@@ -922,7 +985,10 @@ class AutomationsRepository:
                     AutomationRun.started_at < stale_started_before,
                 )
             )
-            .values(started_at=claimed_started_at)
+            .values(
+                started_at=claimed_started_at,
+                claim_budget_seconds=effective_compact_request_budget_seconds(),
+            )
             .returning(AutomationRun)
         )
         run = result.scalar_one_or_none()
@@ -1066,37 +1132,6 @@ class AutomationsRepository:
             count_stmt = count_stmt.where(and_(*conditions))
         total = int((await self._session.execute(count_stmt)).scalar_one() or 0)
         return runs, total
-
-    async def list_runs_filtered(
-        self,
-        *,
-        search: str | None = None,
-        account_ids: Sequence[str] | None = None,
-        models: Sequence[str] | None = None,
-        statuses: Sequence[str] | None = None,
-        triggers: Sequence[str] | None = None,
-        job_ids: Sequence[str] | None = None,
-    ) -> list[AutomationRunRecord]:
-        conditions = self._build_run_conditions(
-            search=search,
-            account_ids=account_ids,
-            models=models,
-            statuses=statuses,
-            triggers=triggers,
-            job_ids=job_ids,
-        )
-        stmt = (
-            select(AutomationRun, AutomationJob.name, AutomationJob.model, AutomationJob.reasoning_effort)
-            .join(AutomationJob, AutomationJob.id == AutomationRun.job_id)
-            .order_by(AutomationRun.started_at.desc(), AutomationRun.id.desc())
-        )
-        if conditions:
-            stmt = stmt.where(and_(*conditions))
-        result = await self._session.execute(stmt)
-        return [
-            self._run_from_model(run, job_name=job_name, model=model, reasoning_effort=reasoning_effort)
-            for run, job_name, model, reasoning_effort in result.all()
-        ]
 
     def _build_grouped_run_candidates(
         self,
@@ -1679,6 +1714,7 @@ class AutomationsRepository:
             error_code=run.error_code,
             error_message=run.error_message,
             attempt_count=run.attempt_count,
+            claim_budget_seconds=run.claim_budget_seconds,
         )
 
     @staticmethod
@@ -1834,12 +1870,6 @@ def _serialize_schedule_days(days: Sequence[str]) -> str:
     if not normalized:
         return ",".join(DEFAULT_AUTOMATION_SCHEDULE_DAYS)
     return ",".join(normalized)
-
-
-def _automation_run_execution_claim_stale_started_before(now_utc: datetime) -> datetime:
-    settings = get_settings()
-    timeout_seconds = max(30.0, settings.compact_request_budget_seconds + 30.0)
-    return now_utc - timedelta(seconds=timeout_seconds)
 
 
 def _scheduled_slot_key(job_id: str, *, account_id: str, due_slot: datetime) -> str:

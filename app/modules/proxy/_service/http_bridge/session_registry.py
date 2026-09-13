@@ -8,7 +8,7 @@ from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import scheduler_for
-from app.core.config.settings import Settings
+from app.core.config.dashboard_overrides import effective_settings
 from app.core.errors import openai_error
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -18,6 +18,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.utils.time import utcnow
 from app.db.models import StickySessionKind
+from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence_owner,
@@ -37,6 +38,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _record_bridge_reattach,
     _register_http_bridge_turn_state_aliases_locked,
     _renew_durable_http_bridge_lease,
+    _service_get_settings_cache,
     _track_alias_registration,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
@@ -104,7 +106,19 @@ class _HTTPBridgeSessionRegistryMixin:
         proof. A durable row is only eligible when no canonical or detached
         generation, including terminal event settlement, still references it.
         """
+        # M1 stream/bridge budgets: this pass runs from the ring heartbeat, outside
+        # any request binding, so the dashboard-managed bridge budget is applied
+        # from one snapshot read here (``effective_settings``), never the bare
+        # environment value. A snapshot failure keeps the environment budget.
         settings = _service_get_settings()
+        try:
+            settings = effective_settings(await _service_get_settings_cache().get(), settings)
+        except Exception:
+            logger.warning(
+                "HTTP bridge stale operation abandonment could not read the dashboard settings snapshot; "
+                "using the environment budget",
+                exc_info=True,
+            )
         inactivity_seconds = max(30.0 * 60.0, _http_bridge_request_budget_seconds(settings))
         maintenance_now = utcnow()
         cutoff = maintenance_now - timedelta(seconds=inactivity_seconds)
@@ -296,7 +310,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 session.codex_session = True
                 session.idle_ttl_seconds = max(
                     session.idle_ttl_seconds,
-                    float(_service_get_settings().http_responses_session_bridge_codex_idle_ttl_seconds),
+                    float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
                 )
                 session.headers = without_http_bridge_session_affinity_headers(session.headers)
             registration_generation = _track_alias_registration(session, turn_state, turn_state=True)
@@ -615,7 +629,6 @@ class _HTTPBridgeSessionRegistryMixin:
         session: _HTTPBridgeSession,
         *,
         turn_state: str,
-        settings: Settings,
     ) -> None:
         session.affinity = _AffinityPolicy(key=turn_state, kind=StickySessionKind.CODEX_SESSION)
         session.codex_session = True
@@ -623,7 +636,7 @@ class _HTTPBridgeSessionRegistryMixin:
         session.downstream_turn_state_aliases.add(turn_state)
         session.idle_ttl_seconds = max(
             session.idle_ttl_seconds,
-            float(settings.http_responses_session_bridge_codex_idle_ttl_seconds),
+            float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
         )
         session.headers = _headers_with_turn_state(session.headers, turn_state)
 

@@ -76,9 +76,6 @@ def _write_proxy_fixture(root: Path) -> Path:
     (service_dir / "http_bridge" / "mixin.py").write_text("# HTTP bridge\n", encoding="utf-8")
     (service_dir / "streaming" / "mixin.py").write_text("# Streaming\n", encoding="utf-8")
     (service_dir / "websocket" / "__init__.py").write_text("", encoding="utf-8")
-    shim = "from app.modules.proxy._service.support import VALUE\n"
-    (proxy_dir / "_support.py").write_text(shim, encoding="utf-8")
-    (proxy_dir / "_warmup.py").write_text(shim, encoding="utf-8")
     return proxy_dir
 
 

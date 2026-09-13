@@ -6,7 +6,7 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, SkipValidation, field_validator, model_validator
 
 from app.core.openai.contracts import OpenAIMessage
-from app.core.openai.message_coercion import coerce_messages
+from app.core.openai.message_coercion import _content_parts, coerce_messages
 from app.core.openai.requests import (
     PassthroughJsonList,
     PassthroughJsonValue,
@@ -23,12 +23,6 @@ from app.core.utils.json_guards import is_json_list, is_json_mapping
 
 _SUPPORTED_CHAT_ROLES = frozenset({"system", "developer", "user", "assistant", "tool"})
 _TEXT_CONTENT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
-
-
-def _content_parts(content: JsonValue) -> list[JsonValue]:
-    if is_json_list(content):
-        return content
-    return [content]
 
 
 def _part_type(part: Mapping[str, JsonValue]) -> str | None:

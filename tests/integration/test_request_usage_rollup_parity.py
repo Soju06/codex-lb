@@ -623,6 +623,11 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeyp
     reference = await _snapshot()
     await run_hourly_fold_pass(now=NOW)
     await run_conversation_fold_pass(now=NOW)
+    from app.modules.reports.rollup import fold_next_report_slice
+
+    async with SessionLocal() as session:
+        while await fold_next_report_slice(session, TARGET_W):
+            pass
     # The reference for unaligned window starts once their partial leading
     # hour is un-servable: identical to starting at the ceil hour (that
     # partial slice is ALWAYS raw-served, by design). Captured pre-prune;
@@ -659,13 +664,7 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeyp
             "buckets_raw_degrade",
             "trends_raw_degrade",
             "conv_buckets_raw_degrade",
-            # Reports measures other than conversation_count are raw-bound
-            # (documented non-goal); the satellite-served conversation counts
-            # are asserted to survive below. The half-hour-offset local days
-            # additionally lose their pruned partial leading half hours.
-            "reports_summary",
-            "reports_summary_filtered",
-            "reports_daily_utc",
+            # Half-hour-offset local days lose their pruned partial raw edges.
             "reports_daily_offset",
             "listing_totals",  # tracks listable rows (asserted below)
         ),
@@ -683,23 +682,14 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeyp
     raw_expected = (await _snapshot())["listing_totals"]
     assert pruned["listing_totals"] == raw_expected
     monkeypatch.undo()
-    # Satellite-served conversation counts survive pruning exactly: the
-    # summary window is hour-aligned at the start and its unaligned tail is
-    # served from surviving raw; UTC local days are hour-aligned throughout.
+    # Every UTC report day and filtered summary now survives pruning;
+    # report history carries the filter and conversation dimensions.
     assert pruned["reports_summary"].conversation_count == reference["reports_summary"].conversation_count
-    # Daily-report day-row membership stays raw-driven (the day CTE INNER
-    # joins request_logs, exactly as before the satellite): a fully pruned
-    # day drops out of the report; days that still have raw rows keep their
-    # satellite-served conversation counts unchanged.
-    pruned_daily = {row.date: row.conversation_count for row in pruned["reports_daily_utc"]}
-    reference_daily = {row.date: row.conversation_count for row in reference["reports_daily_utc"]}
-    assert pruned_daily
-    assert pruned_daily == {date: reference_daily[date] for date in pruned_daily}
-    # The filtered summary path stays fully raw-bound by design.
     assert (
         pruned["reports_summary_filtered"].conversation_count
-        <= reference["reports_summary_filtered"].conversation_count
+        == reference["reports_summary_filtered"].conversation_count
     )
+    assert [row.date for row in pruned["reports_daily_utc"]] == [row.date for row in reference["reports_daily_utc"]]
     # earliest_activity_at: raw min is gone; the rollup fallback reports the
     # first countable bucket at hour precision.
     assert pruned["earliest"] == floor_to_hour(reference["earliest"])

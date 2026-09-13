@@ -34,10 +34,6 @@ function persistPreference(preference: AccountQuotaDisplayPreference): void {
   }
 }
 
-export function getAccountQuotaDisplayPreference(): AccountQuotaDisplayPreference {
-  return useAccountQuotaDisplayStore.getState().quotaDisplay;
-}
-
 export const useAccountQuotaDisplayStore = create<AccountQuotaDisplayState>((set) => ({
   quotaDisplay: readStoredPreference(),
   setQuotaDisplay: (preference) => {

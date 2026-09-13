@@ -20,7 +20,7 @@ from app.modules.proxy._load_balancer.error_rate import (
     record_outcome_locked,
 )
 from app.modules.proxy._load_balancer.types import RuntimeState
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import LoadBalancer, effective_routing_tunables
 from tests.simulation.virtual_time import VirtualClock
 from tests.unit.test_load_balancer_concurrency import (
     _repo_factory,
@@ -205,6 +205,8 @@ async def test_weighting_disabled_keeps_selection_neutral(monkeypatch: pytest.Mo
         )
         for _ in range(20):
             await balancer.record_error(flaky)
-        assert error_rate_weight_multiplier(balancer._runtime[flaky.id], clock.time()) == 1.0
+        disabled = ErrorRateWeightingPolicy(enabled=effective_routing_tunables().error_rate_weighting_enabled)
+        assert disabled.enabled is False
+        assert error_rate_weight_multiplier(balancer._runtime[flaky.id], clock.time(), policy=disabled) == 1.0
     finally:
         get_settings.cache_clear()

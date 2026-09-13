@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
 from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam
+from app.core.openai.chat_responses import _coerce_number
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -115,6 +116,13 @@ def classify_upstream_failure(
         error=error,
         http_status=http_status,
     )
+
+
+def is_upstream_burst_rejection(*, failure_class: FailureClass, http_status: int | None) -> bool:
+    """True for a code-less upstream HTTP 429: a per-account burst/concurrency
+    rejection that ``classify_upstream_failure`` files as ``retryable_transient``
+    (coded 429s land in ``rate_limit`` / ``quota`` and are not bursts)."""
+    return http_status == 429 and failure_class == "retryable_transient"
 
 
 def _header_account_id(account_id: str | None) -> str | None:
@@ -338,17 +346,6 @@ def _openai_error_param(error: OpenAIError | None) -> OpenAIErrorParam:
 
 def _coerce_str(value: JsonValue) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _coerce_number(value: JsonValue) -> int | float | None:
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _apply_error_metadata(target: OpenAIErrorDetail, error: OpenAIError | None) -> None:

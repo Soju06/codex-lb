@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.balancer.types import UpstreamError
+from app.core.clients.proxy import ProxyResponseError
 from app.core.crypto import TokenEncryptor
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.time import utcnow
@@ -104,29 +105,21 @@ def _make_proxy_settings() -> SimpleNamespace:
         prefer_earlier_reset_window="secondary",
         sticky_threads_enabled=False,
         sticky_reallocation_budget_threshold_pct=95.0,
-        upstream_stream_transport="default",
+        upstream_stream_transport="auto",
         openai_cache_affinity_max_age_seconds=300,
-        openai_prompt_cache_key_derivation_enabled=True,
         routing_strategy="usage_weighted",
         proxy_request_budget_seconds=75.0,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
-        upstream_compact_timeout_seconds=None,
         http_responses_session_bridge_gateway_safe_mode=False,
         trace_channels=frozenset(),
-        proxy_token_refresh_limit=32,
-        proxy_upstream_websocket_connect_limit=64,
         proxy_account_response_create_limit=4,
         proxy_account_stream_limit=8,
         proxy_account_stream_recovery_reserve=1,
         proxy_api_key_fair_share_congestion_threshold_pct=0,
         proxy_response_create_limit=64,
-        proxy_compact_response_create_limit=16,
-        proxy_admission_wait_timeout_seconds=10.0,
-        max_sse_event_bytes=16 * 1024 * 1024,
         http_responses_session_bridge_instance_id="test-instance",
         http_responses_session_bridge_instance_ring=[],
-        http_responses_session_bridge_anchor_poison_failure_threshold=7,
         http_downstream_transport_policy="smart",
     )
 
@@ -299,6 +292,99 @@ async def test_transient_retry_backoff_and_stream_close_owners_use_the_injected_
         assert clock.monotonic() == pytest.approx(1_002.5)
         # Both attempts closed their inner stream through an owned task.
         assert [name for name in scheduler.spawned if name.startswith("stream-inner-close-")] != []
+        assert all(task.done() for task in scheduler.owned_tasks)
+    finally:
+        await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_owner_bound_burst_429_backoff_parks_on_the_injected_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A code-less 429 on an owner-bound stream waits on ``scheduler.sleep``, never wall-clock."""
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service, clock, scheduler = _virtual_service(request_logs)
+    account = _make_account("acc_virtual_burst_owner")
+    attempts = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    handle_stream_error = AsyncMock(return_value={"failure_class": "retryable_transient"})
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+
+    async def fake_stream_once(_account: Account, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ProxyResponseError(
+                429,
+                cast(Any, {"error": {"message": "Rate limit exceeded"}}),
+                failure_phase="status",
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_virtual_burst_owner"}}\n\n'
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    # A ``reasoning`` input item binds the dispatched payload to its account.
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"type": "reasoning", "id": "rs_virtual_burst", "encrypted_content": "owner-bound"}],
+            "stream": True,
+        }
+    )
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-virtual-burst"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    consumer = scheduler.create_task(collect())
+    try:
+        await scheduler.drain()
+        # The owner was rejected once and the same-account retry is parked on
+        # the 1 s burst backoff timer (no re-selection happened).
+        assert attempts == 1
+        assert not consumer.done()
+        assert scheduler.pending_timers == 1
+        assert select_account.await_count == 1
+
+        await scheduler.advance(0.5)
+        assert attempts == 1
+        assert not consumer.done()
+
+        await scheduler.advance(0.5)
+        chunks = await consumer
+
+        assert attempts == 2
+        assert select_account.await_count == 1
+        assert any("response.completed" in chunk for chunk in chunks)
+        assert clock.monotonic() == pytest.approx(1_001.0)
+        assert scheduler.pending_timers == 0
+        # The same-account retry engages only the replica-local burst cooldown
+        # (stamped from the injected clock); no transient penalty is written.
+        handle_stream_error.assert_not_awaited()
+        runtime = service._load_balancer._runtime[account.id]
+        assert runtime.burst_backoff_until == pytest.approx(clock.time() - 1.0 + 5.0)
         assert all(task.done() for task in scheduler.owned_tasks)
     finally:
         await scheduler.cancel_owned_tasks()

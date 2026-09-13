@@ -1154,6 +1154,9 @@ async def test_abandoned_browser_flow_expiry_releases_callback_port_without_foll
 ):
     monkeypatch.setattr(oauth_module, "OAUTH_CALLBACK_PORT", unused_tcp_port)
     monkeypatch.setattr(oauth_module, "_PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS", 0.25)
+    # Keep the flow pending until the listener is observed, even on a slow runner.
+    now = time.time()
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: now))
     stopped = asyncio.Event()
     original_stop = oauth_module.OAuthCallbackServer.stop
 
@@ -1169,6 +1172,7 @@ async def test_abandoned_browser_flow_expiry_releases_callback_port_without_foll
     writer.close()
     await writer.wait_closed()
 
+    now += oauth_module._PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS
     # Only the deadline can trigger cleanup: no status, callback, or new start.
     await asyncio.wait_for(stopped.wait(), timeout=5)
     store = oauth_module._OAUTH_STORE

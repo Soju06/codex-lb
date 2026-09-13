@@ -45,8 +45,10 @@ selectors instead of being persisted on account state.
 ## Scheduler
 
 The scheduler gates every tick on the enabled-by-default scheduler leader lease (see the `scheduler-coordination`
-capability), ticking every five minutes (a fixed application constant since issue #1340 phase 2). It can be
-disabled with `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED=false`.
+capability), ticking every five minutes (a fixed application constant since issue #1340 phase 2). The dashboard
+`quota_planner_settings.mode = "off"` is the only switch: the scheduler still ticks but records a `no_op`
+decision and plans nothing (the former `CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED` env toggle was
+constantized to always-on by `constantize-core-tunables`).
 
 Each tick:
 

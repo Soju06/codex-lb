@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import DEFAULT_PLAN, OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.refresh import (
+    TOKEN_REFRESH_TIMEOUT_SECONDS,
     RefreshError,
     TokenRefreshResult,
     get_token_refresh_timeout_override,
@@ -26,7 +27,6 @@ from app.core.auth.refresh import (
     should_refresh,
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
-from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
@@ -36,6 +36,7 @@ from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.refresh_claims import RefreshClaimCoordinatorPort, get_refresh_claim_coordinator
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.work_admission import ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
 class AccountsRepositoryPort(Protocol):
@@ -148,11 +149,29 @@ _CLAIM_RELEASE_RETRY_BASE_SECONDS = 0.05
 # Cross-replica refresh-claim wait/poll tuning (fixed; issue #1340 /
 # PRINCIPLES.md P2). The wait caps how long a non-claimant polls for the claim
 # winner's rotated tokens before giving up; the poll interval bounds
-# claim-table read pressure while waiting. Note the claim TTL floor
-# (``token_refresh_claim_ttl_seconds``) is derived from the admission wait and
-# refresh timeouts, not from these values.
+# claim-table read pressure while waiting.
 _TOKEN_REFRESH_CLAIM_WAIT_SECONDS = 8.0
 _TOKEN_REFRESH_CLAIM_POLL_SECONDS = 0.25
+# Cross-replica token-refresh claim TTL (account_refresh_claims table). The
+# claim is acquired BEFORE the refresh-admission wait and held through the
+# OAuth exchange, so the TTL must cover both: the admission wait ceiling plus
+# the HTTP exchange (2x for margin). A TTL sized only around the HTTP timeout
+# could expire under a healthy claimant stuck in admission, letting another
+# replica claim the same account and reuse the single-use refresh token. The
+# 30 s floor bounds how long a crashed claimant can block refresh for one
+# account.
+_TOKEN_REFRESH_CLAIM_TTL_FLOOR_SECONDS = 30.0
+# Negative cache for a failed refresh so a burst of requests for one account
+# does not re-run the same failing exchange (transport errors are exempt).
+_REFRESH_FAILURE_COOLDOWN_SECONDS = 5.0
+
+
+def _token_refresh_claim_ttl_seconds() -> float:
+    return max(
+        _TOKEN_REFRESH_CLAIM_TTL_FLOOR_SECONDS,
+        ADMISSION_WAIT_TIMEOUT_SECONDS + 2.0 * TOKEN_REFRESH_TIMEOUT_SECONDS,
+    )
+
 
 # Terminal account statuses a PRIOR claim holder may have committed while
 # leaving ``refresh_token_encrypted`` UNCHANGED: a permanent refresh failure
@@ -224,7 +243,7 @@ class _RefreshSingleflight:
                 try:
                     task.result()
                 except RefreshError as exc:
-                    ttl = max(0.0, float(get_settings().proxy_refresh_failure_cooldown_seconds))
+                    ttl = _REFRESH_FAILURE_COOLDOWN_SECONDS
                     if ttl > 0 and not exc.transport_error:
                         self._recent_failures[key] = (
                             time.monotonic() + ttl,
@@ -372,7 +391,6 @@ class AuthManager:
         upstream, so a second concurrent exchange would receive a permanent
         ``refresh_token_reused`` error and could revoke the token family.
         """
-        settings = get_settings()
         requested_fingerprint = _refresh_token_material_fingerprint(
             self._encryptor,
             account.refresh_token_encrypted,
@@ -405,7 +423,7 @@ class AuthManager:
         while True:
             if await claims.try_acquire(
                 account.id,
-                ttl_seconds=settings.token_refresh_claim_ttl_seconds,
+                ttl_seconds=_token_refresh_claim_ttl_seconds(),
                 owner=requested_fingerprint,
             ):
                 # Monotonic deadline covering the ENTIRE claim hold from this
@@ -419,7 +437,7 @@ class AuthManager:
                 # caller's remaining budget so total claim-hold stays within
                 # budget + a small fixed release, and a persist that runs past the
                 # deadline stops (releasing the claim) instead of looping.
-                claim_ttl = max(0.0, float(settings.token_refresh_claim_ttl_seconds))
+                claim_ttl = _token_refresh_claim_ttl_seconds()
                 persist_deadline = time.monotonic() + claim_ttl
                 if caller_deadline is not None:
                     persist_deadline = min(persist_deadline, caller_deadline)
@@ -1141,7 +1159,7 @@ class AuthManager:
         # ``token_refresh_timeout_override`` (set by the claim path to the
         # remaining budget) only caps the HTTP exchange; without help,
         # ``WorkAdmissionController`` waits up to
-        # ``proxy_admission_wait_timeout_seconds`` for a slot on a saturated
+        # ``ADMISSION_WAIT_TIMEOUT_SECONDS`` for a slot on a saturated
         # token-refresh semaphore BEFORE that HTTP timeout is even armed. Derive
         # one monotonic deadline from the budget and enforce it on BOTH the
         # admission acquire and the exchange so their sum cannot overrun it.
@@ -1216,7 +1234,7 @@ class AuthManager:
         """Acquire token-refresh admission without overrunning the caller budget.
 
         ``WorkAdmissionController`` waits up to
-        ``proxy_admission_wait_timeout_seconds`` for a slot on a saturated
+        ``ADMISSION_WAIT_TIMEOUT_SECONDS`` for a slot on a saturated
         token-refresh semaphore. That wait happens while this shielded task
         already holds the cross-replica DB refresh claim, so it MUST be capped by
         the caller's remaining refresh budget (``deadline``): otherwise a

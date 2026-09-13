@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LocalLoginPolicySchema, StrictLocalLoginPolicySchema } from "@/features/auth/schemas";
+
 const RoutingStrategySchema = z.enum([
   "usage_weighted",
   "round_robin",
@@ -149,6 +151,8 @@ export const DashboardSettingsSchema = z
     totpRequiredOnLogin: z.boolean(),
     // Defaults cover a mixed-version rollout against an older backend.
     totpRequiredForAdminRole: z.boolean().optional().default(false),
+    // Who may still sign in with a local password; database only, never an env var.
+    localLoginPolicy: LocalLoginPolicySchema.optional().default("enabled"),
     usersWithoutTotpCount: z.number().int().min(0).optional().default(0),
     adminsWithoutTotpCount: z.number().int().min(0).optional().default(0),
     apiKeyAuthEnabled: z.boolean(),
@@ -301,6 +305,10 @@ export const SettingsUpdateRequestSchema = z
     importWithoutOverwrite: z.boolean().optional(),
     totpRequiredOnLogin: z.boolean().optional(),
     totpRequiredForAdminRole: z.boolean().optional(),
+    // Strict, unlike the response field: `updateSettings` parses an `unknown`
+    // payload, so a fallback here would turn a typo into a policy relaxation
+    // the backend would happily accept.
+    localLoginPolicy: StrictLocalLoginPolicySchema.optional(),
     apiKeyAuthEnabled: z.boolean().optional(),
     hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
     limitWarmupEnabled: z.boolean().optional(),

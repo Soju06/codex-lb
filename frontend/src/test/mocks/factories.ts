@@ -503,6 +503,7 @@ export function createDashboardAuthSession(
 		permissions: ADMIN_PERMISSIONS,
 		guestAccessEnabled: false,
 		guestPasswordRequired: false,
+		breakGlassSession: false,
 		...overrides,
 	});
 }
@@ -894,6 +895,7 @@ export function createDashboardSettings(
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
 		totpRequiredForAdminRole: false,
+		localLoginPolicy: "enabled",
 		usersWithoutTotpCount: 0,
 		adminsWithoutTotpCount: 0,
 		apiKeyAuthEnabled: true,

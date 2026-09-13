@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "notes": "Machine-readable provenance for the provider-portability fixture corpus (issue #2123, design v3 section 16 item i). tests/unit/test_codex_body_fixtures.py is the gate; README.md renders the same facts for humans and is pinned against this file. The marker never lives inside a body: an extra top-level key makes overflow_portability_view decline with not_portable_unknown_field and would change the recorded verdict. A captured body is REBUILT from a structural allowlist rather than scrubbed, so it carries the shape of the real request (keys, discriminators, tool declaration field sets, item ids, call/output pairing) and none of its prose: every free-text field holds a synthetic placeholder derived from its own JSON path. The recorded verdict is asserted to be unchanged by that rebuild.",
+  "fixtures": {
+    "captured_gpt55_standard_http.json": {
+      "origin": "captured",
+      "model_slug": "gpt-5.5",
+      "transport": "http",
+      "captured_at": "2026-09-11T17:29:52Z",
+      "codex_version": "codex-cli 0.154.0",
+      "catalog_sha256": "de111010ad347d62a87346760fb6746bc1a490483359b8cefd66e57daa0ed576",
+      "carries_client_telemetry": false,
+      "strip_item_ids": false,
+      "sanitisation": [
+        "telemetry_field_dropped",
+        "identifier_placeholder",
+        "synthetic_text",
+        "synthetic_label",
+        "synthetic_key"
+      ],
+      "expected_view": "view",
+      "expected_view_decline": null,
+      "expected_portability_verdict": {
+        "declared_tool_types": ["custom", "tool_search", "web_search"],
+        "supports_vision": true,
+        "portable": false,
+        "reason": "not_portable_tools",
+        "detail": "tool_search"
+      },
+      "expected_transcript_is_source_free": false,
+      "notes": "Real Codex 0.154.0 standard body. It declines even with every tool type it declares marked supported, because the real tool_search declaration carries an execution field outside _STATELESS_TOOL_DECLARATION_FIELDS, the real web_search carries external_web_access/search_content_types outside _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS, and every input item carries a prefixed id so the fresh-replay predicate is false. This body therefore cannot overflow; the gate records that instead of asserting a shape no client sends. Fixing the three gaps is production work tracked separately. The prose of this body is synthetic; the shape the three reasons above depend on is the real one."
+    },
+    "captured_gpt56sol_lite_http.json": {
+      "origin": "captured",
+      "model_slug": "gpt-5.6-sol",
+      "transport": "http",
+      "captured_at": "2026-09-11T17:29:52Z",
+      "codex_version": "codex-cli 0.154.0",
+      "catalog_sha256": "de111010ad347d62a87346760fb6746bc1a490483359b8cefd66e57daa0ed576",
+      "carries_client_telemetry": false,
+      "strip_item_ids": false,
+      "sanitisation": [
+        "telemetry_field_dropped",
+        "identifier_placeholder",
+        "synthetic_text",
+        "synthetic_label",
+        "synthetic_key"
+      ],
+      "expected_view": "declined",
+      "expected_view_decline": {
+        "reason": "not_portable_lite_namespace",
+        "detail": "reasoning.context"
+      },
+      "expected_portability_verdict": {
+        "declared_tool_types": ["custom", "tool_search", "web_search"],
+        "supports_vision": true,
+        "portable": false,
+        "reason": "not_portable_lite_namespace",
+        "detail": "additional_tools"
+      },
+      "expected_transcript_is_source_free": false,
+      "notes": "Real Codex 0.154.0 Responses-Lite body. It carries no instructions key at all, so it must be validated through normalize_responses_request_payload with openai_compat from _has_openai_responses_shape; bare ResponsesRequest.model_validate fails with 'instructions Field required'. Its additional_tools bundle declares the functions and collaboration namespaces (no web, no image_gen in this lane) and four developer prefix messages. Verdict evaluated on a view built directly from the stripped body, as the builder declines it first. The prose of this body is synthetic; the namespace/tool structure the verdict depends on is the real one."
+    },
+    "gpt55_standard_first_turn.json": {
+      "origin": "synthetic",
+      "model_slug": "gpt-5.5",
+      "transport": "http",
+      "captured_at": null,
+      "codex_version": null,
+      "catalog_sha256": null,
+      "carries_client_telemetry": true,
+      "strip_item_ids": false,
+      "sanitisation": [],
+      "expected_view": "view",
+      "expected_view_decline": null,
+      "expected_portability_verdict": {
+        "declared_tool_types": ["custom"],
+        "supports_vision": false,
+        "portable": true,
+        "reason": null,
+        "detail": null
+      },
+      "expected_transcript_is_source_free": true,
+      "notes": "Hand-written pre-strip fixture: it keeps client_metadata and stream_options on purpose, because its job is to feed strip_source_telemetry. Shape-illustrative, not byte-faithful -- compare the README divergence table against the captured pair before citing it as ground truth. Its identifiers are placeholders, so the privacy gate only exempts the bare telemetry key names."
+    },
+    "gpt56_lite_bundle.json": {
+      "origin": "synthetic",
+      "model_slug": "gpt-5.6-sol",
+      "transport": "http",
+      "captured_at": null,
+      "codex_version": null,
+      "catalog_sha256": null,
+      "carries_client_telemetry": true,
+      "strip_item_ids": false,
+      "sanitisation": [],
+      "expected_view": "declined",
+      "expected_view_decline": {
+        "reason": "not_portable_lite_namespace",
+        "detail": "reasoning.context"
+      },
+      "expected_portability_verdict": {
+        "declared_tool_types": ["custom", "namespace"],
+        "supports_vision": true,
+        "portable": false,
+        "reason": "not_portable_lite_namespace",
+        "detail": "additional_tools"
+      },
+      "expected_transcript_is_source_free": false,
+      "notes": "Hand-written pre-strip Responses-Lite fixture. Its reasoning.context decline is the one verdict the synthetic pair gets right against a real capture; its namespaces, developer prefix and empty instructions do not match Codex 0.154.0."
+    }
+  }
+}

@@ -3,8 +3,7 @@
 Every mutation is attributed to the calling principal (``AuditActor``), bumps
 the ``dashboard_users`` cache namespace so peers drop their copy, and applies
 the invariants in one place: no self role/status change, at least one active
-admin preset, delegation subset checks, the compat ``admin`` lock, and the
-credential-required rule.
+admin preset, delegation subset checks, and the credential-required rule.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 
 import app.modules.dashboard_users.repository as users_repository
-from app.core.audit.service import AuditActor, AuditDetails, AuditService, AuditTarget
+from app.core.audit.service import AuditActor, AuditDetails, AuditService, AuditSeverity, AuditTarget
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.dashboard_access import (
     PRESET_ROLE_IDS,
@@ -45,6 +44,12 @@ from app.db.models import (
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
 from app.modules.dashboard_roles.service import resolve_assignable_role, resolve_role_grants
+from app.modules.dashboard_users.break_glass import (
+    BreakGlassRoleRequiredError,
+    LastBreakGlassProtectedError,
+    assert_break_glass_remains,
+    is_admin_preset,
+)
 from app.modules.dashboard_users.credentials import assert_credential_remains
 from app.modules.dashboard_users.repository import (
     DashboardUsersRepository,
@@ -93,10 +98,6 @@ class SelfModificationForbiddenError(ValueError):
 
 
 class LastAdminProtectedError(ValueError):
-    pass
-
-
-class CompatUserLockedError(ValueError):
     pass
 
 
@@ -195,7 +196,7 @@ def _is_active(user: DashboardUser) -> bool:
 
 
 def _is_admin_preset(user: DashboardUser) -> bool:
-    return user.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]
+    return is_admin_preset(user.role_id)
 
 
 def _user_actor(user: DashboardUser) -> AuditActor:
@@ -292,7 +293,13 @@ class DashboardUsersService:
 
     @staticmethod
     def _new_username(raw: str) -> str:
-        """Normalise and validate a username chosen for a person; ``admin`` stays the break-glass account's."""
+        """Normalise and validate a username chosen for a person; ``admin`` stays the break-glass account's.
+
+        The reservation is a rule about the *name*: the bootstrapped account
+        may be renamed away from it, and no account -- including that one --
+        may take it afterwards, so the name the recovery runbooks use can never
+        come to mean somebody else.
+        """
 
         username = normalize_username(raw)
         if not is_valid_username(username):
@@ -300,6 +307,19 @@ class DashboardUsersService:
         if username == COMPAT_ADMIN_USERNAME:
             raise InvalidUsernameError("'admin' is reserved for the local break-glass account")
         return username
+
+    @classmethod
+    def _renamed_username(
+        cls, user: DashboardUser, payload: DashboardUserUpdateRequest, fields: set[str]
+    ) -> str | None:
+        """The normalised new name, or ``None`` when the request does not rename."""
+
+        if "username" not in fields:
+            return None
+        if payload.username is None:
+            raise InvalidUsernameError("A username cannot be cleared")
+        username = cls._new_username(payload.username)
+        return None if username == user.username else username
 
     async def _expected_identity(self, payload: DashboardUserCreateRequest) -> ExpectedIdentityRequest | None:
         """Validate the SSO fields: they need an active non-password provider, and the
@@ -333,9 +353,10 @@ class DashboardUsersService:
     async def update_user(
         self, principal: DashboardPrincipal, user_id: str, payload: DashboardUserUpdateRequest, *, actor_ip: str | None
     ) -> UserListing:
-        """Rules, in this order: compat lock, self, invite pending, externally
-        managed role, delegation (new role), act-on (current role), last admin,
-        credential required."""
+        """Rules, in this order: self, invite pending, externally managed role,
+        delegation (new role), act-on (current role), last admin, last
+        qualifying break-glass, credential required. The account the install
+        bootstrapped is subject to exactly these and to nothing else."""
 
         caller_id = self._require_account(principal)
         await self._purge_expired()
@@ -345,8 +366,18 @@ class DashboardUsersService:
         fields = payload.model_fields_set
         role_changes = payload.role_id is not None and payload.role_id != user.role_id
         new_status = payload.status if payload.status is not None and payload.status != user.status else None
-        if (role_changes or new_status is not None) and user.username == COMPAT_ADMIN_USERNAME:
-            raise CompatUserLockedError("The migrated 'admin' account keeps its role and status in this release")
+        designation = (
+            payload.is_break_glass
+            if payload.is_break_glass is not None and payload.is_break_glass != user.is_break_glass
+            else None
+        )
+        # A rename is not a role or status change: it is allowed on the
+        # caller's own account and never moves ``session_generation``. It is
+        # validated up front so a taken or reserved name is refused before any
+        # other field is applied.
+        new_username = self._renamed_username(user, payload, fields)
+        if new_username is not None and await self._repo.get_by_username(new_username) is not None:
+            raise UsernameTakenError("Username is already taken")
         if (role_changes or new_status is not None) and is_self:
             raise SelfModificationForbiddenError("You cannot change your own role or status")
         if new_status is not None and user.status == DashboardUserStatus.INVITED.value:
@@ -362,6 +393,11 @@ class DashboardUsersService:
             raise RoleManagedExternallyError(
                 "That account's role is managed by its sign-in method; repeat with force to take it over"
             )
+        designation_takes_over = designation is True and user.role_source != DashboardUserRoleSource.MANUAL.value
+        if overridden_source is None and designation_takes_over:
+            # Designating an emergency account takes its role over by hand;
+            # it must not be a role the next sign-in can move.
+            overridden_source = user.role_source
         new_role: DashboardRoleRecord | None = None
         if role_changes:
             assert payload.role_id is not None
@@ -371,6 +407,16 @@ class DashboardUsersService:
             assert_can_act_on(principal.grants, resolve_role_grants(user.role))
         role_id_after = new_role.id if new_role is not None else user.role_id
         status_after = new_status or user.status
+        # The designation says "this account is the way in when the identity
+        # provider is not": it is meaningless on any other role, and it must
+        # never be a role a provider can re-evaluate away. Asking for it on a
+        # non-admin is a mistake; a role change that moves a designated
+        # account off admin simply drops it -- and then meets the guard below.
+        if designation is True and not is_admin_preset(role_id_after):
+            raise BreakGlassRoleRequiredError("Only an admin account can be an emergency (break-glass) account")
+        designation_after = (user.is_break_glass if designation is None else designation) and is_admin_preset(
+            role_id_after
+        )
         leaves_admin = (
             _is_active(user)
             and _is_admin_preset(user)
@@ -378,6 +424,11 @@ class DashboardUsersService:
         )
         if leaves_admin:
             await self._assert_other_active_admin(user.id)
+        # One guard, whatever the field: demoting, disabling and clearing the
+        # designation are the same question to the install.
+        loses_break_glass = await self.assert_break_glass_remains(
+            user, role_id=role_id_after, status=status_after, is_break_glass=designation_after
+        )
         if new_status == DashboardUserStatus.ACTIVE.value:
             assert_credential_remains(
                 password_hash=user.password_hash,
@@ -386,34 +437,74 @@ class DashboardUsersService:
             )
 
         old_role_slug = user.role.slug
+        old_username = user.username
         new_role_slug = new_role.slug if new_role is not None else None
         key_hashes: list[str] = []
         try:
             profile_changed = await self._apply_profile(user, payload, fields)
+            if new_username is not None:
+                user.username = new_username
             if new_status == DashboardUserStatus.DISABLED.value:
                 key_hashes = await self._repo.deactivate_owned_keys(user.id)
-            if overridden_source is not None:
-                # Taken over by hand: no later re-evaluation moves this role again.
+            if overridden_source is not None or designation_after:
+                # Taken over by hand (or designated): no later re-evaluation
+                # moves this role again -- which is what makes the mapping
+                # exemption a fact rather than a check.
                 user.role_source = DashboardUserRoleSource.MANUAL.value
-            if leaves_admin:
-                # The invariant is part of the write: the row only changes while
-                # another active admin exists at the moment of the UPDATE.
-                if not await self._repo.update_role_status_guarded(user.id, role_id=role_id_after, status=status_after):
+            if leaves_admin or loses_break_glass:
+                # The invariants are part of the write: the row only changes
+                # while another active admin (and, once local sign-in is
+                # restricted, another qualifying emergency account) exists at
+                # the moment of the UPDATE.
+                if not await self._repo.update_role_status_guarded(
+                    user.id,
+                    role_id=role_id_after,
+                    status=status_after,
+                    is_break_glass=designation_after,
+                    require_other_admin=leaves_admin,
+                    require_other_break_glass=loses_break_glass,
+                ):
                     await self._repo.rollback()
-                    raise LastAdminProtectedError("At least one active admin account must remain")
+                    if leaves_admin and await self._repo.count_active_admins(exclude_user_id=user.id) == 0:
+                        raise LastAdminProtectedError("At least one active admin account must remain")
+                    raise LastBreakGlassProtectedError(
+                        "This is the only emergency account that can still sign in while local sign-in is "
+                        "restricted; designate another admin with two-factor first"
+                    )
             else:
                 user.role_id = role_id_after
                 user.status = status_after
+                user.is_break_glass = designation_after
             bump = new_role is not None or new_status == DashboardUserStatus.DISABLED.value
             user = await self._repo.commit_user(user.id, bump_generation=bump)
         except IntegrityError as exc:
             await self._repo.rollback()
+            # A concurrent writer took the name or the address between the
+            # pre-check and this commit; the unique index says which.
+            if new_username is not None and await self._repo.conflicting_field(new_username, None) == "username":
+                raise UsernameTakenError("Username is already taken") from exc
             raise EmailTakenError("E-mail is already in use") from exc
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
 
-        if profile_changed:
-            self._audit("user_updated", principal, user.id, actor_ip, {"username": user.username})
+        if new_username is not None:
+            self._audit(
+                "user_renamed",
+                principal,
+                user.id,
+                actor_ip,
+                {"username": user.username, "from": old_username, "to": user.username},
+            )
+        if profile_changed or designation is not None:
+            self._audit(
+                "user_updated",
+                principal,
+                user.id,
+                actor_ip,
+                {"username": user.username, "is_break_glass": user.is_break_glass}
+                if designation is not None
+                else {"username": user.username},
+            )
         if new_role is not None:
             self._audit(
                 "user_role_changed",
@@ -471,21 +562,128 @@ class DashboardUsersService:
         user = await self._get(user_id)
         if user.id == caller_id:
             raise SelfModificationForbiddenError("You cannot delete your own account")
-        if user.username == COMPAT_ADMIN_USERNAME:
-            raise CompatUserLockedError("The migrated 'admin' account cannot be deleted in this release")
         counts_as_admin = _is_active(user) and _is_admin_preset(user)
         if counts_as_admin:
             await self._assert_other_active_admin(user.id)
+        counts_as_break_glass = await self.assert_break_glass_remains(user, is_break_glass=False)
         assert_can_act_on(principal.grants, resolve_role_grants(user.role))
         details: AuditDetails = {"username": user.username, "role": user.role.slug}
-        key_hashes = await self._repo.delete_user(user, require_other_admin=counts_as_admin)
+        key_hashes = await self._repo.delete_user(
+            user, require_other_admin=counts_as_admin, require_other_break_glass=counts_as_break_glass
+        )
         if key_hashes is None:
-            raise LastAdminProtectedError("At least one active admin account must remain")
+            if counts_as_admin and await self._repo.count_active_admins(exclude_user_id=user_id) == 0:
+                raise LastAdminProtectedError("At least one active admin account must remain")
+            raise LastBreakGlassProtectedError(
+                "This is the only emergency account that can still sign in while local sign-in is restricted; "
+                "designate another admin with two-factor first"
+            )
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
         self._audit("user_deleted", principal, user_id, actor_ip, details)
         if key_hashes:
             self._audit("user_keys_deactivated", principal, user_id, actor_ip, {"count": len(key_hashes)})
+
+    # --- the break-glass invariant (one guard, every mutation) ---
+
+    async def assert_break_glass_remains(
+        self,
+        user: DashboardUser,
+        *,
+        role_id: str | None = None,
+        status: str | None = None,
+        is_break_glass: bool | None = None,
+        has_totp: bool | None = None,
+        has_password: bool | None = None,
+    ) -> bool:
+        """Refuse a change that would leave no qualifying emergency account (PLAN §4.2).
+
+        The single entry point for every call site: the role and status
+        branches of the account PATCH, deletion, clearing the designation,
+        self-service ``/totp/disable`` (through the auth service, which calls
+        the same free function), the administrative TOTP reset, and
+        :meth:`deactivate_user`. Each keyword is the value the field would
+        carry after the write. Returns whether the caller's conditional write
+        must re-apply the count (see the free function).
+        """
+
+        settings = await self._auth.get_settings()
+        return await assert_break_glass_remains(
+            user,
+            policy=settings.local_login_policy,
+            count_other_qualifying=lambda: self._repo.count_qualifying_break_glass(exclude_user_id=user.id),
+            role_id=role_id,
+            status=status,
+            is_break_glass=is_break_glass,
+            has_totp=has_totp,
+            has_password=has_password,
+        )
+
+    async def deactivate_user(
+        self,
+        user_id: str,
+        *,
+        actor: AuditActor,
+        actor_ip: str | None,
+        source: str,
+    ) -> bool:
+        """Disable an account through one back-channel: guard, status, generation, key cascade, audit.
+
+        This is the shared path for deactivations that do not come from the
+        account PATCH — the SCIM ``active=false`` endpoint of Phase 3b and the
+        identity resolver — so none of them can bypass the break-glass guard.
+        A refusal audits ``scim_deprovision_refused`` next to raising, because
+        the caller is a machine whose 409 nobody reads. Returns ``False`` when
+        the account was already inactive (nothing to do, nothing audited).
+        """
+
+        await self._repo.acquire_write_intent()
+        user = await self._get(user_id)
+        if not _is_active(user):
+            return False
+        try:
+            guarded = await self.assert_break_glass_remains(user, status=DashboardUserStatus.DISABLED.value)
+        except LastBreakGlassProtectedError:
+            AuditService.log_async(
+                "scim_deprovision_refused",
+                actor_ip=actor_ip,
+                details={"username": user.username, "source": source, "reason": "last_break_glass_protected"},
+                actor=actor,
+                target=AuditTarget("user", user.id),
+                severity=AuditSeverity.WARNING,
+            )
+            raise
+        if _is_admin_preset(user):
+            await self._assert_other_active_admin(user.id)
+        key_hashes = await self._repo.deactivate_owned_keys(user.id)
+        if not await self._repo.update_role_status_guarded(
+            user.id,
+            role_id=user.role_id,
+            status=DashboardUserStatus.DISABLED.value,
+            require_other_admin=_is_admin_preset(user),
+            require_other_break_glass=guarded,
+        ):
+            await self._repo.rollback()
+            raise LastAdminProtectedError("At least one active admin account must remain")
+        username = user.username
+        await self._repo.commit_user(user.id, bump_generation=True)
+        await self._invalidate_users()
+        await self._invalidate_api_keys(key_hashes)
+        AuditService.log_async(
+            "user_disabled",
+            actor_ip=actor_ip,
+            details={"username": username, "source": source},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+        )
+        AuditService.log_async(
+            "user_keys_deactivated",
+            actor_ip=actor_ip,
+            details={"count": len(key_hashes), "source": source},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+        )
+        return True
 
     # --- invites (management side) ---
 
@@ -538,14 +736,19 @@ class DashboardUsersService:
     async def reset_totp(self, principal: DashboardPrincipal, user_id: str, *, actor_ip: str | None) -> None:
         caller_id = self._require_account(principal)
         await self._purge_expired()
+        # Serialised with the other account mutations *before the first read*,
+        # exactly as the account PATCH does, and held until the secret write
+        # commits: the write has no conditional form, so the lock is the only
+        # thing stopping two admins from clearing the last two second factors
+        # after both passed the count. Acquiring before the first read also
+        # keeps ``BEGIN IMMEDIATE`` on its primary path rather than the
+        # in-transaction fallback.
+        await self._repo.acquire_write_intent()
         user = await self._get(user_id)
         if user.id == caller_id:
             raise SelfModificationForbiddenError("Disable your own TOTP through /totp/disable")
-        if user.username == COMPAT_ADMIN_USERNAME and (await self._auth.get_settings()).totp_required_on_login:
-            # A previous-release replica reads the legacy columns: without a
-            # secret and with the policy on it would refuse this account forever.
-            raise CompatUserLockedError("Turn off 'require TOTP on login' before resetting the 'admin' account's TOTP")
         assert_can_act_on(principal.grants, resolve_role_grants(user.role))
+        await self.assert_break_glass_remains(user, has_totp=False)
         await self._auth.set_user_totp_secret(user.id, None, bump_generation=True, preserve_policy=True)
         await self._invalidate_users()
         self._audit("user_totp_reset", principal, user.id, actor_ip, {"username": user.username})

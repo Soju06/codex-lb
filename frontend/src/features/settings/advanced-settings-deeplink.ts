@@ -31,7 +31,14 @@ export function accessTabFromHash(hash: string): AccessTab | null {
 export const ORGANISATION_GROUP_ID = "organisation";
 export const ORGANISATION_HASH = `#${ORGANISATION_GROUP_ID}`;
 export const ORGANISATION_REFUSED_HASH = "#organisation-refused";
+/** The login-policy card's own anchor: the id is on the card's `<section>`. */
+export const ORGANISATION_LOGIN_POLICY_ID = "organisation-login-policy";
+export const ORGANISATION_LOGIN_POLICY_HASH = `#${ORGANISATION_LOGIN_POLICY_ID}`;
 
 export function shouldExpandOrganisationSettings(hash: string): boolean {
-  return hash === ORGANISATION_HASH || hash === ORGANISATION_REFUSED_HASH;
+  return (
+    hash === ORGANISATION_HASH ||
+    hash === ORGANISATION_REFUSED_HASH ||
+    hash === ORGANISATION_LOGIN_POLICY_HASH
+  );
 }

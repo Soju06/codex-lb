@@ -1377,6 +1377,43 @@ def test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly():
     assert _account_selection_recovery_sleep_seconds(selection) == 2.0
 
 
+@pytest.mark.asyncio
+async def test_account_selection_recovery_sleep_refuses_a_self_excluded_hard_affinity_owner():
+    """#2163: the selector reports that the hard ``CODEX_SESSION`` owner it
+    resolved is one of the caller's own ``exclude_account_ids``. That owner
+    cannot become selectable while the exclusion holds and a hard row never
+    spills, so the 2s owner-recovery window buys nothing: repeating it burns
+    the whole request budget (7200s on the HTTP bridge) before the same
+    failure surfaces. The wait is refused without sleeping once, and the same
+    ``hard_affinity_saturated`` without that proof keeps its recovery wait
+    (``test_account_selection_recovery_sleep_retries_hard_affinity_owner_briefly``)."""
+    selection = AccountSelection(
+        account=None,
+        error_message="Hard affinity owner account is unavailable",
+        error_code="hard_affinity_saturated",
+        hard_affinity_owner_excluded=True,
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    assert _account_selection_recovery_sleep_seconds(selection) is None
+    waited = await _sleep_for_account_selection_recovery(
+        selection,
+        request_id="req_self_excluded_hard_owner",
+        kind="http_bridge",
+        request_stage="reattach",
+        model="gpt-5.1",
+        max_sleep_seconds=7200.0,
+        scheduler=cast(Any, SimpleNamespace(sleep=fake_sleep)),
+        clock=REAL_CLOCK,
+    )
+
+    assert waited is False
+    assert sleeps == []
+
+
 def test_account_selection_recovery_sleep_ignores_generic_no_available_accounts():
     selection = AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
 
@@ -10018,6 +10055,71 @@ async def test_native_codex_stream_reraises_transport_failure_without_terminal_e
     assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
 
 
+@pytest.mark.asyncio
+async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmarked_terminal() -> None:
+    """A refusal the proxy raised before dispatch keeps its terminal event.
+
+    Regression for issue #2364: the denied-anchor fence reports the public code
+    ``stream_incomplete``, which is also how an upstream transport failure ends,
+    so without the provenance flag the native lifecycle aborted the committed
+    body and the client received nothing at all. The terminal must also stay
+    unmarked — ``_normalize_public_responses_stream`` turns a terminal marked as
+    a synthetic transport failure back into an abort for native clients.
+    """
+
+    def _refusal(*, local_pre_dispatch_refusal: bool) -> proxy_module.ProxyResponseError:
+        return proxy_module.ProxyResponseError(
+            502,
+            openai_error("stream_incomplete", "The previous response anchor was rejected upstream; retry the request."),
+            local_pre_dispatch_refusal=local_pre_dispatch_refusal,
+        )
+
+    async def refused_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=True)
+        yield ""  # pragma: no cover
+
+    events = [
+        parse_sse_data_json(event_block)
+        async for event_block in proxy_api._stream_response_error_events(
+            refused_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    assert events[0] is not None
+    assert events[0]["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], events[0]["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "stream_incomplete"
+    # The actionable half of the fix is the message, not the code: a regression
+    # that kept the terminal but dropped the retry instruction would leave the
+    # client with the same dead end #2364 reported.
+    assert error["message"] == "The previous response anchor was rejected upstream; retry the request."
+    assert "_codex_lb_synthetic_transport_failure" not in events[0]
+
+    async def unflagged_stream() -> AsyncIterator[str]:
+        raise _refusal(local_pre_dispatch_refusal=False)
+        yield ""  # pragma: no cover
+
+    # The same error without the provenance flag still ends the native stream
+    # without a terminal: the flag is the whole of the new behaviour.
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        _ = [
+            event
+            async for event in proxy_api._stream_response_error_events(
+                unflagged_stream(),
+                owns_reservation=False,
+                reservation=None,
+                preserve_native_failure_lifecycle=True,
+            )
+        ]
+
+    assert _proxy_error_code(exc_info.value) == "stream_incomplete"
+
+
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
     request = Request({"type": "http", "method": "POST", "path": "/backend-api/codex/responses", "headers": []})
     error = proxy_module.ProxyResponseError(
@@ -13866,7 +13968,11 @@ def test_sticky_key_for_responses_request_derives_when_payload_key_is_whitespace
         {
             "model": "gpt-5.1",
             "instructions": "hi",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "hi"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "again"}]},
+            ],
             "stream": True,
             "prompt_cache_key": "   ",
         }

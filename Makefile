@@ -43,6 +43,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
 	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_account_pending_deletion_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_bridge_continuity_abandonment_migration_upgrade_and_downgrade \
+	tests/integration/test_repositories.py::test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \
@@ -65,7 +67,7 @@ help:
 	@printf '%s\n' \
 	  'Common targets:' \
 	  '  make lint                    ruff check + format check + architecture checks' \
-	  '  make architecture-check      proxy architecture fitness ratchets' \
+	  '  make architecture-check      proxy, settings, and migration-graph fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make rust-check              fmt + clippy + tests + release build' \
 	  '  make rust-audit              cargo-deny dependency policy' \
@@ -73,6 +75,7 @@ help:
 	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
+	  '  make test-overflow-drills    subscription-overflow canary drill rehearsals' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package/rust-check' \
 	  '  make ci                      full local CI gate'
@@ -114,6 +117,7 @@ architecture-check:
 	uv run python scripts/check_cancellation_safety.py
 	uv run python scripts/check_proxy_timing_seams.py
 	uv run python scripts/check_settings_tiers.py
+	uv run python scripts/check_migration_topology.py
 
 typecheck:
 	uv sync --dev --frozen
@@ -138,7 +142,7 @@ rust-audit:
 
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
-	test-integration-bridge test-e2e test-postgres
+	test-integration-bridge test-overflow-drills test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
@@ -172,6 +176,15 @@ test-integration-bridge: frontend-build
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
 	  tests/integration/test_http_responses_bridge.py \
 	  tests/integration/test_proxy_websocket_responses.py
+
+# The pre-flip canary drill rehearsals (docs/routing.md "Canary and drills").
+# Marker-selected rather than path-selected so a drill can move modules without
+# staling the runbook; ``tests/integration`` only bounds collection. Already
+# covered by test-integration-core -- this target exists so an operator can run
+# exactly the drill list before standing a canary up.
+test-overflow-drills:
+	uv sync --dev --frozen
+	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -m overflow_drill tests/integration
 
 test-e2e: frontend-build
 	uv sync --dev --frozen

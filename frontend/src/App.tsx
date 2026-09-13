@@ -109,6 +109,9 @@ export default function App() {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             {/* Public pending screen: once the account exists, "Try again" lands in the app. */}
             <Route path="/auth/pending" element={<Navigate to="/dashboard" replace />} />
+            {/* Public login route (`?local=1` is the break-glass form): a session
+                that already exists belongs in the app, not on a not-found page. */}
+            <Route path="/login" element={<Navigate to="/dashboard" replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />

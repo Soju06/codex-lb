@@ -47,7 +47,7 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 
 export const STEP_UP_REQUIRED_CODE = "step_up_required";
 export const STEP_UP_UNAVAILABLE_CODE = "step_up_unavailable";
-export type StepUpMethod = "password" | "totp";
+export type StepUpMethod = "password" | "totp" | "oidc";
 
 export type StepUpHandlers = {
   /** Ask the person to re-verify with `methods`; resolve `true` once `/step-up` succeeded, `false` if they gave up. */
@@ -65,7 +65,7 @@ export function setStepUpHandlers(handlers: StepUpHandlers | null): void {
 
 function stepUpMethodsFrom(details: unknown): StepUpMethod[] {
   const parsed = z
-    .object({ details: z.object({ methods: z.array(z.enum(["password", "totp"])) }) })
+    .object({ details: z.object({ methods: z.array(z.enum(["password", "totp", "oidc"])) }) })
     .safeParse(details);
   return parsed.success ? parsed.data.details.methods : [];
 }

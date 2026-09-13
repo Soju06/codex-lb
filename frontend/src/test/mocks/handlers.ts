@@ -84,6 +84,7 @@ const DashboardUserCreatePayloadSchema = z.looseObject({
 });
 
 const DashboardUserUpdatePayloadSchema = z.looseObject({
+  username: z.string().optional(),
   roleId: z.string().optional(),
   status: z.enum(["active", "disabled"]).optional(),
   force: z.boolean().optional(),
@@ -319,6 +320,26 @@ async function parseJsonBody<T>(
 /** Winner-first order onto the contiguous `N..1` priorities the server owns. */
 function renumberMappings(ordered: readonly RoleMapping[]): RoleMapping[] {
   return ordered.map((mapping, index) => ({ ...mapping, priority: ordered.length - index }));
+}
+
+/**
+ * `admin` is reserved for the local break-glass account, whether or not a row
+ * currently holds the name.
+ *
+ * `DashboardUsersService._new_username` refuses it before it looks anything up,
+ * so the reservation outlives the row: once the bootstrap account is renamed
+ * away, no account — including that one — may take the name back. A mock that
+ * only checked for a duplicate would accept that rename and let a test prove a
+ * workflow production refuses.
+ */
+const RESERVED_USERNAME = "admin";
+
+function reservedUsernameRefusal(username: string | null | undefined): Response | null {
+  if (username !== RESERVED_USERNAME) return null;
+  return HttpResponse.json(
+    { error: { code: "validation_error", message: "'admin' is reserved for the local break-glass account" } },
+    { status: 422 },
+  );
 }
 
 type MockState = {
@@ -2313,6 +2334,8 @@ export const handlers = [
     if (!payload) {
       return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
     }
+    const reservedOnCreate = reservedUsernameRefusal(payload.username);
+    if (reservedOnCreate) return reservedOnCreate;
     if (state.dashboardUsers.some((user) => user.username === payload.username)) {
       return HttpResponse.json(
         { error: { code: "username_taken", message: "Username is already taken" } },
@@ -2370,9 +2393,16 @@ export const handlers = [
       return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
     }
     const changesAccess = Boolean(payload.roleId && payload.roleId !== user.role.id) || Boolean(payload.status);
-    if (user.username === "admin" && changesAccess) {
+    // A rename is neither: it is allowed on any account, including the caller's own.
+    // The reservation is checked on the name that was sent, before the "did it
+    // actually change" filter, because the service validates it the same way --
+    // so even the bootstrap account re-sending its own `admin` is refused.
+    const reservedOnRename = reservedUsernameRefusal(payload.username);
+    if (reservedOnRename) return reservedOnRename;
+    const renamesTo = payload.username && payload.username !== user.username ? payload.username : null;
+    if (renamesTo && state.dashboardUsers.some((candidate) => candidate.username === renamesTo)) {
       return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account keeps its role and status" } },
+        { error: { code: "username_taken", message: "Username is already taken" } },
         { status: 409 },
       );
     }
@@ -2408,6 +2438,7 @@ export const handlers = [
     const role = payload.roleId ? state.dashboardRoles.find((candidate) => candidate.id === payload.roleId) : null;
     const updated: DashboardUser = {
       ...user,
+      username: renamesTo ?? user.username,
       role: role ? { id: role.id, slug: role.slug, name: role.name, kind: role.kind } : user.role,
       status: payload.status ?? user.status,
       roleSource: payload.force ? "manual" : user.roleSource,
@@ -2424,12 +2455,6 @@ export const handlers = [
     if (user.id === state.authSession.user?.id) {
       return HttpResponse.json(
         { error: { code: "self_modification_forbidden", message: "You cannot delete your own account" } },
-        { status: 409 },
-      );
-    }
-    if (user.username === "admin") {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account cannot be deleted" } },
         { status: 409 },
       );
     }
@@ -2481,12 +2506,6 @@ export const handlers = [
     if (user.id === state.authSession.user?.id) {
       return HttpResponse.json(
         { error: { code: "self_modification_forbidden", message: "Disable your own TOTP from Settings" } },
-        { status: 409 },
-      );
-    }
-    if (user.username === "admin" && state.settings.totpRequiredOnLogin) {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "Resetting the migrated admin's TOTP would lock it out" } },
         { status: 409 },
       );
     }

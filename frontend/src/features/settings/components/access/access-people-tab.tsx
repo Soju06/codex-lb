@@ -140,8 +140,8 @@ export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, on
   // The configured policy, not the session's per-login challenge flag (which
   // is false again once this admin has passed TOTP). Shares the Settings
   // page's cache entry and loads it on `/settings/access`. Unknown while it
-  // loads or after a failure: the tab then neither states a policy nor offers
-  // the action that policy would forbid (fail closed).
+  // loads or after a failure: the tab then states no policy at all rather than
+  // guessing one (fail closed).
   const settingsQuery = useQuery({ queryKey: ["settings", "detail"], queryFn: getSettings });
   const totpPolicyOn: boolean | undefined = settingsQuery.data?.totpRequiredOnLogin;
   const mutations = useAccessMutations({
@@ -246,7 +246,6 @@ export function AccessPeopleTab({ fullPage = false, onOpenMySignIn, onInvite, on
                     <PeopleRowActions
                       user={user}
                       isSelf={isSelf}
-                      totpPolicyOn={totpPolicyOn}
                       roles={roles}
                       assignableRoleIds={assignableRoleIds}
                       mutations={mutations}

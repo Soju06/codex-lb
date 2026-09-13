@@ -48,7 +48,47 @@ describe("AuthSessionSchema", () => {
       assignableRoleIds: [],
       localPasswordConfigured: false,
       stepUp: null,
+      breakGlassSession: false,
     });
+  });
+
+  it("falls back to the open policy rather than failing the whole session on an unknown value", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      login: { usernameField: "shown", providers: [], localLogin: "something_new", pendingIdentity: false },
+      accessSummary: {
+        usersTotal: 1,
+        usersActive: 1,
+        usersInvited: 0,
+        usersDisabled: 0,
+        pendingInvites: 0,
+        nonAdminUsers: 0,
+        customRoles: 0,
+        providersEnabled: ["password"],
+        roleMappings: 0,
+        scimTokens: 0,
+        auditSinks: 0,
+        localLoginPolicy: "something_new",
+      },
+    });
+
+    expect(parsed.login.localLogin).toBe("enabled");
+    expect(parsed.accessSummary?.localLoginPolicy).toBe("enabled");
+  });
+
+  it("reports a break-glass session when the server marks one", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      breakGlassSession: true,
+    });
+
+    expect(parsed.breakGlassSession).toBe(true);
   });
 
   it("defaults the account fields for payloads that predate them", () => {

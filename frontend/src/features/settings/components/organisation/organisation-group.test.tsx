@@ -1,15 +1,18 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { ORGANISATION_LOGIN_POLICY_ID } from "@/features/settings/advanced-settings-deeplink";
 import { OrganisationSettingsGroup } from "@/features/settings/components/organisation/organisation-group";
 import { renderAt, signInAsTeamAdmin } from "@/test/access-test-utils";
 import {
   ADMIN_PERMISSIONS,
   createAccessSummary,
   createAuthProvider,
+  createDashboardSettings,
+  createDashboardUser,
   createDefaultDashboardRoles,
   createRoleMapping,
   OPERATOR_PERMISSIONS,
@@ -397,5 +400,245 @@ describe("OrganisationSettingsGroup", () => {
     // is only addressable as hidden content.
     expect(await screen.findByRole("heading", { name: "Refused sign-ins" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Sign-in rules", hidden: true })).toBeInTheDocument();
+  });
+  describe("login-policy card", () => {
+    const ENROLLED_ADMIN = createDashboardUser({ username: "rescue" });
+    const UNENROLLED_ADMIN = createDashboardUser({ username: "rescue", totpConfigured: false });
+
+    function useUsers(...users: ReturnType<typeof createDashboardUser>[]) {
+      server.use(http.get("/api/dashboard-users", () => HttpResponse.json(users)));
+    }
+
+    it("renders even on an install with no reverse proxy, where the other two cards do not", async () => {
+      const user = userEvent.setup();
+      server.use(http.get("/api/auth-providers", () => HttpResponse.json([])));
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(await screen.findByRole("heading", { name: "Password sign-in" })).toBeInTheDocument();
+      expect(screen.getByText("There is no company sign-in method to configure on this install yet.")).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Reverse-proxy sign-in" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Sign-in rules" })).not.toBeInTheDocument();
+    });
+
+    it("shows the emergency address and the account to save with it", async () => {
+      const user = userEvent.setup();
+      useUsers(ENROLLED_ADMIN);
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      const facts = await screen.findByTestId("organisation-emergency-facts");
+      expect(facts).toHaveTextContent("rescue");
+      expect(facts).toHaveTextContent(`${window.location.origin}/login?local=1`);
+      expect(facts).toHaveTextContent("Ready: it has two-factor, so it can always get back in.");
+    });
+
+    it("names the account to enrol while nothing qualifies", async () => {
+      const user = userEvent.setup();
+      useUsers(UNENROLLED_ADMIN);
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(
+        await screen.findByText(
+          "Turn on two-factor for rescue to qualify. Until then password sign-in cannot be restricted.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("organisation-emergency-facts")).toHaveTextContent("Not ready: it has no two-factor yet.");
+    });
+
+    it("says so plainly when no emergency account is designated at all", async () => {
+      const user = userEvent.setup();
+      useUsers(createDashboardUser({ username: "rescue", isBreakGlass: false }));
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(
+        await screen.findByText(
+          "No emergency account has been designated yet, so password sign-in cannot be restricted.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("saves the policy and refreshes the session so the rest of the page follows", async () => {
+      const user = userEvent.setup();
+      const refreshSession = vi.fn().mockResolvedValue(undefined);
+      signInAsTeamAdmin({ refreshSession });
+      useUsers(ENROLLED_ADMIN);
+      const puts: Record<string, unknown>[] = [];
+      server.use(
+        http.put("/api/settings", async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          puts.push(body);
+          return HttpResponse.json(
+            createDashboardSettings({ localLoginPolicy: body["localLoginPolicy"] as "break_glass_only" }),
+          );
+        }),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.click(await screen.findByRole("combobox", { name: "Allowed to sign in with a password" }));
+      await user.click(await screen.findByRole("option", { name: "The emergency account only" }));
+
+      await waitFor(() => expect(puts).toHaveLength(1));
+      expect(puts[0]).toMatchObject({ localLoginPolicy: "break_glass_only" });
+      await waitFor(() => expect(refreshSession).toHaveBeenCalled());
+    });
+
+    it("explains a refusal instead of echoing the server", async () => {
+      const user = userEvent.setup();
+      useUsers(UNENROLLED_ADMIN);
+      server.use(
+        http.put("/api/settings", () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: "break_glass_requires_totp",
+                message: "raw server message",
+                param: "rescue",
+                details: { username: "rescue" },
+              },
+            },
+            { status: 409 },
+          ),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.click(await screen.findByRole("combobox", { name: "Allowed to sign in with a password" }));
+      await user.click(await screen.findByRole("option", { name: "Administrators only" }));
+
+      expect(
+        await screen.findByText(
+          "Turn on two-factor for the emergency account first. Without it, restricting password sign-in could lock everybody out.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("raw server message")).not.toBeInTheDocument();
+    });
+
+    it("does not name an account it was not told about", async () => {
+      const user = userEvent.setup();
+      signInAsTeamAdmin({ permissions: ADMIN_PERMISSIONS.filter((grant) => grant !== "users:manage:all") });
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      const facts = await screen.findByTestId("organisation-emergency-facts");
+      expect(facts).toHaveTextContent("Permission to manage people is needed to see which account this is.");
+      expect(facts).not.toHaveTextContent("admin");
+    });
+
+    it("summarises a policy-only install without claiming a company login it does not have", () => {
+      signInAsTeamAdmin({ accessSummary: createAccessSummary({ localLoginPolicy: "break_glass_only" }) });
+      renderAt(<OrganisationSettingsGroup />);
+
+      expect(screen.getByTestId("organisation-group-line")).toHaveTextContent("Password sign-in is restricted.");
+      expect(screen.getByTestId("organisation-group-line")).not.toHaveTextContent("sign-in rules");
+    });
+
+    it("expands and scrolls from its own deep link", async () => {
+      renderAt(<OrganisationSettingsGroup />, "/settings#organisation-login-policy");
+
+      expect(await screen.findByRole("heading", { name: "Password sign-in" })).toBeInTheDocument();
+    });
+
+    it("waits for the group's own queries before scrolling to the card", async () => {
+      // The card's anchor lives behind the group's spinner, and the scroll is
+      // one animation-frame lookup that never retries: a deep link that raced
+      // the providers, rules and roles requests used to find nothing and leave
+      // the operator at the top of the page.
+      let openGate: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      const roles = createDefaultDashboardRoles();
+      server.use(
+        http.get("/api/auth-providers", async () => {
+          await gate;
+          return HttpResponse.json([createAuthProvider()]);
+        }),
+        http.get("/api/role-mappings", async () => {
+          await gate;
+          return HttpResponse.json([]);
+        }),
+        http.get("/api/role-mappings/assignable-roles", async () => {
+          await gate;
+          return HttpResponse.json(roles);
+        }),
+      );
+      const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+
+      renderAt(<OrganisationSettingsGroup />, "/settings#organisation-login-policy");
+
+      // The group is open on the spinner, so the anchor does not exist yet.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Hide organisation settings" })).toBeInTheDocument(),
+      );
+      expect(document.getElementById(ORGANISATION_LOGIN_POLICY_ID)).toBeNull();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+
+      openGate?.();
+
+      expect(await screen.findByRole("heading", { name: "Password sign-in" })).toBeInTheDocument();
+      await waitFor(() => {
+        const card = document.getElementById(ORGANISATION_LOGIN_POLICY_ID);
+        expect(card).not.toBeNull();
+        expect(scrollIntoView.mock.contexts).toContain(card);
+      });
+
+      scrollIntoView.mockRestore();
+    });
+
+    it("offers a retry instead of an endless spinner when the settings request fails", async () => {
+      const user = userEvent.setup();
+      let attempts = 0;
+      server.use(
+        http.get("/api/settings", () => {
+          attempts += 1;
+          return attempts === 1
+            ? HttpResponse.json({ error: { code: "internal_error", message: "boom" } }, { status: 500 })
+            : HttpResponse.json(createDashboardSettings({ localLoginPolicy: "admins_only" }));
+        }),
+      );
+      useUsers(ENROLLED_ADMIN);
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(await screen.findByText("The current setting could not be loaded.")).toBeInTheDocument();
+      // Never a select offering "Everyone" as though that were the saved value.
+      expect(screen.queryByRole("combobox", { name: "Allowed to sign in with a password" })).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByRole("combobox", { name: "Allowed to sign in with a password" })).toHaveTextContent(
+        "Administrators only",
+      );
+    });
+
+    it("does not turn an unreadable people list into 'nobody is designated'", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get("/api/dashboard-users", () =>
+          HttpResponse.json({ error: { code: "internal_error", message: "boom" } }, { status: 500 }),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(
+        await screen.findByText(
+          "The list of accounts could not be loaded, so this cannot say whether an emergency account is ready.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(
+          "No emergency account has been designated yet, so password sign-in cannot be restricted.",
+        ),
+      ).not.toBeInTheDocument();
+      const facts = screen.getByTestId("organisation-emergency-facts");
+      expect(facts).toHaveTextContent("Not known right now");
+      expect(facts).not.toHaveTextContent("Ready: it has two-factor");
+    });
   });
 });

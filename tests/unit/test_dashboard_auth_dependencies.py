@@ -124,6 +124,7 @@ def _settings(**overrides: object) -> SimpleNamespace:
         "guest_access_enabled": False,
         "guest_password_hash": None,
         "guest_session_generation": 0,
+        "local_login_policy": "enabled",
     }
     fields.update(overrides)
     return SimpleNamespace(**fields)

@@ -127,14 +127,24 @@ async def test_derived_key_is_observed_without_persisting_prompt(async_client, m
     for _ in range(2):
         response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": "hello", "stream": True})
         assert "response.completed" in response.text
-    assert sent_keys == ["std-2cf24dba5fb0", "std-2cf24dba5fb0"]
+    # The derived key is anchored to the thread rather than to a hash of its
+    # text, so pin the properties the observation depends on -- one key reused
+    # across both turns, in the anchored ``v2t-`` namespace -- instead of the
+    # literal, which moves with the derivation.
+    assert len(sent_keys) == 2
+    assert sent_keys[0] == sent_keys[1]
+    derived_key = sent_keys[0]
+    assert derived_key is not None and derived_key.startswith("v2t-")
     logs = await async_client.get("/api/request-logs")
-    assert len(logs.json()["requests"]) == 2
-    for row in logs.json()["requests"]:
+    rows = logs.json()["requests"]
+    assert len(rows) == 2
+    hashes = {row["stickyKeyHash"] for row in rows}
+    assert len(hashes) == 1
+    for row in rows:
         assert row["stickyKeySource"] == "derived"
-        assert row["stickyKeyHash"] == "433f4703a32a3eb1"
+        assert row["stickyKeyHash"]
     assert "hello" not in logs.text
-    assert "std-2cf24dba5fb0" not in logs.text
+    assert derived_key not in logs.text
 
 
 @pytest.mark.asyncio

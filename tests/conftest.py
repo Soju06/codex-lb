@@ -542,6 +542,15 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        # Thread anchors are process-global by design (one live thread keeps
+        # one derived prompt_cache_key), so a body reused by the next test
+        # would otherwise resolve to the previous test's key and account.
+        from app.modules.proxy.thread_anchors import reset_thread_anchor_index
+
+        reset_thread_anchor_index()
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

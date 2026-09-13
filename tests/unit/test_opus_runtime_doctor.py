@@ -240,7 +240,10 @@ def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch
             self.calls += 1
             if self.calls == 1:
                 raise subprocess.TimeoutExpired("probe", timeout)
-            return "", ""
+            return (
+                _event(type="system", subtype="init", model="claude-fable-5-1", session_id="safe-session") + "\n",
+                "Operation not permitted; secret details omitted",
+            )
 
     process = Process()
     killed: list[tuple[int, int]] = []
@@ -250,6 +253,50 @@ def test_probe_timeout_kills_owned_process_group(monkeypatch: pytest.MonkeyPatch
     outcome = doctor.run_probe()
     assert outcome.error_class == "timeout"
     assert killed == [(process.pid, doctor.signal.SIGKILL)]
+    assert outcome.evidence == {
+        "event_count": 1,
+        "malformed_lines": 0,
+        "init_model": "claude-fable-5-1",
+        "session_id": "safe-session",
+        "last_event_type": "system",
+        "last_event_subtype": "init",
+        "terminal_subtype": None,
+        "parent_models": [],
+        "child_models": [],
+        "stderr_tags": ["operation_not_permitted"],
+    }
+
+
+def test_stream_diagnostics_sanitizes_models_and_classifies_stderr() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    stdout = "\n".join(
+        [
+            _event(type="system", subtype="init", model="claude-fable-5-1[1m]", session_id="session-1"),
+            _event(type="assistant", message={"model": "claude-opus-5", "content": []}),
+            _event(
+                type="assistant",
+                message={"model": "unsafe model with spaces SECRET", "content": []},
+                parent_tool_use_id="agent-1",
+            ),
+            _event(type="assistant", message={"model": "claude-opus-5", "content": []}, parent_tool_use_id="agent-1"),
+            _event(type="result", subtype="error", is_error=True),
+        ]
+    )
+    evidence = doctor.stream_diagnostics(stdout, "OAuth keychain rate limit connection refused SECRET")
+
+    assert evidence["init_model"] == "claude-fable-5-1[1m]"
+    assert evidence["session_id"] == "session-1"
+    assert evidence["parent_models"] == ["claude-opus-5"]
+    assert evidence["child_models"] == ["claude-opus-5"]
+    assert evidence["terminal_subtype"] == "error"
+    assert evidence["stderr_tags"] == ["auth", "keychain", "connection", "rate_limit"]
+    assert "SECRET" not in json.dumps(evidence)
+
+
+def test_probe_command_disables_slash_commands() -> None:
+    doctor = load_script("opus-runtime-doctor")
+    command = doctor._probe_command(Path("/safe/fable"), "safe prompt", "session")
+    assert "--disable-slash-commands" in command
 
 
 def test_schedule_claims_before_detach_and_gates_six_hours(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

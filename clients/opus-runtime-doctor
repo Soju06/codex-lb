@@ -8,6 +8,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -23,6 +24,7 @@ from typing import Any
 PROBE_INTERVAL_SECONDS = 6 * 60 * 60
 PROBE_TIMEOUT_SECONDS = 180
 EXPECTED_MODEL_DEFAULT = "claude-opus-5"
+SAFE_MODEL = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,100}$")
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,78 @@ def _claimed_at(value: Any) -> float:
 
 def _model_base(model: str) -> str:
     return model.removesuffix("[1m]")
+
+
+def _safe_model(value: Any) -> str | None:
+    return value if isinstance(value, str) and SAFE_MODEL.fullmatch(value) else None
+
+
+def _stderr_tags(stderr: str) -> list[str]:
+    lowered = stderr.lower()
+    patterns = (
+        ("permission_denied", ("permission denied", "eacces")),
+        ("operation_not_permitted", ("operation not permitted", "eperm")),
+        ("auth", ("authentication", "unauthorized", "not logged in", "oauth")),
+        ("keychain", ("keychain", "security framework")),
+        ("connection", ("connection refused", "could not connect", "network is unreachable", "timed out")),
+        ("rate_limit", ("rate limit", "rate_limit", "429", "usage limit")),
+    )
+    return [tag for tag, needles in patterns if any(needle in lowered for needle in needles)] or ["none"]
+
+
+def stream_diagnostics(stdout: str, stderr: str) -> dict[str, Any]:
+    """Return bounded structural diagnostics without retaining stream text."""
+    event_count = 0
+    init_model: str | None = None
+    session_id: str | None = None
+    last_type: str | None = None
+    last_subtype: str | None = None
+    terminal_subtype: str | None = None
+    parent_models: set[str] = set()
+    child_models: set[str] = set()
+    malformed_lines = 0
+    for raw_line in stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            malformed_lines += 1
+            continue
+        if not isinstance(event, dict):
+            malformed_lines += 1
+            continue
+        event_count += 1
+        event_type = event.get("type")
+        event_subtype = event.get("subtype")
+        last_type = event_type if isinstance(event_type, str) else None
+        last_subtype = event_subtype if isinstance(event_subtype, str) else None
+        if event_type == "result":
+            terminal_subtype = last_subtype
+        safe_session = event.get("session_id")
+        if session_id is None and isinstance(safe_session, str) and len(safe_session) <= 100:
+            session_id = safe_session
+        message = _message(event)
+        model = _safe_model(message.get("model") if message else event.get("model"))
+        parent_id = event.get("parent_tool_use_id") or (message.get("parent_tool_use_id") if message else None)
+        if event_type == "system" and event_subtype == "init":
+            init_model = _safe_model(event.get("model"))
+        elif model and isinstance(parent_id, str):
+            child_models.add(model)
+        elif model:
+            parent_models.add(model)
+    return {
+        "event_count": event_count,
+        "malformed_lines": malformed_lines,
+        "init_model": init_model,
+        "session_id": session_id,
+        "last_event_type": last_type,
+        "last_event_subtype": last_subtype,
+        "terminal_subtype": terminal_subtype,
+        "parent_models": sorted(parent_models)[:10],
+        "child_models": sorted(child_models)[:10],
+        "stderr_tags": _stderr_tags(stderr),
+    }
 
 
 def analyze_stream(stdout: str, nonce: str, expected_model: str) -> tuple[str, str | None, dict[str, Any]]:
@@ -282,6 +356,7 @@ def _probe_command(fable: Path, prompt: str, session_id: str) -> list[str]:
         "stream-json",
         "--verbose",
         "--forward-subagent-text",
+        "--disable-slash-commands",
         "--max-turns",
         "8",
         "--effort",
@@ -352,17 +427,25 @@ def run_probe(*, canonical_retry: bool = False) -> ProbeOutcome:
         except OSError as error:
             return ProbeOutcome("FAIL", type(error).__name__, {}, time.monotonic() - started)
         try:
-            stdout, _stderr = process.communicate(timeout=PROBE_TIMEOUT_SECONDS)
+            stdout, stderr = process.communicate(timeout=PROBE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
-            return ProbeOutcome("FAIL", "timeout", {}, time.monotonic() - started)
+            stdout, stderr = process.communicate()
+            return ProbeOutcome(
+                "FAIL",
+                "timeout",
+                stream_diagnostics(stdout, stderr),
+                time.monotonic() - started,
+            )
         if process.returncode != 0:
-            return ProbeOutcome("FAIL", "nonzero_exit", {"returncode": process.returncode}, time.monotonic() - started)
+            evidence = stream_diagnostics(stdout, stderr)
+            evidence["returncode"] = process.returncode
+            return ProbeOutcome("FAIL", "nonzero_exit", evidence, time.monotonic() - started)
         status, error_class, evidence = analyze_stream(stdout, nonce, expected_model)
+        evidence.update(stream_diagnostics(stdout, stderr))
         return ProbeOutcome(status, error_class, evidence, time.monotonic() - started)
 
 

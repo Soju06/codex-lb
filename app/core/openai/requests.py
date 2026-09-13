@@ -772,11 +772,14 @@ class ResponsesRequest(BaseModel):
 
     def to_payload(self) -> JsonObject:
         payload = _strip_unsupported_fields(self.model_dump_for_forwarding())
+        _normalize_configuration_update_efforts(payload)
         _normalize_compaction_trigger_singleton(payload)
         return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+        payload = _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+        _normalize_configuration_update_efforts(payload)
+        return payload
 
 
 class ResponsesCompactRequest(BaseModel):
@@ -828,7 +831,32 @@ class ResponsesCompactRequest(BaseModel):
 
     def to_payload(self) -> JsonObject:
         payload: MutableJsonObject = self.model_dump(mode="json", exclude_none=True)
+        _normalize_configuration_update_efforts(payload)
         return _strip_compact_unsupported_fields(payload)
+
+
+def _normalize_configuration_update_efforts(payload: MutableJsonObject) -> None:
+    """Map client-plane Ultra to Max only at subscription wire serialization."""
+    model = payload.get("model")
+    if not isinstance(model, str) or model.strip().lower() != "gpt-6-astra":
+        return
+    reasoning = payload.get("reasoning")
+    if is_json_mapping(reasoning):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip().lower() == "ultra":
+            payload["reasoning"] = {**reasoning, "effort": "max"}
+    items = payload.get("input")
+    if not is_json_list(items):
+        return
+    for index, item in enumerate(items):
+        if not is_json_mapping(item) or item.get("type") != "configuration_update":
+            continue
+        item_reasoning = item.get("reasoning")
+        if not is_json_mapping(item_reasoning):
+            continue
+        item_effort = item_reasoning.get("effort")
+        if isinstance(item_effort, str) and item_effort.strip().lower() == "ultra":
+            items[index] = {**item, "reasoning": {**item_reasoning, "effort": "max"}}
 
 
 _UNSUPPORTED_UPSTREAM_FIELDS = {

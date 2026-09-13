@@ -1249,7 +1249,11 @@ OVERFLOW_FIELD_CLASSIFICATION: Mapping[str, OverflowFieldClass] = {
 # is incoherent: the client would echo the result into a next turn that is then
 # unportable. ``reasoning.encrypted_content`` is removed by the egress instead
 # (``NEUTRALIZED_INCLUDE_VALUES``) and therefore is not portable *here*: the
-# verdict is what makes that removal load-bearing.
+# verdict is what makes that removal load-bearing. The request model closes the
+# ``include`` vocabulary to seven values and to ``list[str]``, so the unknown and
+# non-string cases ``_unportable_forwarded_field`` answers are backstops for a
+# hand-built view rather than production declines; a unit test pins these sets
+# against that vocabulary so an eighth value cannot arrive without a rule.
 _PORTABLE_INCLUDE_VALUES = frozenset(
     {"message.input_image.image_url", "message.output_text.logprobs", "web_search_call.action.sources"}
 )

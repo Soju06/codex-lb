@@ -561,7 +561,9 @@ async def test_overflow_dispatch_streams_through_the_source_route_with_the_decis
     assert "client_metadata" not in sent
     assert "stream_options" not in sent
     assert "store" not in sent, "a client that omitted ``store`` leaves the source its default (§7.2 anchors)"
-    assert sent["prompt_cache_key"] == "pck_verbatim"
+    # The overflow egress rewrites the client's cache namespace (#2123); this route
+    # has no API key, so the token is the one the empty namespace produces.
+    assert sent["prompt_cache_key"] == overflow_opaque_value("pck_verbatim", namespace=None, domain="prompt_cache")
 
     # The decision's claims were taken over by the owner and released exactly once by it.
     assert dispatch.claims.owner is not None

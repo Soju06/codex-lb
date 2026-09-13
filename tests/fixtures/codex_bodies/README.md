@@ -171,7 +171,7 @@ captures are standard slugs, so only the two-field form is in the corpus.
 
 These are two HTTP bodies from one CLI version through one uncredentialed lane,
 so they are evidence about the mechanism rather than a census. Closing the three
-gaps is production work, not fixture work: it changes `replay_safety` and the
+gpt-5.5 gaps is production work, not fixture work: it changes `replay_safety` and the
 overflow decision order. It is tracked separately, and
 `add-subscription-overflow-model-source/design.md` decision 21 states the
 `{type, description?}` declaration shape as a design premise that these

@@ -3253,6 +3253,71 @@ async def test_http_bridge_terminal_append_phase_migration_upgrade_and_downgrade
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_transcript_core_migration_upgrade_and_downgrade(tmp_path):
+    """Transcript storage expands the operation row without wiring behavior."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-transcript-core.sqlite'}"
+    revision = "20260914_010000_add_http_bridge_transcript_core"
+    parent_revision = ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(revision).down_revision
+    assert isinstance(parent_revision, str)
+    table = "http_bridge_operations"
+    columns_added = (
+        "transcript_version",
+        "response_output_items_json",
+        "response_output_items_complete",
+        "response_replay_input_json",
+        "response_replay_input_complete",
+        "response_replay_input_turn_count",
+    )
+    indexes_added = (
+        "idx_http_bridge_operations_session_state_created",
+        "idx_http_bridge_operations_response_state",
+    )
+
+    async def _schema(engine):
+        async with engine.connect() as conn:
+            columns = {
+                row[1]: {"notnull": row[3], "default": row[4]}
+                for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).all()
+            }
+            indexes = {row[1] for row in (await conn.execute(text("PRAGMA index_list(http_bridge_operations)"))).all()}
+            return columns, indexes
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        before_columns, before_indexes = await _schema(engine)
+        assert all(column not in before_columns for column in columns_added)
+        assert all(index not in before_indexes for index in indexes_added)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        after_columns, after_indexes = await _schema(engine)
+        assert all(column in after_columns for column in columns_added)
+        assert all(index in after_indexes for index in indexes_added)
+        assert after_columns["transcript_version"]["notnull"] == 1
+        assert after_columns["response_output_items_complete"]["notnull"] == 1
+        assert after_columns["response_replay_input_complete"]["notnull"] == 1
+        assert after_columns["response_replay_input_turn_count"]["notnull"] == 1
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        reverted_columns, reverted_indexes = await _schema(engine)
+        assert all(column not in reverted_columns for column in columns_added)
+        assert all(index not in reverted_indexes for index in indexes_added)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        final_columns, final_indexes = await _schema(engine)
+        assert all(column in final_columns for column in columns_added)
+        assert all(index in final_indexes for index in indexes_added)
+    finally:
+        await engine.dispose()
+
+
 # begin bridge continuity abandonment
 
 

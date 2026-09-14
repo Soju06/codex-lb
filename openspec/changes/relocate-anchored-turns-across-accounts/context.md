@@ -156,6 +156,14 @@ role and its content, a tool call is its identity and arguments, a tool output i
 its call and its result. A field nobody thought of is then ignored by default,
 which is the safe direction.
 
+The enumeration has to recurse, which the first positive key did not. It named
+an item's fields and then serialized nested values whole, so every field inside
+a tool declaration became identity-bearing and a client that reworded a tool's
+description between turns had its conversation dispatched twice. That is the
+subtractive failure again, one level down: the same reasoning that forbids a
+list of fields to ignore forbids a raw comparison of anything the enumeration
+has not reached.
+
 The overlap must be anchored at the accumulated tail. A match in the middle of
 the chain is a coincidence, and coincidences must not shorten anything — that is
 the one case where content comparison would still be guessing.

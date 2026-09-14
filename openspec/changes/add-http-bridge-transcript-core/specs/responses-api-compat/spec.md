@@ -18,7 +18,7 @@ outputs MUST carry `call_id`; repeatable non-tool output items MUST carry
 
 Echo matching MUST ignore provider-owned item ids and an omitted optional
 status, but MUST reject conflicting explicit statuses or other content.
-Exact repeated tool calls or outputs with the same call id MAY be removed only
+Exact repeated tool calls or outputs with the same call id MUST be removed only
 when their type and canonical content match exactly; conflicting content MUST
 return an ineligible result. Malformed JSON-compatible item types MUST not
 raise while being inspected.

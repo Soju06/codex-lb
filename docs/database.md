@@ -44,4 +44,8 @@ layouts need an explicit pg_upgrade before the Postgres 18 container can safely 
 
 ---
 
-*Specs: [database-backends](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-backends) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations)*
+## Advisory migration measurements
+
+Developers can measure selected Alembic revisions with deterministic synthetic accounts and request logs on an empty, owned PostgreSQL database. The explicitly invoked benchmark produces JSON and Markdown reports; durations do not determine pass or fail. Follow the [benchmark guide](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/migration-benchmark/context.md) for target isolation, fixture parameters and transaction limits.
+
+*Specs: [database-backends](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-backends) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations) · [migration-benchmark](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/migration-benchmark)*

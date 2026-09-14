@@ -24,12 +24,12 @@ The dashboard SHALL provide a local-only display mode setting with `weeklyPace` 
 
 ### Requirement: Request activity data
 
-The dashboard SHALL expose sparse daily non-warmup request counts for the latest six calendar months, including the current calendar month, through a dashboard activity endpoint. The endpoint SHALL accept an optional IANA timezone identifier. An absent or invalid timezone value MUST use UTC.
+The dashboard SHALL expose sparse daily non-warmup request counts for exactly 180 local calendar days inclusive of today through a dashboard activity endpoint. The endpoint SHALL accept an optional IANA timezone identifier. An absent or invalid timezone value MUST use UTC.
 
 #### Scenario: Return daily counts
 
 - **WHEN** the request activity endpoint is queried
-- **THEN** it SHALL capture the current instant once and use the effective timezone to select the local date range beginning on the first day of the calendar month five months before the current local month and ending at that captured instant on the current local date
+- **THEN** it SHALL capture the current instant once and use the effective timezone to select exactly 180 local calendar dates beginning 179 days before the current local date and ending at that captured instant on the current local date
 - **AND** it SHALL return local calendar-day labels and non-negative request counts
 - **AND** it SHALL omit days with no requests from the response because the frontend fills them as zero
 
@@ -70,12 +70,12 @@ The dashboard SHALL expose sparse daily non-warmup request counts for the latest
 
 ### Requirement: Request activity heatmap
 
-The request activity view SHALL display the latest six calendar months, including the current calendar month, of daily request counts in a GitHub-style calendar heatmap using the requested browser IANA timezone.
+The request activity view SHALL display exactly 180 local calendar dates ending today, inclusive, of daily request counts in a GitHub-style calendar heatmap using the requested browser IANA timezone.
 
 #### Scenario: Render themed heatmap
 
 - **WHEN** requestHeatmap mode is active
-- **THEN** the view SHALL render six months of daily activity cells in seven weekday rows, with intensity increasing with request count
+- **THEN** the view SHALL render exactly 180 daily activity cells in seven weekday rows, with intensity increasing with request count
 - **AND** the view SHALL NOT render month or weekday axis labels
 - **AND** the view SHALL use the active light or dark theme colors
 

@@ -22,16 +22,17 @@ class _ActivityRepository:
 
 
 @pytest.mark.asyncio
-async def test_request_activity_starts_on_first_day_of_month_five_months_back(monkeypatch) -> None:
+async def test_request_activity_covers_180_local_calendar_days_including_today(monkeypatch) -> None:
     repository = _ActivityRepository()
     monkeypatch.setattr(service_module, "utcnow", lambda: datetime(2026, 8, 10, 12, 34, 56))
 
     response = await DashboardService(cast(DashboardRepository, repository)).get_request_activity()
 
+    assert len(repository.windows) == 180
     assert repository.windows[0] == (
-        "2026-03-01",
-        datetime(2026, 3, 1),
-        datetime(2026, 3, 2),
+        "2026-02-12",
+        datetime(2026, 2, 12),
+        datetime(2026, 2, 13),
     )
     assert repository.windows[-1] == (
         "2026-08-10",
@@ -60,4 +61,4 @@ async def test_request_activity_invalid_timezone_falls_back_to_utc(monkeypatch) 
 
     await DashboardService(cast(DashboardRepository, repository)).get_request_activity("not/a-timezone")
 
-    assert repository.windows[0][1:] == (datetime(2026, 3, 1), datetime(2026, 3, 2))
+    assert repository.windows[0][1:] == (datetime(2026, 2, 12), datetime(2026, 2, 13))

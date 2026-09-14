@@ -50,7 +50,6 @@ def _scheduler(repo: _RecordingRepo, *, leader_election_enabled: bool) -> AuthGu
     return AuthGuardianScheduler(
         interval_seconds=3600,
         enabled=True,
-        max_age_seconds=3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,

@@ -1042,6 +1042,7 @@ def _is_account_neutral_request_rejection(
 
 def _is_model_scoped_rejection(
     *,
+    code: str,
     http_status: int | None,
     message: str | None,
 ) -> bool:
@@ -1060,14 +1061,15 @@ def _is_model_scoped_rejection(
     returned, so the caller keeps trying other accounts, whose entitlements may
     differ.
 
-    The normalized code is not part of the match. Upstream delivers this
-    rejection with neither ``code`` nor ``type`` on the streaming path, which
-    normalizes to ``upstream_error``; on other paths it arrives as
-    ``invalid_request_error``. Only the exact message shape decides membership.
+    ``model_not_found`` is authoritative. Code-less legacy rejections still
+    need the exact message shape because their streaming frames normalize to
+    ``upstream_error``; other non-400 errors remain account-scoped.
     """
+    if code == "model_not_found":
+        return is_model_scoped_upstream_rejection(message, error_code=code)
     if http_status is not None and http_status != 400:
         return False
-    return is_model_scoped_upstream_rejection(message)
+    return is_model_scoped_upstream_rejection(message, error_code=code)
 
 
 def _request_usage_refresh(proxy: Any, account_id: str) -> None:
@@ -1142,6 +1144,7 @@ async def _handle_stream_error(
         )
         return classified
     if _is_model_scoped_rejection(
+        code=code,
         http_status=http_status,
         message=error.get("message"),
     ):

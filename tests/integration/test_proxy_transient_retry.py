@@ -1014,6 +1014,60 @@ async def test_stream_model_entitlement_rejection_keeps_account_health_after_fai
 
 
 @pytest.mark.asyncio
+async def test_stream_model_not_found_keeps_account_health_and_valid_neighbour_working(async_client, monkeypatch):
+    """A globally unknown model may exhaust failover but cannot bench its accounts."""
+    account_id_1 = await _import_account(async_client, "acc_model_not_found_a", "model-not-found-a@example.com")
+    account_id_2 = await _import_account(async_client, "acc_model_not_found_b", "model-not-found-b@example.com")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        if payload.model == "gpt-5.5":
+            raise ProxyResponseError(
+                404,
+                openai_error(
+                    "model_not_found",
+                    "The model `gpt-5.5` does not exist or you do not have access to it.",
+                    error_type="invalid_request_error",
+                ),
+                failure_phase="status",
+            )
+        yield _success_sse_event()
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    rejected = {"model": "gpt-5.5", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=rejected) as response:
+        rejected_lines = [line async for line in response.aiter_lines() if line]
+
+    assert set(seen_account_ids) == {"acc_model_not_found_a", "acc_model_not_found_b"}
+    assert response.status_code == 404
+    assert json.loads("\n".join(rejected_lines)) == {
+        "error": {
+            "code": "model_not_found",
+            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+            "type": "invalid_request_error",
+        }
+    }
+    assert not any(event.get("type") == "response.completed" for event in _extract_events(rejected_lines))
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    for imported_account_id in (account_id_1, account_id_2):
+        runtime = service._load_balancer._runtime.get(imported_account_id)
+        assert runtime is None or runtime.error_count == 0
+        assert runtime is None or runtime.last_error_at is None
+
+    valid = {"model": "gpt-5.6", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=valid) as response:
+        valid_lines = [line async for line in response.aiter_lines() if line]
+
+    assert any(event.get("type") == "response.completed" for event in _extract_events(valid_lines))
+
+
+@pytest.mark.asyncio
 async def test_stream_genuine_400_failover_still_records_error_control(async_client, monkeypatch):
     """Control for the neutrality regression above: the same route and status
     with a non-entitlement message must keep penalizing, proving the runtime

@@ -349,6 +349,7 @@ from app.modules.proxy.helpers import (
     _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
+    is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
@@ -1043,6 +1044,16 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
+    if error_code == "model_not_found" and is_model_scoped_upstream_rejection(
+        error_message,
+        error_code=error_code,
+    ):
+        # The exact code proves the rejection is about the requested model.
+        # The common pre-created gate above has already ruled out acceptance,
+        # output, a second pending turn, and a second replay.
+        if _websocket_response_id(None, payload) is not None:
+            return None
+        return error_code
     if is_upstream_model_capacity_error(error_message):
         if error_code in {
             "rate_limit_exceeded",
@@ -1161,6 +1172,19 @@ def _websocket_auth_request_can_switch_account(request_state: _WebSocketRequestS
     return _websocket_request_text_is_account_neutral_fresh_replay(
         request_state.fresh_upstream_request_text
     ) and not _websocket_fresh_request_blocks_account_switch(request_state)
+
+
+def _websocket_request_requires_preferred_account(request_state: _WebSocketRequestState) -> bool:
+    """Whether continuity or file ownership makes the preferred account mandatory."""
+    return (
+        (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+        or request_state.replay_required_account_id is not None
+        or request_state.file_required_preferred_account
+        or (
+            request_state.affinity_policy.codex_session_source == "turn_state"
+            and request_state.preferred_account_id is not None
+        )
+    )
 
 
 def _prepare_websocket_request_state_for_auth_replay(

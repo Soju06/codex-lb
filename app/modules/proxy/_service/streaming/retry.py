@@ -102,8 +102,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.replay_safety import (
-    project_responses_input_for_account_neutral_fresh_replay,
-    responses_input_suffix_retains_prior_output,
+    project_responses_input_retaining_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
@@ -198,25 +197,8 @@ def _project_unanchored_account_neutral_replay(payload: ResponsesRequest) -> Res
     input_value = payload.input
     if not isinstance(input_value, list) or not input_value or extract_input_file_ids(input_value):
         return None
-    last_assistant_index: int | None = None
-    for index in range(len(input_value) - 1, -1, -1):
-        item = input_value[index]
-        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
-            last_assistant_index = index
-            break
-    if last_assistant_index is None or last_assistant_index == 0:
-        return None
-    projection = project_responses_input_for_account_neutral_fresh_replay(
-        cast(list[Any], input_value),
-        stored_count=last_assistant_index,
-    )
+    projection = project_responses_input_retaining_prior_output(cast(list[Any], input_value))
     if projection is None:
-        return None
-    if not responses_input_suffix_retains_prior_output(
-        projection.input_items,
-        stored_count=projection.stored_prefix_count,
-        canonical_lite_developer_index=projection.canonical_lite_developer_index,
-    ):
         return None
     projected = payload.model_copy(update={"input": projection.input_items})
     if not responses_payload_is_account_neutral_fresh_replay(projected.to_replay_safety_payload()):
@@ -2884,13 +2866,15 @@ class _StreamingRetryMixin:
                         http_status=None,
                         phase="first_event",
                     )["failure_class"]
-                    if not resilience.deterministic_failover_enabled and failure_class in ("rate_limit", "quota"):
-                        break
                     verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
-                    if not verified_owner_replay_moved and failure_class in ("rate_limit", "quota"):
+                    if (
+                        not verified_owner_replay_moved
+                        and resilience.deterministic_failover_enabled
+                        and failure_class in ("rate_limit", "quota")
+                    ):
                         _move_previsible_quota_rejection_from_soft_owner(
                             account_id=account.id,
                             outcome="owner_previsible_retryable_quota_rejection",

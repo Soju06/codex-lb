@@ -74,8 +74,7 @@ from app.modules.proxy.load_balancer import (
     effective_account_concurrency_caps,
 )
 from app.modules.proxy.replay_safety import (
-    project_responses_input_for_account_neutral_fresh_replay,
-    responses_input_suffix_retains_prior_output,
+    project_responses_input_retaining_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
@@ -526,34 +525,7 @@ def _compact_replay_history_retains_prior_output(input_items: list[JsonValue]) -
     transcript walk can actually refute.
     """
 
-    last_assistant_index: int | None = None
-    for index in range(len(input_items) - 1, -1, -1):
-        item = input_items[index]
-        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
-            last_assistant_index = index
-            break
-    # ``responses_input_suffix_retains_prior_output`` requires a non-empty
-    # stored prefix, so a history that opens with (or lacks) assistant output
-    # cannot be proven and stays owner-bound.
-    if last_assistant_index is None or last_assistant_index == 0:
-        return False
-    # The projection is an identity transform for input that already passed
-    # the account-neutral fresh-replay gate (no server-assigned ids, no
-    # reasoning or omitted bookkeeping types survive that gate), but it is the
-    # shared authority for recognizing the canonical Responses-Lite developer
-    # instruction behind an ``additional_tools`` bundle — without that index
-    # the suffix walk would reject every Lite full resend.
-    projection = project_responses_input_for_account_neutral_fresh_replay(
-        input_items,
-        stored_count=last_assistant_index,
-    )
-    if projection is None:
-        return False
-    return responses_input_suffix_retains_prior_output(
-        projection.input_items,
-        stored_count=projection.stored_prefix_count,
-        canonical_lite_developer_index=projection.canonical_lite_developer_index,
-    )
+    return project_responses_input_retaining_prior_output(input_items) is not None
 
 
 def _compact_account_neutral_replay_payload(

@@ -439,6 +439,32 @@ def responses_input_suffix_retains_prior_output(
     return retained_output_seen and fresh_followup_seen and not pending_suffix_calls
 
 
+def project_responses_input_retaining_prior_output(
+    input_items: list[JsonValue],
+) -> AccountNeutralReplayProjection | None:
+    """Project a full resend whose final assistant turn precedes fresh input."""
+
+    last_assistant_index: int | None = None
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
+            last_assistant_index = index
+            break
+    if last_assistant_index is None or last_assistant_index == 0:
+        return None
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=last_assistant_index,
+    )
+    if projection is None or not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    ):
+        return None
+    return projection
+
+
 def responses_input_suffix_matches_pending_tool_calls(
     input_items: list[JsonValue],
     *,

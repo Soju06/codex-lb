@@ -97,6 +97,16 @@ def set_dashboard_error_format(request: Request) -> None:
     request.state.error_format = "dashboard"
 
 
+def set_scim_error_format(request: Request) -> None:
+    """Mark the request so every refusal answers RFC 7644's envelope.
+
+    A router-level marker, exactly like the two above; unmatched ``/scim``
+    paths fall back on the path prefix in ``_error_format`` instead.
+    """
+
+    request.state.error_format = "scim"
+
+
 # --- Proxy API key auth ---
 
 

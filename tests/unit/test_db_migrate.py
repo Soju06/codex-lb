@@ -1652,6 +1652,16 @@ def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Pa
     assert result.current_revision == initial.current_revision
 
 
+def test_rebased_published_revision_ids_have_explicit_remaps() -> None:
+    """Re-stamped upstream migrations remain resolvable for existing ledgers."""
+    assert OLD_TO_NEW_REVISION_MAP[
+        "20260912_010000_drop_legacy_dashboard_credentials"
+    ] == "20260913_000000_drop_legacy_dashboard_credentials"
+    assert OLD_TO_NEW_REVISION_MAP["20260913_000000_add_oidc_provider_flow"] == (
+        "20260913_010000_add_oidc_provider_flow"
+    )
+
+
 def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "no-remap.db"
     url = _db_url(db_path)

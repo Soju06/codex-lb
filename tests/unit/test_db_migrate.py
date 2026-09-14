@@ -2995,20 +2995,18 @@ def _restamp_warnings(caplog) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("target", ["+1", "abbreviated"], ids=["relative", "id-prefix"])
-def test_the_drain_warning_survives_a_relative_or_abbreviated_target(tmp_path: Path, caplog, target: str) -> None:
+def test_the_drain_warning_survives_an_abbreviated_target(tmp_path: Path, caplog) -> None:
     """The decision is taken over what Alembic will apply, not over the string.
 
-    ``upgrade +1`` and ``upgrade <prefix>`` are both targets Alembic resolves
-    happily. A check that special-cased ``head`` and otherwise treated the
-    target as a literal revision id read both as unknown ids, said nothing, and
-    dropped the columns in silence one statement later.
+    A check that treated an abbreviated target as a literal revision id read it
+    as unknown, said nothing, and dropped the columns in silence one statement
+    later.
     """
 
-    url = _db_url(tmp_path / f"relative-{target.strip('+')}.db")
+    url = _db_url(tmp_path / "abbreviated.db")
     parent = _drop_revision_parent(url)
     run_upgrade(url, parent, bootstrap_legacy=False)
-    revision = target if target == "+1" else CREDENTIAL_DROP_REVISION[:16]
+    revision = CREDENTIAL_DROP_REVISION[:16]
 
     with caplog.at_level("WARNING", logger="app.db.migrate"):
         run_upgrade(url, revision, bootstrap_legacy=False)
@@ -3022,6 +3020,22 @@ def test_the_drain_warning_survives_a_relative_or_abbreviated_target(tmp_path: P
     finally:
         engine.dispose()
     assert not {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"} & columns
+
+
+def test_an_ambiguous_relative_target_fails_closed_before_the_drain_warning(
+    tmp_path: Path, caplog
+) -> None:
+    """A branch point must be explicit; do not warn for an upgrade that fails."""
+
+    url = _db_url(tmp_path / "ambiguous-relative.db")
+    parent = _drop_revision_parent(url)
+    run_upgrade(url, parent, bootstrap_legacy=False)
+
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        with pytest.raises(CommandError, match="Ambiguous walk"):
+            run_upgrade(url, "+1", bootstrap_legacy=False)
+
+    assert _drain_warnings(caplog) == []
 
 
 # --- the legacy dashboard credential drop: the ledger-less replay ---

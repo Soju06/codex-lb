@@ -87,6 +87,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
+from app.modules.proxy.account_cache import mark_account_routing_unavailable_pending_persist
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
@@ -110,7 +111,10 @@ from app.modules.proxy.helpers import (
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -527,6 +531,8 @@ class _StreamingRetryMixin:
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
+        last_permanent_refresh_error: RefreshError | None = None
+        last_permanent_refresh_error_account_id: str | None = None
         # (account, error, code, http_status, retry_count, retry_after_seconds,
         #  burst_cooldown_recorded): a queued keyed health write. The burst
         # cooldown is replica-local runtime state with no reservation-ordering
@@ -580,6 +586,43 @@ class _StreamingRetryMixin:
             )
             _apply_error_metadata(event["response"]["error"], error)
             return format_sse_event(event)
+
+        async def _render_permanent_refresh_error(exc: RefreshError, *, account_id: str | None) -> str:
+            message = exc.message or "Authentication token is no longer valid; re-login required."
+            await proxy._write_stream_preflight_error(
+                account_id=account_id,
+                api_key=api_key,
+                request_id=request_id,
+                model=payload.model,
+                start=start,
+                error_code=exc.code,
+                error_message=message,
+                reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                service_tier=payload.service_tier,
+                transport=request_transport,
+                upstream_transport=upstream_stream_transport,
+                useragent=useragent,
+                useragent_group=useragent_group,
+                conversation_id=conversation_id,
+                client_ip=client_ip,
+            )
+            if propagate_http_errors:
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        exc.code,
+                        message,
+                        error_type="authentication_error",
+                    ),
+                ) from exc
+            return format_sse_event(
+                response_failed_event(
+                    exc.code,
+                    message,
+                    error_type="authentication_error",
+                    response_id=request_id,
+                )
+            )
 
         async def _flush_pending_post_refresh_penalties() -> None:
             # Consume one queued penalty at a time only after that entry's
@@ -717,6 +760,15 @@ class _StreamingRetryMixin:
             after settlement (same ordering as compact keyed mid-loop health).
             """
             if api_key is not None and api_key_reservation is not None:
+                if failed_code == "token_revoked":
+                    # Publish a guarded, reason-only quarantine now. The
+                    # REAUTH_REQUIRED health/status write remains owned by the
+                    # post-settlement path.
+                    quarantine = getattr(proxy._load_balancer, "quarantine_permanent_failure", None)
+                    if callable(quarantine):
+                        await quarantine(failed_account, failed_code)
+                    else:
+                        mark_account_routing_unavailable_pending_persist(failed_account.id)
                 classified = classify_upstream_failure(
                     error_code=failed_code,
                     error=failed_error,
@@ -946,6 +998,58 @@ class _StreamingRetryMixin:
             affinity = replace(affinity, reallocate_sticky=True)
             logger.info(
                 "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
+
+        def _move_previsible_account_rejection_from_dispatch_owner(*, account_id: str, outcome: str) -> bool:
+            """Move a rejected first-turn body after upstream rejected this account.
+
+            A non-neutral body is pinned once dispatched because an ambiguous
+            transport failure may have created account-owned state.  A
+            pre-visible permanent account rejection is different: upstream
+            rejected the credential/account before it could execute the turn.
+            For an otherwise unanchored first turn, remove only the known
+            response-owned bookkeeping and require the resulting wire body to
+            pass the shared account-neutral replay gate before moving it.
+            """
+
+            nonlocal affinity, payload, payload_replay_required_account_id
+            if (
+                require_preferred_account
+                or preferred_account_id is not None
+                or file_preferred_account_id is not None
+                or turn_state_owner_account_id is not None
+                or routing_strategy == "single_account"
+                or payload.previous_response_id is not None
+                or payload_replay_required_account_id not in (None, account_id)
+            ):
+                return False
+
+            replay_payload = payload
+            replay_safety_payload = replay_payload.to_replay_safety_payload()
+            if not responses_payload_is_account_neutral_fresh_replay(replay_safety_payload):
+                input_items = replay_payload.input
+                if not isinstance(input_items, list) or not input_items:
+                    return False
+                projection = project_responses_input_for_account_neutral_fresh_replay(
+                    input_items,
+                    stored_count=len(input_items),
+                )
+                if projection is None:
+                    return False
+                replay_payload = replay_payload.model_copy(update={"input": projection.input_items})
+                if not responses_payload_is_account_neutral_fresh_replay(replay_payload.to_replay_safety_payload()):
+                    return False
+
+            payload = replay_payload
+            payload_replay_required_account_id = None
+            excluded_account_ids.add(account_id)
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.info(
+                "previsible_account_rejection_replay request_id=%s outcome=%s account_id=%s",
                 request_id,
                 outcome,
                 account_id,
@@ -1641,6 +1745,13 @@ class _StreamingRetryMixin:
                             raise last_pre_dispatch_transport_error
                         yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
                         return
+                    if last_permanent_refresh_error is not None:
+                        await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+                        yield await _render_permanent_refresh_error(
+                            last_permanent_refresh_error,
+                            account_id=last_permanent_refresh_error_account_id,
+                        )
+                        return
                     if selection.error_code == USAGE_LIMIT_REACHED:
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         no_accounts_msg = selection.error_message or "Usage limit reached"
@@ -1741,6 +1852,11 @@ class _StreamingRetryMixin:
                         event = response_failed_event(
                             last_retryable_stream_error.code,
                             error_message,
+                            error_type=(
+                                "authentication_error"
+                                if last_retryable_stream_error.code == "token_revoked"
+                                else "server_error"
+                            ),
                             response_id=request_id,
                         )
                         yield format_sse_event(event)
@@ -1882,6 +1998,14 @@ class _StreamingRetryMixin:
                     )
                     return
 
+                if (
+                    last_permanent_refresh_error_account_id is not None
+                    and account.id != last_permanent_refresh_error_account_id
+                ):
+                    # A legal replacement is now authoritative. Its eventual
+                    # result must supersede the retired account's refresh error.
+                    last_permanent_refresh_error = None
+                    last_permanent_refresh_error_account_id = None
                 if pending_post_refresh_transient_penalties:
                     post_refresh_transient_replacement_selected = True
 
@@ -2032,6 +2156,9 @@ class _StreamingRetryMixin:
                         selected_account_model_replacement = account.id == account_model_replacement_account_id
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
+                                if exc.code == "token_revoked":
+                                    last_permanent_refresh_error = exc
+                                    last_permanent_refresh_error_account_id = account.id
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
                                 # Keep the warning account routable for later
                                 # requests, but do not immediately reselect it in
@@ -2622,19 +2749,36 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                     phase="first_event",
                                 )
+                                permanent_account_rejection_replay = False
+                                if (
+                                    resilience.deterministic_failover_enabled
+                                    and code == "token_revoked"
+                                    and attempt < max_attempts - 1
+                                ):
+                                    permanent_account_rejection_replay = _move_verified_fresh_replay_from_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_permanent_account_rejection",
+                                    ) or _move_previsible_account_rejection_from_dispatch_owner(
+                                        account_id=account.id,
+                                        outcome="owner_previsible_permanent_account_rejection",
+                                    )
                                 burst = is_upstream_burst_rejection(
                                     failure_class=classified["failure_class"],
                                     http_status=tex.status_code,
                                 )
                                 if resilience.deterministic_failover_enabled:
-                                    action = failover_decision(
-                                        failure_class=classified["failure_class"],
-                                        downstream_visible=settlement.downstream_visible,
-                                        candidates_remaining=max_attempts - attempt - 1,
-                                        owner_bound=_stream_owner_bound_to(account),
-                                        same_account_retry_available=_burst_same_account_retry_available(
-                                            account, burst=burst
-                                        ),
+                                    action = (
+                                        "failover_next"
+                                        if permanent_account_rejection_replay
+                                        else failover_decision(
+                                            failure_class=classified["failure_class"],
+                                            downstream_visible=settlement.downstream_visible,
+                                            candidates_remaining=max_attempts - attempt - 1,
+                                            owner_bound=_stream_owner_bound_to(account),
+                                            same_account_retry_available=_burst_same_account_retry_available(
+                                                account, burst=burst
+                                            ),
+                                        )
                                     )
                                 else:
                                     action = "surface"
@@ -2870,10 +3014,29 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                    _move_verified_fresh_replay_from_owner(
+                    replay_moved = _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
+                    if exc.code == "token_revoked" and not replay_moved:
+                        replay_moved = _move_previsible_account_rejection_from_dispatch_owner(
+                            account_id=account.id,
+                            outcome="owner_previsible_permanent_account_rejection",
+                        )
+                    if exc.code == "token_revoked" and not replay_moved:
+                        # The account is now retired, but this body could not be
+                        # proven safe to move. Preserve the real authentication
+                        # failure instead of replacing it with the misleading
+                        # preferred-account-unavailable selector error.
+                        yield format_sse_event(
+                            response_failed_event(
+                                exc.code,
+                                str(exc.error.get("message") or "Upstream account is unavailable"),
+                                error_type="authentication_error",
+                                response_id=request_id,
+                            )
+                        )
+                        return
                     continue
                 except _TerminalStreamError:
                     if settlement.settlement_order_required:
@@ -2962,6 +3125,9 @@ class _StreamingRetryMixin:
                         except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
+                                    if refresh_exc.code == "token_revoked":
+                                        last_permanent_refresh_error = refresh_exc
+                                        last_permanent_refresh_error_account_id = account.id
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                                     # Keep the warning account routable for later
                                     # requests, but exclude it from this request's
@@ -3559,6 +3725,9 @@ class _StreamingRetryMixin:
                     return
                 except RefreshError as exc:
                     if exc.is_permanent:
+                        if exc.code == "token_revoked":
+                            last_permanent_refresh_error = exc
+                            last_permanent_refresh_error_account_id = account.id
                         await proxy._load_balancer.mark_permanent_failure(account, exc.code)
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
@@ -3580,6 +3749,12 @@ class _StreamingRetryMixin:
                     yield format_sse_event(event)
                     return
             await _drain_pending_post_refresh_penalty_on_terminal(settlement)
+            if last_permanent_refresh_error is not None:
+                yield await _render_permanent_refresh_error(
+                    last_permanent_refresh_error,
+                    account_id=last_permanent_refresh_error_account_id,
+                )
+                return
             # When HTTP error propagation is enabled and the last failure was
             # a transient 500, re-raise to preserve the upstream status/payload.
             if last_account_model_rejection is not None:
@@ -3603,6 +3778,11 @@ class _StreamingRetryMixin:
                 event = response_failed_event(
                     last_retryable_stream_error.code,
                     retries_exhausted_msg,
+                    error_type=(
+                        "authentication_error"
+                        if last_retryable_stream_error.code == "token_revoked"
+                        else "server_error"
+                    ),
                     response_id=request_id,
                 )
                 if last_retryable_stream_error.code in SYNTHETIC_TRANSPORT_FAILURE_CODES:

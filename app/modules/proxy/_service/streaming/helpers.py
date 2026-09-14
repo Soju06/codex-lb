@@ -658,7 +658,11 @@ def _rewrite_previous_response_stream_error(
             None,
         )
     normalized_code = _normalize_error_code(error_code, error_type)
-    if preferred_account_id is not None and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
+    if (
+        preferred_account_id is not None
+        and normalized_code != "token_revoked"
+        and normalized_code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+    ):
         _record_continuity_fail_closed(
             surface="http_stream",
             reason="owner_account_unavailable",
@@ -1159,7 +1163,13 @@ async def _handle_stream_error(
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:
-        await proxy._load_balancer.mark_permanent_failure(account, code)
+        downgraded = await proxy._load_balancer.mark_permanent_failure(account, code)
+        if code == "token_revoked" and not downgraded:
+            # A concurrent re-auth won the guarded write. Do not leave the
+            # pre-settlement local quarantine wedged on the repaired account.
+            from app.modules.proxy.account_cache import clear_account_routing_unavailable
+
+            clear_account_routing_unavailable(account.id)
     else:
         await proxy._load_balancer.record_error(account)
         _facade().logger.info(

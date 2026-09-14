@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
 from app.modules.accounts.mappers import (
@@ -14,8 +16,8 @@ from app.modules.accounts.mappers import (
 def _usage(
     *,
     recorded_at: datetime,
-    credits_has: bool,
-    credits_balance: float,
+    credits_has: bool | None,
+    credits_balance: float | None,
 ) -> UsageHistory:
     return UsageHistory(
         account_id="acc",
@@ -137,6 +139,42 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
             runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
         == AccountStatus.ACTIVE
+    )
+
+
+@pytest.mark.parametrize("credits_balance", [None, 0.0])
+def test_effective_status_secondary_exhausted_credits_has_without_positive_balance_stays_quota_exceeded(
+    credits_balance: float | None,
+) -> None:
+    account = _account(AccountStatus.ACTIVE)
+    primary = _primary_usage(
+        used_percent=0.0,
+        reset_at=1_788_722_939,
+        credits_has=True,
+        credits_unlimited=False,
+        credits_balance=credits_balance,
+    )
+    secondary = _secondary_usage(
+        used_percent=100.0,
+        reset_at=1_789_131_968,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=None,
+    )
+
+    assert (
+        _effective_status_from_usage(
+            account,
+            status_seed=account.status,
+            primary_usage=primary,
+            primary_used_percent=primary.used_percent,
+            secondary_usage=secondary,
+            secondary_used_percent=secondary.used_percent,
+            monthly_usage=None,
+            monthly_used_percent=None,
+            runtime_reset=None,
+        )
+        == AccountStatus.QUOTA_EXCEEDED
     )
 
 

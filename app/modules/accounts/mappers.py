@@ -6,7 +6,7 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.quota import apply_usage_quota
+from app.core.usage.quota import apply_usage_quota, has_usable_credits
 from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
@@ -408,7 +408,11 @@ def _has_credit_override(
     credits_unlimited: bool | None,
     credits_balance: float | None,
 ) -> bool:
-    return credits_unlimited is True or credits_has is True or (credits_balance is not None and credits_balance > 0)
+    return has_usable_credits(
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
 
 
 def _first_not_none(primary_usage: UsageHistory | None, secondary_usage: UsageHistory | None, field: str):

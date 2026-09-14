@@ -6,14 +6,14 @@ The dashboard currently exposes weekly credits pace but does not provide a compa
 
 - Add a local-only Appearance setting that selects either Weekly credits pace or Request activity heatmap.
 - Preserve the existing Weekly credits pace rendering when that mode is selected.
-- Add a responsive, theme-aware GitHub-style heatmap covering the latest six calendar months including the current month, using the requested browser IANA timezone, with date/request-count tooltips and no axis labels.
+- Add a responsive, theme-aware GitHub-style heatmap covering exactly 180 local calendar days inclusive of today, using the requested browser IANA timezone, with date/request-count tooltips and no axis labels.
 - Provide sparse daily request counts through a bounded dashboard data path that falls back to UTC for absent or invalid timezones, converts local-day bounds correctly across DST, and does not introduce an unindexed table scan.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `dashboard-request-activity`: Six-month daily request activity heatmap and its display-mode contract.
+- `dashboard-request-activity`: Rolling 180-day request activity heatmap and its display-mode contract.
 
 ### Modified Capabilities
 

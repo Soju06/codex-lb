@@ -46,7 +46,7 @@ from app.modules.usage.depletion_service import (
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import NormalizedUsageWindow
 
-_REQUEST_ACTIVITY_MONTHS = 6
+_REQUEST_ACTIVITY_DAYS = 180
 
 # Newest-first per-account row bound for the projections history fetch
 # (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
@@ -286,9 +286,7 @@ class DashboardService:
         )
         timezone_info = _resolve_timezone(timezone_name)
         local_now = captured_now_utc.astimezone(timezone_info)
-        current_month_index = local_now.year * 12 + local_now.month - 1
-        start_year, start_month_index = divmod(current_month_index - (_REQUEST_ACTIVITY_MONTHS - 1), 12)
-        start_date = date(start_year, start_month_index + 1, 1)
+        start_date = local_now.date() - timedelta(days=_REQUEST_ACTIVITY_DAYS - 1)
         windows = _request_activity_windows(
             start_date,
             local_now.date(),

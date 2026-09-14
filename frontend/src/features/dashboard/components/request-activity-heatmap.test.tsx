@@ -9,7 +9,7 @@ describe("request activity heatmap", () => {
     vi.useRealTimers();
   });
 
-  it("builds a six-month, seven-day calendar and scales activity levels", () => {
+  it("builds a rolling 180-day, seven-day calendar and scales activity levels", () => {
     const calendar = buildRequestActivityCalendar(
       [
         { date: "2026-09-10", requests: 8 },
@@ -20,7 +20,7 @@ describe("request activity heatmap", () => {
 
     expect(calendar.weeks.every((week) => week.length === 7)).toBe(true);
     const cells = calendar.weeks.flat().filter((cell) => cell !== null);
-    expect(cells).toHaveLength(168);
+    expect(cells).toHaveLength(180);
     expect(cells.find((cell) => cell?.date === "2026-09-10")).toMatchObject({
       requests: 8,
       level: 4,
@@ -49,7 +49,8 @@ describe("request activity heatmap", () => {
     );
     const cells = calendar.weeks.flat().filter((cell) => cell !== null);
 
-    expect(cells[0]?.date).toBe("2025-07-01");
+    expect(cells).toHaveLength(180);
+    expect(cells[0]?.date).toBe("2025-07-05");
     expect(cells.at(-1)?.date).toBe("2025-12-31");
     expect(cells.find((cell) => cell?.date === "2025-12-31")).toMatchObject({ requests: 7 });
     expect(cells.find((cell) => cell?.date === "2026-01-01")).toBeUndefined();

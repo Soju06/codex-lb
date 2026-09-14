@@ -751,7 +751,7 @@ class RequestLogsRepository:
 
         Folded hourly counts are reduced to one row per day in SQL.  The
         separate raw query is restricted to the exact complements returned by
-        the watermark-aware folded read, so the six-month dashboard request
+        the watermark-aware folded read, so the rolling 180-day dashboard request
         never materializes full-grain rollup or request-log rows.
         """
         folded_counts, raw_windows = await sum_labeled_hourly_window(

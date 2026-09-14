@@ -46,7 +46,11 @@ The chain is the proxy's own reconstruction of turns the client is not currently
 
 The join is therefore: walk the chain oldest first; where the client's input matches the **tail** of what the walk has accumulated, discard that tail; append the client's input verbatim and last. The overlap MUST be anchored at the accumulated tail — a match anywhere else is a coincidence, not a restatement, and MUST NOT shorten anything.
 
-**The comparison MUST be made on the projected form of both sides, and the dispatched items MUST be the client's verbatim ones.** The key the comparison uses MUST be built from a **positive enumeration of the fields that identify an item** — a message's role and content, a tool call's identity and arguments, a tool output's call and result — and MUST NOT be built by subtracting a list of fields that do not identify one. A subtractive list is open-ended: every field the wire may carry and the recording may drop has to be remembered, and the two rounds that tried it were each defeated by a field nobody had listed yet. A positive list is bounded by what a turn *is*, and a field nobody thought of is ignored by default instead of doubling the conversation. The chain's items have been through the account-neutral projection and the client's have not, so comparing them as they stand makes the overlap depend on fields the projection normalizes away: one legal difference — an assistant message that omits `status`, which the wire allows — collapses the overlap to zero and doubles the whole conversation. Normalize for the comparison only. Never let normalization reach the body that is dispatched.
+**The comparison MUST be made on the projected form of both sides, and the dispatched items MUST be the client's verbatim ones.** The key the comparison uses MUST be built from a **positive enumeration of the fields that identify an item** — a message's role and content, a tool call's identity and arguments, a tool output's call and result — and MUST NOT be built by subtracting a list of fields that do not identify one. A subtractive list is open-ended: every field the wire may carry and the recording may drop has to be remembered, and the two rounds that tried it were each defeated by a field nobody had listed yet. A positive list is bounded by what a turn *is*, and a field nobody thought of is ignored by default instead of doubling the conversation.
+
+**The enumeration MUST go all the way down.** It applies to every nested structure the key reaches — a content part, a tool declaration, a tool call's arguments — and not only to an item's top level. Serializing a nested value whole makes every field inside it identity-bearing, which is the subtractive failure again one level lower: a client that rewords a tool's description between turns then reads as a different turn and has its conversation dispatched twice. A structure the enumeration does not reach MUST make the item unidentifiable rather than compared on its raw form, so the rebuild fails closed instead of guessing.
+
+The enumeration MUST also be checked against the set of item kinds the strict predicate admits, so a kind added later is identified rather than silently compared by accident. The chain's items have been through the account-neutral projection and the client's have not, so comparing them as they stand makes the overlap depend on fields the projection normalizes away: one legal difference — an assistant message that omits `status`, which the wire allows — collapses the overlap to zero and doubles the whole conversation. Normalize for the comparison only. Never let normalization reach the body that is dispatched.
 
 **The overlap computation MUST be linear in the number of items.** The transcript caps bound turns and bytes, not items, so a chain that is legal under both can still carry six figures of them; a nested scan over that is minutes of blocking work on a single-worker event loop, inside a failover path whose whole purpose is to be faster than losing the conversation. Apply the same rule to each chain turn's stored request as the walk accumulates it, so a parent turn that restated the conversation replaces what it restates instead of repeating it.
 
@@ -105,6 +109,13 @@ The proxy MUST NOT attempt to classify the client's intent. Whether the input is
 - **GIVEN** a client restating the chain's turns with any field the wire permits and the recording does not keep — one the implementation has never enumerated
 - **WHEN** the join computes the overlap
 - **THEN** the restated turns are still recognised, because the key is built from what identifies a turn rather than from what to ignore
+- **AND** this holds for a field nested inside a content part or a tool declaration exactly as it holds at the item's top level
+
+#### Scenario: Rewording a tool description does not resend the conversation
+
+- **GIVEN** a client whose tool declarations carry a different description, format or search configuration than the recording kept, while declaring the same tools
+- **WHEN** the join computes the overlap
+- **THEN** the turns are recognised as restatements and the conversation is dispatched once
 
 #### Scenario: The item count is bounded
 

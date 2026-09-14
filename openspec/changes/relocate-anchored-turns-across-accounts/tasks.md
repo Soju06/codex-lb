@@ -38,7 +38,19 @@
   item. Two rounds subtracted a hand-listed set of per-recording fields and each
   was defeated by a field nobody had listed — first `status`, then `phase` and
   `internal_chat_message_metadata_passthrough`. A subtractive list can never be
-  finished; a positive one is bounded by what a turn is.
+  finished; a positive one is bounded by what a turn is. **Recurse.** An
+  enumeration that stops at the item's top level and serializes a nested value
+  whole is the same failure one level down: round 9 identified
+  `additional_tools` by the whole `tools` value, so rewording a tool's
+  description dispatched the conversation twice. An unreachable structure must
+  make the item unidentifiable, not compared raw.
+- [ ] Sweep the guard across every item kind the strict predicate admits and
+  every nested position, not three kinds and no content-part field. Feed the
+  independent checker the same breadth — it currently only ever sees plain text
+  messages, so it validates nothing about the other item types the key claims to
+  identify.
+- [ ] Exercise the transcript caps on the path production uses, not through the
+  test file's own rebuild helpers.
 - [ ] Bound the item count alongside turns and bytes. Neither existing cap bounds
   items, so the worst legal input is the smallest legal item repeated until the
   byte budget is spent.

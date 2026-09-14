@@ -4566,6 +4566,43 @@ def test_background_recovery_state_requires_fresh_long_window_for_zero_primary_p
     assert state.status == AccountStatus.RATE_LIMITED
 
 
+@pytest.mark.parametrize("plan_type", ["free", "guest"])
+def test_background_recovery_state_uses_fresh_weekly_primary_for_zero_primary_plan(
+    monkeypatch,
+    plan_type,
+):
+    now = 1_700_000_000.0
+    blocked = now - 7200.0
+    past_reset = int(now - 300)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=past_reset,
+        blocked_at=int(blocked),
+        plan_type=plan_type,
+    )
+    fresh_weekly_primary = _make_test_usage(
+        window="primary",
+        used_percent=40.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=10_080,
+    )
+
+    state = background_recovery_state_from_account(
+        account=account,
+        primary_entry=fresh_weekly_primary,
+        secondary_entry=None,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+    assert state.blocked_at is None
+
+
 def test_background_recovery_state_keeps_rate_limited_when_primary_reset_metadata_missing(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0

@@ -2811,7 +2811,7 @@ def background_recovery_state_from_account(
         freshness_entry = _rate_limited_freshness_entry(
             account=account,
             primary_entry=primary_entry,
-            long_window_entry=secondary_entry,
+            long_window_entry=normalized_usage.effective_secondary_entry,
             now=now,
         )
         # Keep elapsed resets intact until _state_from_account evaluates the

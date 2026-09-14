@@ -32,7 +32,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260913_000000_drop_legacy_dashboard_credentials"
-down_revision = "20260912_000000_merge_thread_cache_and_bridge_retirement_heads"
+down_revision = "20260912_010001_merge_credential_drop_lineage"
 branch_labels = None
 depends_on = None
 

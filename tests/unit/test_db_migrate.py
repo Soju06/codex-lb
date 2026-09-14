@@ -2013,7 +2013,7 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
         rehome_revision,
         bridge_affinity_merge,
     )
-    assert script_directory.get_heads() == [lineage_merge_revision]
+    assert script_directory.get_heads() == ["20260914_000000_merge_http_bridge_and_oidc_heads"]
 
 
 def test_check_migration_policy_reports_head_and_format_violations(monkeypatch, tmp_path: Path) -> None:

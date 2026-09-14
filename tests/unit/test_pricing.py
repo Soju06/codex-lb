@@ -78,8 +78,8 @@ def test_get_pricing_for_model_gpt_5_4_alias():
 )
 def test_get_pricing_for_model_gpt_5_6_aliases(requested_model: str, canonical_model: str) -> None:
     result = get_pricing_for_model(requested_model, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
-    assert result is not None
-    assert result[0] == canonical_model
+
+    assert result == (canonical_model, DEFAULT_PRICING_MODELS[canonical_model])
 
 
 @pytest.mark.parametrize(

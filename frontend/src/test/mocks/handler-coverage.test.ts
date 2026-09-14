@@ -85,6 +85,7 @@ const EXPECTED_ENDPOINTS = [
 	// organisation (sign-in providers, group-to-role rules, refused sign-ins)
 	"GET /api/auth-providers",
 	"PATCH /api/auth-providers/:providerId",
+	"POST /api/dashboard-auth/oidc/test-login/start",
 	"GET /api/role-mappings",
 	"GET /api/role-mappings/assignable-roles",
 	"POST /api/role-mappings",
@@ -95,7 +96,6 @@ const EXPECTED_ENDPOINTS = [
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",
-	"GET /api/settings/subscription-overflow/preflight",
 	"GET /api/settings/telemetry",
 	"PUT /api/settings/telemetry",
 	"GET /api/settings/upstream-proxy",

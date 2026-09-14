@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -16,6 +17,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardConflictError
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus
+from app.modules.accounts import account_bundle as account_bundle_module
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts import service as accounts_service_module
 from app.modules.accounts.account_bundle import (
@@ -51,6 +53,66 @@ from app.modules.usage.background_repository import BackgroundAdditionalUsageRep
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater, _BundleValidationAuthRepository
 
 MAX_BYTES = 256 * 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["encrypt_bundle", "decrypt_bundle"])
+async def test_bundle_crypto_runs_off_loop_and_bounds_cancelled_work(monkeypatch, operation):
+    loop = asyncio.get_running_loop()
+    started: asyncio.Queue[str] = asyncio.Queue()
+    release = threading.Event()
+    third_started = threading.Event()
+
+    def blocking_crypto(value, passphrase, *, max_bytes):
+        assert threading.get_ident() != loop_thread
+        if value == "third":
+            third_started.set()
+        loop.call_soon_threadsafe(started.put_nowait, value)
+        assert release.wait(timeout=5), "test did not release crypto worker"
+        return value
+
+    loop_thread = threading.get_ident()
+    monkeypatch.setattr(account_bundle_module, operation, blocking_crypto)
+    crypto = getattr(account_bundle_module, f"{operation}_async")
+    first = asyncio.create_task(crypto("first", "synthetic", max_bytes=MAX_BYTES))
+    second = asyncio.create_task(crypto("second", "synthetic", max_bytes=MAX_BYTES))
+    tasks = [first, second]
+    try:
+        # Receiving worker notifications proves the loop remains responsive while
+        # both synchronous operations are blocked.
+        observed = {await asyncio.wait_for(started.get(), 2), await asyncio.wait_for(started.get(), 2)}
+        assert observed == {"first", "second"}
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        third = asyncio.create_task(crypto("third", "synthetic", max_bytes=MAX_BYTES))
+        tasks.append(third)
+        await asyncio.sleep(0)  # Submit the third job with both workers still occupied.
+        assert not third_started.is_set()
+        third.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await third
+        fourth = asyncio.create_task(crypto("fourth", "synthetic", max_bytes=MAX_BYTES))
+        tasks.append(fourth)
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.wait_for(second, 2) == "second"
+        assert await asyncio.wait_for(fourth, 2) == "fourth"
+        assert not third_started.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_async_bundle_crypto_preserves_format_and_errors():
+    payload = new_payload([_account()])
+    raw = await account_bundle_module.encrypt_bundle_async(payload, "synthetic", max_bytes=MAX_BYTES)
+    restored = await account_bundle_module.decrypt_bundle_async(raw, "synthetic", max_bytes=MAX_BYTES)
+    assert restored == payload
+    for _ in range(3):
+        with pytest.raises(AccountBundleError, match="Invalid account bundle or passphrase"):
+            await asyncio.wait_for(account_bundle_module.decrypt_bundle_async(raw, "wrong", max_bytes=MAX_BYTES), 2)
 
 
 def _account(email: str = "operator@example.com") -> BundleAccount:

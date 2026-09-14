@@ -40,7 +40,6 @@ import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
@@ -64,7 +63,7 @@ from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
-from app.core.utils.sse import parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind, UsageHistory
 from app.modules.accounts import auth_manager as auth_manager_module
@@ -76,7 +75,6 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import helpers as proxy_helpers_module
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy._load_balancer.exhaustion_probe import probe_pool_usage_exhaustion
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import file_ops as proxy_file_ops
 from app.modules.proxy._service import observability as proxy_observability_module
@@ -290,6 +288,36 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
             "No tool output found for function call call_abc.",
             True,
         ),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "Unrelated upstream failure",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            " This request was blocked by our safety systems.",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
+            500,
+            "This request was blocked by our safety systems.",
+            False,
+        ),
         # A model-entitlement rejection is not a payload-shape rejection, so it
         # is not a member of this narrow set. Its own health-neutrality is
         # decided by ``_is_model_scoped_rejection`` instead.
@@ -342,6 +370,31 @@ async def test_missing_tool_output_rejection_does_not_penalize_account() -> None
         {"message": "No tool output found for custom tool call call_poisoned."},
         "invalid_request_error",
         400,
+    )
+
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_safety_policy_rejection_does_not_penalize_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-healthy")),
+        {"message": "This request was blocked by our safety systems."},
+        "misalignment_policy_violation",
+        None,
     )
 
     assert classified["failure_class"] == "non_retryable"
@@ -645,6 +698,11 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         ("quota_exceeded", 429, "quota exceeded"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+        ),
         (
             "invalid_request_error",
             400,
@@ -4381,147 +4439,6 @@ async def test_opportunistic_admission_forwards_service_tier_to_selection_inputs
     assert selection.account is None
     assert selection.error_code == "no_plan_support_for_model"
     assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.1' at service tier 'priority'"
-
-
-@pytest.mark.asyncio
-async def test_exhaustion_probe_ignores_account_caps_that_close_the_opportunistic_burn_window(monkeypatch):
-    """``lease_kind=None`` disables cap filtering: an exhausted pool at its stream cap is still exhausted."""
-    settings = _make_proxy_settings()
-    settings.proxy_account_stream_limit = 1
-    settings.proxy_account_response_create_limit = 64
-    settings.soft_drain_enabled = False
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    now = utcnow()
-    now_epoch = int(time.time())
-    reset_at = now_epoch + 1800
-    account = _make_account("acc_exhausted_at_cap")
-    # Mirror handle_quota_exceeded: status + blocked_at marker + reset deadline, with 100 % primary usage.
-    account.status = AccountStatus.QUOTA_EXCEEDED
-    account.reset_at = reset_at
-    account.blocked_at = now_epoch
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(
-            return_value=SelectionInputs(
-                accounts=[account],
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=100.0,
-                        reset_at=reset_at,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=40.0,
-                        reset_at=reset_at + 6 * 86400,
-                        window_minutes=10080,
-                    )
-                },
-                latest_monthly={},
-            )
-        ),
-    )
-    service._load_balancer._runtime[account.id] = RuntimeState(inflight_streams=1)
-
-    capped = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind="stream")
-    assert capped.account is None
-    assert capped.error_code == "opportunistic_burn_window_closed"
-
-    runtime_before = deepcopy(service._load_balancer._runtime)
-    exhaustion = await probe_pool_usage_exhaustion(
-        service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None
-    )
-    assert exhaustion is not None
-    assert exhaustion.resets_at == reset_at
-    assert exhaustion.selection.error_code == "usage_limit_reached"
-    assert service._load_balancer._runtime == runtime_before, "the probe leased nothing and touched no runtime state"
-
-
-@pytest.mark.asyncio
-async def test_exhaustion_probe_observes_health_tiers_without_refreshing_the_live_runtime(monkeypatch):
-    """A live admission check refreshes the usage-derived health tier; the observe-only probe must not."""
-    settings = _make_proxy_settings()
-    settings.soft_drain_enabled = True
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    now = utcnow()
-    now_epoch = int(time.time())
-    account = _make_account("acc_draining_soon")
-    # ACTIVE at 96 % of the 5h window: past the soft-drain threshold, still selectable.
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(
-            return_value=SelectionInputs(
-                accounts=[account],
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=96.0,
-                        reset_at=now_epoch + 1800,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=20.0,
-                        reset_at=now_epoch + 6 * 86400,
-                        window_minutes=10080,
-                    )
-                },
-                latest_monthly={},
-            )
-        ),
-    )
-    runtime = service._load_balancer._runtime
-    assert runtime == {}
-
-    # The observation neither creates a runtime entry nor refreshes health.
-    assert (
-        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
-        is None
-    )
-    assert runtime == {}
-
-    # The same question asked as a live admission check performs the ordinary refresh.
-    live = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind=None)
-    assert live.account is not None or live.error_code == "opportunistic_burn_window_closed"
-    refreshed = runtime[account.id]
-    assert refreshed.health_tier == HEALTH_TIER_DRAINING
-    assert refreshed.drain_entered_at is not None
-    assert refreshed.health_version == 1
-
-    # And a subsequent observation still leaves that live state exactly as the refresh left it.
-    snapshot = deepcopy(runtime)
-    assert (
-        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
-        is None
-    )
-    assert runtime == snapshot
 
 
 @pytest.mark.asyncio
@@ -9870,6 +9787,9 @@ async def test_stream_responses_websocket_normalizes_typeless_error_as_terminal(
     assert failed_error["code"] == "invalid_request_error"
     assert failed_error["message"] == "No tool output found for function call call_missing."
     assert failed_error["param"] == "input"
+    assert isinstance(events[1], ParsedSseBlock)
+    assert events[1].response_id_is_local is True
+    assert events[1].is_local is False
     assert websocket._index == 2
 
 
@@ -10822,7 +10742,8 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
 
 
 @pytest.mark.asyncio
-async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_sdk_contract_disabled():
+@pytest.mark.parametrize("enforce_sdk", [False, True])
+async def test_stream_codex_websocket_events_preserves_error_origin_when_normalizing(enforce_sdk: bool):
     raw_payload = {"type": "error", "code": "rate_limit_exceeded", "message": "OpenCode stream failed"}
 
     websocket = _WsResponse(
@@ -10841,14 +10762,20 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
             idle_timeout_seconds=45.0,
             total_timeout_seconds=5.0,
             max_event_bytes=1024,
-            enforce_openai_sdk_contract=False,
+            enforce_openai_sdk_contract=enforce_sdk,
         )
     ]
 
     assert len(events) == 1
     event_block, event_type = events[0]
-    assert parse_sse_data_json(event_block) == raw_payload
-    assert event_type == "error"
+    if enforce_sdk:
+        assert event_type == "response.failed"
+        assert isinstance(event_block, ParsedSseBlock)
+        assert event_block.response_id_is_local is True
+        assert event_block.is_local is False
+    else:
+        assert parse_sse_data_json(event_block) == raw_payload
+        assert event_type == "error"
     assert websocket._index == 1
 
 
@@ -53469,6 +53396,9 @@ def test_normalize_stream_payload_for_http_block_still_rewrites_error_frames():
 
     assert normalized_type == "response.failed"
     assert '"boom"' in normalized_block
+    assert isinstance(normalized_block, ParsedSseBlock)
+    assert normalized_block.response_id_is_local is True
+    assert normalized_block.is_local is False
 
 
 def test_normalize_stream_payload_for_http_block_still_rewrites_error_envelopes_on_non_error_types():

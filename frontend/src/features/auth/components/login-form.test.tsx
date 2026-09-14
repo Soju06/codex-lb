@@ -310,6 +310,70 @@ describe("LoginForm", () => {
       expect(screen.queryByRole("link", { name: /Reverse proxy/ })).not.toBeInTheDocument();
     });
 
+    it("shows the company sign-in under every policy, and the local form only as the policy allows", () => {
+      const providers = [
+        { kind: "password", providerKey: "default", label: "Password", loginUrl: null },
+        SSO,
+      ];
+      const hint = (localLogin: "enabled" | "admins_only" | "break_glass_only") =>
+        LoginHintSchema.parse({ usernameField: "hidden", providers, localLogin });
+
+      // `enabled`: the button first, the form as every install has always had it.
+      useAuthStore.setState({ loginHint: hint("enabled") });
+      const open = render(<LoginForm localForm="shown" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      open.unmount();
+
+      // `admins_only`: the form is one click away, not gone.
+      useAuthStore.setState({ loginHint: hint("admins_only") });
+      const collapsed = render(<LoginForm localForm="collapsed" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in with a password instead" })).toBeInTheDocument();
+      collapsed.unmount();
+
+      // `break_glass_only` at `/`: the company control and nothing else.
+      useAuthStore.setState({ loginHint: hint("break_glass_only") });
+      const closed = render(<LoginForm localForm="hidden" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+      closed.unmount();
+
+      // The same policy at `/login?local=1`, which is what the gate resolves to
+      // `shown`: the password field is back, beneath the company control.
+      useAuthStore.setState({ loginHint: hint("break_glass_only") });
+      render(<LoginForm localForm="shown" />);
+      const block = screen.getByTestId("login-providers");
+      expect(block.compareDocumentPosition(screen.getByLabelText("Password"))).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+
+    it("says a company sign-in did not finish without saying why, or who", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "shown", providers: [SSO], localLogin: "enabled" }),
+      });
+      const { container } = render(<LoginForm localForm="shown" signInFailed />);
+
+      const notice = screen.getByText("That sign-in did not finish. Try again.");
+      // Above the way back in, so the sentence and the button read as one thing.
+      expect(notice.compareDocumentPosition(screen.getByTestId("login-providers"))).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      // The server collapses every cause into one marker; the screen must not
+      // undo that, and must not say anything about who exists.
+      expect(container.textContent).not.toMatch(/expired|nonce|state|denied|unknown|no account|not allowed/i);
+      expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+    });
+
+    it("draws no notice when the URL carries no marker", () => {
+      render(<LoginForm localForm="shown" />);
+
+      expect(screen.queryByText("That sign-in did not finish. Try again.")).not.toBeInTheDocument();
+    });
+
     it("keeps the guest block reachable while the password form is hidden", () => {
       useAuthStore.setState({
         guestAccessEnabled: true,

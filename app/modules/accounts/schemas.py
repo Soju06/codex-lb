@@ -5,6 +5,7 @@ from typing import List, Literal
 
 from pydantic import Field, PrivateAttr, field_validator
 
+from app.modules.accounts.account_bundle import MAX_BUNDLE_ACCOUNTS
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -146,7 +147,7 @@ class AccountImportResponse(DashboardModel):
 
 
 class AccountBundleExportRequest(DashboardModel):
-    account_ids: list[str] | None = None
+    account_ids: list[str] | None = Field(default=None, max_length=MAX_BUNDLE_ACCOUNTS)
     passphrase: str = Field(min_length=1)
 
 

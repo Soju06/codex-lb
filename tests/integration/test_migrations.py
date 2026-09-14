@@ -3315,6 +3315,8 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
         "20260908_000000_add_subscription_overflow",
         "20260908_010000_merge_account_bundle_and_subscription_overflow_heads",
         "20260912_010000_drop_legacy_dashboard_credentials",
+        "20260912_020000_merge_account_bundle_and_dashboard_credentials_heads",
+        "20260913_000000_add_oidc_provider_flow",
     ],
 )
 async def test_account_bundle_and_subscription_overflow_heads_upgrade_to_single_head(tmp_path, parent_revision):
@@ -3336,6 +3338,7 @@ async def test_account_bundle_and_subscription_overflow_heads_upgrade_to_single_
             )
             assert "password_hash" not in dashboard_columns
             assert await conn.run_sync(lambda sync_conn: sa_inspect(sync_conn).has_table("dashboard_users"))
+            assert await conn.run_sync(lambda sync_conn: sa_inspect(sync_conn).has_table("dashboard_oidc_login_flows"))
             index_sql = (
                 await conn.execute(
                     text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_accounts_email_lower'")

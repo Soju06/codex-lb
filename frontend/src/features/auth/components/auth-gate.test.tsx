@@ -213,7 +213,7 @@ describe("AuthGate", () => {
       passwordRequired: true,
       authenticated: false,
       authMode: "trusted_header",
-      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true },
+      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true, pendingArrival: null },
     });
 
     renderGate();
@@ -242,7 +242,10 @@ describe("AuthGate", () => {
     expect(screen.getByText("Protected content")).toBeInTheDocument();
   });
 
-  it("keeps the URL-only pending clause to trusted-header installs", async () => {
+  it("keeps the URL from speaking on an install nothing could have redirected from", async () => {
+    // No reverse proxy and no sign-in method that sends a browser away and
+    // back: the pending URL cannot be a destination here, so it is a mistyped
+    // address and the login screen is the honest answer.
     const refreshSession = vi.fn().mockResolvedValue(undefined);
     setAuthState({ refreshSession, passwordRequired: true, authenticated: false, authMode: "standard" });
 
@@ -252,6 +255,79 @@ describe("AuthGate", () => {
     expect(screen.queryByText("Your account is not ready yet")).not.toBeInTheDocument();
   });
 
+  it("renders the pending screen for a company sign-in refusal that carried no reference", async () => {
+    // The identity provider asserted no address, so the server set no marker —
+    // there would be nothing for the person to quote — and the session that
+    // follows reports no pending identity. The destination the server chose is
+    // all that is left, and honouring it names nobody.
+    setAuthState({
+      refreshSession: vi.fn().mockResolvedValue(undefined),
+      passwordRequired: true,
+      authenticated: false,
+      authMode: "standard",
+      loginHint: LoginHintSchema.parse({
+        usernameField: "shown",
+        providers: [
+          { kind: "oidc", providerKey: "default", label: "Okta", loginUrl: "/api/dashboard-auth/oidc/login/start" },
+        ],
+        pendingIdentity: false,
+        pendingArrival: null,
+      }),
+    });
+
+    const { container } = renderGate("/auth/pending");
+
+    expect(screen.getByText("Your account is not ready yet")).toBeInTheDocument();
+    expect(screen.queryByTestId("pending-reference")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
+    // The general copy: it guesses no provider and asserts nothing about who
+    // already has an account here.
+    expect(container.textContent).not.toContain("Okta");
+    expect(container.textContent).not.toMatch(/issuer|claim|subject|@/i);
+  });
+
+  it("parks a refused company sign-in on the pending screen in standard mode too", async () => {
+    // The URL alone still proves nothing here; the session does. The server
+    // reports `pendingIdentity` for the browser holding its own refusal marker,
+    // and this clause has always followed that fact rather than the auth mode.
+    setAuthState({
+      refreshSession: vi.fn().mockResolvedValue(undefined),
+      passwordRequired: true,
+      authenticated: false,
+      authMode: "standard",
+      loginHint: LoginHintSchema.parse({
+        usernameField: "shown",
+        providers: [{ kind: "oidc", providerKey: "default", label: "Okta", loginUrl: "/start" }],
+        pendingIdentity: true,
+        pendingArrival: { provider: "Okta", reference: "s***@example.com" },
+      }),
+    });
+
+    renderGate("/auth/pending");
+
+    expect(screen.getByText("Your account is not ready yet")).toBeInTheDocument();
+    expect(screen.getByTestId("pending-reference")).toHaveTextContent("s***@example.com");
+    expect(screen.queryByText("Sign in")).not.toBeInTheDocument();
+  });
+
+  it("passes the sign-in failure marker to the login screen and nothing more", async () => {
+    setAuthState({
+      refreshSession: vi.fn().mockResolvedValue(undefined),
+      passwordRequired: true,
+      authenticated: false,
+      loginHint: LoginHintSchema.parse({
+        usernameField: "shown",
+        providers: [{ kind: "oidc", providerKey: "default", label: "Okta", loginUrl: "/start" }],
+      }),
+    });
+
+    const { container } = renderGate("/login?sso=failed");
+
+    expect(screen.getByText("That sign-in did not finish. Try again.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/nonce|state|expired|no account/i);
+  });
+
   it("does not pull an invite link onto the pending screen", async () => {
     const refreshSession = vi.fn().mockResolvedValue(undefined);
     setAuthState({
@@ -259,7 +335,7 @@ describe("AuthGate", () => {
       passwordRequired: true,
       authenticated: false,
       authMode: "trusted_header",
-      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true },
+      loginHint: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true, pendingArrival: null },
     });
 
     renderGate("/invite/abc123");
@@ -276,6 +352,7 @@ describe("AuthGate", () => {
       providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
       localLogin: "enabled" as const,
       pendingIdentity: true,
+      pendingArrival: null,
     };
     setAuthState({
       refreshSession,

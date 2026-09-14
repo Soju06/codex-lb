@@ -43,3 +43,5 @@
 - [x] 6.8 Restrict bundle validation refreshes to guarded token-only rotation, suppress metadata/status/routing writes, and keep failed credentials quarantined.
 - [x] 6.9 Exclude pending-deletion destinations from bundle identity matching without changing ordinary-import revival, and cover skip/replace and id collisions through the API.
 - [x] 6.10 Preserve indexed database email comparisons with database-side normalization on both operands, and verify repeated Unicode auth.json imports reuse their slot.
+- [x] 6.11 Offload bundle cryptography with cancellation-safe bounded concurrency and preserve the v1 format.
+- [x] 6.12 Reject export selections above the bundle account limit before repository lookup.

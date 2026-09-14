@@ -82,7 +82,7 @@ class _DummyFacade:
         return None
 
     @staticmethod
-    def _should_penalize_stream_error(_error_code: object) -> bool:
+    def _should_penalize_stream_error(_error_code: object, _error_message: object = None) -> bool:
         return False
 
     @staticmethod

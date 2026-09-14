@@ -48,8 +48,8 @@ from app.modules.accounts.account_bundle import (
     BundleAccount,
     BundleCredentials,
     bundle_integrity_token,
-    decrypt_bundle,
-    encrypt_bundle,
+    decrypt_bundle_async,
+    encrypt_bundle_async,
     mask_email,
     new_payload,
 )
@@ -600,7 +600,7 @@ class AccountsService:
                     ),
                 )
             )
-        return encrypt_bundle(new_payload(records), passphrase, max_bytes=max_bytes), len(records)
+        return await encrypt_bundle_async(new_payload(records), passphrase, max_bytes=max_bytes), len(records)
 
     async def preflight_account_bundle(
         self,
@@ -609,7 +609,7 @@ class AccountsService:
         *,
         max_bytes: int,
     ) -> AccountBundlePreflightResponse:
-        payload = decrypt_bundle(raw, passphrase, max_bytes=max_bytes)
+        payload = await decrypt_bundle_async(raw, passphrase, max_bytes=max_bytes)
         accounts = self._bundle_accounts_for_destination(payload)
         matches = await self._repo.account_bundle_identity_matches(accounts)
         previews = [
@@ -650,7 +650,7 @@ class AccountsService:
             raise InvalidAuthJsonError("Account bundle does not match the preflight upload")
         if conflict_mode == "replace" and not confirm_replace:
             raise InvalidAuthJsonError("Replacing matching accounts requires explicit confirmation")
-        payload = decrypt_bundle(raw, passphrase, max_bytes=max_bytes)
+        payload = await decrypt_bundle_async(raw, passphrase, max_bytes=max_bytes)
         accounts = self._bundle_accounts_for_destination(payload)
         await self._repo.account_bundle_identity_matches(accounts)
         persisted = await self._repo.persist_account_bundle(accounts, conflict_mode=conflict_mode)

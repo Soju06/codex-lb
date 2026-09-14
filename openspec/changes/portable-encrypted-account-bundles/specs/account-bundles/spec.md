@@ -1,5 +1,18 @@
 ## ADDED Requirements
 
+### Requirement: Bundle cryptography and export selection are bounded
+Bundle export, preflight, and commit MUST execute bundle encryption and decryption, including scrypt, outside the event-loop thread. At most two bundle cryptographic operations per event loop MAY execute concurrently. Cancellation of a request MUST NOT release an executing worker's capacity until that worker finishes. The v1 format and cryptographic parameters MUST remain unchanged.
+
+An explicit export selection MUST contain at most 10,000 account ids and MUST be rejected before account lookup when it exceeds that limit. Omitted or null selection MUST continue to select all visible accounts, and an empty selection MUST continue to export zero accounts.
+
+#### Scenario: Cancellation cannot exceed the cryptographic concurrency bound
+- **WHEN** an export or import request is cancelled while its cryptographic worker runs
+- **THEN** that worker continues to occupy its capacity until completion and unrelated event-loop tasks can progress
+
+#### Scenario: Excessive export selection fails before lookup
+- **WHEN** export supplies more than 10,000 account ids
+- **THEN** validation rejects the request before a repository lookup is built
+
 ### Requirement: Bundle permissions match dashboard role grants
 Bundle export MUST require `accounts:export`, including the dashboard's existing recent step-up policy, before reading the body. Bundle import preflight and commit MUST require `accounts:write` before reading the body. The dashboard bundle export action MUST be gated independently by `accounts:export`, not by account-write access.
 

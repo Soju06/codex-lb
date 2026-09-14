@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,7 +15,9 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
+from app.modules.accounts.account_bundle import MAX_BUNDLE_ACCOUNTS
 from app.modules.accounts.repository import ACCOUNT_PENDING_DELETION_REASON, BUNDLE_IMPORT_VALIDATION_PAUSE_REASON
+from app.modules.accounts.service import AccountsService
 
 from .test_account_auth_export import _make_auth_json
 
@@ -99,6 +102,8 @@ async def test_account_bundle_export_openapi_preserves_manual_json_body_schema(a
     schema = request_body["content"]["application/json"]["schema"]
     assert set(schema["required"]) == {"passphrase"}
     assert set(schema["properties"]) == {"accountIds", "passphrase"}
+    array_schema = next(option for option in schema["properties"]["accountIds"]["anyOf"] if option["type"] == "array")
+    assert array_schema["maxItems"] == MAX_BUNDLE_ACCOUNTS
 
 
 @pytest.mark.asyncio
@@ -147,6 +152,47 @@ async def test_account_bundle_export_request_body_is_bounded(async_client, monke
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "payload_too_large"
     assert response.headers["cache-control"].startswith("no-store")
+
+
+@pytest.mark.asyncio
+async def test_account_bundle_export_rejects_oversized_selection_before_lookup(async_client, monkeypatch) -> None:
+    export = AsyncMock()
+    monkeypatch.setattr(AccountsService, "export_account_bundle", export)
+
+    response = await async_client.post(
+        "/api/accounts/bundle/export",
+        json={"accountIds": ["selected-account"] * (MAX_BUNDLE_ACCOUNTS + 1), "passphrase": "test-passphrase"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert response.headers["cache-control"].startswith("no-store")
+    export.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", ["omitted", "null", "empty", "single", "maximum"])
+async def test_account_bundle_export_preserves_valid_selections(async_client, monkeypatch, selection) -> None:
+    account_ids = {
+        "omitted": None,
+        "null": None,
+        "empty": [],
+        "single": ["selected-account"],
+        "maximum": [f"selected-account-{index}" for index in range(MAX_BUNDLE_ACCOUNTS)],
+    }[selection]
+    payload: dict[str, object] = {"passphrase": "test-passphrase"}
+    if selection != "omitted":
+        payload["accountIds"] = account_ids
+    export = AsyncMock(return_value=(b"synthetic-bundle", 0))
+    monkeypatch.setattr(AccountsService, "export_account_bundle", export)
+
+    response = await async_client.post("/api/accounts/bundle/export", json=payload)
+
+    assert response.status_code == 200
+    assert response.content == b"synthetic-bundle"
+    export.assert_awaited_once_with(
+        account_ids, "test-passphrase", max_bytes=accounts_api_module.get_settings().account_bundle_max_bytes
+    )
 
 
 def test_account_bundle_export_rejects_single_oversized_chunk_before_retaining_it() -> None:

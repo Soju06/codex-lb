@@ -234,6 +234,9 @@ async def test_refused_identity_gets_pending_session_and_401(async_client: Async
     assert body["user"] is None
     assert body["accessSummary"] is None
     assert body["login"]["pendingIdentity"] is True
+    # A proxy refusal keeps the bare boolean: the arrival block is derived from
+    # the OIDC refusal marker and from nothing else, so there is none here.
+    assert body["login"]["pendingArrival"] is None
 
     blocked = await async_client.get("/api/settings", headers=_as("nobody@example.com"))
     assert blocked.status_code == 401
@@ -491,8 +494,12 @@ async def test_provider_api_lists_and_edits_the_resolver_knobs(async_client: Asy
     listed = await async_client.get(PROVIDERS, headers=admin)
     assert listed.status_code == 200, listed.text
     by_kind = {row["kind"]: row for row in listed.json()}
-    assert set(by_kind) == {"password", "trusted_header"}
+    assert set(by_kind) == {"password", "trusted_header", "oidc"}
     assert by_kind["password"]["active"] is True and by_kind["password"]["unknownIdentityRoleId"] is None
+    # The seeded single sign-on row is off and hands an unmatched identity
+    # nothing until an operator connects and enables it.
+    assert by_kind["oidc"]["enabled"] is False and by_kind["oidc"]["active"] is False
+    assert by_kind["oidc"]["unknownIdentityRoleId"] is None
     trusted = by_kind["trusted_header"]
     assert trusted["id"] == TRUSTED_HEADER_PROVIDER_ID
     assert trusted["active"] is True and trusted["enabled"] is True
@@ -543,7 +550,11 @@ async def test_provider_api_lists_and_edits_the_resolver_knobs(async_client: Asy
 async def test_provider_edits_need_an_attributable_account(async_client: AsyncClient) -> None:
     listed = await async_client.get(PROVIDERS)
     assert listed.status_code == 200
-    assert {row["kind"]: row["active"] for row in listed.json()} == {"password": True, "trusted_header": False}
+    assert {row["kind"]: row["active"] for row in listed.json()} == {
+        "password": True,
+        "trusted_header": False,
+        "oidc": False,
+    }
     refused = await async_client.patch(f"{PROVIDERS}/{TRUSTED_HEADER_PROVIDER_ID}", json={"linkByEmail": True})
     assert refused.status_code == 409 and _error(refused) == "admin_account_required"
 
@@ -621,6 +632,11 @@ async def test_providers_migration_upgrades_and_downgrades(tmp_path) -> None:
         }
         assert {"expected_provider", "expected_provider_key", "expected_subject"} <= invite_columns
         assert seeded == [
+            # Insert-ignore seeding is shared, so every revision that seeds
+            # plants whatever built-in rows the release has; the OIDC row is
+            # disabled and hands out nothing, so an install that never connects
+            # an identity provider is unchanged by it.
+            ("oidc", "default", 0, None, None),
             ("password", "default", 1, None, None),
             ("trusted_header", "default", 1, ADMIN_ROLE, VIEWER_ROLE),
         ]

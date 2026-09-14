@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from typing import Literal
+from weakref import WeakValueDictionary
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -21,6 +26,11 @@ SALT_BYTES = 16
 NONCE_BYTES = 12
 KEY_BYTES = 32
 MAX_BUNDLE_ACCOUNTS = 10_000
+
+# A dedicated pool keeps scrypt off the event loop and bounds its memory/CPU
+# use even when a caller cancels: running jobs retain their worker until done.
+_CRYPTO_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="account-bundle")
+_CRYPTO_LIMITERS: WeakValueDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakValueDictionary()
 
 
 class AccountBundleError(ValueError):
@@ -162,6 +172,34 @@ def new_payload(accounts: list[BundleAccount]) -> AccountBundlePayload:
         created_at=datetime.now(timezone.utc),
         accounts=accounts,
     )
+
+
+async def encrypt_bundle_async(payload: AccountBundlePayload, passphrase: str, *, max_bytes: int) -> bytes:
+    return await _run_crypto(partial(encrypt_bundle, payload, passphrase, max_bytes=max_bytes))
+
+
+async def decrypt_bundle_async(raw: bytes, passphrase: str, *, max_bytes: int) -> AccountBundlePayload:
+    return await _run_crypto(partial(decrypt_bundle, raw, passphrase, max_bytes=max_bytes))
+
+
+async def _run_crypto[T](operation: Callable[[], T]) -> T:
+    loop = asyncio.get_running_loop()
+    limiter = _CRYPTO_LIMITERS.setdefault(loop, asyncio.Semaphore(2))
+    await limiter.acquire()
+    try:
+        future = loop.run_in_executor(_CRYPTO_EXECUTOR, operation)
+    except BaseException:
+        limiter.release()
+        raise
+
+    def completed(done: asyncio.Future[T]) -> None:
+        limiter.release()
+        # Retrieve failures even if the requesting task was cancelled.
+        if not done.cancelled():
+            done.exception()
+
+    future.add_done_callback(completed)
+    return await asyncio.shield(future)
 
 
 def encrypt_bundle(payload: AccountBundlePayload, passphrase: str, *, max_bytes: int) -> bytes:

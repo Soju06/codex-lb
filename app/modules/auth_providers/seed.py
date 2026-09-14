@@ -61,6 +61,23 @@ def default_auth_provider_rows() -> list[dict[str, object]]:
             "skip_role_sync": False,
             "idp_mfa_enforced": False,
         },
+        {
+            # Disabled, and with no role for an unmatched identity: an install
+            # that never connects an identity provider is unchanged, and one
+            # that does denies unknown identities until an operator says
+            # otherwise. The settings API has no create endpoint, so this row
+            # is what the connect wizard edits.
+            "id": auth_provider_id(AuthProviderKind.OIDC),
+            "kind": AuthProviderKind.OIDC.value,
+            "provider_key": DEFAULT_PROVIDER_KEY,
+            "enabled": False,
+            "label": "Single sign-on",
+            "unknown_identity_role_id": None,
+            "no_match_role_id": None,
+            "link_by_email": False,
+            "skip_role_sync": False,
+            "idp_mfa_enforced": False,
+        },
     ]
 
 

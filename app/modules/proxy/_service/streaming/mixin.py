@@ -51,10 +51,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.api_keys.service import (
-    ApiKeyData,
-    ApiKeyUsageReservationData,
-)
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -271,6 +268,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _mark_upstream_stream_incomplete,
     _observe_terminal_stream_error_frame,
     _openai_error_fields,
+    _publish_http_response_owner,
     _rewrite_malformed_stream_error_event,
     _stamp_terminal,
     _stream_transport_failure_event_or_raise,
@@ -636,6 +634,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+            _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -716,7 +715,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         failure_metadata = _RequestLogFailureMetadata(
                             failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
                         )
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(code)
+                    settlement.account_health_error = _facade()._should_penalize_stream_error(code, error_message)
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     if allow_retry and _facade()._is_security_work_authorization_required_error(code, error_message):
@@ -745,7 +744,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.error = {"message": error_message or "Upstream error"}
                 settlement.record_success = False
                 settlement.account_health_error = False
-
             if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
                 if event.response and event.response.id:
@@ -794,6 +792,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+                _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 malformed_error_rewrite = _rewrite_malformed_stream_error_event(
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -890,7 +889,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.account_health_error = not saw_text_delta
                             else:
                                 settlement.account_health_error = (
-                                    _facade()._should_penalize_stream_error(error_code) and not saw_text_delta
+                                    _facade()._should_penalize_stream_error(error_code, error_message)
+                                    and not saw_text_delta
                                 )
                 elif preserve_raw_sse_line:
                     _, raw_error_message, _, raw_error_code = _raw_error_fields(

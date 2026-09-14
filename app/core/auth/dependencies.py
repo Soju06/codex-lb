@@ -28,7 +28,12 @@ from app.core.auth.dashboard_access import (
 from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth, get_dashboard_request_auth
 from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
 from app.core.auth.external_identity import resolve_trusted_header_request
-from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, is_step_up_fresh, step_up_methods
+from app.core.auth.step_up import (
+    STEP_UP_COOKIE,
+    STEP_UP_UNAVAILABLE_MESSAGE,
+    account_step_up_methods,
+    is_step_up_fresh,
+)
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -49,6 +54,7 @@ from app.modules.dashboard_auth.service import (
     DashboardSessionState,
     get_dashboard_session_store,
     get_step_up_cookie_store,
+    is_local_password_session,
     session_clock,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
@@ -279,7 +285,7 @@ async def _password_fallback_principal(request: Request) -> DashboardPrincipal |
     users_cache = get_dashboard_users_cache()
     state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     session_user = await _resolve_session_user(state, users_cache)
-    if state is None or session_user is None or not state.password_verified:
+    if state is None or session_user is None or not is_local_password_session(state):
         return None
     settings = await get_settings_cache().get()
     if not local_login_admits(session_user, settings.local_login_policy):
@@ -364,7 +370,7 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     has_password_fallback_session = (
         state is not None
         and session_user is not None
-        and state.password_verified
+        and is_local_password_session(state)
         and local_login_admits(session_user, settings.local_login_policy)
     )
     if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_password_fallback_session:
@@ -488,7 +494,8 @@ async def ensure_step_up(request: Request, principal: DashboardPrincipal, permis
     admin, the disabled-auth principal) have no credential to re-verify and are
     exempt; every account is held to it, whatever provider signed it in. A
     stale or missing step-up answers ``403 step_up_required`` naming the
-    factors the account can present; an account with no factor at all answers
+    factors the account can present — including its identity provider when
+    that is the only thing it has; an account with no factor at all answers
     ``403 step_up_unavailable``.
     """
 
@@ -503,7 +510,7 @@ async def ensure_step_up(request: Request, principal: DashboardPrincipal, permis
         recorded += [value for value in (recorded_step_up(request, user),) if value is not None]
     if recorded and is_step_up_fresh(max(recorded), now=session_clock()):
         return
-    methods = step_up_methods(user) if user is not None else []
+    methods = await account_step_up_methods(user) if user is not None else []
     if not methods:
         raise DashboardPermissionError(STEP_UP_UNAVAILABLE_MESSAGE, code="step_up_unavailable", param=permission.value)
     raise DashboardPermissionError(

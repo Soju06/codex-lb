@@ -1138,10 +1138,64 @@ class DashboardAuthProvider(Base):
     link_by_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     skip_role_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     idp_mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: Proof that the acting admin's own browser completed a round trip through
+    #: this exact configuration. Enabling a redirect-style provider requires one
+    #: no older than ten minutes; freshness is computed on read, never stored as
+    #: a deadline, and a connection-field write clears it.
+    test_login_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    test_login_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class DashboardOidcLoginFlow(Base):
+    """One in-flight OIDC round trip, held where every replica can see it.
+
+    The callback routinely lands on a replica that did not serve the start, so
+    the flow cannot live in process memory. Neither the ``state`` nor the
+    ``nonce`` is stored in clear: the ``state`` arrives in the callback URL and
+    the ``nonce`` arrives inside the ID token, so both can be hashed and
+    compared, and a copy that is never needed in clear is only a liability. The
+    row is consumed by one conditional ``DELETE``, which is what makes a state
+    single-use across the fleet.
+    """
+
+    __tablename__ = "dashboard_oidc_login_flows"
+    __table_args__ = (Index("idx_dashboard_oidc_login_flows_expires_at", "expires_at"),)
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_auth_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    #: ``login``, ``test`` or ``step_up``; it decides where the browser lands,
+    #: which is why no destination is ever accepted from the caller.
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    acting_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    #: The redirect URI exactly as sent, so the token exchange repeats it
+    #: byte-identically even if the configuration changes mid-flow.
+    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: A digest of the connection document this flow was started against. A
+    #: pre-flight proves *a configuration*, so the stamp it leaves must name the
+    #: one it actually reached: without this a configuration write that commits
+    #: while the callback is exchanging its code would be handed the proof that
+    #: the previous issuer worked.
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class DashboardRoleMappingClaim(str, Enum):

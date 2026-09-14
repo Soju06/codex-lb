@@ -321,6 +321,9 @@ async def test_bootstrap_creates_admin_account_and_describes_the_session(async_c
         "providers": [{"kind": "password", "providerKey": "default", "label": "Password", "loginUrl": None}],
         "localLogin": "enabled",
         "pendingIdentity": False,
+        # No company sign-in was refused for this browser; there is nothing to
+        # describe and nothing that says whether anyone else has an account.
+        "pendingArrival": None,
     }
     assert payload["accessSummary"]["usersTotal"] == 1
     assert payload["accessSummary"]["usersActive"] == 1

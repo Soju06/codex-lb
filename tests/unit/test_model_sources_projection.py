@@ -1,4 +1,4 @@
-"""Source-body projection: telemetry stripping and the overflow portability view (#2123 WP-C1, §4.6, CP-7).
+"""Source-body projection: Codex telemetry stripping for direct model-source routing.
 
 The two bodies this module loads are the *pre-strip* fixtures of
 ``tests/fixtures/codex_bodies``: synthetic, and kept synthetic because they
@@ -10,10 +10,10 @@ gpt-5.6 Responses-Lite bundle: ``namespace`` tools
 the tagged developer base-instructions message, ``reasoning.context=all_turns``,
 no top-level ``tools``) but they are shape-illustrative, not byte-faithful.
 
-Real captured bodies now live alongside them (design §16 item i is closed); the
-corpus, the per-fixture divergences from Codex 0.154.0 and the recorded
-portability verdicts are in ``tests/fixtures/codex_bodies/provenance.json`` and
-its README, gated by ``tests/unit/test_codex_body_fixtures.py``.
+Real captured bodies live alongside them; the corpus and the per-fixture
+divergences from Codex 0.154.0 are in
+``tests/fixtures/codex_bodies/provenance.json`` and its README, gated by
+``tests/unit/test_codex_body_fixtures.py``.
 """
 
 from __future__ import annotations
@@ -24,24 +24,15 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from hypothesis import given, settings
 
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.model_sources.projection import (
-    DECLINE_REASONS,
-    OVERFLOW_VIEW_FIELDS,
-    OVERFLOW_VIEW_REASONING_FIELDS,
-    SERVICE_TIER_FIELD,
     STREAM_OPTIONS_FIELD,
     STRIPPED_STREAM_OPTIONS_KEYS,
     STRIPPED_TELEMETRY_FIELDS,
-    Declined,
-    PortabilityView,
-    overflow_portability_view,
     strip_source_telemetry,
 )
-from tests.unit.hypothesis_strategies import json_objects
 
 pytestmark = pytest.mark.unit
 
@@ -111,22 +102,9 @@ def test_strip_removes_exactly_the_telemetry_fields_in_place() -> None:
     assert result["background"] is False and result["max_tool_calls"] == 3 and result["top_logprobs"] == 2
 
 
-def test_strip_service_tier_only_when_flagged() -> None:
-    kept = strip_source_telemetry(_telemetry_payload())
-    assert kept[SERVICE_TIER_FIELD] == "priority"
-
-    stripped = strip_source_telemetry(_telemetry_payload(), strip_service_tier=True)
-    assert SERVICE_TIER_FIELD not in stripped
-    assert set(_telemetry_payload()) - set(stripped) == set(STRIPPED_TELEMETRY_FIELDS) | {
-        STREAM_OPTIONS_FIELD,
-        SERVICE_TIER_FIELD,
-    }
-
-
 def test_strip_is_idempotent_and_tolerates_absent_fields() -> None:
     payload: dict[str, JsonValue] = {"model": "gpt-5.5", "input": "hello"}
     assert strip_source_telemetry(payload) == {"model": "gpt-5.5", "input": "hello"}
-    assert strip_source_telemetry(payload, strip_service_tier=True) == {"model": "gpt-5.5", "input": "hello"}
 
     once = strip_source_telemetry(_telemetry_payload())
     twice = strip_source_telemetry(dict(once))
@@ -168,170 +146,36 @@ def test_strip_removes_only_the_codex_key_from_stream_options(stream_options: Js
     assert stripped["model"] == "gpt-5.5" and stripped["input"] == []
 
 
-def test_a_surviving_stream_options_forwards_for_direct_routing_but_declines_the_overflow_view() -> None:
-    """The view allowlist (§4.6) is not widened: overflow stays Codex-shaped, direct routing forwards the field."""
+def test_a_surviving_stream_options_forwards_for_direct_routing() -> None:
+    """An SDK client's ``stream_options.include_obfuscation`` is forwarded; only the Codex key goes."""
 
-    codex_shaped = {**_full_allowlisted_body(), "stream_options": {"reasoning_summary_delivery": "interleaved"}}
-    assert overflow_portability_view(codex_shaped) == Declined("not_portable_unknown_field", "stream_options")
-    assert isinstance(overflow_portability_view(strip_source_telemetry(codex_shaped)), PortabilityView)
-
-    sdk_shaped = {**_full_allowlisted_body(), "stream_options": {"include_obfuscation": True}}
+    sdk_shaped: dict[str, JsonValue] = {
+        "model": "gpt-5.5",
+        "input": [],
+        "stream_options": {"include_obfuscation": True},
+    }
     stripped = strip_source_telemetry(sdk_shaped)
     assert stripped["stream_options"] == {"include_obfuscation": True}
-    assert overflow_portability_view(stripped) == Declined("not_portable_unknown_field", "stream_options")
 
 
-def test_strip_never_fails_closed_on_an_unknown_field_while_the_view_declines_it() -> None:
-    """CP-7: the same unknown field forwards for direct routing and declines overflow."""
+def test_strip_never_fails_closed_on_an_unknown_field() -> None:
+    """CP-7: an unknown field is forwarded for direct routing, never dropped."""
 
     stripped = strip_source_telemetry({"model": "gpt-5.5", "input": [], "x_future_field": 1})
     assert stripped["x_future_field"] == 1
 
-    assert overflow_portability_view(stripped) == Declined("not_portable_unknown_field", "x_future_field")
 
-
-# --- overflow_portability_view ------------------------------------------------------
-
-
-def _full_allowlisted_body() -> dict[str, JsonValue]:
-    return {
-        "model": "gpt-5.5",
-        "input": [{"role": "user", "content": "hi"}],
-        "instructions": "base",
-        "tools": [{"type": "function", "name": "shell"}],
-        "tool_choice": "auto",
-        "parallel_tool_calls": False,
-        "reasoning": {"effort": "medium", "summary": "auto"},
-        "text": {"verbosity": "medium"},
-        "include": ["reasoning.encrypted_content"],
-        "store": False,
-        "stream": True,
-        "truncation": "auto",
-        "max_output_tokens": 4096,
-        "temperature": 1.0,
-        "top_p": 1.0,
-        "metadata": {"team": "a"},
-        "user": "user-1",
-        "safety_identifier": "safety-1",
-        "prompt_cache_key": "cache-1",
-        "prompt_cache_retention": "24h",
-        "previous_response_id": "resp_1",
-        "conversation": "conv_1",
-        "prompt": {"id": "pmpt_1"},
-    }
-
-
-def test_view_admits_every_allowlisted_field_as_a_shallow_copy() -> None:
-    body = _full_allowlisted_body()
-    assert set(body) == set(OVERFLOW_VIEW_FIELDS)
-
-    view = overflow_portability_view(body)
-
-    assert isinstance(view, PortabilityView)
-    assert dict(view.body) == body
-    assert view.body is not body
-    body["model"] = "mutated-later"
-    assert view.body["model"] == "gpt-5.5"
-
-
-def test_view_declines_unknown_top_level_fields_naming_every_offender_sorted() -> None:
-    body = {**_full_allowlisted_body(), "zeta": 1, "alpha": {"nested": True}}
-
-    assert overflow_portability_view(body) == Declined("not_portable_unknown_field", "alpha,zeta")
-
-
-@pytest.mark.parametrize("telemetry_field", sorted(STRIPPED_TELEMETRY_FIELDS) + [SERVICE_TIER_FIELD])
-def test_view_is_built_from_the_stripped_body_so_telemetry_is_an_unknown_field(telemetry_field: str) -> None:
-    body = {**_full_allowlisted_body(), telemetry_field: {"k": "v"}}
-
-    assert overflow_portability_view(body) == Declined("not_portable_unknown_field", telemetry_field)
-    assert isinstance(overflow_portability_view(strip_source_telemetry(body, strip_service_tier=True)), PortabilityView)
-
-
-@pytest.mark.parametrize(
-    ("reasoning", "expected"),
-    [
-        ({"effort": "high", "summary": "detailed"}, None),
-        ({"effort": "high"}, None),
-        ({}, None),
-        ({"effort": "high", "context": "all_turns"}, Declined("not_portable_lite_namespace", "reasoning.context")),
-        (
-            {"context": "all_turns", "budget": 1},
-            Declined("not_portable_lite_namespace", "reasoning.budget,reasoning.context"),
-        ),
-        ("high", Declined("not_portable_unknown_field", "reasoning")),
-        (["high"], Declined("not_portable_unknown_field", "reasoning")),
-    ],
-)
-def test_view_reasoning_admits_effort_and_summary_only(reasoning: JsonValue, expected: Declined | None) -> None:
-    body: dict[str, JsonValue] = {"model": "gpt-5.5", "input": [], "reasoning": reasoning}
-
-    view = overflow_portability_view(body)
-
-    if expected is None:
-        assert isinstance(view, PortabilityView)
-        assert view.body["reasoning"] == reasoning
-    else:
-        assert view == expected
-    assert OVERFLOW_VIEW_REASONING_FIELDS == frozenset({"effort", "summary"})
-
-
-def test_view_declines_the_lite_tool_bundle_before_any_history_check() -> None:
-    body: dict[str, JsonValue] = {
-        "model": "gpt-5.6-sol",
-        "input": [
-            {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]},
-            {"role": "user", "content": "hi"},
-        ],
-    }
-
-    assert overflow_portability_view(body) == Declined("not_portable_lite_namespace", "additional_tools")
-
-
-def test_view_treats_a_missing_or_string_input_as_portable_shape() -> None:
-    assert isinstance(overflow_portability_view({"model": "gpt-5.5"}), PortabilityView)
-    assert isinstance(overflow_portability_view({"model": "gpt-5.5", "input": "hello"}), PortabilityView)
-
-
-@settings(max_examples=150, deadline=None)
-@given(json_objects)
-def test_view_never_raises_and_only_uses_closed_reasons(body: dict[str, JsonValue]) -> None:
-    view = overflow_portability_view(body)
-
-    if isinstance(view, Declined):
-        assert view.reason in DECLINE_REASONS
-        assert view.reason in {"not_portable_unknown_field", "not_portable_lite_namespace"}
-    else:
-        assert isinstance(view, PortabilityView)
-        assert set(view.body) <= OVERFLOW_VIEW_FIELDS
-
-
-def test_constants_are_disjoint_and_closed() -> None:
+def test_constants_are_closed() -> None:
     assert STRIPPED_TELEMETRY_FIELDS == frozenset({"client_metadata", "access_programs"})
     assert STRIPPED_STREAM_OPTIONS_KEYS == frozenset({"reasoning_summary_delivery"})
     assert STREAM_OPTIONS_FIELD == "stream_options"
-    assert not STRIPPED_TELEMETRY_FIELDS & OVERFLOW_VIEW_FIELDS
-    # A ``stream_options`` that survives the projection declines the view as an unknown field.
-    assert STREAM_OPTIONS_FIELD not in OVERFLOW_VIEW_FIELDS
-    assert SERVICE_TIER_FIELD not in OVERFLOW_VIEW_FIELDS
-    assert DECLINE_REASONS == frozenset(
-        {
-            "not_portable_history",
-            "not_portable_lite_namespace",
-            "not_portable_tools",
-            "not_portable_items",
-            "not_portable_vision",
-            "not_portable_unknown_field",
-            "turn_state_bound",
-        }
-    )
 
 
 # --- fixtures: gpt-5.5 standard body and gpt-5.6 Responses-Lite bundle ---------------
 
 
 @pytest.mark.parametrize("through_request_model", [False, True], ids=["raw", "model_dump_for_forwarding"])
-def test_gpt55_standard_first_turn_strips_exactly_two_fields_and_builds_a_view(through_request_model: bool) -> None:
+def test_gpt55_standard_first_turn_strips_exactly_two_fields(through_request_model: bool) -> None:
     fixture = _load_fixture("gpt55_standard_first_turn.json")
     body = _forwarded(fixture) if through_request_model else dict(fixture)
     before = copy.deepcopy(body)
@@ -344,20 +188,13 @@ def test_gpt55_standard_first_turn_strips_exactly_two_fields_and_builds_a_view(t
     assert stripped["include"] == ["reasoning.encrypted_content"]
     assert "service_tier" not in stripped  # never sent on a standard-tier turn; nothing synthesized
 
-    view = overflow_portability_view(stripped)
-
-    assert isinstance(view, PortabilityView)
-    assert dict(view.body) == stripped
-
 
 @pytest.mark.parametrize("through_request_model", [False, True], ids=["raw", "model_dump_for_forwarding"])
-def test_gpt56_lite_bundle_declines_lite_namespace_while_the_stripped_body_still_forwards(
-    through_request_model: bool,
-) -> None:
+def test_gpt56_lite_bundle_still_forwards_the_lite_wire_shape(through_request_model: bool) -> None:
     fixture = _load_fixture("gpt56_lite_bundle.json")
     body = _forwarded(fixture) if through_request_model else dict(fixture)
 
-    stripped = strip_source_telemetry(body, strip_service_tier=True)
+    stripped = strip_source_telemetry(body)
 
     # Direct routing keeps forwarding the Lite wire shape untouched (CP-7 / CP-1).
     assert "tools" not in stripped
@@ -374,9 +211,3 @@ def test_gpt56_lite_bundle_declines_lite_namespace_while_the_stripped_body_still
     assert passthrough == {"content_item_kinds": ["model.base_instructions"]}
     assert stripped["reasoning"] == {"effort": "medium", "summary": "auto", "context": "all_turns"}
     assert "client_metadata" not in stripped and "stream_options" not in stripped
-
-    # Overflow declines it as Lite -- never as history (mutants: hoist a Lite bundle; Lite declined as history).
-    assert overflow_portability_view(stripped) == Declined("not_portable_lite_namespace", "reasoning.context")
-    without_context = dict(stripped)
-    without_context["reasoning"] = {"effort": "medium", "summary": "auto"}
-    assert overflow_portability_view(without_context) == Declined("not_portable_lite_namespace", "additional_tools")

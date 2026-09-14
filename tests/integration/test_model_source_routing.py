@@ -4272,8 +4272,7 @@ async def test_direct_source_routing_forwards_only_constructed_headers(async_cli
     scratch, so a native Codex request's ChatGPT-internal telemetry headers
     (``x-openai-subagent``, ``x-codex-*``, ``session-id``, ``thread-id``, ...)
     never reach a source and the client's ``User-Agent`` is replaced by the
-    HTTP client's own. The overflow path shares the builder; its capture lives
-    in ``test_subscription_overflow_routing.py``.
+    HTTP client's own.
     """
     from tests.unit.test_model_source_request_headers import (
         CODEX_TELEMETRY_REQUEST_HEADERS,

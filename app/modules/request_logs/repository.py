@@ -754,12 +754,17 @@ class RequestLogsRepository:
         the watermark-aware folded read, so the rolling 180-day dashboard request
         never materializes full-grain rollup or request-log rows.
         """
-        folded_counts, raw_windows = await sum_labeled_hourly_window(
-            self._session,
-            windows,
-            filters=(RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),),
-        )
-        counts = dict(folded_counts)
+        counts: dict[str, int] = {}
+        raw_windows: list[tuple[str, RawWindow]] = []
+        for window_batch in batched(windows, _REQUEST_ACTIVITY_SQL_BATCH_SIZE):
+            folded_counts, batch_raw_windows = await sum_labeled_hourly_window(
+                self._session,
+                window_batch,
+                filters=(RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),),
+            )
+            for label, count in folded_counts.items():
+                counts[label] = counts.get(label, 0) + count
+            raw_windows.extend(batch_raw_windows)
 
         if raw_windows:
             for raw_window_batch in batched(raw_windows, _REQUEST_ACTIVITY_SQL_BATCH_SIZE):

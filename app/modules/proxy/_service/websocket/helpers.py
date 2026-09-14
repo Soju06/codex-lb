@@ -451,6 +451,8 @@ def _is_websocket_stale_previous_response(
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
+    if request_state.steering_parent_response_id is not None:
+        return None
     # An identity captured by an earlier replay (or staged by the terminal
     # capacity path before ``response_id`` was cleared) outlives this call, so
     # a bounded extra replay keeps rewriting to the id the client is reading.
@@ -690,6 +692,8 @@ def _prepare_websocket_request_state_for_account_switch(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
     """Return an unsent request body only when moving accounts is proven safe."""
+    if request_state.steering_parent_response_id is not None:
+        return None
     if request_state.previous_response_id is None:
         if not _websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text):
             return None
@@ -1168,6 +1172,8 @@ def _prepare_websocket_request_state_for_auth_replay(
     *,
     current_account_id: str | None = None,
 ) -> str | None:
+    if request_state.steering_parent_response_id is not None:
+        return None
     if request_state.verified_stale_anchor_replay:
         return None
     if request_state.last_downstream_sequence_number is not None:
@@ -1359,7 +1365,7 @@ def _sanitize_public_websocket_event_payload(
     """Copy a terminal event with only a client-safe ``error.param``."""
 
     normalized = payload
-    if event_type in {"error", "response.failed"}:
+    if event_type in {"error", "response.failed", "response.steer.failed"}:
         error_value = payload.get("error")
         if isinstance(error_value, dict):
             sanitized_error = sanitize_public_error_detail(error_value)
@@ -1833,6 +1839,11 @@ def _assign_websocket_response_id(
 ) -> _WebSocketRequestState | None:
     if response_id is None:
         return None
+    pending_requests = deque(
+        state
+        for state in pending_requests
+        if state.steering_parent_response_id is None or state.response_id is not None or state.request_text is not None
+    )
     existing = _find_websocket_request_state_by_response_id(pending_requests, response_id)
     if existing is not None:
         return existing
@@ -1876,6 +1887,11 @@ def _match_websocket_request_state_for_anonymous_event(
     prefer_draining_requests: bool = True,
     event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
+    pending_requests = deque(
+        state
+        for state in pending_requests
+        if state.steering_parent_response_id is None or state.response_id is not None or state.request_text is not None
+    )
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
             pending_requests,
@@ -1909,14 +1925,13 @@ def _match_websocket_request_state_for_anonymous_event(
         if not visible_requests:
             return draining_requests[0]
 
-    if len(visible_requests) == 1:
-        return visible_requests[0]
-
     unresolved_visible_requests = [
         request_state for request_state in visible_requests if request_state.response_id is None
     ]
     if len(unresolved_visible_requests) == 1:
         return unresolved_visible_requests[0]
+    if len(visible_requests) == 1:
+        return visible_requests[0]
 
     if not visible_requests and draining_requests:
         unresolved_draining_requests = [

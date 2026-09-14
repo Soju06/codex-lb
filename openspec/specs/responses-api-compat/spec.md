@@ -10826,3 +10826,289 @@ SDK parser failure.
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
 
+### Requirement: Steering continuations retain owned WebSocket lifecycles
+The proxy SHALL accept valid response.steer events on an active subscription Responses WebSocket for an owned Astra response and SHALL forward them on that response's existing upstream connection/account. Steering events SHALL contain only type, previous_response_id and a nonempty supported user input. Accepted, pending, failed, and automatically created continuation responses SHALL remain correlated to the originating request and API key. Each continuation SHALL receive admission and usage accounting and SHALL settle once on its own terminal event. Each additional queued steer SHALL extend the same successor reservation before upstream dispatch; rejection SHALL release only that submission's unapplied reservation increment without charging or settling the successor twice. If this refund fails, the proxy SHALL retain the existing reservation for normal terminal reconciliation without terminating unrelated in-flight responses; failed admission extensions SHALL still reject the steer. A steered incomplete response SHALL not be treated as an unhealthy upstream account. Automatic continuations SHALL not bind to unrelated queued response.create requests. Completed request-state retention for post-completion steering SHALL be limited to Astra responses; a subsequent successful non-Astra response SHALL clear the retained steering parent.
+
+Completed Astra parents retained for later steering SHALL discard historical input and serialized request/replay bodies while preserving the effective configuration needed for later steering and explicit tool continuations.
+
+Steering configuration snapshots SHALL be retained only for downstream Astra WebSocket requests. HTTP requests, including requests bridged to an upstream WebSocket, SHALL preserve their existing forwarded payload and accounting without retaining an additional steering snapshot.
+
+#### Scenario: HTTP Astra requests do not retain steering snapshots
+- **GIVEN** an HTTP Astra request is forwarded through the Responses WebSocket bridge
+- **WHEN** the proxy prepares its request state
+- **THEN** the request SHALL NOT retain an additional steering configuration snapshot
+- **AND** its input, response lifecycle and accounting SHALL remain unchanged
+- **AND** downstream Astra WebSocket requests SHALL continue retaining the configuration needed for steering
+
+#### Scenario: Steering creates an automatic successor
+- **GIVEN** an owned Astra response and accepted steering
+- **WHEN** the original response ends with incomplete reason steered and upstream automatically creates a successor
+- **THEN** the successor retains the original account and policy ownership and its usage is recorded exactly once
+
+#### Scenario: Completed Astra parents retain settings without request bodies
+- **GIVEN** an Astra request contains user input and reasoning configuration updates
+- **WHEN** it completes successfully or becomes incomplete because it was steered
+- **THEN** the retained parent SHALL discard its historical input and serialized original/replay request bodies before forwarding the terminal event
+- **AND** later steering and required-tool continuations SHALL preserve the effective reasoning settings, stream identity, account ownership and accounting
+
+#### Scenario: Ordinary responses do not retain steering request bodies
+- **GIVEN** a WebSocket previously completed an Astra response
+- **WHEN** a non-Astra response reaches a successful completion boundary
+- **THEN** the connection clears the retained steering parent without retaining the completed non-Astra request body
+- **AND** successful Astra responses remain available for owned post-completion steering
+
+#### Scenario: Steering waits for a tool result
+- **WHEN** upstream reports response.steer.pending with required tool input
+- **THEN** the proxy preserves that notification and allows the matching explicit anchored response.create to continue on the same connection without replaying the steer
+
+#### Scenario: A pending notification is the first acknowledgment
+- **GIVEN** a submitted steer has not yet received response.steer.accepted and the parent's terminal names no pending call
+- **WHEN** upstream reports response.steer.pending with required tool input as the first notification for that steer
+- **THEN** the proxy SHALL correlate it to the oldest unacknowledged submission, record its identity and required input, and allow the matching explicit anchored response.create to continue
+
+#### Scenario: Explicit tool continuation normalizes its parent before ownership lookup
+- **GIVEN** an accepted steer awaiting required tool input and a response.create whose previous_response_id has surrounding whitespace
+- **AND** reservation operations succeed
+- **WHEN** the proxy identifies the explicit continuation
+- **THEN** it SHALL apply the existing ResponsesRequest parent-ID normalization before ownership lookup and replace the matching steering placeholder
+- **AND** it SHALL release the placeholder reservation before dispatching the explicit continuation and settle the explicit response exactly once on its terminal event
+- **AND** a connection retiring after drain SHALL allow that owned continuation to finish before rotating
+
+#### Scenario: Required tool input arrives before pending notification
+- **GIVEN** steering has been accepted and the original response has completed with a tool call
+- **WHEN** the client sends the matching anchored tool result before response.steer.pending arrives
+- **THEN** the explicit continuation is forwarded on the same connection and owns its terminal accounting
+
+#### Scenario: Multiple accepted steers share one automatic successor
+- **GIVEN** multiple steering inputs are accepted for the same response
+- **WHEN** upstream creates their automatic successor
+- **THEN** the proxy owns one continuation lifecycle and one reservation for that successor
+
+#### Scenario: Additional steering input exceeds the remaining quota
+- **GIVEN** an automatic successor already has a reservation for an earlier steer
+- **WHEN** a later steer would exceed an applicable API-key quota after extending that reservation
+- **THEN** the later steer is rejected before upstream dispatch
+- **AND** the earlier submission and reservation remain valid
+
+#### Scenario: A rejected steer releases its reservation increment
+- **GIVEN** several admitted steering submissions share one successor reservation
+- **WHEN** upstream rejects one submission before applying it
+- **THEN** its unapplied reservation increment is released while the remaining submissions retain their reserved usage
+- **AND** final successor usage is settled once against the remaining reservation
+
+#### Scenario: A failed refund preserves the connection and settlement
+- **GIVEN** several steering submissions share a reservation and the quota window changes before one is rejected
+- **WHEN** refunding that rejected submission fails
+- **THEN** the proxy keeps the reservation ledger intact for terminal reconciliation
+- **AND** other in-flight responses and the remaining steering continuation can complete on the connection
+
+#### Scenario: A first steer on a retained parent reserves input once
+- **GIVEN** an owned parent retains migrated steering configuration and has not retired a steering lifecycle
+- **WHEN** its first steering submission creates a successor reservation
+- **THEN** that submission is reserved once without immediately extending the new reservation for the same input
+
+#### Scenario: Disconnect does not replay accepted steering
+- **GIVEN** steering is accepted on a connection
+- **WHEN** that connection closes before application completes
+- **THEN** all locally owned reservations/tasks are finalized and the proxy does not replay the queued steering on another account or connection
+
+#### Scenario: Failed or malformed steering does not corrupt other work
+- **WHEN** a steering request is invalid, unknown, or upstream reports response.steer.failed
+- **THEN** the failure is returned without assigning its lifecycle to an unrelated queued create or charging usage twice
+
+#### Scenario: Steering parent normalization preserves failure correlation
+- **GIVEN** a valid steering request whose previous_response_id has surrounding whitespace
+- **AND** reservation operations succeed
+- **WHEN** the proxy admits the steering request for the normalized owned response ID
+- **THEN** it SHALL forward that same normalized ID upstream while preserving the submitted input representation
+- **AND** an echoed rejection SHALL release the matching successor reservation before the connection closes
+
+#### Scenario: A late successor does not consume unrelated admission
+- **GIVEN** a known steering continuation no longer has a pending request state after expiry or during explicit replacement
+- **WHEN** its late response.created event names the original parent
+- **THEN** the event is not assigned through the generic create queue
+- **AND** unrelated request identity, usage ownership and create admission remain unchanged
+
+#### Scenario: A suppressed successor's anonymous error does not settle an undispatched replacement
+- **GIVEN** a late automatic successor was suppressed before an explicit replacement reached transport handoff
+- **AND** the replacement has no response id and there is no eligible live request
+- **WHEN** an ID-less top-level error arrives
+- **THEN** the error is not assigned to the undispatched replacement
+- **AND** that replacement retains its reservation and eligibility for its own created event after handoff
+
+#### Scenario: A live request owns anonymous errors before a successor tombstone
+- **GIVEN** a suppressed late successor and a visible request, including one that already has a response id
+- **WHEN** an ID-less top-level error arrives
+- **THEN** the visible request owns that error
+- **AND** the suppressed successor lifecycle remains available for a later unmatched terminal
+
+#### Scenario: An already-sent explicit create owns the next created event
+- **GIVEN** an explicit response.create for parent r1 is pending and a steering placeholder also exists for r1
+- **WHEN** upstream emits response.created naming r1
+- **THEN** the explicit create receives that response id
+- **AND** the steering placeholder is not bound to it
+
+#### Scenario: A rejected submission releases its queued byte budget
+- **GIVEN** multiple steering submissions share one continuation
+- **WHEN** upstream rejects one submission
+- **THEN** the queued byte count excludes the rejected submission
+- **AND** a subsequent valid submission can use the released capacity
+
+#### Scenario: Empty structured text is rejected before steering admission
+- **WHEN** a steering user message contains an input_text part with an empty text string
+- **THEN** the proxy returns invalid_input before creating or reserving a continuation
+
+#### Scenario: Explicit continuation prepares before releasing the placeholder
+- **GIVEN** a steering continuation has a placeholder request state
+- **WHEN** the client sends the matching explicit response.create
+- **THEN** the proxy prepares and registers that request before removing or releasing the placeholder
+- **AND** a failed prepare or admission leaves the placeholder in place
+
+#### Scenario: Placeholder refund failure does not abort an explicit continuation
+- **GIVEN** an explicit continuation has been prepared and registered
+- **WHEN** releasing the replaced placeholder reservation fails
+- **THEN** the continuation remains pending and the socket continues
+- **AND** the socket SHALL retain ownership of the failed release and retry it during its tracked teardown cleanup
+- **AND** a successful retry SHALL refund only the placeholder without settling or releasing the explicit continuation twice
+- **AND** teardown SHALL await its owned cleanup within the existing cleanup budget and report a repeated release failure without skipping unrelated cleanup
+
+#### Scenario: Steering ownership changes while an explicit continuation awaits registration
+- **GIVEN** a matching explicit response.create is awaiting preparation, owner resolution, or admission
+- **WHEN** the upstream reader rejects the final steer or assigns its placeholder to an automatic successor
+- **THEN** registration SHALL revalidate the exact continuation and its pending, unassigned placeholder under the pending lock
+- **AND** the stale explicit create SHALL fail with response_not_found before dispatch and release its own reservation and admission
+- **AND** the reader-owned successor and unrelated requests SHALL retain their identity and accounting
+
+#### Scenario: Apply-patch output is required for explicit continuation
+- **GIVEN** a completed steered response with a synchronous apply_patch_call
+- **WHEN** the client sends the matching apply_patch_call_output before response.steer.pending
+- **THEN** the explicit continuation is forwarded on the same connection
+
+#### Scenario: Upstream steering failures are sanitized before forwarding
+- **WHEN** upstream sends response.steer.failed with a malformed or structured error.param
+- **THEN** the forwarded client payload omits the non-public parameter value
+
+#### Scenario: Public steering policy failures retain their classification
+- **WHEN** steering policy refresh, model or reasoning authorization, or usage reservation rejects a request with a known authentication, permission, or quota failure
+- **THEN** response.steer.failed SHALL retain the failure's canonical public code and type
+- **AND** the failure SHALL use a canonical public message without forwarding exception-provided message, code, or parameter values
+
+#### Scenario: Unknown caught steering errors remain private
+- **WHEN** steering catches an application or payload-validation error without a recognized public mapping
+- **THEN** response.steer.failed SHALL contain the generic invalid_input failure
+- **AND** the failure SHALL NOT expose raw exception message, code, or parameter values
+
+#### Scenario: Final rejected steering retains failed release ownership
+- **GIVEN** the final queued steer is rejected before its successor is created
+- **WHEN** releasing its reservation fails
+- **THEN** the socket SHALL retain that request in its tracked teardown cleanup and retry release within the existing cleanup budget
+- **AND** unrelated requests SHALL continue while repeated failure is reported without skipping their cleanup
+
+#### Scenario: Pre-send rejection clears explicit continuation ownership
+- **GIVEN** an explicit continuation has replaced its steering placeholder
+- **WHEN** final payload validation rejects the unsent replacement
+- **THEN** the proxy SHALL remove only that replacement's control-map ownership and release its reservation and admission
+- **AND** a corrected continuation SHALL be admitted on the same socket
+
+#### Scenario: Final rejected steering retains late successor correlation
+- **GIVEN** the final queued steer fails and its continuation is removed
+- **WHEN** a late response.created names that steering parent while unrelated creates are pending
+- **THEN** the proxy SHALL suppress that late lifecycle without assigning or settling an unrelated request
+- **AND** the parent correlation SHALL survive the failed reservation release and remain valid for the upstream connection lifetime
+- **AND** an explicit create or already admitted steering continuation for the same parent SHALL retain priority over suppression
+
+#### Scenario: Automatic successor arrives before explicit dispatch
+- **GIVEN** an explicit continuation has replaced its placeholder but has not reached upstream dispatch
+- **WHEN** an automatic successor arrives while placeholder release or account admission is awaiting
+- **THEN** that automatic lifecycle SHALL be suppressed without binding the unsent explicit request or consuming its reservation
+- **AND** the explicit request SHALL retain its payload and parent correlation until its own dispatched lifecycle settles
+- **AND** unrelated queued creates SHALL retain their identity and admission
+
+#### Scenario: Explicit steering dispatch has not written its frame
+- **GIVEN** a steering replacement is waiting before its frame is written to the upstream transport
+- **WHEN** an automatic successor arrives
+- **THEN** the proxy SHALL preserve the replacement's unsent correlation protection
+- **AND** the automatic lifecycle SHALL not consume the explicit reservation
+
+#### Scenario: Explicit response arrives while its written frame drains
+- **GIVEN** the upstream has received the explicit steering replacement frame while the local send operation still awaits flow control
+- **WHEN** the explicit response's created and terminal events arrive
+- **THEN** the proxy SHALL forward that lifecycle and settle the explicit reservation exactly once
+- **AND** the unfinished send operation SHALL NOT by itself classify that response as an automatic successor
+
+#### Scenario: Suppressed successor terminates without a response ID before explicit handoff
+- **GIVEN** an automatic successor was suppressed while an explicit steering continuation still awaits transport handoff
+- **WHEN** an ID-less terminal for the suppressed successor arrives
+- **THEN** the unsent explicit continuation SHALL remain pending with its reservation and admission intact
+- **AND** the proxy SHALL suppress the unmatched terminal while preserving the priority of an eligible live request
+- **AND** the explicit continuation SHALL still own its real created and terminal events after handoff
+
+### Requirement: Steering correlation history retires with its connection
+The proxy SHALL stop starting new steering admissions when retained rejected-parent and suppressed-response IDs reach an internal per-connection history limit. It SHALL preserve existing correlation records and allow admitted work, including explicit required-tool-input continuations, to finish on that upstream connection. New unrelated creates received during this drain SHALL receive a retryable error without acquiring a reservation. An admission already in progress MAY finish on the same connection while it remains open. Once pending work drains, the proxy SHALL close the upstream connection and discard its correlation history before admitting work on a new connection. Planned retirement SHALL NOT penalize account health or fail existing requests. History beyond the limit SHALL be retained only for admitted work and admission already in progress when retirement began.
+
+When expiry removes a steering continuation's owned request from pending work, the proxy SHALL discard that continuation and its submissions and retain a parent-ID tombstone within the existing history limit. Cleanup SHALL preserve any newer replacement owner and SHALL leave reservation finalization to the existing expiry path.
+
+A parent-ID tombstone SHALL reject new response.steer admissions for that parent on the same upstream connection with response_not_found before reserving usage or dispatching upstream. This restriction SHALL apply after expiry, final rejection, or assignment of an automatic successor while queued steers remain unacknowledged, and SHALL NOT prevent explicit response.create requests, already admitted work, or steering against other owned parents. The tombstone SHALL remain until its upstream connection closes.
+
+When an automatic successor is assigned to a steering continuation that still holds more than one submission and at least one of them has not been acknowledged by upstream with response.steer.accepted or response.steer.pending, the proxy SHALL retire that parent as a tombstone at assignment. Later automatic successors naming that parent SHALL be suppressed rather than matched to unrelated pending work. Later acknowledgments or rejections of those submissions SHALL NOT recreate ownership or release the started successor; their reservation increments SHALL reconcile at the successor's terminal settlement. Successors whose queued steers were all acknowledged before assignment SHALL NOT consume correlation history.
+
+#### Scenario: Expired steering releases input while retaining late-response correlation
+- **GIVEN** accepted steers expire without creating their successors
+- **WHEN** the proxy expires their pending requests
+- **THEN** their continuation input SHALL no longer be retained by connection history
+- **AND** late steering notifications SHALL NOT recreate ownership, and late created/terminal events SHALL follow the existing tombstone suppression policy
+- **AND** a new steer for the retired parent SHALL be rejected locally while an explicit create or a steer for another owned parent MAY proceed before connection retirement begins
+- **AND** accumulated expiry tombstones SHALL trigger rotation after admitted work drains, preserving unrelated responses and exactly-once reservation cleanup
+
+#### Scenario: A successor starts before a queued steer is acknowledged
+- **GIVEN** a first steer has been acknowledged and a second admitted steer has not
+- **WHEN** the first steer's automatic successor is created, whether before or after the second frame's local write returns
+- **THEN** the parent SHALL retire as a tombstone at assignment and a later automatic successor for it SHALL be suppressed
+- **AND** unrelated creates SHALL keep their own responses and settle once, and no tombstone SHALL be recorded when every queued steer was acknowledged before the successor
+
+#### Scenario: Late acknowledgment cannot claim a same-parent retry
+- **GIVEN** a steering lifecycle retires before its acknowledgment arrives
+- **WHEN** the client retries response.steer for the same parent before the delayed acceptance, pending and failure notifications arrive
+- **THEN** the retry SHALL fail with response_not_found without acquiring or releasing a new reservation or reaching upstream
+- **AND** the delayed notifications SHALL NOT recreate a steering owner or affect later explicit and unrelated responses
+
+#### Scenario: Repeated rejections exhaust retained history
+- **GIVEN** distinct rejected steering parents or suppressed responses with ID-less terminals have reached the history limit
+- **WHEN** the client submits another steer or an unrelated create while admitted work is pending
+- **THEN** the proxy SHALL reject the new work without reserving or dispatching it
+- **AND** existing tombstones SHALL remain effective until that upstream closes
+- **AND** the next connection SHALL begin with empty correlation history
+
+#### Scenario: Required tool input finishes before planned rotation
+- **GIVEN** the history limit is reached while an accepted steer awaits required tool input or its explicit replacement is registered but unsent
+- **WHEN** the client supplies the required input and the explicit response terminates
+- **THEN** the explicit frame SHALL be sent on the existing connection and retain its own accounting
+- **AND** the proxy SHALL rotate only after pending requests drain, without recording an account-health failure
+
+#### Scenario: Local cleanup completes the drain without another upstream event
+- **GIVEN** history retirement has begun and upstream keepalives are disabled
+- **WHEN** request expiry or a local pre-send rejection removes the last pending request
+- **THEN** the proxy SHALL retire the drained upstream without requiring another upstream frame
+- **AND** the next create SHALL proceed on a fresh connection without waiting indefinitely for the old reader
+- **AND** rotation SHALL NOT add terminal failures or account-health penalties beyond the original timeout or rejection
+
+### Requirement: Steering dispatch follows the owned transport handoff
+The proxy SHALL distinguish send attempt timing from explicit steering transport handoff. Each supported upstream transport SHALL record handoff before exposing a response following that send. Compression waits, unrelated transport writes, archive writes, and Python-to-helper IPC writes SHALL NOT record handoff. A cancelled or failed send scope SHALL NOT later mark another request dispatched. Matching SHALL retain the existing priority of a dispatched explicit create over an otherwise ambiguous same-parent automatic response.
+
+#### Scenario: Compressed explicit frame waits before writing
+- **GIVEN** an explicit continuation is awaiting compression on the aiohttp transport
+- **WHEN** an automatic successor arrives before the explicit frame is written
+- **THEN** that lifecycle SHALL NOT consume the explicit reservation
+- **AND** once the explicit frame is written its valid created and terminal events SHALL be accepted even while drain is pending
+
+#### Scenario: Native send acknowledgment precedes inbound delivery
+- **GIVEN** the native worker acknowledges a completed explicit send and then emits a response
+- **WHEN** Python consumes those events before the sending coroutine resumes
+- **THEN** handoff SHALL be recorded before the response becomes available to matching
+- **AND** another command's acknowledgment SHALL NOT mark this request dispatched
+
+#### Scenario: Archiving preserves dispatch ownership
+- **GIVEN** an explicit continuation uses an archiving upstream wrapper
+- **WHEN** the wrapper archives the request and delegates its send
+- **THEN** only the wrapped transport's handoff SHALL make the request eligible for matching
+

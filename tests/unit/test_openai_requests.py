@@ -3488,3 +3488,47 @@ def test_extract_input_image_file_references_collects_tool_output_paths():
         (0, None, "file_tool"),
         (0, None, "file_nested"),
     ]
+
+
+@pytest.mark.parametrize("lite", [False, True])
+def test_responses_to_payload_preserves_replayed_tool_call_namespace(lite):
+    tools = [
+        {
+            "type": "namespace",
+            "name": "mcp__cua_repl",
+            "tools": [{"type": "function", "name": "js", "parameters": {"type": "object", "properties": {}}}],
+        }
+    ]
+    input_items = [
+        {
+            "type": "function_call",
+            "name": "js",
+            "namespace": "mcp__cua_repl",
+            "arguments": "{}",
+            "call_id": "synthetic-cua-call",
+        }
+    ]
+    payload = {"model": "gpt-6-astra", "instructions": "synthetic namespace routing regression", "input": input_items}
+    if lite:
+        input_items.insert(0, {"type": "additional_tools", "role": "developer", "tools": tools})
+    else:
+        payload["tools"] = tools
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.to_payload()["input"] == input_items
+    assert request.to_replay_safety_payload()["input"] == input_items
+    assert ("tools" in request.to_payload()) is not lite
+
+
+def test_compact_preserves_replayed_executor_identity():
+    input_items = [
+        {"role": "user", "content": "Run diagnostic operation."},
+        {"type": "function_call", "name": "js", "namespace": "alpha", "arguments": "{}", "call_id": "call_alpha"},
+        {"type": "function_call_output", "call_id": "call_alpha", "output": "done"},
+        {"type": "function_call", "name": "js", "namespace": "beta", "arguments": "{}", "call_id": "call_beta"},
+        {"type": "function_call_output", "call_id": "call_beta", "output": "done"},
+    ]
+    request = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-6-astra", "instructions": "Summarize.", "input": input_items}
+    )
+    assert request.to_payload()["input"] == input_items

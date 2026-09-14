@@ -765,12 +765,20 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def to_payload(self) -> JsonObject:
-        payload = _strip_unsupported_fields(self.model_dump_for_forwarding())
+        # Keep the (namespace, name) executor identity on the ChatGPT wire.
+        # Generic model-source compatibility is handled at its own boundary.
+        payload = _strip_unsupported_fields(
+            self.model_dump_for_forwarding(),
+            strip_replayed_tool_call_namespaces=False,
+        )
         _normalize_compaction_trigger_singleton(payload)
         return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+        return _strip_unsupported_fields(
+            self.model_dump_for_forwarding(),
+            strip_replayed_tool_call_namespaces=False,
+        )
 
 
 class ResponsesCompactRequest(BaseModel):
@@ -1015,7 +1023,10 @@ def _sort_keys_recursive(value: JsonValue) -> JsonValue:
 
 
 def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
-    payload = _strip_unsupported_fields(payload)
+    payload = _strip_unsupported_fields(
+        payload,
+        strip_replayed_tool_call_namespaces=False,
+    )
     normalized_payload = _normalize_responses_input_instructions(payload)
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)

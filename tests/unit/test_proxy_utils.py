@@ -12188,7 +12188,7 @@ async def test_stream_responses_uses_websocket_upstream_when_forced(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_websocket_preserves_agent_outputs_before_wire_namespace_strip(monkeypatch):
+async def test_stream_responses_websocket_preserves_agent_outputs_and_namespaces(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -12274,7 +12274,9 @@ async def test_stream_responses_websocket_preserves_agent_outputs_before_wire_na
 
     assert len(events) == 1
     upstream_input = cast(list[JsonValue], response.sent_json[0]["input"])
-    assert all("namespace" not in item for item in upstream_input if isinstance(item, dict))
+    assert cast(dict[str, JsonValue], upstream_input[0])["namespace"] == "collaboration"
+    assert cast(dict[str, JsonValue], upstream_input[2])["namespace"] == "unrelated_namespace"
+    assert cast(dict[str, JsonValue], upstream_input[6])["namespace"] == "collaboration"
     assert cast(dict[str, JsonValue], upstream_input[1])["output"] == agent_custom_output
     assert cast(dict[str, JsonValue], upstream_input[3])["output"] == (
         proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
@@ -28330,7 +28332,7 @@ def test_slim_response_create_orphan_output_does_not_consume_namespaced_pairing(
         pytest.param(proxy_service._REQUEST_TRANSPORT_WEBSOCKET, id="websocket-bridge"),
     ],
 )
-def test_prepare_response_bridge_pairs_same_protocol_reused_call_id_by_occurrence(
+def test_prepare_response_bridge_preserves_replayed_namespace_by_occurrence(
     monkeypatch: pytest.MonkeyPatch,
     transport: str,
 ):
@@ -28374,7 +28376,8 @@ def test_prepare_response_bridge_pairs_same_protocol_reused_call_id_by_occurrenc
     )
 
     upstream_input = json.loads(text_data)["input"]
-    assert all("namespace" not in item for item in upstream_input if isinstance(item, dict))
+    assert upstream_input[0]["namespace"] == "multi_agent_v1"
+    assert "namespace" not in upstream_input[2]
     assert upstream_input[1]["output"] == agent_wait_output
     assert upstream_input[3]["output"] == proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(
         bytes=len(shell_output.encode("utf-8"))
@@ -28388,7 +28391,7 @@ def test_prepare_response_bridge_pairs_same_protocol_reused_call_id_by_occurrenc
         pytest.param(proxy_service._REQUEST_TRANSPORT_WEBSOCKET, id="websocket-bridge"),
     ],
 )
-def test_prepare_response_bridge_preserves_namespaced_custom_outputs_before_wire_namespace_strip(
+def test_prepare_response_bridge_preserves_namespaced_custom_outputs(
     monkeypatch: pytest.MonkeyPatch,
     transport: str,
 ):
@@ -28467,7 +28470,10 @@ def test_prepare_response_bridge_preserves_namespaced_custom_outputs_before_wire
     )
 
     upstream_input = json.loads(text_data)["input"]
-    assert all("namespace" not in item for item in upstream_input if isinstance(item, dict))
+    assert upstream_input[0]["namespace"] == "multi_agent_v1"
+    assert upstream_input[2]["namespace"] == "collaboration"
+    assert upstream_input[4]["namespace"] == "unrelated_namespace"
+    assert upstream_input[8]["namespace"] == "collaboration"
     assert upstream_input[1]["output"] == agent_function_output
     assert upstream_input[3]["output"] == agent_custom_output
     assert upstream_input[5]["output"] == proxy_service._RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE.format(

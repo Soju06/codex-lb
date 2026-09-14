@@ -2815,7 +2815,7 @@ def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_in
     assert expected_tools_bytes in frame
 
 
-def test_backend_responses_websocket_strips_replayed_tool_call_namespaces(app_instance, monkeypatch):
+def test_backend_responses_websocket_preserves_replayed_tool_call_namespaces(app_instance, monkeypatch):
     upstream_messages = [
         _FakeUpstreamMessage(
             "text",
@@ -2904,12 +2904,14 @@ def test_backend_responses_websocket_strips_replayed_tool_call_namespaces(app_in
     assert upstream_frame["input"] == [
         {
             "type": "function_call",
+            "namespace": "collaboration",
             "name": "spawn_agent",
             "arguments": '{"message":"same task"}',
             "call_id": "call_123",
         },
         {
             "type": "custom_tool_call",
+            "namespace": "exec",
             "name": "exec",
             "input": "git status --short",
             "call_id": "call_456",

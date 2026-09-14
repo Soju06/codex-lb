@@ -1,17 +1,21 @@
 ## Why
 
-The marking replica can clear an upstream rate-limit reset deadline
-merely because a usage sample was recorded after the block. With advisory
-foreground usage inference disabled, a fresh but still exhausted window can
-therefore reactivate the account and send a sticky session back to it.
+Current recovery already rejects fresh evidence while an applicable usage
+window remains exhausted. However, that gate can still keep an account blocked
+when the exhausted long window is covered by usable credits, or when a
+zero-capacity plan retains a synthetic exhausted primary row. Those rows do not
+mean the account is unable to serve the request.
 
 ## What Changes
 
-- Require available quota in every applicable known window before fresh usage
-  can clear an unexpired upstream rate-limit block through early recovery.
+- Make the existing all-window recovery gate credit-aware.
+- Ignore synthetic primary usage only when the canonical plan has zero primary
+  capacity.
 - Preserve the existing expiry, credit override, and active-account routing
   contracts; do not turn advisory usage into new account blocks.
-- Cover primary and long-window exhaustion plus repeated sticky HTTP requests.
+- Keep plan-alias resolution out of this change.
+- Cover credit-backed and synthetic-primary recovery plus repeated sticky HTTP
+  requests.
 
 ## Impact
 

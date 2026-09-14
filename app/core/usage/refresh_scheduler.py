@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, cast
 
-from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS, resolve_capacity_plan_type
+from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -506,7 +506,7 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
         return False
     if _is_long_window_minutes(entry.window_minutes):
         return False
-    capacity = capacity_for_plan(resolve_capacity_plan_type(account.plan_type), "primary")
+    capacity = capacity_for_plan(account.plan_type, "primary")
     if capacity is not None and capacity <= 0:
         return False
     return entry.reset_at is None or entry.reset_at > now
@@ -690,12 +690,7 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | None,
 ) -> UsageHistory | None:
-    capacity_plan = (
-        resolve_capacity_plan_type(account.plan_type)
-        if account.status == AccountStatus.RATE_LIMITED
-        else account.plan_type
-    )
-    if monthly_entry is not None and capacity_for_plan(capacity_plan, "monthly") is not None:
+    if monthly_entry is not None and capacity_for_plan(account.plan_type, "monthly") is not None:
         return monthly_entry
     return secondary_entry
 

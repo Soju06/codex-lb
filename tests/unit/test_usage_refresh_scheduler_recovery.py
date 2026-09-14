@@ -81,6 +81,29 @@ def _reset_evidence(
     )
 
 
+def test_short_window_guard_preserves_unknown_alias_capacity() -> None:
+    now = 1_700_000_000.0
+    account = _make_account(
+        "acc_go_short_window",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="go",
+    )
+    exhausted_primary = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=300,
+    )
+
+    assert refresh_scheduler_module._short_window_blocks_recovery(
+        exhausted_primary,
+        account=account,
+        now=now,
+    )
+
+
 def test_historical_reset_recovery_scans_adjacent_sliding_samples() -> None:
     now = 1_700_000_000
     legacy_reset_at = now + 7 * 24 * 60 * 60
@@ -366,10 +389,8 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_until_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
 async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_legacy_deadline(
     monkeypatch: pytest.MonkeyPatch,
-    plan_type: str,
 ) -> None:
     now = 1_700_000_000.0
     blocked_at = int(now - 3600)
@@ -383,7 +404,7 @@ async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_lega
     account = _make_account(
         "acc_free_confirmed_reset",
         status=AccountStatus.RATE_LIMITED,
-        plan_type=plan_type,
+        plan_type="free",
         reset_at=legacy_reset_at,
         blocked_at=blocked_at,
     )
@@ -425,50 +446,6 @@ async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_lega
 
     assert recovered == 1
     assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
-async def test_reset_history_fallback_supports_free_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-    plan_type: str,
-) -> None:
-    now = 1_700_000_000.0
-    blocked_at = int(now - 3600)
-    legacy_reset_at = int(now + 7 * 24 * 3600)
-    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
-    account = _make_account(
-        "acc_free_history_reset",
-        status=AccountStatus.RATE_LIMITED,
-        plan_type=plan_type,
-        reset_at=legacy_reset_at,
-        blocked_at=blocked_at,
-    )
-    before = _make_usage(
-        account.id,
-        window="monthly",
-        used_percent=100.0,
-        reset_at=legacy_reset_at,
-        recorded_at=_epoch_to_naive_utc(now - 120),
-        window_minutes=43_200,
-    )
-    after = _make_usage(
-        account.id,
-        window="monthly",
-        used_percent=0.0,
-        reset_at=int(now - 60 + 30 * 24 * 3600),
-        recorded_at=_epoch_to_naive_utc(now - 60),
-        window_minutes=43_200,
-    )
-
-    evidence = await refresh_scheduler_module._resolve_reset_evidence(
-        accounts=[account],
-        usage_repo=cast("Any", StubUsageRepository(history={account.id: [before, after]})),
-        before_monthly={},
-        after_monthly={},
-    )
-
-    assert evidence.recovery[account.id] == _reset_evidence(before, after)
 
 
 @pytest.mark.asyncio
@@ -1262,77 +1239,6 @@ async def test_reconcile_keeps_elapsed_reset_when_secondary_is_exhausted(
     assert account.status == AccountStatus.RATE_LIMITED
     assert account.reset_at == past_reset
     assert account.blocked_at == blocked_at
-
-
-@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.QUOTA_EXCEEDED])
-def test_select_long_window_entry_preserves_non_rate_limited_alias_behavior(status: AccountStatus) -> None:
-    account = _make_account("acc_guest", plan_type="guest", status=status)
-    monthly = _make_usage(
-        account.id,
-        window="monthly",
-        used_percent=10.0,
-        reset_at=1_700_100_000,
-        recorded_at=_epoch_to_naive_utc(1_700_000_000),
-        window_minutes=43_200,
-    )
-    secondary = _make_usage(
-        account.id,
-        window="secondary",
-        used_percent=20.0,
-        reset_at=1_700_100_000,
-        recorded_at=_epoch_to_naive_utc(1_700_000_000),
-        window_minutes=10_080,
-    )
-
-    selected = refresh_scheduler_module._select_long_window_entry(
-        account=account,
-        monthly_entry=monthly,
-        secondary_entry=secondary,
-    )
-
-    assert selected is secondary
-
-
-@pytest.mark.asyncio
-async def test_reconcile_recovers_free_alias_from_monthly_usage(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = 1_700_000_000.0
-    blocked_at = int(now - 7200)
-    past_reset = int(now - 300)
-    monkeypatch.setattr("time.time", lambda: now)
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
-    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
-
-    account = _make_account(
-        "acc_scheduler_guest_alias",
-        status=AccountStatus.RATE_LIMITED,
-        plan_type="guest",
-        reset_at=past_reset,
-        blocked_at=blocked_at,
-    )
-    accounts_repo = StubAccountsRepository([account])
-    usage_repo = StubUsageRepository(
-        monthly={
-            account.id: _make_usage(
-                account.id,
-                window="monthly",
-                used_percent=10.0,
-                reset_at=int(now + 30 * 24 * 3600),
-                recorded_at=_epoch_to_naive_utc(now - 30),
-                window_minutes=43200,
-            )
-        }
-    )
-
-    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
-        accounts_repo=accounts_repo,
-        usage_repo=usage_repo,
-        accounts=[account],
-    )
-
-    assert recovered == 1
-    assert account.status == AccountStatus.ACTIVE
-    assert account.reset_at is None
-    assert account.blocked_at is None
 
 
 @pytest.mark.asyncio

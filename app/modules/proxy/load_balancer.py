@@ -27,13 +27,11 @@ from app.core.balancer import (
     RoutingCostsByAccount,
     RoutingStrategy,
     TrafficClass,
-    capacity_for_routing_plan,
     evaluate_health_tier,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
     plausible_rate_limit_reset_at,
-    recovery_primary_used,
 )
 from app.core.balancer import (
     select_account as select_account,
@@ -196,8 +194,6 @@ logger = logging.getLogger(__name__)
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
-
-_ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
 
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
@@ -2332,7 +2328,7 @@ def _state_from_account(
     if secondary_used is not None and secondary_reset is not None and secondary_reset <= int(now):
         secondary_used = 0.0
         secondary_reset = None
-    quota_primary_used = recovery_primary_used(plan_type=account.plan_type, primary_used=primary_used)
+    quota_primary_used = _health_tier_primary_used(plan_type=account.plan_type, primary_used=primary_used)
     quota_available = usage_windows_allow_recovery(
         quota_primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
     )
@@ -2381,7 +2377,7 @@ def _state_from_account(
             if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
                 rate_limited_cooldown_deadline = None
 
-    primary_capacity = capacity_for_routing_plan(account.plan_type, account.status, "primary")
+    primary_capacity = usage_core.capacity_for_plan(account.plan_type, "primary")
     if primary_capacity == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
@@ -2396,7 +2392,7 @@ def _state_from_account(
             )
         )
     ):
-        primary_used = recovery_primary_used(
+        primary_used = _health_tier_primary_used(
             plan_type=account.plan_type,
             primary_used=primary_used,
         )
@@ -2635,7 +2631,7 @@ def _normalize_usage_inputs(
     if (
         effective_secondary_entry is not None
         and effective_secondary_entry.window == "monthly"
-        and capacity_for_routing_plan(account.plan_type, account.status, "monthly") is None
+        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
     ):
         effective_secondary_entry = None
     primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
@@ -2799,7 +2795,7 @@ def background_recovery_state_from_account(
             recorded_after=blocked_at,
         )
         quota_available = usage_windows_allow_recovery(
-            recovery_primary_used(
+            _health_tier_primary_used(
                 plan_type=account.plan_type,
                 primary_used=normalized_usage.primary_used,
             ),
@@ -2860,7 +2856,7 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    monthly_capacity = capacity_for_routing_plan(account.plan_type, account.status, "monthly")
+    monthly_capacity = usage_core.capacity_for_plan(account.plan_type, "monthly")
     if monthly_entry is not None and monthly_capacity is not None:
         return monthly_entry
     return secondary_entry

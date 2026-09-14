@@ -754,7 +754,7 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_delivery", ["http_status", "sse_event"])
-async def test_stream_previsible_quota_failover_does_not_pin_replay_to_failed_account(
+async def test_stream_previsible_quota_failure_is_fail_closed_for_nonportable_replay(
     async_client,
     monkeypatch,
     failure_delivery,

@@ -2701,37 +2701,6 @@ def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressur
     assert state.capacity_credits == usage_core.capacity_for_plan("free", "monthly")
 
 
-@pytest.mark.parametrize("plan_type", ["guest", "go", "free_workspace", "quorum", "unknown"])
-def test_state_from_account_active_free_alias_keeps_existing_advisory_routing(monkeypatch, plan_type):
-    now = 1_700_000_000.0
-    monkeypatch.setattr("time.time", lambda: now)
-    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
-
-    state = _state_from_account(
-        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type=plan_type),
-        primary_entry=_make_test_usage(
-            window="primary",
-            used_percent=80.0,
-            reset_at=int(now + 3600),
-            recorded_at=_epoch_to_naive_utc(now - 30),
-            window_minutes=300,
-        ),
-        secondary_entry=_make_test_usage(
-            window="monthly",
-            used_percent=40.0,
-            reset_at=int(now + 30 * 24 * 3600),
-            recorded_at=_epoch_to_naive_utc(now - 30),
-            window_minutes=43200,
-        ),
-        runtime=RuntimeState(),
-    )
-
-    assert state.status == AccountStatus.ACTIVE
-    assert state.used_percent == 80.0
-    assert state.secondary_used_percent is None
-    assert state.capacity_credits == 0.0
-
-
 def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatch):
     now = 1_700_000_000.0
     weekly_reset = int(now + 7 * 24 * 3600)
@@ -3029,10 +2998,7 @@ def test_state_from_account_zero_capacity_recovery_respects_recent_blocked_at_fl
 
 
 @pytest.mark.parametrize("primary_used", [None, 100.0], ids=["missing-primary", "synthetic-exhausted-primary"])
-@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
-def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(
-    monkeypatch, primary_used, plan_type
-):
+def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_block_usage(monkeypatch, primary_used):
     # Once the local cooldown elapsed, fresh applicable quota may recover the
     # marking replica early. A synthetic primary row must not block a plan
     # with zero primary-window capacity.
@@ -3046,7 +3012,7 @@ def test_state_from_account_marking_replica_recovers_free_plan_on_fresh_post_blo
         status=AccountStatus.RATE_LIMITED,
         reset_at=int(now + 20),
         blocked_at=int(blocked_at),
-        plan_type=plan_type,
+        plan_type="free",
     )
     monthly_entry = _make_test_usage(
         window="monthly",
@@ -3805,8 +3771,7 @@ def test_state_from_account_rate_limited_ignores_pre_block_credit_snapshot(monke
     assert state.reset_at == future_reset
 
 
-@pytest.mark.parametrize("plan_type", ["free", "guest", "go", "free_workspace", "quorum"])
-def test_state_from_account_free_plan_recovers_after_expired_long_window(monkeypatch, plan_type):
+def test_state_from_account_free_plan_recovers_after_expired_long_window(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 130.0
     monkeypatch.setattr("time.time", lambda: now)
@@ -3817,7 +3782,7 @@ def test_state_from_account_free_plan_recovers_after_expired_long_window(monkeyp
         status=AccountStatus.RATE_LIMITED,
         reset_at=int(now - 1),
         blocked_at=int(blocked),
-        plan_type=plan_type,
+        plan_type="free",
     )
     synthetic_primary = _make_test_usage(
         window="primary",
@@ -4012,11 +3977,10 @@ def test_state_from_account_rejected_reset_requires_all_quota_windows_available(
     [
         ("free", 100.0, 10.0, None),
         (None, 10.0, 100.0, 25.0),
-        ("guest", 100.0, 100.0, 25.0),
     ],
-    ids=["free-synthetic-primary", "credits-available-secondary", "free-alias-credits"],
+    ids=["free-synthetic-primary", "credits-available-secondary"],
 )
-def test_state_from_account_rejected_reset_uses_normalized_quota_availability(
+def test_state_from_account_rejected_reset_uses_credit_aware_quota_availability(
     monkeypatch, plan_type, primary_used, secondary_used, credits_balance
 ):
     now = 1_700_000_000.0
@@ -4039,11 +4003,11 @@ def test_state_from_account_rejected_reset_uses_normalized_quota_availability(
         credits_balance=credits_balance,
     )
     secondary = _make_test_usage(
-        window="monthly" if plan_type in {"free", "guest"} else "secondary",
+        window="monthly" if plan_type == "free" else "secondary",
         used_percent=secondary_used,
         reset_at=int(now + 7 * 24 * 3600),
         recorded_at=_epoch_to_naive_utc(now - 10),
-        window_minutes=43200 if plan_type in {"free", "guest"} else 10080,
+        window_minutes=43200 if plan_type == "free" else 10080,
     )
 
     state = _state_from_account(
@@ -4451,45 +4415,38 @@ def test_background_recovery_state_keeps_rate_limited_when_long_window_exhausted
     assert state.status == AccountStatus.RATE_LIMITED
 
 
-def test_background_recovery_state_allows_alias_credit_recovery_after_reset_elapses(monkeypatch):
+def test_background_recovery_state_uses_shared_freshness_horizon(monkeypatch):
     now = 1_700_000_000.0
-    blocked = now - 7200.0
-    past_reset = int(now - 300)
     monkeypatch.setattr("time.time", lambda: now)
     monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+    monkeypatch.setattr("app.core.usage.refresh_policy.USAGE_REFRESH_INTERVAL_SECONDS", 600)
 
     account = _make_test_account(
         status=AccountStatus.RATE_LIMITED,
-        reset_at=past_reset,
-        blocked_at=int(blocked),
-        plan_type="guest",
+        reset_at=int(now - 300),
+        blocked_at=None,
+        plan_type="plus",
     )
-    synthetic_primary = _make_test_usage(
+    primary = _make_test_usage(
         window="primary",
-        used_percent=100.0,
+        used_percent=10.0,
         reset_at=int(now + 3600),
-        recorded_at=_epoch_to_naive_utc(now - 30),
-        window_minutes=43200,
-        credits_balance=25.0,
+        recorded_at=_epoch_to_naive_utc(now - 500),
     )
-    exhausted_monthly = _make_test_usage(
-        window="monthly",
-        used_percent=100.0,
-        reset_at=int(now + 30 * 24 * 3600),
-        recorded_at=_epoch_to_naive_utc(now - 30),
-        window_minutes=43200,
+    secondary = _make_test_usage(
+        window="secondary",
+        used_percent=10.0,
+        reset_at=int(now + 5 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 500),
     )
 
     state = background_recovery_state_from_account(
         account=account,
-        primary_entry=synthetic_primary,
-        secondary_entry=exhausted_monthly,
+        primary_entry=primary,
+        secondary_entry=secondary,
     )
 
     assert state.status == AccountStatus.ACTIVE
-    assert state.reset_at is None
-    assert state.blocked_at is None
 
 
 def test_background_recovery_state_ignores_pre_block_credit_snapshot(monkeypatch):
@@ -4566,11 +4523,7 @@ def test_background_recovery_state_requires_fresh_long_window_for_zero_primary_p
     assert state.status == AccountStatus.RATE_LIMITED
 
 
-@pytest.mark.parametrize("plan_type", ["free", "guest"])
-def test_background_recovery_state_uses_fresh_weekly_primary_for_zero_primary_plan(
-    monkeypatch,
-    plan_type,
-):
+def test_background_recovery_state_uses_fresh_weekly_primary_for_zero_primary_plan(monkeypatch):
     now = 1_700_000_000.0
     blocked = now - 7200.0
     past_reset = int(now - 300)
@@ -4582,7 +4535,7 @@ def test_background_recovery_state_uses_fresh_weekly_primary_for_zero_primary_pl
         status=AccountStatus.RATE_LIMITED,
         reset_at=past_reset,
         blocked_at=int(blocked),
-        plan_type=plan_type,
+        plan_type="free",
     )
     fresh_weekly_primary = _make_test_usage(
         window="primary",

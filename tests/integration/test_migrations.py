@@ -2276,7 +2276,11 @@ async def test_subscription_overflow_settings_columns_migration_upgrade_and_down
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
-            assert set(await conn.run_sync(_overflow_columns)) == column_names
+            # The feature was withdrawn: walking on to head runs
+            # 20260914_000000_drop_subscription_overflow_schema, which takes both
+            # columns away again. This revision still has to add them on the way
+            # through, because an old install upgrades through it.
+            assert await conn.run_sync(_overflow_columns) == {}
     finally:
         await engine.dispose()
 
@@ -2385,15 +2389,11 @@ async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
-            # At head the table also carries the composite index WP-G added for
-            # the dashboard's live thread-pin count; everything else is unchanged.
-            assert await conn.run_sync(_schema_state) == {
-                **expected_state,
-                "indexes": {
-                    **expected_state["indexes"],
-                    "ix_model_source_pins_kind_expires_at": ("kind", "expires_at"),
-                },
-            }
+            # The feature was withdrawn: walking on to head runs
+            # 20260914_000000_drop_subscription_overflow_schema, which drops the
+            # table and its indexes. This revision still has to build it on the
+            # way through, because an old install upgrades through it.
+            assert await conn.run_sync(_schema_state) is None
     finally:
         await engine.dispose()
 
@@ -2513,8 +2513,12 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
             )
         await session.commit()
 
-    result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == _HEAD_REVISION
+    # Stop at the revision under test rather than at head: the feature was
+    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # table (and with it this index) away again. The repair still has to happen
+    # on the way through, because an install stranded below it upgrades here.
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+    await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(_DATABASE_URL), overflow_revision))
 
     async with SessionLocal() as session:
         indisvalid = (
@@ -2536,6 +2540,18 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
     assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
+
+    # Leave the database at head for the rest of the suite, and record that the
+    # withdrawal removes the repaired index along with its table.
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            )
+        ).scalar() is None
 
 
 @pytest.mark.asyncio
@@ -2576,8 +2592,12 @@ async def test_model_source_pins_kind_expires_index_repairs_invalid_leftover_pos
         )
         await session.commit()
 
-    result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == _HEAD_REVISION
+    # Stop at the revision under test rather than at head: the feature was
+    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # table (and with it this index) away again. The repair still has to happen
+    # on the way through, because an install stranded below it upgrades here.
+    index_revision = "20260911_000000_model_source_pins_kind_expires_index"
+    await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(_DATABASE_URL), index_revision))
 
     async with SessionLocal() as session:
         indisvalid = (
@@ -2599,6 +2619,18 @@ async def test_model_source_pins_kind_expires_index_repairs_invalid_leftover_pos
     assert indisvalid is True
     assert indexdef.endswith("(kind, expires_at)")  # rebuilt, not the accepted invalid decoy on kind alone
     assert indexdef.startswith("CREATE INDEX ")
+
+    # Leave the database at head for the rest of the suite, and record that the
+    # withdrawal removes the repaired index along with its table.
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            )
+        ).scalar() is None
 
 
 @pytest.mark.asyncio
@@ -3078,43 +3110,6 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT count(*) FROM sqlite_master WHERE name='idx_logs_missing_cost'")) == 0
-        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
-    finally:
-        await engine.dispose()
-
-
-async def test_model_source_pins_kind_expires_index_upgrade_downgrade_and_query_plan(tmp_path):
-    """The dashboard's live thread-pin count rides the index instead of walking the table."""
-    from alembic import command
-
-    from app.db.migrate import _build_alembic_config
-
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'pins-kind-expires.sqlite'}"
-    parent = "20260910_020000_add_dashboard_role_mappings"
-    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-    engine = create_async_engine(db_url)
-    try:
-        async with engine.connect() as conn:
-            plan = (
-                await conn.execute(
-                    text(
-                        "EXPLAIN QUERY PLAN SELECT count(*) FROM model_source_pins "
-                        "WHERE kind = :kind AND expires_at > :now AND purge_at > :now"
-                    ),
-                    {"kind": "thread", "now": "2026-09-11 00:00:00"},
-                )
-            ).fetchall()
-            assert "ix_model_source_pins_kind_expires_at" in str(plan)
-            assert "SCAN model_source_pins" not in str(plan)
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
-        async with engine.connect() as conn:
-            assert (
-                await conn.scalar(
-                    text("SELECT count(*) FROM sqlite_master WHERE name='ix_model_source_pins_kind_expires_at'")
-                )
-                == 0
-            )
         await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:

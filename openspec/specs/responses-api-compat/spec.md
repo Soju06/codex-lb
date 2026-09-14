@@ -10826,3 +10826,89 @@ SDK parser failure.
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
 
+### Requirement: Async tool results remain pending across continuations
+
+The proxy SHALL preserve `async: true` on emitted `function_call` and
+`custom_tool_call` items. It SHALL allow a subsequent anchored response
+to omit an async call result while retaining that call identity for later
+output. It SHALL NOT synthesize an interrupted-tool result for a known
+asynchronous call. Matching actual outputs SHALL complete the
+corresponding pending async call without consuming unrelated pending
+calls.
+
+#### Scenario: Async work spans an intervening turn
+
+- **GIVEN** a response emits async function call `call_a`
+- **WHEN** an anchored follow-up contains a new user message without `call_a` output
+- **THEN** no synthetic output for `call_a` is forwarded
+- **AND** a later actual `call_a` output can be forwarded unchanged
+
+#### Scenario: Async and synchronous calls coexist
+
+- **GIVEN** the previous response contains async `call_a` and interrupted synchronous `call_b`
+- **WHEN** an anchored follow-up omits both outputs
+- **THEN** only `call_b` receives the existing synthetic interrupted output
+
+#### Scenario: Durable recovery keeps synchronous pending calls
+
+- **GIVEN** a completed response contains async `call_a` and synchronous `call_b`
+- **WHEN** the proxy persists the durable pending-tool manifest
+- **THEN** only `call_b` is stored for interrupted-output recovery
+
+#### Scenario: Stored prefixes tolerate unresolved async calls
+
+- **GIVEN** a stored HTTP-bridge prefix contains an unresolved async function call followed by a later user turn
+- **WHEN** the proxy proves a durable full-resend suffix against the synchronous pending-tool manifest
+- **THEN** the unresolved async call does not reject the prefix
+- **AND** the synchronous suffix still matches
+
+#### Scenario: Account-neutral replay accepts settled async pairs
+
+- **GIVEN** a full-history retry contains an async function or custom tool call and its matching typed output
+- **WHEN** the proxy proves the input is a self-contained fresh replay
+- **THEN** the settled async pair is accepted
+- **AND** an unresolved async call without an output remains admissible
+- **AND** the durable suffix matcher ignores completed async pairs when comparing the synchronous pending-tool manifest
+
+#### Scenario: Malformed async suffix items fail closed
+
+- **GIVEN** a durable full resend settles the synchronous pending-tool manifest but includes an async function or custom tool call, or its output, that is not self-contained
+- **WHEN** the proxy validates the recovery proof
+- **THEN** every suffix item MUST have a nonblank string `call_id` and satisfy the existing self-contained tool-item rules before async items are excluded from manifest comparison
+- **AND** invalid items MUST reject the proof without raising an internal error
+- **AND** an unavailable continuity owner MUST produce the existing fail-closed compatibility error instead of an upstream replay
+
+#### Scenario: No-manifest recovery retains asynchronous history
+
+- **GIVEN** a durable HTTP-bridge response has only asynchronous pending calls and no synchronous pending-tool manifest
+- **AND** a full resend matches the stored input prefix and retains a completed assistant message followed by fresh input
+- **WHEN** the owner is lost or another instance recovers the session
+- **THEN** unresolved async function and custom tool calls in the prefix or suffix MUST NOT block the retained-output proof
+- **AND** matching typed async outputs, including delayed prefix-call outputs, MUST be accepted without synthetic results
+- **AND** malformed, duplicate, or mismatched async items MUST fail closed
+- **AND** async calls or their outputs alone MUST NOT replace the completed-assistant boundary or settle pending synchronous calls
+- **AND** existing account-ownership and account-neutral replay checks MUST remain required
+
+#### Scenario: Non-boolean async markers reject durable replay
+
+- **GIVEN** a durable full resend contains a function or custom tool call in its stored prefix or suffix
+- **WHEN** the call contains an `async` field
+- **THEN** its value MUST be a boolean before synchronous or asynchronous classification
+- **AND** string, list, null, integer, and object values MUST reject both synchronous-manifest and retained-output recovery proofs without raising an internal error
+- **AND** an unavailable continuity owner MUST return the existing fail-closed compatibility error without an upstream replay
+- **AND** an omitted marker or `false` MUST retain synchronous settlement requirements, while `true` MUST retain asynchronous settlement semantics
+
+#### Scenario: Retiring a denied WebSocket anchor clears asynchronous state
+
+- **GIVEN** WebSocket continuity retains pending async calls for a completed response
+- **WHEN** the existing stale-anchor policy retires that response before reinjection, or completion removes its anchor
+- **THEN** the proxy MUST clear the pending async identities together with the retired anchor's synchronous tool metadata
+- **AND** the existing unanchored full-context retry and stale-anchor refusal policies MUST remain unchanged
+
+#### Scenario: Blank call identities cannot authorize fresh replay
+
+- **WHEN** a full-history replay contains an async tool call with an empty or whitespace-only call ID
+- **THEN** the account-neutral proof MUST reject the replay even if the async call has no output
+- **AND** WebSocket stale-anchor recovery MUST NOT replay that malformed history to a different account
+- **AND** nonblank async IDs MUST retain the existing unresolved-call replay behavior
+

@@ -30,6 +30,7 @@ from app.modules.proxy.helpers import (
     is_message_derived_usage_limit_rejection,
     is_upstream_burst_rejection,
     is_upstream_usage_limit_rejection,
+    keeps_account_in_the_walk,
 )
 
 pytestmark = pytest.mark.unit
@@ -625,6 +626,63 @@ class TestMessageDerivedUsageLimitRejection:
             phase="first_event",
         )
         assert is_message_derived_usage_limit_rejection(result) is False
+
+
+class TestKeepsAccountInTheWalk:
+    """What a transport asks before taking an account out of its own walk."""
+
+    def test_a_capacity_rejection_on_a_walkable_class_keeps_the_account(self) -> None:
+        result = classify_upstream_failure(
+            error_code="server_error",
+            error=UpstreamError(message="Selected model is at capacity. Please try a different model."),
+            http_status=500,
+            phase="first_event",
+        )
+        assert keeps_account_in_the_walk(result) is True
+
+    @pytest.mark.parametrize(
+        ("error_code", "message", "http_status"),
+        [
+            # The ordinary 500 the transient loop is built for.
+            ("server_error", "Internal server error", 500),
+            # A capacity message the usage limit outranks.
+            ("server_error", "Selected model is at capacity. You've hit your usage limit.", 500),
+            # A benching code: the health write already removed the account.
+            ("usage_limit_reached", "Selected model is at capacity.", 429),
+        ],
+    )
+    def test_other_walkable_rejections_release_the_account(
+        self,
+        error_code: str,
+        message: str,
+        http_status: int,
+    ) -> None:
+        result = classify_upstream_failure(
+            error_code=error_code,
+            error=UpstreamError(message=message),
+            http_status=http_status,
+            phase="first_event",
+        )
+        assert keeps_account_in_the_walk(result) is False
+
+    def test_a_status_less_transport_failure_is_not_a_carve_out(self) -> None:
+        """``non_retryable`` answers "the walk ends", never "keep this account".
+
+        A transport failure carries no status and no transient code, so it
+        classifies ``non_retryable`` and reports no exclusion -- but a transport
+        that has stopped retrying it must still leave that account behind, or
+        the next selection hands the request straight back to the dead route.
+        """
+        result = classify_upstream_failure(
+            error_code="upstream_unavailable",
+            error=UpstreamError(message="Server disconnected"),
+            http_status=None,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "non_retryable"
+        assert result["excludes_account"] is False
+        assert keeps_account_in_the_walk(result) is False
 
 
 class TestIsUpstreamUsageLimitRejection:

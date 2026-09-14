@@ -74,6 +74,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     classify_upstream_failure,
+    keeps_account_in_the_walk,
 )
 from app.modules.proxy.load_balancer import (
     AccountConcurrencyCaps,
@@ -1918,6 +1919,11 @@ class _CompactMixin:
                                 break
                             refresh_retry_used = True
                             continue
+                        error = _parse_openai_error(exc.payload)
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        )
                         if exc.status_code == 500:
                             transient_retries += 1
                             if (
@@ -1952,14 +1958,24 @@ class _CompactMixin:
                                 # meeting the load balancer backoff threshold (error_count >= 3).
                                 await proxy._load_balancer.record_errors(account, transient_retries - 1)
                             last_exc = exc
-                            excluded_account_ids.add(account.id)
+                            # A 500 takes this branch instead of the failover
+                            # decision below, so the account-selection answer is
+                            # taken here: a rejection that describes the
+                            # requested model rather than the account must leave
+                            # the account in the walk, or the next selection is
+                            # pushed onto a sibling that cannot serve the model
+                            # either.
+                            if not keeps_account_in_the_walk(
+                                classify_upstream_failure(
+                                    error_code=code,
+                                    error=_upstream_error_from_openai(error),
+                                    http_status=exc.status_code,
+                                    phase="first_event",
+                                )
+                            ):
+                                excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
-                        error = _parse_openai_error(exc.payload)
-                        code = _normalize_error_code(
-                            error.code if error else None,
-                            error.type if error else None,
-                        )
                         error_message = error.message if error else None
                         network_recovery.account_id = account.id
                         recovery_decision = await network_recovery.wait(

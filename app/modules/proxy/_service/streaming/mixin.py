@@ -725,7 +725,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
                             upstream_error,
                         )
-                    if allow_retry and _facade()._should_retry_stream_error(code):
+                    if allow_retry and _facade()._should_retry_stream_error(code, raw_error_message):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,

@@ -108,6 +108,7 @@ from app.modules.proxy.helpers import (
     is_message_derived_usage_limit_rejection,
     is_upstream_burst_rejection,
     is_upstream_model_capacity_error,
+    keeps_account_in_the_walk,
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
@@ -2793,11 +2794,12 @@ class _StreamingRetryMixin:
                                 transient_retries,
                                 error_code,
                             )
+                            transient_http_status = tex.status_code if isinstance(tex, ProxyResponseError) else None
                             await _handle_or_defer_keyed_stream_health(
                                 account,
                                 error_payload,
                                 error_code,
-                                http_status=(tex.status_code if isinstance(tex, ProxyResponseError) else None),
+                                http_status=transient_http_status,
                                 transient_retry_count=transient_retries,
                             )
                             # Preserve last ProxyResponseError for propagate_http_errors path.
@@ -2813,7 +2815,24 @@ class _StreamingRetryMixin:
                                 )
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
-                            excluded_account_ids.add(account.id)
+                            # The lease goes back either way -- this attempt is
+                            # over -- but a rejection that describes the model
+                            # rather than the account must not take the account
+                            # out of the walk: the next selection would then be
+                            # forced onto a sibling that cannot serve the model
+                            # either, and so on through the pool. An HTTP 500
+                            # reaches this exhaustion tail without passing the
+                            # pre-visible classification above, so it is the one
+                            # place the decision has to be made again.
+                            if not keeps_account_in_the_walk(
+                                classify_upstream_failure(
+                                    error_code=error_code,
+                                    error=error_payload,
+                                    http_status=transient_http_status,
+                                    phase="first_event",
+                                )
+                            ):
+                                excluded_account_ids.add(account.id)
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)

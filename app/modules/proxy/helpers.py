@@ -187,6 +187,23 @@ def is_message_derived_usage_limit_rejection(classified: ClassifiedFailure) -> b
     )
 
 
+def keeps_account_in_the_walk(classified: ClassifiedFailure) -> bool:
+    """True when a transport that has finished with this attempt must still leave the account selectable.
+
+    The model-capacity carve-out, read off the classification instead of
+    re-matched from the message: on ``retryable_transient`` -- the one class
+    whose health write leaves the account usable -- a false exclusion answer can
+    only be the capacity one, so this needs no second opinion about what the
+    message said and cannot drift from it.
+
+    Naming the class is what keeps the carve-out honest. Exclusion is also false
+    for ``non_retryable``, where it means "the walk ends here" rather than "keep
+    this account" -- a status-less transport failure lands there, and a transport
+    that stopped retrying it must still take the account out of its own walk.
+    """
+    return classified["failure_class"] == "retryable_transient" and not classified["excludes_account"]
+
+
 def _header_account_id(account_id: str | None) -> str | None:
     if not account_id:
         return None

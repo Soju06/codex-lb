@@ -368,6 +368,54 @@ async def test_stream_model_capacity_top_level_response_id_surfaces_without_repl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        # The code-less form, which normalizes to ``upstream_error``.
+        {"message": "The usage limit has been reached"},
+        # The generic envelope upstream reuses for rejections it has no code for.
+        {"type": "invalid_request_error", "message": "You've hit your usage limit."},
+    ],
+)
+async def test_stream_serialized_usage_limit_frame_without_a_code_walks_the_pool(
+    async_client, monkeypatch, frame_error
+):
+    """Upstream sends the usage-limit rejection as a frame as well as a body, and the walk
+    must not depend on which one arrived. The serialized form carries no status, and the code it
+    does or does not carry is in no transport retry list, so the sentence is the only evidence
+    there is -- reading it is what keeps the two forms on one answer instead of surfacing the
+    first account's error while the body form rotates."""
+    account_a_id = await _import_account(async_client, "acc_stream_frame_limit_a", "streamframelimita@example.com")
+    await _import_account(async_client, "acc_stream_frame_limit_b", "streamframelimitb@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_frame_limit_a":
+            yield _sse_event({"type": "response.failed", "response": {"error": frame_error}})
+            return
+        yield _success_sse_event("resp_stream_frame_limit_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert seen_account_ids[:2] == ["acc_stream_frame_limit_a", "acc_stream_frame_limit_b"]
+
+    async with SessionLocal() as session:
+        exhausted_account = await session.get(Account, account_a_id)
+        assert exhausted_account is not None
+        assert exhausted_account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
 async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
     """An untyped empty upstream stream may be post-dispatch, so it is not replayed."""
     await _import_account(async_client, "acc_empty_body_no_replay", "empty-body-no-replay@example.com")
@@ -793,6 +841,55 @@ async def test_stream_code_less_429_retries_same_account_then_succeeds(async_cli
     assert len(completed) == 1
     assert len(failed) == 0
     assert seen_account_ids == ["acc_stream_burst_a", "acc_stream_burst_a"]
+    assert 1.0 in slept
+
+    async with SessionLocal() as session:
+        burst_account = await session.get(Account, account_a_id)
+        assert burst_account is not None
+        assert burst_account.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_stream_owner_bound_capacity_429_keeps_its_same_account_retry(async_client, monkeypatch):
+    """The capacity carve-out answers where a request may go next, not whether it may retry.
+
+    An owner-bound request has nowhere to go: the dispatched payload binds it to
+    this account. A code-less 429 is still the burst rejection a short backoff
+    on the owner clears, and a capacity sentence in its body must not cost the
+    request that bounded retry and surface the rejection instead.
+    """
+    account_a_id = await _import_account(async_client, "acc_stream_cap_burst_a", "streamcapbursta@example.com")
+    await _import_account(async_client, "acc_stream_cap_burst_b", "streamcapburstb@example.com")
+
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(
+                429,
+                {"error": {"message": "Selected model is at capacity. Please try a different model."}},
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_cap_burst_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"type": "reasoning", "id": "rs_stream_cap_burst", "encrypted_content": "owner-bound"}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert seen_account_ids == ["acc_stream_cap_burst_a", "acc_stream_cap_burst_a"]
     assert 1.0 in slept
 
     async with SessionLocal() as session:

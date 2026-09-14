@@ -1227,8 +1227,26 @@ def _push_stream_attempt_timeout_overrides(
     )
 
 
-def _should_retry_stream_error(code: str) -> bool:
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+def _should_retry_stream_error(code: str, message: str | None) -> bool:
+    """Whether a pre-visible terminal frame may be retried on a sibling account.
+
+    The code allowlist cannot answer this for the serialized form of the
+    usage-limit rejection: upstream sends that frame with no error code, which
+    normalizes to ``upstream_error`` and is in no transport retry list -- so a
+    frame saying the account is spent would be surfaced on the first account
+    while the identical HTTP body walks the pool. The frame is put through the
+    same classifier the body form uses, on the message alone, because that is
+    the only evidence a status-less frame carries.
+    """
+    if code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES:
+        return True
+    classified = classify_upstream_failure(
+        error_code=code,
+        error=cast(UpstreamError, {"message": message}),
+        http_status=None,
+        phase="first_event",
+    )
+    return classified["failure_class"] == "rate_limit"
 
 
 def _upstream_turn_state_from_socket(upstream: UpstreamWebSocket | None) -> str | None:

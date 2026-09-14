@@ -128,7 +128,7 @@ def deduplicate_exact_replayed_tool_items(items: Iterable[JsonValue]) -> list[Js
         seen = seen_calls if item_type in _TOOL_CALL_TYPES else seen_outputs
         previous = seen.get(call_id)
         if previous is None:
-            seen[call_id] = (cast(str, item_type), canonical)
+            seen[call_id] = (item_type, canonical)
             continue
         previous_type, previous_canonical = previous
         if previous_type != item_type or previous_canonical != canonical:

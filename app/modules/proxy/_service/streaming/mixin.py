@@ -984,7 +984,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             error_message = error.message if error else None
             settlement.record_success = False
-            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code, error_message)
             raise
         except UpstreamProxyRouteError as exc:
             route_fail_closed_reason = exc.reason

@@ -2113,13 +2113,15 @@ class _CompactMixin:
                                 # recovery eligible for the remaining attempts.
                                 owner_quota_failover_eligible = True
                             last_exc = exc
-                            excluded_account_ids.add(account.id)
-                            await record_or_defer_stream_health(
-                                account,
-                                _upstream_error_from_openai(error),
-                                code,
-                                exc.status_code,
-                            )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                excluded_account_ids.add(account.id)
+                                await record_or_defer_stream_health(
+                                    account,
+                                    _upstream_error_from_openai(error),
+                                    code,
+                                    exc.status_code,
+                                )
                             transient_exhausted = True
                             break
                         await settle_compact_usage(

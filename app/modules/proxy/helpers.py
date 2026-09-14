@@ -102,7 +102,13 @@ def is_upstream_model_capacity_error(message: str | None) -> bool:
     return any(marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS)
 
 
-def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -> bool:
+def _message_can_classify_usage_limit(*, error_code: str, http_status: int | None) -> bool:
+    if error_code == "invalid_request_error" and http_status not in (None, 429):
+        return False
+    return error_code in _MESSAGE_CLASSIFIED_CODES
+
+
+def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None, http_status: int | None = None) -> bool:
     """True when upstream says this account's usage limit is spent.
 
     Either the code names the limit or the message does. The message-only form
@@ -112,7 +118,10 @@ def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -
     throttling is deliberately not included -- it says the request arrived too
     fast, not that the subscription window is exhausted.
     """
-    return error_code == _USAGE_LIMIT_CODE or is_upstream_usage_limit_message(message)
+    return error_code == _USAGE_LIMIT_CODE or (
+        _message_can_classify_usage_limit(error_code=error_code, http_status=http_status)
+        and is_upstream_usage_limit_message(message)
+    )
 
 
 def classify_upstream_failure(
@@ -130,7 +139,7 @@ def classify_upstream_failure(
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
-    elif usage_limit_message and error_code in _MESSAGE_CLASSIFIED_CODES:
+    elif usage_limit_message and _message_can_classify_usage_limit(error_code=error_code, http_status=http_status):
         # An account that is out of quota cannot be waited out on itself, so
         # this must not reach the transient branch that
         # ``is_upstream_burst_rejection`` reads as a burst and answers with

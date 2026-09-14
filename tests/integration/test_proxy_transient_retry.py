@@ -25,7 +25,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import RealScheduler
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
@@ -980,11 +980,18 @@ async def test_stream_owner_bound_capacity_429_keeps_its_same_account_retry(asyn
 
 
 _STREAM_CAPACITY_500_ACCOUNTS = ("acc_stream_cap_walk_a", "acc_stream_cap_walk_b")
-_CAPACITY_500_BODY = {"error": {"message": "Selected model is at capacity. Please try a different model."}}
-_ORDINARY_500_BODY = {"error": {"message": "An error occurred while processing your request."}}
+_CAPACITY_500_BODY: OpenAIErrorEnvelope = {
+    "error": {"message": "Selected model is at capacity. Please try a different model."}
+}
+_CAPACITY_429_BODY: OpenAIErrorEnvelope = {
+    "error": {"message": "Selected model is at capacity. Please try a different model."}
+}
+_ORDINARY_500_BODY: OpenAIErrorEnvelope = {"error": {"message": "An error occurred while processing your request."}}
 
 
-async def _run_stream_500_pool_walk(async_client, monkeypatch, body: dict) -> tuple[list[str | None], list[dict]]:
+async def _run_stream_status_pool_walk(
+    async_client, monkeypatch, body: OpenAIErrorEnvelope, status_code: int
+) -> tuple[list[str | None], list[dict]]:
     """Reject every dispatch until both accounts have been walked, then succeed.
 
     Whether the seventh dispatch happens at all is the question: it exists only
@@ -998,7 +1005,7 @@ async def _run_stream_500_pool_walk(async_client, monkeypatch, body: dict) -> tu
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
         if len(seen_account_ids) <= 6:
-            raise ProxyResponseError(500, body, failure_phase="status")
+            raise ProxyResponseError(status_code, body, failure_phase="status")
         yield _success_sse_event("resp_stream_cap_walk_ok")
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -1007,6 +1014,12 @@ async def _run_stream_500_pool_walk(async_client, monkeypatch, body: dict) -> tu
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         lines = [line async for line in resp.aiter_lines() if line]
     return seen_account_ids, _extract_events(lines)
+
+
+async def _run_stream_500_pool_walk(
+    async_client, monkeypatch, body: OpenAIErrorEnvelope
+) -> tuple[list[str | None], list[dict]]:
+    return await _run_stream_status_pool_walk(async_client, monkeypatch, body, 500)
 
 
 @pytest.mark.asyncio
@@ -1024,6 +1037,17 @@ async def test_stream_capacity_500_lets_the_walk_come_back_to_an_account(async_c
     assert set(seen_account_ids) == set(_STREAM_CAPACITY_500_ACCOUNTS)
     assert [event for event in events if event.get("type") == "response.failed"] == []
     assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_429_lets_the_walk_come_back_to_an_account(async_client, monkeypatch):
+    """The model-capacity carve-out must not depend on whether upstream chose 429 or 500."""
+    seen_account_ids, events = await _run_stream_status_pool_walk(async_client, monkeypatch, _CAPACITY_429_BODY, 429)
+
+    assert len(seen_account_ids) == 3
+    assert seen_account_ids[0] == seen_account_ids[2]
+    assert seen_account_ids[1] != seen_account_ids[0]
+    assert [event for event in events if event.get("type") == "response.completed"] == []
 
 
 @pytest.mark.asyncio
@@ -1665,7 +1689,9 @@ async def _create_metered_proxy_key(async_client, name: str) -> str:
     return created.key
 
 
-async def _run_compact_500_pool_walk(async_client, monkeypatch, name: str, body: dict) -> tuple[int, list[str | None]]:
+async def _run_compact_500_pool_walk(
+    async_client, monkeypatch, name: str, body: OpenAIErrorEnvelope
+) -> tuple[int, list[str | None]]:
     account_slug = f"acc_{name}"
     await _import_account(async_client, account_slug, f"{name}@example.com")
     key = await _create_metered_proxy_key(async_client, name)

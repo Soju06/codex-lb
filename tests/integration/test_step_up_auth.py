@@ -100,6 +100,34 @@ async def _rows(action: str) -> list[AuditLog]:
 
 
 @pytest.mark.asyncio
+async def test_account_bundle_export_requires_fresh_step_up_before_body(async_client: AsyncClient, monkeypatch) -> None:
+    clock = _Clock(monkeypatch)
+    await _setup(async_client)
+    clock.advance(301)
+    body_read = False
+
+    async def body():
+        nonlocal body_read
+        body_read = True
+        yield b"must not be parsed"
+
+    blocked = await async_client.post("/api/accounts/bundle/export", content=body())
+    assert blocked.status_code == 403
+    assert _error(blocked)["code"] == "step_up_required"
+    assert _error(blocked)["param"] == "accounts:export"
+    assert body_read is False
+    assert "no-store" in blocked.headers["cache-control"]
+
+    verified = await async_client.post(STEP_UP, json={"password": "password123"})
+    assert verified.status_code == 200
+    exported = await async_client.post(
+        "/api/accounts/bundle/export", json={"passphrase": "synthetic-bundle-passphrase"}
+    )
+    assert exported.status_code == 200
+    assert exported.headers["content-type"] == "application/vnd.codex-lb.account-bundle"
+
+
+@pytest.mark.asyncio
 async def test_password_account_steps_up_with_its_password(async_client: AsyncClient, monkeypatch) -> None:
     clock = _Clock(monkeypatch)
     await _setup(async_client)

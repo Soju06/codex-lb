@@ -34,6 +34,8 @@ TIERS: Final[tuple[Tier, ...]] = ("T0", "T1", "T2", "T3", "T4")
 # Declaration order follows ``Settings``; the tier is the policy answer to
 # "may this value differ between two replicas / must it exist before the DB?".
 SETTING_TIERS: Final[dict[str, Tier]] = {
+    # Per-instance memory/upload capacity bound, like the spool byte limits.
+    "account_bundle_max_bytes": "T1",
     "data_dir": "T0",
     "database_url": "T0",
     "database_pool_size": "T1",

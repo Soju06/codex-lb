@@ -4,6 +4,10 @@ import asyncio
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.middleware.multipart_content_encoding import (
+    account_bundle_no_store_headers,
+    audit_account_bundle_request_failure,
+)
 from app.core.resilience.overload import (
     deny_websocket_with_http_response,
     is_proxy_path,
@@ -30,20 +34,22 @@ class BackpressureMiddleware:
 
         if self._semaphore.locked():
             message = "codex-lb is temporarily overloaded by local backpressure"
+            headers = merge_retry_after_headers(account_bundle_no_store_headers(scope))
+            audit_account_bundle_request_failure(scope, status_code=429)
             if scope["type"] == "websocket":
                 await deny_websocket_with_http_response(
                     receive,
                     send,
                     status_code=429,
                     payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
-                    headers=merge_retry_after_headers(),
+                    headers=headers,
                 )
                 return
             await send_json_http_response(
                 send,
                 status_code=429,
                 payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
-                headers=merge_retry_after_headers(),
+                headers=headers,
             )
             return
 

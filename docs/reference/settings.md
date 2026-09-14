@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 96 settings. Every setting is an environment
+codex-lb currently exposes 97 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -101,6 +101,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable | Tier | Type | Default |
 | --- | --- | --- | --- |
+| `CODEX_LB_ACCOUNT_BUNDLE_MAX_BYTES` | T1 | `int` | `8388608` |
 | `CODEX_LB_ENCRYPTION_KEY_FILE` | T0 | `Path` | `<data_dir>/encryption.key` |
 | `CODEX_LB_ENCRYPTION_KEY_FINGERPRINT_MODE` | T0 | `'enforce' \| 'warn' \| 'off'` | `'enforce'` |
 
@@ -326,4 +327,4 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 
 ---
 
-*Specs: [user-documentation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability)*
+*Specs: [user-documentation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · [account-bundles](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-bundles) · [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability)*

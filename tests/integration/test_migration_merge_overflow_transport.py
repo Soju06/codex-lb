@@ -22,6 +22,8 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_BUNDLE_MERGE = "20260908_010000_merge_account_bundle_and_subscription_overflow_heads"
+_BUNDLE_PARENT = "20260830_010000_merge_accounts_email_index_and_quota_warmup_heads"
 
 
 @dataclass
@@ -218,16 +220,19 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # (and their own drift against the ORM), while the merge itself must stay a
     # no-op in both directions.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    # The published bundle merge is a parallel descendant of overflow and
+    # remains applied when downgrading only the transport lineage.
+    assert _revisions(database.engine) == tuple(sorted((_MERGE, _BUNDLE_MERGE)))
     at_merge = _state(database.engine)
     merge_drift = check_schema_drift(database.url)
 
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
-        # A direct downgrade to either immediate parent executes only the
-        # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        # Targeting overflow also unmerges its bundle descendant; targeting
+        # transport leaves that merge applied, so overflow is not a head.
+        # Neither path executes either original parent's schema downgrade.
+        expected_heads = (*_PARENTS, _BUNDLE_PARENT) if parent == _OVERFLOW else (_TRANSPORT, _BUNDLE_MERGE)
+        assert _revisions(database.engine) == tuple(sorted(expected_heads))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

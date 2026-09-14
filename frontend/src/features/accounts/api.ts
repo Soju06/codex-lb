@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
@@ -5,6 +6,8 @@ import {
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
   AccountAuthExportResponseSchema,
+  AccountBundleCommitResponseSchema,
+  AccountBundlePreflightResponseSchema,
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
@@ -46,6 +49,43 @@ export function importAccount(file: File) {
   formData.append("auth_json", file);
   return post(`${ACCOUNTS_BASE_PATH}/import`, AccountImportResponseSchema, {
     body: formData,
+  });
+}
+
+export async function exportAccountBundle(accountIds: string[] | null, passphrase: string) {
+  return post(`${ACCOUNTS_BASE_PATH}/bundle/export`, z.instanceof(Blob), {
+    cache: "no-store",
+    responseType: "blob",
+    body: { accountIds, passphrase },
+  });
+}
+
+export function preflightAccountBundle(file: File, passphrase: string) {
+  const formData = new FormData();
+  formData.append("bundle", file);
+  formData.append("passphrase", passphrase);
+  return post(`${ACCOUNTS_BASE_PATH}/bundle/import/preflight`, AccountBundlePreflightResponseSchema, {
+    body: formData,
+    cache: "no-store",
+  });
+}
+
+export function commitAccountBundle(params: {
+  file: File;
+  passphrase: string;
+  integrityToken: string;
+  conflictMode: "skip" | "replace";
+  confirmReplace: boolean;
+}) {
+  const formData = new FormData();
+  formData.append("bundle", params.file);
+  formData.append("passphrase", params.passphrase);
+  formData.append("integrity_token", params.integrityToken);
+  formData.append("conflict_mode", params.conflictMode);
+  formData.append("confirm_replace", String(params.confirmReplace));
+  return post(`${ACCOUNTS_BASE_PATH}/bundle/import/commit`, AccountBundleCommitResponseSchema, {
+    body: formData,
+    cache: "no-store",
   });
 }
 

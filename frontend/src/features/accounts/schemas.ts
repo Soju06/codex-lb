@@ -333,6 +333,43 @@ export const ImportStateSchema = z.object({
   message: z.string().nullable(),
 });
 
+export const AccountBundlePortableMetadataSchema = z.object({
+  alias: z.string().nullable(),
+  planType: z.string(),
+  routingPolicy: AccountRoutingPolicySchema,
+  limitWarmupEnabled: z.boolean(),
+  securityWorkAuthorized: z.boolean(),
+});
+
+export const AccountBundlePreflightResponseSchema = z.object({
+  integrityToken: z.string(),
+  accountCount: z.number().int().nonnegative(),
+  newCount: z.number().int().nonnegative(),
+  matchingCount: z.number().int().nonnegative(),
+  accounts: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    maskedIdentity: z.string(),
+    state: z.enum(["new", "matching"]),
+    metadata: AccountBundlePortableMetadataSchema,
+  })),
+});
+
+export const AccountBundleCommitResponseSchema = z.object({
+  summary: z.object({
+    imported: z.number().int().nonnegative(),
+    replaced: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  }),
+  results: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    outcome: z.enum(["imported", "replaced", "skipped", "failed"]),
+    destinationAccountId: z.string().nullable(),
+    warning: z.string().nullable(),
+  })),
+  warnings: z.array(z.string()),
+});
+
 export type UsageTrendPoint = z.infer<typeof UsageTrendPointSchema>;
 export type AccountSummary = z.infer<typeof AccountSummarySchema>;
 export type RateLimitResetCreditItem = z.infer<typeof RateLimitResetCreditItemSchema>;
@@ -381,3 +418,5 @@ export type RuntimeConnectAddressResponse = z.infer<
 >;
 export type OAuthState = z.infer<typeof OAuthStateSchema>;
 export type ImportState = z.infer<typeof ImportStateSchema>;
+export type AccountBundlePreflightResponse = z.infer<typeof AccountBundlePreflightResponseSchema>;
+export type AccountBundleCommitResponse = z.infer<typeof AccountBundleCommitResponseSchema>;

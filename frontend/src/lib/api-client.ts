@@ -9,6 +9,7 @@ type RequestOptions = {
   signal?: AbortSignal;
   credentials?: RequestCredentials;
   cache?: RequestCache;
+  responseType?: "blob";
   suppressUnauthorizedHandler?: boolean;
   /** Internal: set on the single retry after a successful step-up so it cannot loop. */
   skipStepUp?: boolean;
@@ -62,6 +63,12 @@ let unauthorizedHandler: (() => void) | null = null;
 
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
+}
+
+export function handleUnauthorizedResponse(response: Pick<Response, "status">): void {
+  if (response.status === 401) {
+    unauthorizedHandler?.();
+  }
 }
 
 export const STEP_UP_REQUIRED_CODE = "step_up_required";
@@ -207,11 +214,13 @@ async function request<T>(
     });
   }
 
-  if (response.status === 401 && !options?.suppressUnauthorizedHandler) {
-    unauthorizedHandler?.();
+  if (!options?.suppressUnauthorizedHandler) {
+    handleUnauthorizedResponse(response);
   }
 
-  const payload = await readJsonPayload(response);
+  const payload = response.ok && options?.responseType === "blob"
+    ? await response.blob()
+    : await readJsonPayload(response);
   if (!response.ok) {
     const parsedError = parseApiErrorPayload(payload);
     // A sensitive mutation wants a recent re-verification: run the shared

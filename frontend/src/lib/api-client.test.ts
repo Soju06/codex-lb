@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { ApiError, put, setStepUpHandlers } from "@/lib/api-client";
+import { exportAccountBundle } from "@/features/accounts/api";
 
 const okSchema = z.object({ status: z.string() });
 
@@ -19,6 +20,24 @@ const stepUpRequired = {
 };
 
 describe("api-client step-up", () => {
+  it("replays encrypted bundle export after step-up and preserves binary content", async () => {
+    const bundle = new Blob([new Uint8Array([0, 255, 128, 10])]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(stepUpRequired, 403))
+      .mockResolvedValueOnce({ ok: true, status: 200, blob: async () => bundle });
+    vi.stubGlobal("fetch", fetchMock);
+    const onRequired = vi.fn().mockResolvedValue(true);
+    setStepUpHandlers({ onRequired, onUnavailable: vi.fn() });
+
+    const result = await exportAccountBundle(["synthetic-account"], "test-passphrase");
+
+    expect(result).toBe(bundle);
+    expect(onRequired).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
+    expect(fetchMock.mock.calls[1][1].cache).toBe("no-store");
+  });
+
   afterEach(() => {
     setStepUpHandlers(null);
     vi.unstubAllGlobals();

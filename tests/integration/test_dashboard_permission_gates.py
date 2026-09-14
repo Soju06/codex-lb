@@ -88,6 +88,32 @@ async def test_account_export_requires_accounts_export_not_write(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "permission"),
+    [
+        ("/api/accounts/bundle/export", Permission.ACCOUNTS_EXPORT),
+        ("/api/accounts/bundle/import/preflight", Permission.ACCOUNTS_WRITE),
+        ("/api/accounts/bundle/import/commit", Permission.ACCOUNTS_WRITE),
+    ],
+)
+async def test_account_bundle_requires_specific_permission_before_body(
+    app_instance: FastAPI, async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch, path, permission
+) -> None:
+    _use_principal(app_instance, monkeypatch, _principal_without(permission))
+    body_read = False
+
+    async def body():
+        nonlocal body_read
+        body_read = True
+        yield b"must not be parsed"
+
+    response = await async_client.post(path, content=body())
+    _assert_permission_required(response, permission)
+    assert body_read is False
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.asyncio
 async def test_security_settings_fields_require_security_write(
     app_instance: FastAPI, async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

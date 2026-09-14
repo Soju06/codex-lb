@@ -129,6 +129,23 @@ describe("AccountsPage", () => {
     useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true });
   });
 
+  it.each([
+    { permissions: ["accounts:read:all", "accounts:write:all"], canExport: false, canWrite: true },
+    { permissions: ["accounts:read:all", "accounts:export:all"], canExport: true, canWrite: false },
+  ])("gates bundle export independently from account writes ($canExport)", ({ permissions, canExport, canWrite }) => {
+    useAuthStore.setState({ role: "admin", permissions, canWrite, initialized: true });
+    mockAccountsQuery([account({ accountId: "acc-primary" })]);
+    render(<MemoryRouter><AccountsPage /></MemoryRouter>);
+
+    if (canExport) {
+      expect(screen.getByRole("button", { name: "Export accounts" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
+    } else {
+      expect(screen.queryByRole("button", { name: "Export accounts" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Add account" })).toBeEnabled();
+    }
+  });
+
   it("keeps the upstream-proxy admin query idle and hides OAuth help for read-only guests", () => {
     useAuthStore.setState({ role: "guest", permissions: ["read"], canWrite: false, initialized: true });
     // Guests receive a masked identity: no ChatGPT account/workspace ids and a redacted email.

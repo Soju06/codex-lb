@@ -515,6 +515,35 @@ async def test_fetch_usage_native_error_body_matches_python_safe_json_semantics(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport_failure", [False, True])
+async def test_fetch_usage_native_redacts_sensitive_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    transport_failure: bool,
+) -> None:
+    sensitive_message = "synthetic-private-upstream-message"
+    native = StubNativeClient(
+        [NativeEgressProtocolError(sensitive_message)]
+        if transport_failure
+        else [StubNativeResponse(503, body=sensitive_message.encode())]
+    )
+    monkeypatch.setattr("app.core.clients.usage.discover_native_egress_client", lambda: native)
+
+    with pytest.raises(UsageFetchError):
+        await fetch_usage(
+            access_token="access-token",
+            account_id=None,
+            base_url="http://usage.test",
+            max_retries=0,
+            allow_direct_egress=True,
+            redact_sensitive_logs=True,
+        )
+
+    assert "Usage fetch" in caplog.text
+    assert sensitive_message not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_fetch_usage_native_body_failure_is_not_retried_or_fallen_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

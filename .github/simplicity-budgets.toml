@@ -61,7 +61,9 @@ max_items = 5
 # operator must be able to roll back without a deploy, so it needs a dashboard
 # home; the environment leg exists only so an operator locked out of the
 # dashboard can still pin the mode at boot, and it is a fallback, never a seed).
-max = 96
+# account_bundle_max_bytes bounds uploads and plaintext for deployment-specific
+# memory budgets; see portable-encrypted-account-bundles for justification.
+max = 97
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

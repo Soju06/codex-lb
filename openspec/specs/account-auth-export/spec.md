@@ -3,6 +3,16 @@
 ## Purpose
 Governs the OpenCode-format account credential export. Operators who onboard accounts through codex-lb should not have to repeat the OpenAI OAuth flow inside OpenCode, so a selected account can be exported as an OpenCode-compatible `auth.json` holding only that account's OAuth entry. The payload is delivered through the unified export endpoint, must exclude codex-lb-only metadata, and must never leak token material into audit records.
 ## Requirements
+### Requirement: Selected-account auth.json export remains distinct
+
+The existing selected-account auth.json export MUST remain independently available and behavior-compatible when encrypted multi-account export is available.
+
+#### Scenario: Operator exports one selected auth.json
+
+- **WHEN** an operator uses the selected account's existing auth export action
+- **THEN** the existing auth.json response and download behavior apply
+- **AND** the multi-account selection and passphrase dialog is not used
+
 ### Requirement: Per-account OpenCode auth export
 The system SHALL let an authenticated dashboard user export one selected account as an OpenCode-compatible `auth.json` payload. The payload SHALL be delivered as the `opencodeAuthJson` member of the unified `POST /api/accounts/{id}/export/auth` response; the system SHALL NOT expose a dedicated OpenCode export route.
 

@@ -90,6 +90,7 @@ async def fetch_usage(
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
+    redact_sensitive_logs: bool = False,
 ) -> UsagePayload:
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
@@ -113,6 +114,7 @@ async def fetch_usage(
                 timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                 retries=retries,
                 codex_client=codex_client,
+                redact_sensitive_logs=redact_sensitive_logs,
             )
         native_client = discover_native_egress_client() if client is None else None
         if native_client is not None:
@@ -123,6 +125,7 @@ async def fetch_usage(
                     headers=headers,
                     timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                     retries=retries,
+                    redact_sensitive_logs=redact_sensitive_logs,
                 )
             except NativeEgressUnavailable:
                 pass
@@ -135,13 +138,16 @@ async def fetch_usage(
                 retry_options=retry_options,
             ) as resp:
                 data = await _safe_json(resp)
-                return _usage_payload_or_raise(data, resp.status)
+                return _usage_payload_or_raise(data, resp.status, redact_sensitive_logs=redact_sensitive_logs)
     except (aiohttp.ClientError, asyncio.TimeoutError, CodexTransportError, NativeEgressError) as exc:
-        logger.warning(
-            "Usage fetch error request_id=%s error=%s",
-            get_request_id(),
-            exc,
-        )
+        if redact_sensitive_logs:
+            logger.warning("Usage fetch error request_id=%s", get_request_id())
+        else:
+            logger.warning(
+                "Usage fetch error request_id=%s error=%s",
+                get_request_id(),
+                exc,
+            )
         raise UsageFetchError(0, f"Usage fetch failed: {exc}") from exc
 
 
@@ -152,6 +158,7 @@ async def _fetch_usage_via_native(
     headers: dict[str, str],
     timeout_seconds: float,
     retries: int,
+    redact_sensitive_logs: bool = False,
 ) -> UsagePayload:
     attempts = max(1, retries + 1)
     retry_options = _retry_options(attempts)
@@ -183,7 +190,7 @@ async def _fetch_usage_via_native(
             status = response.status
             if status not in RETRYABLE_STATUS or attempt == attempts - 1:
                 data = await _native_usage_json(response)
-                return _usage_payload_or_raise(data, status)
+                return _usage_payload_or_raise(data, status, redact_sensitive_logs=redact_sensitive_logs)
         await asyncio.sleep(retry_options.get_timeout(attempt + 1))
     raise RuntimeError("unreachable native usage retry state")
 
@@ -271,6 +278,7 @@ async def _fetch_usage_via_codex(
     timeout_seconds: float,
     retries: int,
     codex_client: CodexClient | None,
+    redact_sensitive_logs: bool,
 ) -> UsagePayload:
     attempts = max(1, retries + 1)
     owns_codex_client = codex_client is None
@@ -296,7 +304,7 @@ async def _fetch_usage_via_codex(
             if status in RETRYABLE_STATUS and attempt < attempts - 1:
                 await asyncio.sleep(_retry_delay_seconds(attempt))
                 continue
-            return _usage_payload_or_raise(data, status)
+            return _usage_payload_or_raise(data, status, redact_sensitive_logs=redact_sensitive_logs)
     finally:
         if owns_codex_client:
             close = getattr(active_codex_client, "close", None)
@@ -349,17 +357,29 @@ async def _consume_rate_limit_reset_via_codex(
     raise RuntimeError("unreachable usage limit reset retry state")
 
 
-def _usage_payload_or_raise(data: JsonObject, status: int) -> UsagePayload:
+def _usage_payload_or_raise(
+    data: JsonObject,
+    status: int,
+    *,
+    redact_sensitive_logs: bool = False,
+) -> UsagePayload:
     if status >= 400:
         code = _extract_error_code(data)
         message = _extract_error_message(data) or f"Usage fetch failed ({status})"
-        logger.warning(
-            "Usage fetch failed request_id=%s status=%s code=%s message=%s",
-            get_request_id(),
-            status,
-            code,
-            message,
-        )
+        if redact_sensitive_logs:
+            logger.warning(
+                "Usage fetch failed request_id=%s status=%s",
+                get_request_id(),
+                status,
+            )
+        else:
+            logger.warning(
+                "Usage fetch failed request_id=%s status=%s code=%s message=%s",
+                get_request_id(),
+                status,
+                code,
+                message,
+            )
         raise UsageFetchError(status, message, code=code)
     try:
         return UsagePayload.model_validate(data)

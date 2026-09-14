@@ -16,7 +16,9 @@ def test_output_item_identity_collects_stable_fields_and_validates_tool_shapes()
 
     assert identity == {"id": "item_1", "call_id": "call_1", "type": "function_call"}
     assert _output_item_identity_is_valid(identity)
-    assert _output_item_identity_is_valid({"type": "message"})
+    assert _output_item_identity_is_valid({"type": "message", "id": "msg_1"})
+    assert _output_item_identity_is_valid({"type": "compaction"})
+    assert not _output_item_identity_is_valid({"type": "message"})
     assert not _output_item_identity_is_valid({"type": "function_call", "call_id": "call_1"})
     assert not _output_item_identity_is_valid({"type": "function_call_output"})
 
@@ -70,3 +72,9 @@ def test_tool_echo_deduplication_fails_closed_on_conflicting_content() -> None:
     conflicting = {**call, "arguments": '{"cmd":"rm -rf /"}'}
 
     assert _deduplicate_exact_replayed_tool_items([call, conflicting]) is None
+
+
+def test_tool_echo_deduplication_preserves_unhashable_malformed_types() -> None:
+    malformed: JsonValue = {"type": [], "call_id": "call_1"}
+
+    assert _deduplicate_exact_replayed_tool_items([malformed]) == [malformed]

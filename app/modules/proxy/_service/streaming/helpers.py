@@ -504,10 +504,23 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-def _should_penalize_stream_error(code: str | None) -> bool:
+def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
+    """Whether this stream failure owes the account a health write.
+
+    ``message`` is the terminal frame's sentence, and callers that have one pass
+    it: the code table cannot answer for the serialized usage-limit rejection,
+    which upstream sends with no error code at all. That frame normalizes to
+    ``upstream_error``, which is in neither code set, so an account that just
+    said its subscription window is spent would be left ACTIVE and handed the
+    next request -- while the identical coded frame benches it. Callers without
+    a message (transport failures, HTTP-status paths that classify elsewhere)
+    keep the pure code answer.
+    """
     if code is None:
         return False
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    if code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES:
+        return True
+    return is_upstream_usage_limit_rejection(error_code=code, message=message)
 
 
 _MODEL_CAPACITY_LIMIT_CODES = {

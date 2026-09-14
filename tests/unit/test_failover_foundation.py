@@ -23,12 +23,17 @@ from app.core.balancer.logic import (
 from app.core.balancer.types import ClassifiedFailure, FailureClass, UpstreamError
 from app.db.models import AccountStatus
 from app.modules.proxy.helpers import (
+    _MESSAGE_CLASSIFIED_CODES,
+    _QUOTA_CODES,
+    _RATE_LIMIT_CODES,
+    _TRANSIENT_CODES,
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
     classify_upstream_failure,
     is_message_derived_usage_limit_rejection,
     is_upstream_burst_rejection,
+    is_upstream_model_capacity_error,
     is_upstream_usage_limit_rejection,
     keeps_account_in_the_walk,
 )
@@ -72,6 +77,35 @@ def _classify_observed_envelope(envelope: dict[str, Any]) -> ClassifiedFailure:
         http_status=envelope.get("status"),
         phase="first_event",
     )
+
+
+# Every code the classifier has an opinion about, plus the two placeholders a
+# missing or generic envelope normalizes to, plus one it has never heard of.
+_ALL_CLASSIFIABLE_CODES = (
+    _RATE_LIMIT_CODES | _QUOTA_CODES | _TRANSIENT_CODES | _MESSAGE_CLASSIFIED_CODES | {"invalid_request"}
+)
+# One message per behaviour the classifier reads out of a sentence, so the
+# closure below crosses each with every code rather than sampling pairs.
+_RETRY_HINT_CLOSURE_MESSAGES = (
+    "The usage limit has been reached",
+    "You've hit your usage limit.",
+    "Selected model is at capacity. Please try a different model.",
+    "Selected model is at capacity. The usage limit has been reached",
+    "Rate limit exceeded",
+    "",
+)
+
+
+def _was_stamped_before_the_message_branch(error_code: str, message: str) -> bool:
+    """Whether a 429 of this shape carried the locally stamped ``Retry-After`` before.
+
+    ``classify_upstream_failure`` without its usage-limit-message branch, then
+    the burst test. Spelled out rather than imported because the point is to
+    compare against the behaviour that no longer exists.
+    """
+    if error_code in _RATE_LIMIT_CODES or error_code in _QUOTA_CODES:
+        return False
+    return error_code in _TRANSIENT_CODES or is_upstream_model_capacity_error(message)
 
 
 class TestClassifyUpstreamFailure:
@@ -626,6 +660,30 @@ class TestMessageDerivedUsageLimitRejection:
             phase="first_event",
         )
         assert is_message_derived_usage_limit_rejection(result) is False
+
+    @pytest.mark.parametrize("error_code", sorted(_ALL_CLASSIFIABLE_CODES))
+    @pytest.mark.parametrize("message", _RETRY_HINT_CLOSURE_MESSAGES)
+    def test_no_surfaced_429_loses_its_retry_hint(self, error_code: str, message: str) -> None:
+        """Reclassification may add wait guidance to a 429; it may never take guidance away.
+
+        The hint is stamped locally when the surfaced rejection would otherwise reach the client
+        with nothing to wait on, and before the message branch existed the only 429s that got it
+        were the ones classified transient. Rather than list the forms someone thought of, this
+        walks every code the classifier knows crossed with every message that can move one, and
+        asserts the new stamp set covers the old one.
+        """
+        classified = classify_upstream_failure(
+            error_code=error_code,
+            error=UpstreamError(message=message),
+            http_status=429,
+            phase="first_event",
+        )
+        stamped_now = is_upstream_burst_rejection(
+            failure_class=classified["failure_class"],
+            http_status=classified["http_status"],
+        ) or is_message_derived_usage_limit_rejection(classified)
+
+        assert stamped_now or not _was_stamped_before_the_message_branch(error_code, message)
 
 
 class TestKeepsAccountInTheWalk:

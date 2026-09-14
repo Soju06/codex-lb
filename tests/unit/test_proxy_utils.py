@@ -16272,6 +16272,148 @@ async def test_compact_excludes_the_account_after_an_ordinary_500(monkeypatch):
     assert isinstance(outcome, CompactResponsePayload)
 
 
+# Upstream serializes the usage-limit rejection into a terminal frame as well as
+# an HTTP body, and the frame form may carry no error code at all. Both gates
+# that read such a frame -- the retry decision before anything is downstream, and
+# the account-health decision once something is -- live inside ``_stream_once``,
+# so these drive the real one and put the frame on the wire.
+_USAGE_LIMIT_SENTENCE = "The usage limit has been reached"
+_TERMINAL_FRAME_SPENT_ACCOUNT_ID = "acc_terminal_frame_spent"
+_TERMINAL_FRAME_SIBLING_ACCOUNT_ID = "acc_terminal_frame_sibling"
+_RESPONSE_CREATED_EVENT = 'data: {"type":"response.created","response":{"id":"resp_terminal_frame_created"}}\n\n'
+
+
+async def _run_stream_terminal_frame_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    frame_error: dict[str, str],
+    *,
+    lead_event: str | None = None,
+) -> tuple[list[set[str]], list[str], list[dict[str, Any]], list[str]]:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(
+        _repo_factory(_RequestLogsRecorder()),
+        scheduler=_RecordingSleepScheduler(),
+    )
+    spent = _make_account(_TERMINAL_FRAME_SPENT_ACCOUNT_ID)
+    sibling = _make_account(_TERMINAL_FRAME_SIBLING_ACCOUNT_ID)
+    selection_exclusions: list[set[str]] = []
+    dispatched: list[str] = []
+    health_writes: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    _install_500_walk_selection(monkeypatch, service, spent, sibling, selection_exclusions)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    async def record_health(account: Account, *_args: object, **_kwargs: object) -> None:
+        health_writes.append(account.id)
+
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=record_health))
+
+    async def fake_core_stream(_payload, _headers, _token, account_id, base_url=None, raise_for_status=False):
+        dispatched.append(account_id)
+        if account_id != spent.chatgpt_account_id:
+            yield 'data: {"type":"response.completed","response":{"id":"resp_terminal_frame_sibling"}}\n\n'
+            return
+        if lead_event is not None:
+            yield lead_event
+        yield f"data: {json.dumps({'type': 'response.failed', 'response': {'error': frame_error}})}\n\n"
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-terminal-frame-walk"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+    events = [
+        json.loads(chunk.split("data: ", 1)[1])
+        for chunk in chunks
+        if "data: " in chunk and not chunk.split("data: ", 1)[1].startswith("[DONE]")
+    ]
+    return selection_exclusions, dispatched, events, health_writes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        # No code at all, which normalizes to ``upstream_error``.
+        {"message": _USAGE_LIMIT_SENTENCE},
+        # The generic envelope type upstream reuses when it has no code.
+        {"type": "invalid_request_error", "message": _USAGE_LIMIT_SENTENCE},
+        # The coded form, which the code table already answered for.
+        {"code": "usage_limit_reached", "message": _USAGE_LIMIT_SENTENCE},
+    ],
+)
+async def test_stream_usage_limit_frame_leaves_the_spent_account_whatever_code_it_carries(monkeypatch, frame_error):
+    """Nothing is downstream yet, so the request can still be moved -- and this rejection is one
+    it should be moved for. The frame's error code is the one piece of evidence upstream omits at
+    will, so a gate that reads only the code answers "surface it" for the majority of the traffic
+    and "walk the pool" for the rest, on identical rejections."""
+    selection_exclusions, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, frame_error
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID, _TERMINAL_FRAME_SIBLING_ACCOUNT_ID]
+    assert selection_exclusions[-1] == {_TERMINAL_FRAME_SPENT_ACCOUNT_ID}
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert [event["type"] for event in events if event.get("type") == "response.completed"] == ["response.completed"]
+    assert health_writes == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+
+
+@pytest.mark.asyncio
+async def test_stream_unrelated_terminal_frame_without_a_code_is_still_surfaced(monkeypatch):
+    """The classifier is consulted, not bypassed: a code-less frame that says nothing about the
+    account's usage limit stays terminal, so this widens no other rejection into a pool walk."""
+    selection_exclusions, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, {"message": "Your request was rejected as a result of our safety system."}
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+    assert selection_exclusions == [set()]
+    assert [event["type"] for event in events if event.get("type") == "response.failed"] == ["response.failed"]
+    assert health_writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        {"message": _USAGE_LIMIT_SENTENCE},
+        {"code": "usage_limit_reached", "message": _USAGE_LIMIT_SENTENCE},
+    ],
+)
+async def test_stream_usage_limit_frame_after_a_visible_event_still_records_account_health(monkeypatch, frame_error):
+    """Once a lifecycle event is downstream the request is committed to this account, so the frame
+    is surfaced either way. What is left to decide is the account's health, and that decision is
+    for the next request: an account that just said its window is spent must not stay the pool's
+    healthiest just because upstream omitted the code."""
+    _, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, frame_error, lead_event=_RESPONSE_CREATED_EVENT
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+    assert [event["type"] for event in events if event.get("type") == "response.failed"] == ["response.failed"]
+    assert health_writes == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+
+
 @pytest.mark.asyncio
 async def test_stream_with_retry_preserves_account_model_rejection_without_replacement(monkeypatch):
     settings = _make_proxy_settings()

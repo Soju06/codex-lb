@@ -55,8 +55,8 @@ The dashboard SHALL expose sparse daily non-warmup request counts for exactly 18
 #### Scenario: Avoid an unindexed full table scan
 
 - **WHEN** the endpoint loads activity data
-- **THEN** the folded rollup aggregation and fold watermark SHALL come from one watermark-consistent `AccountUsageRollupState LEFT JOIN` rollup SQL statement
-- **AND** that statement SHALL construct bounded, labeled local-day ranges and sum folded hourly `request_count` values in SQL by those labels
+- **THEN** the folded rollup aggregation SHALL be split into bounded batches, with each batch's fold watermark and counts coming from one watermark-consistent `AccountUsageRollupState LEFT JOIN` rollup SQL statement
+- **AND** each such statement SHALL construct bounded, labeled local-day ranges and sum folded hourly `request_count` values in SQL by those labels
 - **AND** separate bounded raw SQL reads SHALL cover exactly the requested UTC intervals not represented by whole folded UTC-hour buckets, including bounded pre-watermark partial edge windows when a local-day boundary is not UTC-hour-aligned, excluding warmup traffic and grouping by the same local-day labels
 - **AND** application code SHALL merge only the small per-day folded and raw totals, not materialize full-grain hourly or raw rows
 - **AND** the endpoint SHALL NOT scan all historical request-log rows or issue a separate watermark query

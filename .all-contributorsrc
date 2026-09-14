@@ -1497,6 +1497,15 @@
         "test",
         "bug"
       ]
+    },
+    {
+      "login": "uniskela",
+      "name": "Uniskela",
+      "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
+      "profile": "https://github.com/uniskela",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

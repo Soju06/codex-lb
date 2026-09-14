@@ -54,6 +54,10 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
     {"input_file", "input_image", "input_text", "output_text", "refusal", "text"}
 )
+# The content parts a client may send as input items in their own right, rather
+# than inside a message. Both readings mean the same thing -- this is the user's
+# content -- and the relocation key relies on that.
+_ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES = frozenset({"input_file", "input_image", "input_text"})
 _ACCOUNT_NEUTRAL_MESSAGE_FIELDS = frozenset(
     {"content", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "phase", "role", "status", "type"}
 )
@@ -142,11 +146,6 @@ RELOCATION_TRANSCRIPT_MAX_ITEMS = 32768
 # imprecise if that argument ever stops holding.
 _OVERLAP_SENTINEL = object()
 _RELOCATION_TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
-# Which field carries a call's arguments depends on the tool: a function call
-# spells them ``arguments``, a custom tool ``input``, an apply-patch call one of
-# ``operation``, ``patch`` or ``input``. All four are read together so the
-# identity does not depend on knowing which.
-_TOOL_CALL_ARGUMENT_FIELDS = ("arguments", "input", "operation", "patch")
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
 _ATTEMPT_START_EVENT_TYPE = "response.created"
@@ -644,7 +643,7 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
-    if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
+    if _is_one_of(item_type, _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES):
         return _input_content_part_is_self_contained(item, allow_output=False)
     return (
         item_type in (None, "message")
@@ -973,7 +972,7 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
         if not isinstance(item, dict):
             return False
         item_type = item.get("type")
-        if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
+        if _is_one_of(item_type, _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES):
             if not _input_content_part_is_self_contained(item, allow_output=False):
                 return False
             continue
@@ -1285,15 +1284,16 @@ def _join_relocated_input(accumulated: list[_RelocatedItem], input_items: list[J
 
 
 def _relocation_comparison_key(item: JsonValue) -> object:
-    """What identifies this item, enumerated positively -- never the form dispatched.
+    """What identifies this item, enumerated positively and to the bottom -- never the form dispatched.
 
     A message is its role and what was said in it; a tool call is which call it
     is and what it was asked; a tool output is which call it answers and what it
-    answered. Nothing else is read, so how an item was recorded cannot decide
-    whether one input restates another -- the owner's item id, the ``status`` it
-    was spooled under, the ``phase`` it was tagged with, the ``annotations`` on
-    every part the Responses API produces and the turn metadata a client echoes
-    back are all absent from the key without being named in it.
+    answered; a tool bundle is which tools it declares. Nothing else is read, so
+    how an item was recorded cannot decide whether one input restates another --
+    the owner's item id, the ``status`` it was spooled under, the ``phase`` it
+    was tagged with, the ``annotations`` on every part the Responses API produces
+    and the turn metadata a client echoes back are all absent from the key
+    without being named in it.
 
     Subtracting those instead would have to know every field the wire may carry
     that a recording may drop, which is not a closed set: a field nobody listed
@@ -1301,9 +1301,17 @@ def _relocation_comparison_key(item: JsonValue) -> object:
     dispatches the whole conversation twice. What a turn *is* is closed, so
     enumerating that leaves a field nobody thought of ignored by default.
 
-    An item type this does not identify gets a key equal to nothing, itself
-    included, so no overlap is claimed across it and the rebuild fails closed
-    rather than guessing; the strict predicate admits no such item anyway.
+    Every structure under an item is enumerated the same way, because handing one
+    to a serializer is that same subtraction one level lower: it makes every
+    field inside a content part, a tool declaration or a call's arguments decide
+    whether a turn was restated, so a client that rewords a tool description
+    between turns has its conversation dispatched twice. The recursion stops at
+    the scalars the wire spells inline, and those the strict predicate pins.
+
+    An item type this does not identify, and a structure inside one it cannot
+    reach, get a key equal to nothing -- itself included -- so no overlap is
+    claimed across it and the rebuild fails closed rather than guessing; the
+    strict predicate admits no such item anyway.
     """
 
     if not isinstance(item, Mapping):
@@ -1313,16 +1321,94 @@ def _relocation_comparison_key(item: JsonValue) -> object:
         return ("message", item.get("role"), _relocation_content_identity(item.get("content")))
     if not isinstance(item_type, str):
         return object()
-    if item_type in _ACCOUNT_NEUTRAL_CONTENT_FIELDS:
-        return ("part", _relocation_content_part_identity(item))
+    if item_type in _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES:
+        # A part standing on its own is the user's own content, and this rebuild
+        # says so itself: a chain turn stored as a scalar is lifted into exactly
+        # this message. Keying the two spellings apart would leave the proxy
+        # unable to recognise a restatement of a turn it reshaped.
+        return ("message", "user", (_relocation_content_part_identity(item),))
     if item_type == "additional_tools":
-        return (item_type, item.get("role"), _relocation_identity_text(item.get("tools")))
+        return (item_type, item.get("role"), _relocation_declared_tools_identity(item.get("tools")))
     if item_type in _TOOL_CALL_TYPES:
-        arguments = [item.get(field) for field in _TOOL_CALL_ARGUMENT_FIELDS]
-        return (item_type, item.get("call_id"), item.get("name"), _relocation_identity_text(arguments))
+        return (item_type, item.get("call_id"), item.get("name"), _relocation_call_arguments_identity(item))
     if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE:
-        return (item_type, item.get("call_id"), _relocation_identity_text(item.get("output")))
+        return (item_type, item.get("call_id"), _relocation_tool_result_identity(item.get("output")))
     return object()
+
+
+def _relocation_declared_tools_identity(tools: JsonValue | None) -> object:
+    """Which tools a bundle declares, not how it described them.
+
+    A declaration's description, strictness, parameter schema, custom format and
+    search options configure a tool that is already named by what it is and what
+    it is called, and a client may reword any of them between turns while
+    declaring the same tools. They are also where a positive enumeration has to
+    stop: a parameter schema is an open structure, so reading it at all means
+    reading it whole.
+    """
+
+    if not isinstance(tools, list):
+        return object()
+    return tuple(_relocation_tool_declaration_identity(tool) for tool in tools)
+
+
+def _relocation_tool_declaration_identity(tool: JsonValue) -> object:
+    if not isinstance(tool, Mapping) or not _is_one_of(tool.get("type"), _ACCOUNT_NEUTRAL_TOOL_TYPES):
+        return object()
+    # The hosted search tools carry no name, so for them the type is all of it.
+    return (tool.get("type"), tool.get("name"))
+
+
+def _relocation_call_arguments_identity(item: Mapping[str, JsonValue]) -> object:
+    """What a call asked, read from every slot the wire may spell it in.
+
+    Which slot a tool uses depends on the tool -- ``arguments`` for a function,
+    ``input`` for a custom tool, one of ``operation``, ``patch`` or ``input`` for
+    an apply-patch call -- so all four are read together and the identity does
+    not depend on knowing which.
+    """
+
+    return (
+        _relocation_opaque_identity(item.get("arguments")),
+        _relocation_opaque_identity(item.get("input")),
+        _relocation_opaque_identity(item.get("patch")),
+        _relocation_apply_patch_operation_identity(item.get("operation")),
+    )
+
+
+def _relocation_opaque_identity(value: JsonValue | None) -> object:
+    """A slot the wire hands over as one blob, or nothing when it holds a structure.
+
+    These are the slots a client is free to fill with anything -- a call's
+    arguments, a patch, a tool's result -- so they are where a structure the
+    enumeration cannot walk actually turns up. Comparing one on its raw form is
+    the thing this key does not do, at any depth, so an object here makes the
+    item unidentifiable; the strict predicate declines such a body in any case.
+    """
+
+    return value if value is None or isinstance(value, (bool, float, int, str)) else object()
+
+
+def _relocation_apply_patch_operation_identity(operation: JsonValue | None) -> object:
+    """Which file an apply-patch call edits, and how, per operation kind."""
+
+    if operation is None:
+        return None
+    if not isinstance(operation, Mapping) or not _is_one_of(
+        operation.get("type"), _ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS
+    ):
+        return object()
+    # A deletion names no diff; reading the slot anyway keeps the three kinds on
+    # one shape and costs a ``None``.
+    return (operation.get("type"), operation.get("path"), operation.get("diff"))
+
+
+def _relocation_tool_result_identity(output: JsonValue | None) -> object:
+    """What a call answered: the text it returned, or the parts it returned."""
+
+    if isinstance(output, list):
+        return tuple(_relocation_content_part_identity(part) for part in output)
+    return _relocation_opaque_identity(output)
 
 
 def _relocation_content_identity(content: JsonValue | None) -> object:
@@ -1340,7 +1426,7 @@ def _relocation_content_part_identity(part: JsonValue) -> object:
     if not isinstance(part, Mapping):
         return object()
     part_type = part.get("type")
-    if part_type in _RELOCATION_TEXT_PART_TYPES:
+    if _is_one_of(part_type, _RELOCATION_TEXT_PART_TYPES):
         # Which of the three spellings a part uses is a function of where it sits
         # rather than of what it says, and the role that decides it is already in
         # the message's own identity.
@@ -1352,12 +1438,6 @@ def _relocation_content_part_identity(part: JsonValue) -> object:
     if part_type == "input_file":
         return ("input_file", part.get("file_data"), part.get("file_id"), part.get("file_url"))
     return object()
-
-
-def _relocation_identity_text(value: JsonValue | None) -> str:
-    """One comparable form for a slot whose whole value is part of what it identifies."""
-
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr)
 
 
 def _tail_overlap_length(accumulated: Sequence[_RelocatedItem], incoming: Sequence[_RelocatedItem]) -> int:

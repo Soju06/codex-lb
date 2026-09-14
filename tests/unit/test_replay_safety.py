@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import inspect
 import json
 import pathlib
@@ -3285,6 +3286,112 @@ def test_a_scalar_message_restates_the_turn_the_chain_holds_as_one_text_part() -
     assert rebuilt["input"] == client_turn
 
 
+def test_a_bare_content_part_restates_the_message_the_chain_holds() -> None:
+    # The corpus records clients sending a turn as a content part in its own
+    # right, with no message around it, and this rebuild manufactures the other
+    # spelling itself: a stored scalar becomes a one-part user message, because a
+    # scalar cannot sit behind other items. So the two spellings meet on a shape
+    # the proxy made, and reading them as different material dispatches the
+    # thread twice on material the client did resend.
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(request_text=_request_frame({"model": "gpt-5.4", "input": "first"})),
+            events=(
+                _sse_block(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "output": [_assistant_item("answer", item_id="msg_1")]},
+                    }
+                ),
+            ),
+        ),
+    )
+    client_turn: list[JsonValue] = [
+        {"type": "input_text", "text": "first"},
+        _restated_assistant_item("answer"),
+        _wire_user_item("second"),
+    ]
+
+    rebuilt = _rebuild(transcript, client_turn)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == client_turn
+
+
+_DECLARED_TOOL: dict[str, JsonValue] = {
+    "type": "function",
+    "name": "lookup",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+
+def _tool_bundle_item(**declared: JsonValue) -> dict[str, JsonValue]:
+    return {"type": "additional_tools", "role": "developer", "tools": [{**_DECLARED_TOOL, **declared}]}
+
+
+@pytest.mark.parametrize(
+    "reworded",
+    [
+        {"description": "look something up, but differently worded"},
+        {"strict": True},
+        {"parameters": {"type": "object", "properties": {"q": {"type": "string"}}}},
+    ],
+)
+def test_rewording_a_tool_declaration_does_not_resend_the_conversation(reworded: dict[str, JsonValue]) -> None:
+    # A Codex turn opens on the tool bundle it declares, so every restatement of
+    # the thread carries one. The client is free to reword a description, tighten
+    # a schema or flip strictness between turns while declaring the same tools,
+    # and the recording keeps whichever wording it saw first -- so a key that
+    # read the declaration whole would find no overlap at all and dispatch every
+    # exchange twice, with each copy individually valid.
+    stored_bundle = _tool_bundle_item(description="look something up")
+    transcript = (
+        _transcript_turn(
+            [stored_bundle, _wire_user_item("q1")],
+            [_assistant_item("a1", item_id="msg_1")],
+        ),
+    )
+    client_input: list[JsonValue] = [
+        _tool_bundle_item(**reworded),
+        _wire_user_item("q1"),
+        _restated_assistant_item("a1"),
+        _wire_user_item("q2"),
+    ]
+
+    rebuilt = _rebuild(transcript, client_input)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == client_input
+
+
+def test_a_restated_answer_is_measured_against_the_item_it_belongs_to() -> None:
+    # A turn whose answer is more than one item: commentary, then the answer.
+    # The client restates the last of them, so exactly one item comes off the
+    # accumulation. An accumulation that paired any item with another's key
+    # measures this overlap at the wrong offset -- here it finds none, and the
+    # commentary and the answer are both dispatched twice -- while every list
+    # stays the same length and every structural check downstream still passes.
+    transcript = (
+        _transcript_turn(
+            [_wire_user_item("q1")],
+            [
+                _assistant_item("thinking about it", item_id="msg_1", phase="commentary"),
+                _assistant_item("a1", item_id="msg_2"),
+            ],
+        ),
+    )
+    client_input: list[JsonValue] = [_restated_assistant_item("a1"), _wire_user_item("q2")]
+
+    rebuilt = _rebuild(transcript, client_input)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == [
+        _wire_user_item("q1"),
+        _replayed_assistant_item("thinking about it", phase="commentary"),
+        *client_input,
+    ]
+
+
 @pytest.mark.parametrize(
     "client_turn",
     [
@@ -3468,55 +3575,365 @@ _JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue
 ]
 
 
-def _rule_part_identity(part: JsonValue) -> object:
-    if not isinstance(part, dict):
-        return object()
-    kind = part.get("type")
-    if kind in {"input_text", "output_text", "text"}:
-        return "wrote", part.get("text")
-    if kind == "refusal":
-        return "refused", part.get("refusal")
-    if kind in {"input_file", "input_image"}:
-        return "attached", kind, part.get("file_data"), part.get("file_id"), part.get("file_url"), part.get("image_url")
-    return object()
+@dataclass(frozen=True, slots=True)
+class _Position:
+    """One place a structure sits inside an input item, and what identifies it there.
+
+    ``wire`` is every field the strict predicate admits at that place, taken from
+    the predicate's own lists rather than hand-written, so a field admitted there
+    later arrives here without a legal value and fails until somebody decides
+    whether it identifies anything. ``identity`` is this file's reading of the
+    requirement -- "a message's role and content, a tool call's identity and
+    arguments, a tool output's call and result", plus a bundle's declared tools
+    -- and it is written out here rather than imported from the module, so the
+    sweep below, the distinctness rows and the quadratic checker can all
+    disagree with the implementation.
+
+    ``item`` is a whole input item with this position filled in and ``path``
+    says where inside it the structure sits, so a nested position is exercised
+    through the same public key the join uses rather than through a helper.
+    """
+
+    name: str
+    item: dict[str, JsonValue]
+    path: tuple[str | int, ...]
+    wire: frozenset[str]
+    identity: frozenset[str]
 
 
-def _rule_content_identity(content: JsonValue | None) -> object:
-    if isinstance(content, str):
-        return (("wrote", content),)
-    if not isinstance(content, list):
+_MESSAGE_FIELDS = replay_safety_module._ACCOUNT_NEUTRAL_MESSAGE_FIELDS
+_CONTENT_FIELDS = replay_safety_module._ACCOUNT_NEUTRAL_CONTENT_FIELDS
+_ITEM_FIELDS = replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS
+_TOOL_FIELDS = replay_safety_module._ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS
+_OPERATION_FIELDS = replay_safety_module._ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS
+# What identifies a content part, wherever it sits: what was said, which
+# attachment was attached. Not ``detail``, which asks how an image should be
+# rendered, and not ``filename``, which names a file the ``file_id`` or the
+# inline ``file_data`` already is.
+_PART_IDENTITY_BY_TYPE: dict[str, frozenset[str]] = {
+    "input_file": frozenset({"file_data", "file_id", "file_url"}),
+    "input_image": frozenset({"file_id", "image_url"}),
+    "input_text": frozenset({"text"}),
+    "output_text": frozenset({"text"}),
+    "refusal": frozenset({"refusal"}),
+    "text": frozenset({"text"}),
+}
+_TEXT_PART: dict[str, JsonValue] = {"type": "input_text", "text": "go"}
+_PLAIN_TEXT_PART: dict[str, JsonValue] = {"type": "text", "text": "go"}
+_IMAGE_PART: dict[str, JsonValue] = {"type": "input_image", "image_url": "https://example.test/a.png"}
+_FILE_PART: dict[str, JsonValue] = {"type": "input_file", "file_url": "https://example.test/a.txt"}
+_ANSWER_PART: dict[str, JsonValue] = {"type": "output_text", "text": "hi"}
+_REFUSAL_PART: dict[str, JsonValue] = {"type": "refusal", "refusal": "no"}
+_FUNCTION_TOOL: dict[str, JsonValue] = {"type": "function", "name": "lookup"}
+_CUSTOM_TOOL: dict[str, JsonValue] = {"type": "custom", "name": "shell"}
+
+
+def _message_of(role: str, part: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {"type": "message", "role": role, "content": [dict(part)]}
+
+
+def _bundle_of(tool: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {"type": "additional_tools", "role": "developer", "tools": [dict(tool)]}
+
+
+def _call_of(item_type: str, **slots: JsonValue) -> dict[str, JsonValue]:
+    return {"type": item_type, "call_id": "call_1", **slots}
+
+
+def _part_position(name: str, item: dict[str, JsonValue], path: tuple[str | int, ...], part_type: str) -> _Position:
+    return _Position(name, item, path, _CONTENT_FIELDS[part_type], _PART_IDENTITY_BY_TYPE[part_type])
+
+
+_POSITIONS: tuple[_Position, ...] = (
+    _Position("user message", _message_of("user", _TEXT_PART), (), _MESSAGE_FIELDS, frozenset({"content", "role"})),
+    _Position(
+        "assistant message", _message_of("assistant", _ANSWER_PART), (), _MESSAGE_FIELDS, frozenset({"content", "role"})
+    ),
+    _part_position("text part in a message", _message_of("user", _TEXT_PART), ("content", 0), "input_text"),
+    _part_position("plain text part in a message", _message_of("user", _PLAIN_TEXT_PART), ("content", 0), "text"),
+    _part_position("image part in a message", _message_of("user", _IMAGE_PART), ("content", 0), "input_image"),
+    _part_position("file part in a message", _message_of("user", _FILE_PART), ("content", 0), "input_file"),
+    _part_position("answer part in a message", _message_of("assistant", _ANSWER_PART), ("content", 0), "output_text"),
+    _part_position("refusal part in a message", _message_of("assistant", _REFUSAL_PART), ("content", 0), "refusal"),
+    _part_position("text part sent on its own", dict(_TEXT_PART), (), "input_text"),
+    _part_position("image part sent on its own", dict(_IMAGE_PART), (), "input_image"),
+    _part_position("file part sent on its own", dict(_FILE_PART), (), "input_file"),
+    _Position(
+        "tool bundle", _bundle_of(_FUNCTION_TOOL), (), _ITEM_FIELDS["additional_tools"], frozenset({"role", "tools"})
+    ),
+    _Position(
+        "declared function", _bundle_of(_FUNCTION_TOOL), ("tools", 0), _TOOL_FIELDS["function"], frozenset({"name"})
+    ),
+    _Position(
+        "declared custom tool", _bundle_of(_CUSTOM_TOOL), ("tools", 0), _TOOL_FIELDS["custom"], frozenset({"name"})
+    ),
+    _Position(
+        "declared custom tool grammar",
+        _bundle_of({**_CUSTOM_TOOL, "format": {"type": "grammar", "syntax": "lark", "definition": "start: A"}}),
+        ("tools", 0, "format"),
+        frozenset({"definition", "syntax"}),
+        frozenset(),
+    ),
+    _Position(
+        "declared web search", _bundle_of({"type": "web_search"}), ("tools", 0), _TOOL_FIELDS["web_search"], frozenset()
+    ),
+    _Position(
+        "declared web search preview",
+        _bundle_of({"type": "web_search_preview"}),
+        ("tools", 0),
+        _TOOL_FIELDS["web_search_preview"],
+        frozenset(),
+    ),
+    _Position(
+        "web search domain filters",
+        _bundle_of({"type": "web_search", "filters": {"allowed_domains": ["a.test"]}}),
+        ("tools", 0, "filters"),
+        replay_safety_module._ACCOUNT_NEUTRAL_WEB_SEARCH_FILTER_FIELDS,
+        frozenset(),
+    ),
+    _Position(
+        "web search user location",
+        _bundle_of({"type": "web_search", "user_location": {"type": "approximate", "city": "Seoul"}}),
+        ("tools", 0, "user_location"),
+        replay_safety_module._ACCOUNT_NEUTRAL_WEB_SEARCH_LOCATION_FIELDS,
+        frozenset(),
+    ),
+    _Position(
+        "function call",
+        _call_of("function_call", name="lookup", arguments="{}"),
+        (),
+        _ITEM_FIELDS["function_call"],
+        frozenset({"arguments", "call_id", "name"}),
+    ),
+    _Position(
+        "custom tool call",
+        _call_of("custom_tool_call", name="shell", input="ls"),
+        (),
+        _ITEM_FIELDS["custom_tool_call"],
+        frozenset({"call_id", "input", "name"}),
+    ),
+    _Position(
+        "apply patch call",
+        _call_of("apply_patch_call", patch="*** Begin Patch"),
+        (),
+        _ITEM_FIELDS["apply_patch_call"],
+        # An apply-patch call spells its arguments in exactly one of the three,
+        # so all three identify it and which one is used does not.
+        frozenset({"call_id", "input", "operation", "patch"}),
+    ),
+    _Position(
+        "created file",
+        _call_of("apply_patch_call", operation={"type": "create_file", "path": "a.py", "diff": "@@"}),
+        ("operation",),
+        _OPERATION_FIELDS["create_file"],
+        frozenset({"diff", "path"}),
+    ),
+    _Position(
+        "deleted file",
+        _call_of("apply_patch_call", operation={"type": "delete_file", "path": "a.py"}),
+        ("operation",),
+        _OPERATION_FIELDS["delete_file"],
+        frozenset({"path"}),
+    ),
+    _Position(
+        "updated file",
+        _call_of("apply_patch_call", operation={"type": "update_file", "path": "a.py", "diff": "@@"}),
+        ("operation",),
+        _OPERATION_FIELDS["update_file"],
+        frozenset({"diff", "path"}),
+    ),
+    _Position(
+        "function call output",
+        _call_of("function_call_output", output="ok"),
+        (),
+        _ITEM_FIELDS["function_call_output"],
+        frozenset({"call_id", "output"}),
+    ),
+    _Position(
+        "custom tool call output",
+        _call_of("custom_tool_call_output", output="ok"),
+        (),
+        _ITEM_FIELDS["custom_tool_call_output"],
+        frozenset({"call_id", "output"}),
+    ),
+    _Position(
+        "apply patch call output",
+        _call_of("apply_patch_call_output", output="done"),
+        (),
+        _ITEM_FIELDS["apply_patch_call_output"],
+        frozenset({"call_id", "output"}),
+    ),
+    _part_position(
+        "text part in a tool result", _call_of("function_call_output", output=[_TEXT_PART]), ("output", 0), "input_text"
+    ),
+    _part_position(
+        "image part in a tool result",
+        _call_of("function_call_output", output=[_IMAGE_PART]),
+        ("output", 0),
+        "input_image",
+    ),
+    _part_position(
+        "file part in a tool result", _call_of("function_call_output", output=[_FILE_PART]), ("output", 0), "input_file"
+    ),
+)
+# Two legal values per field: the first says whether a field the identity omits
+# can change a key, and the pair together says whether a field the identity
+# names does. Keyed by field name and shared across positions, so a field that
+# means one thing in two places cannot be given two readings here either.
+_LEGAL_VALUES: dict[str, tuple[JsonValue, JsonValue]] = {
+    "allowed_domains": (["a.test"], ["b.test"]),
+    "arguments": ('{"q":1}', '{"q":2}'),
+    "call_id": ("call_one", "call_two"),
+    "caller": ({"type": "direct"}, {"type": "direct"}),
+    "city": ("Seoul", "Tokyo"),
+    "content": ([{"type": "input_text", "text": "one"}], [{"type": "input_text", "text": "other"}]),
+    "country": ("KR", "JP"),
+    "definition": ("start: A", "start: B"),
+    "description": ("does a thing", "does another thing"),
+    "detail": ("low", "high"),
+    "diff": ("@@ -1 +1 @@", "@@ -2 +2 @@"),
+    "file_data": ("AAA", "BBB"),
+    "file_id": ("file_one", "file_two"),
+    "file_url": ("https://example.test/one.txt", "https://example.test/two.txt"),
+    "filename": ("one.txt", "two.txt"),
+    "filters": ({"allowed_domains": ["a.test"]}, {"allowed_domains": ["b.test"]}),
+    "format": ({"type": "text"}, {"type": "grammar", "syntax": "lark", "definition": "start: A"}),
+    "id": ("item_one", "item_two"),
+    "image_url": ("https://example.test/one.png", "https://example.test/two.png"),
+    "input": ("ls", "pwd"),
+    "internal_chat_message_metadata_passthrough": ({"turn_id": "turn-one"}, {"turn_id": "turn-two"}),
+    "name": ("lookup", "search"),
+    "operation": (
+        {"type": "update_file", "path": "one.py", "diff": "@@"},
+        {"type": "update_file", "path": "two.py", "diff": "@@"},
+    ),
+    "output": ("yes", "no"),
+    "parameters": ({"type": "object", "properties": {}}, {"type": "object", "properties": {"q": {"type": "string"}}}),
+    "patch": ("*** Begin Patch one", "*** Begin Patch two"),
+    "path": ("one.py", "two.py"),
+    "phase": ("commentary", "final_answer"),
+    "refusal": ("no", "never"),
+    "region": ("Seoul", "Kanto"),
+    "role": ("user", "developer"),
+    "search_context_size": ("low", "high"),
+    "status": ("completed", "failed"),
+    "strict": (True, False),
+    "syntax": ("lark", "regex"),
+    "text": ("one", "other"),
+    "timezone": ("Asia/Seoul", "Asia/Tokyo"),
+    "tools": ([{"type": "function", "name": "lookup"}], [{"type": "function", "name": "search"}]),
+    "user_location": ({"type": "approximate", "city": "Seoul"}, {"type": "approximate", "city": "Tokyo"}),
+}
+_POSITION_BY_NAME = {position.name: position for position in _POSITIONS}
+# ``type`` is what selects the position rather than a field swept inside it: a
+# row that changed it would be describing some other structure.
+_SELECTOR_FIELD = "type"
+_IGNORED_FIELD_POSITIONS: list[tuple[str, str]] = sorted(
+    (position.name, field) for position in _POSITIONS for field in position.wire - position.identity - {_SELECTOR_FIELD}
+)
+_IDENTITY_FIELD_POSITIONS: list[tuple[str, str]] = sorted(
+    (position.name, field) for position in _POSITIONS for field in position.identity - {_SELECTOR_FIELD}
+)
+
+
+def _fragment_at(item: JsonValue, path: tuple[str | int, ...]) -> dict[str, JsonValue]:
+    fragment: Any = item
+    for step in path:
+        fragment = fragment[step]
+    return cast(dict[str, JsonValue], fragment)
+
+
+def _item_with(position: _Position, fragment: dict[str, JsonValue]) -> JsonValue:
+    """``position.item``, with the structure at ``position.path`` replaced."""
+
+    if not position.path:
+        return fragment
+    item = copy.deepcopy(position.item)
+    cast(Any, _fragment_at(item, position.path[:-1]))[position.path[-1]] = fragment
+    return item
+
+
+def _identity_fields_by_kind() -> dict[str, frozenset[str]]:
+    """The requirement's identity sets, keyed by the ``type`` that selects them.
+
+    A kind identifies the same thing wherever it sits: a file part attached to a
+    message, sent on its own and returned by a tool are one kind of thing said
+    in three places. Building the table this way is what makes the two readings
+    impossible rather than merely untested.
+    """
+
+    fields: dict[str, frozenset[str]] = {}
+    for position in _POSITIONS:
+        # A tool's search filters are the one swept structure the wire gives no
+        # ``type``; nothing inside one identifies anything, so there is no kind
+        # for the checker to look up either.
+        kind = _fragment_at(position.item, position.path).get(_SELECTOR_FIELD)
+        if not isinstance(kind, str):
+            continue
+        if fields.setdefault(kind, position.identity) != position.identity:
+            raise AssertionError(f"{kind} would be identified differently depending on where it sits")
+    return fields
+
+
+_RULE_IDENTITY_BY_KIND = _identity_fields_by_kind()
+# The wire spells one stretch of text three ways depending on where it sits, and
+# the requirement identifies a part by what was said in it.
+_RULE_TEXT_KINDS = frozenset({"input_text", "output_text", "text"})
+_RULE_BARE_PART_KINDS = frozenset({"input_file", "input_image", "input_text"})
+
+
+def _rule_kind(fragment: dict[str, JsonValue]) -> str | None:
+    kind = fragment.get(_SELECTOR_FIELD)
+    if kind is None:
+        return "message"
+    return kind if isinstance(kind, str) else None
+
+
+def _rule_as_sent(item: JsonValue) -> JsonValue:
+    """One spelling for the two the wire allows.
+
+    A content part sent as an input item in its own right is the user's content,
+    which is what a one-part user message is -- and this rebuild turns a turn
+    stored as a scalar into exactly that message, so a client restating such a
+    turn in the bare spelling has to be recognised as restating it.
+    """
+
+    if isinstance(item, dict) and _rule_kind(item) in _RULE_BARE_PART_KINDS:
+        return {"type": "message", "role": "user", "content": [item]}
+    return item
+
+
+def _rule_fragment_identity(fragment: JsonValue) -> object:
+    if isinstance(fragment, list):
+        return tuple(_rule_fragment_identity(entry) for entry in fragment)
+    if not isinstance(fragment, dict):
+        return fragment
+    kind = _rule_kind(fragment)
+    identity = _RULE_IDENTITY_BY_KIND.get(kind) if kind is not None else None
+    if identity is None:
         return object()
-    return tuple(_rule_part_identity(part) for part in content)
+    if kind == "message":
+        content = fragment.get("content")
+        if isinstance(content, str):
+            fragment = {**fragment, "content": [{"type": "input_text", "text": content}]}
+        elif not isinstance(content, list):
+            return object()
+    return (
+        "wrote" if kind in _RULE_TEXT_KINDS else kind,
+        *((field, _rule_fragment_identity(fragment.get(field))) for field in sorted(identity)),
+    )
 
 
 def _rule_identity(item: JsonValue) -> object:
-    """What the requirement says identifies an item, read off its words and nothing else.
+    """What the requirement says identifies an input item, read off the position table.
 
-    "A message's role and content, a tool call's identity and arguments, a tool
-    output's call and result" -- plus the tool bundle, which is identified by
-    what it declares. Written out here rather than borrowed from the module: a
-    checker that shares the implementation's helpers checks the fast path against
-    itself, and a defect in a shared helper passes both. So nothing the module
-    builds its own key from is used below.
+    Written as a projection that knows only which fields identify which kind, so
+    it shares no branch, no tuple shape and no helper with the module: a checker
+    built on the implementation's own pieces checks the fast path against itself,
+    and a defect in a shared piece passes both.
     """
 
-    if not isinstance(item, dict):
-        return object()
-    kind = item.get("type")
-    if kind is None or kind == "message":
-        return "said", item.get("role"), _rule_content_identity(item.get("content"))
-    if not isinstance(kind, str):
-        return object()
-    if kind in {"input_file", "input_image", "input_text", "output_text", "refusal", "text"}:
-        return "alone", _rule_part_identity(item)
-    if kind == "additional_tools":
-        return "declared", item.get("role"), json.dumps(item.get("tools"), sort_keys=True)
-    if kind.endswith("_call_output"):
-        return "answered", kind, item.get("call_id"), json.dumps(item.get("output"), sort_keys=True)
-    if kind.endswith("_call"):
-        arguments = [item.get(name) for name in ("arguments", "input", "operation", "patch")]
-        return "asked", kind, item.get("call_id"), item.get("name"), json.dumps(arguments, sort_keys=True)
-    return object()
+    return _rule_fragment_identity(_rule_as_sent(item))
 
 
 def _restated_tail_length(accumulated: Sequence[JsonValue], client_input: Sequence[JsonValue]) -> int:
@@ -3527,13 +3944,17 @@ def _restated_tail_length(accumulated: Sequence[JsonValue], client_input: Sequen
     rather than against itself.
     """
 
-    chain_keys = [_rule_identity(item) for item in accumulated]
-    client_keys = [_rule_identity(item) for item in client_input]
+    return _restated_tail_from_keys(
+        [_rule_identity(item) for item in accumulated], [_rule_identity(item) for item in client_input]
+    )
+
+
+def _restated_tail_from_keys(chain_keys: Sequence[object], client_keys: Sequence[object]) -> int:
     return next(
         (
             length
             for length in range(min(len(chain_keys), len(client_keys)), 0, -1)
-            if chain_keys[len(chain_keys) - length :] == client_keys[:length]
+            if list(chain_keys[len(chain_keys) - length :]) == list(client_keys[:length])
         ),
         0,
     )
@@ -3566,34 +3987,11 @@ _SAMPLE_ITEM_BY_TYPE: dict[str, dict[str, JsonValue]] = {
     "custom_tool_call_output": {"type": "custom_tool_call_output", "call_id": "call_c", "output": "ok"},
     "function_call": {"type": "function_call", "call_id": "call_f", "name": "lookup", "arguments": "{}"},
     "function_call_output": {"type": "function_call_output", "call_id": "call_f", "output": "ok"},
-    "input_file": {"type": "input_file", "file_url": "https://example.test/a.txt", "filename": "a.txt"},
-    "input_image": {"type": "input_image", "image_url": "https://example.test/a.png", "detail": "low"},
-    "input_text": {"type": "input_text", "text": "go"},
+    "input_file": {"type": "input_file", "file_url": "https://example.test/bare.txt", "filename": "bare.txt"},
+    "input_image": {"type": "input_image", "image_url": "https://example.test/bare.png", "detail": "low"},
+    "input_text": {"type": "input_text", "text": "sent on its own"},
     "message": _user_item("go"),
 }
-_IDENTITY_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
-    "message": frozenset({"content", "role", "type"}),
-    "function_call": frozenset({"arguments", "call_id", "input", "name", "operation", "patch", "type"}),
-    "function_call_output": frozenset({"call_id", "output", "type"}),
-}
-_WIRE_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
-    "message": replay_safety_module._ACCOUNT_NEUTRAL_MESSAGE_FIELDS,
-    "function_call": replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["function_call"],
-    "function_call_output": replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["function_call_output"],
-}
-_LEGAL_FIELD_VALUES: dict[str, JsonValue] = {
-    "caller": {"type": "direct"},
-    "id": "msg_owner",
-    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
-    "phase": "final_answer",
-    "status": "completed",
-}
-# Taken from the strict predicate's own field lists rather than hand-written, so
-# a field admitted there later arrives here without a value and fails until
-# somebody decides whether it identifies an item.
-_UNENUMERATED_LEGAL_FIELDS: list[tuple[str, str]] = sorted(
-    (kind, field) for kind, fields in _WIRE_FIELDS_BY_KIND.items() for field in fields - _IDENTITY_FIELDS_BY_KIND[kind]
-)
 
 
 def test_the_key_identifies_every_item_type_a_dispatched_body_may_carry() -> None:
@@ -3606,81 +4004,175 @@ def test_the_key_identifies_every_item_type_a_dispatched_body_may_carry() -> Non
         assert _relocation_comparison_key(dict(item)) == _relocation_comparison_key(dict(item)), item_type
 
 
-@pytest.mark.parametrize(
-    ("kind", "field"),
-    _UNENUMERATED_LEGAL_FIELDS,
-    ids=[f"{kind}.{field}" for kind, field in _UNENUMERATED_LEGAL_FIELDS],
-)
-def test_no_legal_field_outside_the_identity_set_changes_an_items_key(kind: str, field: str) -> None:
-    # Every field the wire admits on a restatable item and the key does not
-    # enumerate, one per row. Two rounds built this key by subtracting a
-    # hand-listed set instead, and each was defeated by a field nobody had listed
-    # -- first ``status``, then ``phase``. The list cannot be finished, so the
-    # key reads what identifies an item and a field nobody thought of is ignored.
-    item = _SAMPLE_ITEM_BY_TYPE[kind]
+def test_the_sweep_reaches_every_item_type_and_every_structure_under_one() -> None:
+    # The sweep below is only as wide as this table. Two earlier readings of this
+    # key were defeated by a field nobody had listed, and a third by a field nobody
+    # had swept, because the table stopped at an item's top level -- so the table's
+    # own coverage is asserted rather than assumed: every admitted item type, and
+    # every structure the strict predicate admits underneath one.
+    swept_item_types = {cast(str, position.item[_SELECTOR_FIELD]) for position in _POSITIONS}
+    nested_paths = {position.path for position in _POSITIONS if position.path}
 
-    assert _relocation_comparison_key({**item, field: _LEGAL_FIELD_VALUES[field]}) == _relocation_comparison_key(
-        dict(item)
+    assert swept_item_types == replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES
+    assert nested_paths == {
+        ("content", 0),
+        ("operation",),
+        ("output", 0),
+        ("tools", 0),
+        ("tools", 0, "format"),
+        ("tools", 0, "filters"),
+        ("tools", 0, "user_location"),
+    }
+    assert set(_RULE_IDENTITY_BY_KIND) >= replay_safety_module._ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES
+    assert {field for _, field in [*_IGNORED_FIELD_POSITIONS, *_IDENTITY_FIELD_POSITIONS]} <= set(_LEGAL_VALUES)
+
+
+@pytest.mark.parametrize(
+    ("position", "field"),
+    _IGNORED_FIELD_POSITIONS,
+    ids=[f"{position}.{field}" for position, field in _IGNORED_FIELD_POSITIONS],
+)
+def test_no_legal_field_outside_the_identity_set_changes_an_items_key(position: str, field: str) -> None:
+    # Every field the wire admits somewhere inside a restatable item and the key
+    # does not enumerate, one per row. Two earlier readings built this key by
+    # subtracting a hand-listed set instead, and each was defeated by a field
+    # nobody had listed -- first ``status``, then ``phase``; a third serialized a
+    # tool bundle whole, which is the same subtraction one level lower and made a
+    # reworded description dispatch the conversation twice. The list cannot be finished,
+    # so the key reads what identifies a turn, at every depth, and a field nobody
+    # thought of is ignored by default.
+    row = _POSITION_BY_NAME[position]
+    fragment = _fragment_at(row.item, row.path)
+    unchanged = _relocation_comparison_key(_item_with(row, fragment))
+
+    for value in _LEGAL_VALUES[field]:
+        assert _relocation_comparison_key(_item_with(row, {**fragment, field: value})) == unchanged
+
+
+@pytest.mark.parametrize(
+    ("position", "field"),
+    _IDENTITY_FIELD_POSITIONS,
+    ids=[f"{position}.{field}" for position, field in _IDENTITY_FIELD_POSITIONS],
+)
+def test_a_field_that_identifies_an_item_decides_whether_it_was_restated(position: str, field: str) -> None:
+    # The other half of a positive key: a field that does identify an item has to
+    # be in it, at every depth. An identity missing one of these makes two
+    # different items read as restatements of each other, and the chain's copy is
+    # then discarded for a client item that does not stand in for it. One row per
+    # component, so no component can be deleted with the suite green.
+    row = _POSITION_BY_NAME[position]
+    fragment = _fragment_at(row.item, row.path)
+    first, second = _LEGAL_VALUES[field]
+
+    assert _relocation_comparison_key(_item_with(row, {**fragment, field: first})) != _relocation_comparison_key(
+        _item_with(row, {**fragment, field: second})
     )
 
 
-_DISTINCT_ITEM_PAIRS: list[tuple[str, JsonValue, JsonValue]] = [
-    ("same words, different speaker", _wire_user_item("same"), _restated_assistant_item("same")),
-    ("different words", _wire_user_item("one"), _wire_user_item("other")),
+def test_item_types_saying_different_things_do_not_share_a_key() -> None:
+    # The sweep varies one field inside one kind; this is the cross-kind half.
+    # A call and the output that answers it carry the same ``call_id``, and the
+    # three tool vocabularies spell their calls with the same fields, so a key
+    # that dropped the item type would read any of them as a restatement of
+    # another and discard a chain item for something that does not stand in.
+    keys = {item_type: _relocation_comparison_key(item) for item_type, item in _SAMPLE_ITEM_BY_TYPE.items()}
+
+    for item_type, key in keys.items():
+        others = [other for other_type, other in keys.items() if other_type != item_type]
+        assert all(key != other for other in others), item_type
+
+
+def test_a_part_sent_on_its_own_is_the_message_that_holds_it() -> None:
+    # The one equivalence the row above must not read as a collision. This proxy
+    # rebuilds a turn stored as a scalar into a one-part user message, so a
+    # client restating that turn in the bare spelling the wire also allows has to
+    # be recognised -- otherwise the rebuild fails to see a restatement of a
+    # shape it manufactured itself and dispatches the conversation twice.
+    for part in (_TEXT_PART, _IMAGE_PART, _FILE_PART):
+        assert _relocation_comparison_key(dict(part)) == _relocation_comparison_key(_message_of("user", part))
+        assert _relocation_comparison_key(dict(part)) != _relocation_comparison_key(_message_of("assistant", part))
+
+
+_ITEM_TYPE_PROBE: dict[str, JsonValue] = {
+    "arguments": "{}",
+    "call_id": "call_1",
+    "content": [{"type": "input_text", "text": "content text"}],
+    "file_url": "https://example.test/probe.txt",
+    "image_url": "https://example.test/probe.png",
+    "input": "ls",
+    "name": "lookup",
+    "operation": {"type": "update_file", "path": "a.py", "diff": "@@"},
+    "output": "ok",
+    "patch": "*** Begin Patch",
+    "role": "user",
+    "text": "part text",
+    "tools": [{"type": "function", "name": "lookup"}],
+}
+
+
+def test_two_items_differing_only_in_their_type_are_different_items() -> None:
+    # One item filled in for every slot any admitted kind reads, dispatched
+    # eleven times under eleven types. The three tool vocabularies spell a call
+    # with the same fields and a call's output carries the call's own id, so a
+    # key that left the item type out would read a shell command as a restatement
+    # of the patch that followed it -- and discard the chain's copy of a turn the
+    # client never restated.
+    keys = {
+        item_type: _relocation_comparison_key({**_ITEM_TYPE_PROBE, _SELECTOR_FIELD: item_type})
+        for item_type in sorted(replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES)
+    }
+
+    for item_type, key in keys.items():
+        assert all(key != other for other_type, other in keys.items() if other_type != item_type), item_type
+
+
+_UNREADABLE_STRUCTURES: list[tuple[str, JsonValue]] = [
+    ("an item type the predicate does not admit", {"type": "compaction", "content": []}),
+    ("a content part of a type nothing enumerates", _message_of("user", {"type": "input_audio", "audio": "..."})),
+    ("a tools slot that is not a list", {"type": "additional_tools", "role": "developer", "tools": _FUNCTION_TOOL}),
+    ("a tool the predicate does not admit", _bundle_of({"type": "mcp", "name": "lookup"})),
     (
-        "same call, different arguments",
-        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": '{"q":1}'},
-        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": '{"q":2}'},
+        "an apply-patch operation of a kind nothing enumerates",
+        _call_of("apply_patch_call", operation={"type": "move_file", "path": "a.py"}),
     ),
+    ("an apply-patch operation that is not an object", _call_of("apply_patch_call", operation=["move", "a.py"])),
     (
-        "same call id, different tool",
-        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"},
-        {"type": "function_call", "call_id": "c", "name": "search", "arguments": "{}"},
+        "call arguments sent as an object rather than a blob",
+        _call_of("function_call", name="lookup", arguments={"q": 1}),
     ),
+    ("a tool result sent as an object rather than a blob", _call_of("function_call_output", output={"rows": []})),
     (
-        "different call, same arguments",
-        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"},
-        {"type": "function_call", "call_id": "d", "name": "lookup", "arguments": "{}"},
-    ),
-    (
-        "same call answered differently",
-        {"type": "function_call_output", "call_id": "c", "output": "yes"},
-        {"type": "function_call_output", "call_id": "c", "output": "no"},
-    ),
-    (
-        "different bundles of tools",
-        {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "lookup"}]},
-        {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "search"}]},
-    ),
-    (
-        "different images",
-        {"type": "input_image", "image_url": "https://example.test/one.png"},
-        {"type": "input_image", "image_url": "https://example.test/other.png"},
-    ),
-    (
-        "different files",
-        {"type": "input_file", "file_url": "https://example.test/one.txt"},
-        {"type": "input_file", "file_url": "https://example.test/other.txt"},
-    ),
-    (
-        "an answer and the refusal of it",
-        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "no"}]},
-        {"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "no"}]},
+        "a tool result part of a type nothing enumerates",
+        _call_of("function_call_output", output=[{"type": "input_audio", "audio": "..."}]),
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("left", "right"),
-    [row[1:] for row in _DISTINCT_ITEM_PAIRS],
-    ids=[row[0] for row in _DISTINCT_ITEM_PAIRS],
+    "item",
+    [row[1] for row in _UNREADABLE_STRUCTURES],
+    ids=[row[0] for row in _UNREADABLE_STRUCTURES],
 )
-def test_items_saying_different_things_do_not_share_a_key(left: JsonValue, right: JsonValue) -> None:
-    # The other half of a positive key: a field that does identify an item has to
-    # be in it. An identity missing one of these makes two different items read
-    # as a restatement of each other, and the chain's copy is then discarded for
-    # a client item that does not stand in for it.
-    assert _relocation_comparison_key(left) != _relocation_comparison_key(right)
+def test_a_structure_the_enumeration_cannot_read_leaves_the_item_unidentifiable(item: JsonValue) -> None:
+    # Failing closed at depth, which is the whole reason the enumeration is
+    # positive: a structure nothing here can read gets a key equal to nothing,
+    # itself included, so no overlap is ever claimed across it. Comparing one on
+    # its raw form instead would have the rebuild guess -- and a guess here
+    # discards a chain item for a client item that does not stand in for it.
+    assert _relocation_comparison_key(item) != _relocation_comparison_key(copy.deepcopy(item))
+
+
+@pytest.mark.parametrize("unhashable_type", [[], {}, ["input_text"]])
+def test_a_content_part_whose_type_is_a_structure_is_unidentifiable(unhashable_type: JsonValue) -> None:
+    # The key runs on the client's raw input, before the strict predicate has
+    # refused anything, so a ``type`` slot holding a list or an object reaches it
+    # -- and a set membership test on one raises rather than returning False,
+    # which would take the whole relocation down instead of declining it.
+    part: dict[str, JsonValue] = {"type": unhashable_type, "text": "go"}
+
+    assert _relocation_comparison_key(_message_of("user", part)) != _relocation_comparison_key(
+        _message_of("user", part)
+    )
 
 
 def test_no_items_key_equals_the_marker_that_separates_the_two_halves() -> None:
@@ -3705,6 +4197,29 @@ def _strings_in(value: object) -> set[str]:
     return set()
 
 
+def _key_builder_closure(module_functions: dict[str, ast.FunctionDef]) -> set[str]:
+    """Every module function the key builder reaches, however many hops away.
+
+    Following the calls rather than naming the functions is the point: the same
+    reading that stopped at an item's top level would let a helper one call away
+    read whatever it liked while the proof above it stayed green.
+    """
+
+    reached: set[str] = set()
+    pending = ["_relocation_comparison_key"]
+    while pending:
+        name = pending.pop()
+        if name in reached:
+            continue
+        reached.add(name)
+        pending.extend(
+            child.func.id
+            for child in ast.walk(module_functions[name])
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id in module_functions
+        )
+    return reached
+
+
 def _key_builder_field_names() -> set[str]:
     """Every field or type name the key builder can read, literal or via a constant it names.
 
@@ -3714,16 +4229,14 @@ def _key_builder_field_names() -> set[str]:
     """
 
     parsed = ast.parse(pathlib.Path(inspect.getfile(replay_safety_module)).read_text(encoding="utf-8"))
-    wanted = {
-        "_relocation_comparison_key",
-        "_relocation_content_identity",
-        "_relocation_content_part_identity",
-        "_relocation_identity_text",
-    }
-    built = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
-    assert {node.name for node in built} == wanted
+    module_functions = {node.name: node for node in parsed.body if isinstance(node, ast.FunctionDef)}
+    reached = _key_builder_closure(module_functions)
+    # Every identity helper the module has is reached from the one entry point,
+    # so none of them can become a side door the proof does not walk into.
+    assert {name for name in module_functions if name.startswith("_relocation_")} <= reached
     names: set[str] = set()
-    for node in built:
+    for name in reached:
+        node = module_functions[name]
         node.body = node.body[1:] if ast.get_docstring(node) is not None else node.body
         for child in ast.walk(node):
             if isinstance(child, ast.Constant) and isinstance(child.value, str):
@@ -3736,15 +4249,36 @@ def _key_builder_field_names() -> set[str]:
 def test_the_key_builder_names_no_field_outside_the_identity_set() -> None:
     # The behavioural rows above pass for a subtractive key too, as long as its
     # list happens to be complete today. This is the structural half: the code
-    # that builds a key cannot name a bookkeeping field at all, so there is no
-    # list left to be incomplete.
+    # that builds a key cannot name a bookkeeping field at all, at any depth, so
+    # there is no list left to be incomplete.
     names = _key_builder_field_names()
 
-    assert {"role", "content", "call_id", "name", "output", "tools"} <= names
-    assert not names & {field for _, field in _UNENUMERATED_LEGAL_FIELDS}
+    assert {
+        "arguments",
+        "call_id",
+        "content",
+        "diff",
+        "file_data",
+        "file_id",
+        "file_url",
+        "image_url",
+        "input",
+        "name",
+        "operation",
+        "output",
+        "patch",
+        "path",
+        "refusal",
+        "role",
+        "text",
+        "tools",
+    } <= names
+    assert not names & {field for _, field in _IGNORED_FIELD_POSITIONS}
 
 
-_RESTATABLE_MESSAGE_BOOKKEEPING = sorted(_WIRE_FIELDS_BY_KIND["message"] - _IDENTITY_FIELDS_BY_KIND["message"] - {"id"})
+_RESTATABLE_MESSAGE_BOOKKEEPING = sorted(
+    field for position, field in _IGNORED_FIELD_POSITIONS if position == "assistant message" and field != "id"
+)
 
 
 @pytest.mark.parametrize("field", _RESTATABLE_MESSAGE_BOOKKEEPING)
@@ -3755,7 +4289,7 @@ def test_an_unenumerated_legal_field_does_not_double_the_conversation(field: str
     # all four exchanges twice -- on the fenced lane at the cost of the one
     # relocation that operation will ever get.
     restated = [
-        {**cast(dict[str, JsonValue], item), field: _LEGAL_FIELD_VALUES[field]}
+        {**cast(dict[str, JsonValue], item), field: _LEGAL_VALUES[field][0]}
         if cast(dict[str, JsonValue], item).get("role") == "assistant"
         else item
         for item in _RESTATED_THREAD
@@ -3822,27 +4356,55 @@ def test_the_overlap_search_reads_a_restatement_that_repeats_inside_itself(
     assert _tail_overlap_length(*_paired(_overlap_items(accumulated), _overlap_items(incoming))) == expected
 
 
-def _overlap_spellings(max_length: int) -> list[str]:
+def _shapes(alphabet: Sequence[JsonValue], max_length: int) -> list[tuple[int, ...]]:
+    """Every arrangement of ``alphabet`` up to ``max_length`` items, as index tuples."""
+
     return [
-        "".join("ab"[(index >> position) & 1] for position in range(length))
+        tuple((index // len(alphabet) ** position) % len(alphabet) for position in range(length))
         for length in range(1, max_length + 1)
-        for index in range(2**length)
+        for index in range(len(alphabet) ** length)
     ]
+
+
+def _assert_overlap_agrees_with_the_rule(alphabet: Sequence[JsonValue], *, max_length: int) -> int:
+    """Check the module's search against the quadratic rule on every shape; return the pairs read."""
+
+    module_keys = [_relocation_comparison_key(item) for item in alphabet]
+    rule_keys = [_rule_identity(item) for item in alphabet]
+    shapes = _shapes(alphabet, max_length)
+    paired = {shape: [(alphabet[index], module_keys[index]) for index in shape] for shape in shapes}
+    ruled = {shape: [rule_keys[index] for index in shape] for shape in shapes}
+
+    for accumulated in shapes:
+        for incoming in shapes:
+            assert _tail_overlap_length(paired[accumulated], paired[incoming]) == _restated_tail_from_keys(
+                ruled[accumulated], ruled[incoming]
+            ), f"{accumulated} / {incoming}"
+    return len(shapes) ** 2
+
+
+_CHECKED_ITEM_ALPHABET: tuple[JsonValue, ...] = tuple(item for _, item in sorted(_SAMPLE_ITEM_BY_TYPE.items()))
 
 
 def test_the_overlap_search_agrees_with_the_rule_on_every_short_shape() -> None:
     # Exhaustive over repeats, borders and self-repeating prefixes up to five
     # items, each answer checked against the quadratic reading of the
     # requirement. A plausible-looking edit to the search survives any fixture
-    # whose items happen to differ; it does not survive all of these.
-    shapes = [(spelling, _overlap_items(spelling)) for spelling in _overlap_spellings(5)]
-    keyed = {spelling: _paired(items)[0] for spelling, items in shapes}
+    # whose items happen to differ; it does not survive all of these. Run over
+    # each pair of admitted item types in turn rather than over text messages
+    # alone: fed one item type, the checker agrees with the module about the
+    # other ten by never being shown them.
+    alphabets = zip(_CHECKED_ITEM_ALPHABET, [*_CHECKED_ITEM_ALPHABET[1:], _CHECKED_ITEM_ALPHABET[0]], strict=True)
+    for left, right in alphabets:
+        _assert_overlap_agrees_with_the_rule((left, right), max_length=5)
 
-    for accumulated, accumulated_items in shapes:
-        for incoming, incoming_items in shapes:
-            assert _tail_overlap_length(keyed[accumulated], keyed[incoming]) == _restated_tail_length(
-                accumulated_items, incoming_items
-            ), f"{accumulated} / {incoming}"
+
+def test_the_overlap_search_agrees_with_the_rule_on_every_item_type_it_may_meet() -> None:
+    # The same agreement across all eleven admitted types at once, at the two
+    # lengths that fit exhaustively. Depth is the row above; this is breadth --
+    # every ordered pair of item types, including a call beside the output that
+    # answers it and a bare part beside the message holding the same content.
+    _assert_overlap_agrees_with_the_rule(_CHECKED_ITEM_ALPHABET, max_length=2)
 
 
 def test_a_later_fold_measures_its_overlap_against_what_the_earlier_one_left() -> None:

@@ -14,7 +14,13 @@ from app.modules.proxy.replay_relocation import (
     RelocationInputs,
     RelocationSource,
     RelocationTransport,
+    RelocationVerdict,
     decide_relocation,
+)
+from app.modules.proxy.replay_safety import (
+    RELOCATION_TRANSCRIPT_MAX_BYTES,
+    RELOCATION_TRANSCRIPT_MAX_ITEMS,
+    RELOCATION_TRANSCRIPT_MAX_TURNS,
 )
 
 _TRANSPORTS: tuple[RelocationTransport, ...] = get_args(RelocationTransport)
@@ -1023,8 +1029,8 @@ def test_a_legal_field_difference_does_not_double_the_conversation(
     # of them. A comparison that reads one as content makes the restatement look
     # like new material, so the chain is kept as well and every turn is
     # dispatched twice -- on the fenced lane, at the cost of the one relocation
-    # that operation will ever get. Two rounds each lost to a different one of
-    # them, which is why the key names none of them.
+    # that operation will ever get. Two earlier readings of this key each lost
+    # to a different one of them, which is why it names none of them.
     resend = _wire_full_resend(*bookkeeping)
 
     verdict = decide_relocation(
@@ -1072,3 +1078,84 @@ def test_a_relocatable_verdict_never_carries_a_decline_reason() -> None:
 
     assert (verdict.movable, verdict.decline_reason) == (True, None)
     assert set(get_args(RelocationSource)) == set(_SOURCE_BUILDERS)
+
+
+# --- The transcript bounds, reached the way production reaches them -----------
+#
+# The rebuild takes its three bounds as default arguments. Every bound assertion
+# that passes them explicitly leaves the defaults -- the only values production
+# ever uses, because this decision does not offer to override them -- asserted by
+# nothing, so a widened default is a bound that no longer exists and a green
+# suite. These rows go through the same entry point every transport calls, on
+# material sized against the shipped values.
+
+
+def _linked_chain(
+    turn_count: int,
+    *,
+    prompt: str = "q",
+    answer: str = "a",
+    stored_items: int = 1,
+) -> tuple[_Turn, ...]:
+    return tuple(
+        _completed_turn(
+            prompt,
+            f"{answer}{index}",
+            response_id=f"resp_{index}",
+            parent_response_id=None if index == 0 else f"resp_{index - 1}",
+            stored_input=[_user(f"{prompt}{index}-{position}") for position in range(stored_items)],
+        )
+        for index in range(turn_count)
+    )
+
+
+def _relocation_of(chain: tuple[_Turn, ...]) -> RelocationVerdict:
+    """The verdict for a delta continuing ``chain``, with the bounds production runs."""
+
+    return decide_relocation(
+        RelocationInputs(
+            transport="http_bridge",
+            payload={
+                "model": "gpt-5.4",
+                "input": [_user("next")],
+                "previous_response_id": chain[-1].operation.response_id,
+            },
+            evidence="definitive",
+            durable_transcript=chain,
+        )
+    )
+
+
+def test_the_shipped_turn_bound_refuses_one_turn_past_it() -> None:
+    assert _relocation_of(_linked_chain(RELOCATION_TRANSCRIPT_MAX_TURNS)).movable is True
+
+    refused = _relocation_of(_linked_chain(RELOCATION_TRANSCRIPT_MAX_TURNS + 1))
+
+    assert (refused.movable, refused.decline_reason) == (False, "no_account_neutral_body")
+
+
+def test_the_shipped_byte_bound_refuses_a_transcript_that_exceeds_it_in_total() -> None:
+    # Three turns of roughly 3 MiB: each is well inside the 8 MiB bound on its
+    # own and the three together are not, so this also fails a bound re-read per
+    # turn rather than spent across the walk.
+    third_of_the_bound = RELOCATION_TRANSCRIPT_MAX_BYTES // 3
+    filler = "x" * (third_of_the_bound // 2)
+
+    assert _relocation_of(_linked_chain(2, prompt=filler, answer=filler)).movable is True
+
+    refused = _relocation_of(_linked_chain(3, prompt=filler, answer=filler))
+
+    assert (refused.movable, refused.decline_reason) == (False, "no_account_neutral_body")
+
+
+def test_the_shipped_item_bound_refuses_a_transcript_that_exceeds_it_in_total() -> None:
+    # Three turns of twelve thousand items. A legal item is about fifty bytes, so
+    # the whole transcript is inside the byte bound and inside the turn bound
+    # while carrying more items than the rebuild will do per-item work for.
+    items_per_turn = RELOCATION_TRANSCRIPT_MAX_ITEMS // 3 + 1
+
+    assert _relocation_of(_linked_chain(3, stored_items=2)).movable is True
+
+    refused = _relocation_of(_linked_chain(3, stored_items=items_per_turn))
+
+    assert (refused.movable, refused.decline_reason) == (False, "no_account_neutral_body")

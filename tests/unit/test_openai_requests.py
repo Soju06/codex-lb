@@ -3532,3 +3532,19 @@ def test_compact_preserves_replayed_executor_identity():
         {"model": "gpt-6-astra", "instructions": "Summarize.", "input": input_items}
     )
     assert request.to_payload()["input"] == input_items
+
+
+@pytest.mark.parametrize("item_type", ["apply_patch_call", 123])
+def test_responses_to_payload_preserves_namespace_for_additional_replay_items(item_type):
+    item = {
+        "type": item_type,
+        "name": "apply_patch" if item_type == "apply_patch_call" else "unknown",
+        "namespace": "patch" if item_type == "apply_patch_call" else "untyped",
+        "call_id": "additional-replay-item",
+    }
+    request = ResponsesRequest.model_validate(
+        {"model": "gpt-6-astra", "instructions": "synthetic namespace regression", "input": [item]}
+    )
+
+    assert request.to_payload()["input"] == [item]
+    assert request.to_replay_safety_payload()["input"] == [item]

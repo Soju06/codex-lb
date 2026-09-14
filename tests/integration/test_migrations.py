@@ -3369,6 +3369,38 @@ async def test_http_bridge_transcript_core_migration_upgrade_and_downgrade(tmp_p
         assert all(column not in before_columns for column in columns_added)
         assert all(index not in before_indexes for index in indexes_added)
 
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash,
+                        api_key_scope, owner_instance_id, owner_epoch, state,
+                        created_at, updated_at, last_seen_at
+                    ) VALUES (
+                        'legacy-transcript-session', 'conversation', 'legacy-transcript-conversation',
+                        'legacy-transcript-hash', 'legacy-transcript-scope', 'legacy-transcript-instance',
+                        1, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, state,
+                        event_bytes, event_spool_complete, spool_format,
+                        created_at, updated_at
+                    ) VALUES (
+                        'legacy-transcript-operation', 'legacy-transcript-session',
+                        'legacy-transcript-fingerprint', 'completed',
+                        0, 1, 'rows_v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
         await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
         after_columns, after_indexes = await _schema(engine)
         assert all(column in after_columns for column in columns_added)
@@ -3377,6 +3409,21 @@ async def test_http_bridge_transcript_core_migration_upgrade_and_downgrade(tmp_p
         assert after_columns["response_output_items_complete"]["notnull"] == 1
         assert after_columns["response_replay_input_complete"]["notnull"] == 1
         assert after_columns["response_replay_input_turn_count"]["notnull"] == 1
+        async with engine.connect() as conn:
+            legacy_values = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT transcript_version, response_output_items_json,
+                               response_output_items_complete, response_replay_input_json,
+                               response_replay_input_complete, response_replay_input_turn_count
+                        FROM http_bridge_operations
+                        WHERE operation_id = 'legacy-transcript-operation'
+                        """
+                    )
+                )
+            ).one()
+        assert legacy_values == (0, None, 0, None, 0, 0)
 
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
         reverted_columns, reverted_indexes = await _schema(engine)

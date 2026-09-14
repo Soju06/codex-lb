@@ -4,7 +4,6 @@ import math
 from datetime import timedelta
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -18,7 +17,12 @@ from app.core.shutdown import DRAIN_DEADLINE_HEADER
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
-from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
+from app.modules.health.schemas import (
+    BridgeRingInfo,
+    HealthCheckResponse,
+    HealthCheckUnavailableResponse,
+    HealthResponse,
+)
 from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 
 router = APIRouter(tags=["health"])
@@ -46,8 +50,27 @@ async def health_live() -> HealthCheckResponse:
     return HealthCheckResponse(status="ok")
 
 
-@router.get("/health/ready", response_model=HealthCheckResponse)
-async def health_ready() -> HealthCheckResponse:
+def _readiness_unavailable(
+    detail: str,
+    *,
+    checks: dict[str, str] | None = None,
+    bridge_ring: BridgeRingInfo | None = None,
+) -> JSONResponse:
+    payload = HealthCheckUnavailableResponse(
+        status="unavailable",
+        checks=checks,
+        bridge_ring=bridge_ring,
+        detail=detail,
+    )
+    return JSONResponse(status_code=503, content=payload.model_dump(mode="json"))
+
+
+@router.get(
+    "/health/ready",
+    response_model=HealthCheckResponse,
+    responses={503: {"model": HealthCheckUnavailableResponse}},
+)
+async def health_ready() -> HealthCheckResponse | JSONResponse:
     draining = False
     try:
         import app.core.draining as draining_module
@@ -57,14 +80,13 @@ async def health_ready() -> HealthCheckResponse:
         pass
 
     if draining:
-        raise HTTPException(status_code=503, detail="Service is draining")
+        return _readiness_unavailable("Service is draining")
 
     try:
         async for session in get_session():
             try:
                 await session.execute(text("SELECT 1"))
                 checks = {"database": "ok"}
-                status = "ok"
 
                 # Upstream health (degradation flag, circuit breaker) is NOT
                 # checked here — only infrastructure readiness matters.
@@ -73,37 +95,20 @@ async def health_ready() -> HealthCheckResponse:
 
                 bridge_ring = await _get_bridge_ring_info(session)
                 failure_detail = _bridge_readiness_failure_detail(bridge_ring)
-                if failure_detail in {
-                    "Service is not an active bridge ring member",
-                    "Service bridge ring metadata is unavailable",
-                }:
-                    payload = HealthCheckResponse(
-                        status="unavailable",
+                if failure_detail is not None:
+                    return _readiness_unavailable(
+                        failure_detail,
                         checks=checks,
                         bridge_ring=bridge_ring,
-                    ).model_dump(mode="json")
-                    payload["detail"] = failure_detail
-                    return cast(HealthCheckResponse, JSONResponse(status_code=503, content=payload))
-                if failure_detail is not None:
-                    raise HTTPException(status_code=503, detail=failure_detail)
+                    )
 
-                return HealthCheckResponse(status=status, checks=checks, bridge_ring=bridge_ring)
-            except HTTPException:
-                raise
+                return HealthCheckResponse(status="ok", checks=checks, bridge_ring=bridge_ring)
             except Exception:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Service unavailable",
-                )
-    except HTTPException:
-        raise
+                return _readiness_unavailable("Service unavailable")
     except Exception:
-        raise HTTPException(
-            status_code=503,
-            detail="Service unavailable",
-        )
+        return _readiness_unavailable("Service unavailable")
 
-    raise HTTPException(status_code=503, detail="Service unavailable")
+    return _readiness_unavailable("Service unavailable")
 
 
 @router.post("/internal/drain/start", include_in_schema=False)
@@ -240,7 +245,7 @@ async def _get_bridge_ring_info(session: AsyncSession) -> BridgeRingInfo:
         heartbeat_age_seconds = (
             max((now - local_heartbeat_at).total_seconds(), 0.0) if local_heartbeat_at is not None else None
         )
-        data = ",".join(active_members)
+        data = ",".join(sorted(active_members))
         fingerprint = sha256(data.encode()).hexdigest()
         is_member = instance_id in active_members if instance_id else False
 

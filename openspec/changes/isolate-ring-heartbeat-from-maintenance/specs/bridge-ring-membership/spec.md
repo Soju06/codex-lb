@@ -47,7 +47,7 @@ Each registered replica MUST refresh its ring row via an upsert heartbeat every 
 ## ADDED Requirements
 
 ### Requirement: Heartbeat diagnostics preserve readiness policy
-When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST preserve the empty-active-ring exemption. Absence from a nonempty active ring MUST remain unready. Liveness MUST remain independent of ring membership. When the bridge is disabled, a non-draining replica whose database probe succeeds MUST return HTTP 200 from `/health/ready` regardless of bridge schema readiness, registration state, ring lookup errors, or ring membership.
+When the HTTP Responses session bridge is enabled and bridge registration has completed, `/health/ready` MUST preserve the empty-active-ring exemption. Absence from a nonempty active ring MUST remain unready. Every HTTP 503 readiness outcome MUST use one validated response envelope containing `status="unavailable"`, nullable `checks`, nullable `bridge_ring`, and a string `detail`, including draining, database failure, bridge-schema failure, registration-incomplete, ring-lookup failure, and nonmembership outcomes. Liveness MUST remain independent of ring membership. When the bridge is disabled, a non-draining replica whose database probe succeeds MUST return HTTP 200 from `/health/ready` regardless of bridge schema readiness, registration state, ring lookup errors, or ring membership.
 
 #### Scenario: Single replica ages out of an empty ring
 - **GIVEN** bridge registration completed for the only replica
@@ -60,6 +60,13 @@ When the HTTP Responses session bridge is enabled and bridge registration has co
 - **GIVEN** bridge registration completed and the probed replica has a fresh ring heartbeat
 - **WHEN** `/health/ready` checks infrastructure readiness
 - **THEN** ring membership does not make the probe fail
+
+#### Scenario: Registration-incomplete readiness uses the shared failure envelope
+- **GIVEN** the bridge is enabled and its database probe succeeds
+- **AND** bridge registration is not complete
+- **WHEN** `/health/ready` is requested
+- **THEN** the probe returns HTTP 503
+- **AND** the response has status `unavailable`, database checks, bridge-ring diagnostics, and the registration-incomplete detail in the same envelope used by every other readiness failure
 
 #### Scenario: Bridge-disabled readiness ignores ring state
 - **GIVEN** the HTTP Responses session bridge is disabled

@@ -1,3 +1,20 @@
+## PR #2133 2026-09-14 maintainer follow-up
+
+- Rebased onto current `origin/main@d1fd2f21fa0e0f3b5fcad3af5fada19693cd1fc1`. The only conflict was the metric-registration test: the resolution preserved current main's removal of the reverted subscription-overflow checks and reapplied only this change's heartbeat metric assertions.
+- Every `/health/ready` HTTP 503 path now constructs the same validated unavailable envelope (`status`, nullable `checks`, nullable `bridge_ring`, and `detail`), and the route documents that model. Success responses are unchanged.
+- Health-side ring fingerprinting sorts active member ids in Python as well as requesting database order, preserving one cross-engine codepoint-order contract.
+- Design now states that a phase deadline is diagnostic: a permanently wedged idle sweep parks that owner rather than being cancelled or duplicated, while the heartbeat and other owners continue.
+- SQLite uses a single writer. The background pool isolates heartbeat connection admission, not file-lock acquisition; bounded singleflight owners and the short heartbeat upsert limit contention, while the heartbeat timeout/retry path handles a lock held past the diagnostic bound.
+
+## Production database-copy and contention evidence
+
+- A beta.7 derivative carrying the heartbeat implementation from PR head `16c12122` was built for the production arm64 platform and matched the reviewed application hashes. A representative 48,394,301,440-byte production copy passed pre/post migration integrity, foreign-key, revision, and schema-policy checks; its blocked-maintenance/failure-recovery soak kept heartbeats advancing without overlap and shut down cleanly.
+- The controlled production rollout compacted the live SQLite database from 48,556,052,480 bytes to approximately 1.19 GB while retaining the stopped original as rollback. Migration, rollup finalization, full destination integrity, foreign-key checks, revision checks, and retention-policy checks passed.
+- During the arm64 and production-copy fault soaks, one injected heartbeat failure and one maintenance timeout were observed and recovered without overlap; SQLite CLEAN remained suppressed while required work was unsettled.
+- After roughly 45 hours of production traffic, the container had zero restarts, the persisted heartbeat was advancing, local/public readiness was healthy, and the preceding hour contained no SQLite-lock, disk-full, heartbeat-failure, maintenance-timeout, backpressure, queue-full, traceback, OOM, or HTTP 502 signatures. The last 24-hour traffic window was 4,038 successes out of 4,068 requests; the remaining outcomes were client cancellations or classified upstream failures.
+- The PR's GitHub PostgreSQL job passed at head `16c12122`. The production deployment remains single-instance SQLite; no claim of zero-downtime migration is made.
+- Post-rebase local follow-up validation passed 119 periodic/ring/health/metrics/cap tests, 69 health/degradation/ring/metrics tests, 11 integration/E2E health tests, 10 selected HTTP bridge maintenance tests, and 207 database/shutdown/lifespan tests with the one reproduced current-main baseline deselected. Repository lint, formatting, type checking, strict change validation, and all 65 repository specs passed.
+
 ## PR #2133 maintenance-only shutdown regression
 
 - The lifespan shutdown matrix now exercises the production stale-mark/CLEAN gates with fully drained owners, an active heartbeat writer, and maintenance-only incomplete drainage. Real test owners are drained before injecting the partial result, avoiding leaked test tasks.
@@ -55,8 +72,8 @@ Current-main baseline failures reproduced or confirmed separately:
 
 The six historical `tests/unit/test_otel.py` database-mocking failures are resolved on current main. The later `tests/unit/test_otel.py::test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close` failure reproduces on unmodified current main and is the only lifespan baseline excluded from the current follow-up run.
 
-## Verification still blocked
+## Resolved rollout gates
 
-- No local PostgreSQL service is available, so PostgreSQL-focused verification has not run.
-- No verified production-sized database copy or approved Docker environment is available, so the candidate-image/database-copy soak in task 5.3 has not been attempted.
-- No production database, container, compose stack, or service was touched.
+- PostgreSQL-focused coverage passed in PR CI at head `16c12122`; the local environment remains SQLite-only.
+- Candidate-image, representative database-copy, arm64 fault-soak, and controlled production rollout evidence is recorded above. The fresh stopped pre-upgrade database, compose file, and prior image remain available for rollback.
+- Production deployment is operational evidence, not permission to self-merge PR #2133; current-head CI, review threads, and mergeability still govern the PR.

@@ -16,7 +16,7 @@ from alembic import op
 from app.db.alembic.http_bridge_migration_ownership import OWNERSHIP_TABLE, ensure_ownership_table
 
 revision = "20260912_020000_rehome_recovery_repair_ownership"
-down_revision = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
+down_revision = "20260912_005900_merge_recovery_repair_and_thread_cache_heads"
 branch_labels = None
 depends_on = None
 

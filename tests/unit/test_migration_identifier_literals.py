@@ -17,7 +17,7 @@ pytestmark = pytest.mark.unit
 _MIGRATIONS = (
     Path("app/db/alembic/versions/20260909_010000_add_dashboard_users.py"),
     Path("app/db/alembic/versions/20260909_020000_reproject_compat_admin_credentials.py"),
-    Path("app/db/alembic/versions/20260913_000000_drop_legacy_dashboard_credentials.py"),
+    Path("app/db/alembic/versions/20260912_010000_drop_legacy_dashboard_credentials.py"),
 )
 
 _RUNTIME_IDENTIFIERS = {

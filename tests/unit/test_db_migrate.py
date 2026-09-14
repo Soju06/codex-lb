@@ -1634,6 +1634,16 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     assert result.current_revision == initial.current_revision
 
 
+def test_published_upstream_revision_ids_remain_resolvable() -> None:
+    """Direct Alembic callers can still resolve the published upstream IDs."""
+    script_directory = ScriptDirectory.from_config(_build_alembic_config("sqlite:///:memory:"))
+    drop = script_directory.get_revision("20260912_010000_drop_legacy_dashboard_credentials")
+    oidc = script_directory.get_revision("20260913_000000_add_oidc_provider_flow")
+    assert drop is not None and oidc is not None
+    assert drop.down_revision == "20260912_000000_merge_thread_cache_and_bridge_retirement_heads"
+    assert oidc.down_revision == drop.revision
+
+
 def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Path) -> None:
     db_path = tmp_path / "routing-security-remap.db"
     url = _db_url(db_path)
@@ -1650,16 +1660,6 @@ def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Pa
 
     result = run_upgrade(url, "head", bootstrap_legacy=False)
     assert result.current_revision == initial.current_revision
-
-
-def test_rebased_published_revision_ids_have_explicit_remaps() -> None:
-    """Re-stamped upstream migrations remain resolvable for existing ledgers."""
-    assert OLD_TO_NEW_REVISION_MAP[
-        "20260912_010000_drop_legacy_dashboard_credentials"
-    ] == "20260913_000000_drop_legacy_dashboard_credentials"
-    assert OLD_TO_NEW_REVISION_MAP["20260913_000000_add_oidc_provider_flow"] == (
-        "20260913_010000_add_oidc_provider_flow"
-    )
 
 
 def test_run_upgrade_without_auto_remap_fails_for_legacy_revision_ids(tmp_path: Path) -> None:
@@ -2007,7 +2007,7 @@ def test_persisted_recovery_schema_repair_precedes_ownership_registry_repair(tmp
     thread_cache_revision = "20260911_040000_add_thread_cache_identity_mode"
     continuity_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
     recovery_repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
-    recovery_merge_revision = "20260912_010000_merge_recovery_repair_and_thread_cache_heads"
+    recovery_merge_revision = "20260912_005900_merge_recovery_repair_and_thread_cache_heads"
     terminal_phase_revision = "20260911_020000_add_http_bridge_terminal_append_phase"
     lineage_merge_revision = "20260912_030000_merge_terminal_append_lineage"
     assert script_directory.get_revision(thread_cache_revision).down_revision == local_login_revision

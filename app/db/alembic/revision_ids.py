@@ -27,11 +27,6 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
     ),
     "20260410_020000_restore_import_without_overwrite_default_false": "20260409_020000_fix_http_bridge_last_seen_index",
     "20260525_000000_merge_routing_settings_security_heads": "20260513_000000_add_accounts_alias",
-    # The upstream credential-drop and OIDC revisions were already published
-    # on the fork before the rebase had to re-stamp their colliding timestamp
-    # slots.  Keep databases stamped by those identifiers upgradeable.
-    "20260912_010000_drop_legacy_dashboard_credentials": "20260913_000000_drop_legacy_dashboard_credentials",
-    "20260913_000000_add_oidc_provider_flow": "20260913_010000_add_oidc_provider_flow",
 }
 
 LEGACY_MIGRATION_TO_NEW_REVISION: dict[str, str] = {

@@ -10,7 +10,7 @@ from __future__ import annotations
 revision = "20260914_000000_merge_http_bridge_and_oidc_heads"
 down_revision = (
     "20260912_030000_merge_terminal_append_lineage",
-    "20260913_010000_add_oidc_provider_flow",
+    "20260913_000000_add_oidc_provider_flow",
 )
 branch_labels = None
 depends_on = None

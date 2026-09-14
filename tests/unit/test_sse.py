@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -145,6 +147,49 @@ async def test_inject_sse_keepalives_cancels_idle_source_when_downstream_closes(
     await cast(Any, stream).aclose()
 
     assert source_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_inject_sse_keepalives_does_not_leave_stream_end_unretrieved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A source that ends while the consumer is away must not become an ERROR.
+
+    The injector pulls each chunk in its own task. After a keepalive timeout it
+    yields the frame and suspends, leaving that task running with no waiter
+    attached; if the source ends there, nothing retrieves the resulting
+    ``StopAsyncIteration`` and asyncio logs ``Task exception was never
+    retrieved`` with a traceback when the task is collected -- on a request
+    that had otherwise completed normally. Production saw one per such stream.
+    """
+
+    source_exhausted = asyncio.Event()
+
+    async def source() -> AsyncIterator[str]:
+        yield "a\n\n"
+        await asyncio.sleep(0.05)
+        source_exhausted.set()
+
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    stream = inject_sse_keepalives(source(), 0.01)
+    assert await anext(stream) == "a\n\n"
+    # The keepalive fires while the pull task is still running.
+    assert await anext(stream) == SSE_KEEPALIVE_FRAME
+
+    # The consumer goes away here -- a client that disconnected, or simply a
+    # socket write that has not drained -- so the source ends with the injector
+    # suspended and no waiter registered on the pull task.
+    await source_exhausted.wait()
+    await asyncio.sleep(0)
+    await cast(Any, stream).aclose()
+
+    # Collection is when asyncio's destructor would log it.
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gc.collect()
+
+    unretrieved = [record for record in caplog.records if "never retrieved" in record.getMessage()]
+    assert not unretrieved, [record.getMessage() for record in unretrieved]
 
 
 @pytest.mark.asyncio

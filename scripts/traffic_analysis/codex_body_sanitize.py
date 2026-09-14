@@ -10,7 +10,7 @@ checkout without the application environment.
 a rule in ``BODY``, and only what a rule names reaches the fixture. Two kinds of
 rule exist and there is no third:
 
-* **Preserved.** A closed domain the portability and parity assertions read --
+* **Preserved.** A closed domain the replay-safety and parity assertions read --
   an object key, a discriminator value (``type``, ``role``, ``status``,
   ``phase``, ``effort``, ``verbosity``, a JSON Schema keyword), a boolean, a
   number, ``null``, a model slug in slug shape, and the small vocabulary of
@@ -56,13 +56,13 @@ What that costs is stated rather than hidden: the committed fixture is no
 longer a readable transcript. It records the *shape* of a real Codex body --
 every key, every discriminator, every tool declaration's field set, every item
 id's presence and every call/output pairing -- and none of its prose. The
-portability verdict is a function of exactly that shape, which is why the gate
-can assert the recorded verdict is unchanged by the rebuild.
+replay-safety predicates are a function of exactly that shape, which is why the
+gate can assert the recorded skeleton is unchanged by the rebuild.
 
 Absence is preserved and nothing is ever fabricated. A real Responses-Lite body
-carries no ``instructions``, no ``tools`` and no ``stream_options``; the
-overflow portability view declines unknown top-level fields, so adding a key
-would change the recorded verdict. A key the body did not carry is not written.
+carries no ``instructions``, no ``tools`` and no ``stream_options``; fabricating
+a key the body did not carry would misrepresent the wire, so it is not
+written.
 
 A websocket capture is persisted verbatim, so it arrives with the transport's
 frame envelope (``type``) around the Responses body. The envelope is dropped
@@ -133,8 +133,8 @@ SYNTHETIC_PREFIX = "[synthetic "
 _SYNTHETIC_PATTERN = re.compile(r"\A\[synthetic .+\]\Z", re.DOTALL)
 
 # The substitute for a number inside a tool's JSON Schema, where no value is
-# read by the portability decision and every value is authored by whoever wrote
-# the tool.
+# read by the replay-safety predicates and every value is authored by whoever
+# wrote the tool.
 SYNTHETIC_NUMBER = 0
 
 # Preserved numbers are capped, because an unbounded numeric slot is an
@@ -182,8 +182,8 @@ def synthetic_text(path: str) -> str:
 # --- vocabularies -------------------------------------------------------------------
 #
 # Every string below is part of the allowlist: a key name or a discriminator the
-# portability decision, the replay predicate or the fixture gate reads. A
-# captured string that is none of these never reaches the output.
+# replay predicate or the fixture gate reads. A captured string that is none of
+# these never reaches the output.
 
 MESSAGE_ROLES: frozenset[str] = frozenset({"assistant", "developer", "system", "user"})
 MESSAGE_PHASES: frozenset[str] = frozenset({"commentary", "final_answer"})
@@ -300,11 +300,11 @@ SCHEMA_TYPES: frozenset[str] = frozenset({"array", "boolean", "integer", "null",
 # they are:
 #
 # ``_contains_account_scoped_tool_state`` recognises an account-scoped reference
-# by *key name*, so renaming one inside a declaration it walks flips the verdict.
+# by *key name*, so renaming one inside a declaration it walks flips its answer.
 # It walks the whole subtree of every declaration except a ``function`` tool's
 # own ``parameters``, which it skips at the root. Measured against 0.154.0's
 # declarations: a property named ``file_id`` under ``tool_search.parameters``
-# moves the verdict, the same property under a ``function`` tool's
+# moves that answer, the same property under a ``function`` tool's
 # ``parameters`` does not. Keeping the names everywhere is the cheap side of
 # that asymmetry -- eight OpenAI-vocabulary words, chosen from a list written
 # down here rather than from the capture.
@@ -332,7 +332,7 @@ MODEL_SLUG = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 # URL schemes ``replay_safety._url_is_account_neutral`` decides on. The captured
 # URL is never carried: its scheme picks which synthetic URL is emitted, so the
-# neutrality verdict survives and the address does not.
+# neutrality answer survives and the address does not.
 SYNTHETIC_URLS: dict[str, str] = {
     "data": "data:image/png;base64,iVBORw0KGgo=",
     "http": "http://fixture.invalid/asset",
@@ -510,7 +510,7 @@ class _Ident(_Node):
     Two items naming the same ``call_id`` still name the same placeholder, which
     is what ``responses_input_items_are_self_contained_fresh_replay`` pairs on.
     An empty identifier stays empty: a *non-empty* id is what makes a native
-    Codex body decline as ``not_portable_history``, and both states are evidence.
+    Codex body account-bound, and both states are evidence.
     """
 
     namespace: str = ""
@@ -710,8 +710,9 @@ class _SchemaNode(_Node):
         if value is None or isinstance(value, bool):
             return value
         if isinstance(value, int | float):
-            # No number in a tool's schema is read by the portability decision,
-            # and an MCP server authors every one of them, so the value goes.
+            # No number in a tool's schema is read by the replay-safety
+            # predicates, and an MCP server authors every one of them, so the
+            # value goes.
             run.note(path, "synthetic_number", changed=value != SYNTHETIC_NUMBER)
             return SYNTHETIC_NUMBER
         if isinstance(value, str):
@@ -1139,7 +1140,7 @@ def surviving_captured_strings(captured: Mapping[str, Any], sanitised: Mapping[s
     it and are capped elsewhere instead: numbers, which ``_Scalar`` bounds and
     ``_SchemaNode`` replaces outright, and cardinality plus ordering (how many
     items, how many properties, which property sorts first), which are the
-    structure the verdict reads and which a human sees in the diff.
+    structure the predicates read and which a human sees in the diff.
 
     Four things are allowed through by name: the structural vocabulary, the
     tokens of this module's own path-derived placeholders, the placeholder

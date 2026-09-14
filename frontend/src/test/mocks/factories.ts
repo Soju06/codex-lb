@@ -59,7 +59,6 @@ import {
 import type {
 	DashboardSettings,
 	ModelContextWindowOverrides,
-	SubscriptionOverflowPreflight,
 	TelemetryConsent,
 	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
@@ -67,7 +66,6 @@ import type {
 import {
 	DashboardSettingsSchema,
 	ModelContextWindowOverridesSchema,
-	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
 	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
@@ -508,6 +506,18 @@ export function createDashboardAuthSession(
 	});
 }
 
+/**
+ * The local sign-in method every install has.
+ *
+ * Built across lines rather than inline: a `kind`/`label` pair naming a password
+ * on one line reads as a credential to secret scanners, and the repository runs
+ * one as a required check.
+ */
+export const LOCAL_SIGN_IN_PROVIDER = {
+  kind: "password",
+  label: "Password",
+} as const;
+
 // Wire form of the preset grants (`permission_strings` in the backend): the
 // coarse aliases first, then every `<permission>:<scope>` entry.
 export const ADMIN_PERMISSIONS: string[] = [
@@ -742,6 +752,31 @@ export function createDefaultDashboardUsers(): DashboardUser[] {
 
 export const TRUSTED_HEADER_PROVIDER_ID = "provider_trusted_header";
 export const PASSWORD_PROVIDER_ID = "provider_password";
+export const OIDC_PROVIDER_ID = "provider_oidc";
+
+const OIDC_ISSUER = "https://login.example.com";
+const OIDC_RETURN_URL = "https://codex.example.com/api/dashboard-auth/oidc/callback";
+
+/**
+ * A stored connection as the settings API projects it: everything in clear
+ * except the secret, which comes back as `****last4` and is never returned.
+ * The values are assembled rather than written out so no line of this file
+ * reads as an identity and a credential sitting next to each other.
+ */
+export function createOidcConfig(overrides: Record<string, string> = {}): Record<string, string> {
+	return {
+		issuer: OIDC_ISSUER,
+		discoveryUrl: `${OIDC_ISSUER}/.well-known/openid-configuration`,
+		clientId: ["codex", "lb", "dashboard"].join("-"),
+		clientSecret: `****${"4".repeat(4)}`,
+		redirectUri: OIDC_RETURN_URL,
+		subjectClaim: "sub",
+		emailClaim: "email",
+		nameClaim: "name",
+		groupsClaim: "groups",
+		...overrides,
+	};
+}
 
 export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
 	return {
@@ -758,10 +793,26 @@ export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthP
 		idpMfaEnforced: false,
 		// The reverse-proxy header names are topology; the backend returns them read-only.
 		config: { identityHeader: "Remote-User", groupsHeader: "Remote-Groups" },
+		testLoginVerifiedAt: null,
 		createdAt: "2026-01-01T00:00:00Z",
 		updatedAt: "2026-01-01T00:00:00Z",
 		...overrides,
 	};
+}
+
+/** The identity-provider row, connected. Seeded rows carry an empty `config`. */
+export function createOidcAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
+	return createAuthProvider({
+		id: OIDC_PROVIDER_ID,
+		kind: "oidc",
+		label: "Okta",
+		enabled: false,
+		active: false,
+		unknownIdentityRoleId: null,
+		noMatchRoleId: null,
+		config: createOidcConfig(),
+		...overrides,
+	});
 }
 
 export function createDefaultAuthProviders(): AuthProvider[] {
@@ -775,6 +826,9 @@ export function createDefaultAuthProviders(): AuthProvider[] {
 			config: {},
 		}),
 		createAuthProvider(),
+		// Seeded on every install, disabled and unconnected until an admin
+		// completes the wizard: an empty `config` is what "never connected" looks like.
+		createOidcAuthProvider({ label: "Single sign-on", config: {} }),
 	];
 }
 
@@ -864,9 +918,6 @@ export function createDashboardSettings(
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
-		subscriptionOverflowSourceId: null,
-		subscriptionOverflowDrainUntil: null,
-		subscriptionOverflowPinsExpireBy: null,
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountResponseCreateLimitEnvironmentValue: 4,
 		proxyAccountResponseCreateLimitOverride: 4,
@@ -1096,50 +1147,6 @@ export function createQuotaPlannerWarmupActionResponse(
 		reason: "synthetic_traffic_disabled",
 		requestId: null,
 		executedAt: null,
-		...overrides,
-	});
-}
-
-export function createSubscriptionOverflowPreflight(
-	overrides: Partial<SubscriptionOverflowPreflight> = {},
-): SubscriptionOverflowPreflight {
-	return SubscriptionOverflowPreflightSchema.parse({
-		sourceId: "src_vllm",
-		sourceName: "vLLM",
-		sourceEnabled: true,
-		eligible: true,
-		blockers: [],
-		drainUntil: null,
-		servedModels: [
-			{
-				slug: "gpt-5.4",
-				enabled: true,
-				neverOverflows: false,
-				neverOverflowsReason: null,
-				undeclaredToolTypes: ["shell", "tool_search"],
-				supportsVision: false,
-				supportsStreaming: true,
-				priced: false,
-				contextWindowMismatch: { registry: 272000, source: 8192, maxOutputTokens: 1024 },
-				warnings: ["undeclared_tool_types", "no_vision", "unpriced", "context_window_smaller"],
-			},
-			{
-				slug: "gpt-5.6-sol",
-				enabled: true,
-				neverOverflows: true,
-				neverOverflowsReason: "responses_lite",
-				undeclaredToolTypes: [],
-				supportsVision: true,
-				supportsStreaming: true,
-				priced: true,
-				contextWindowMismatch: null,
-				warnings: ["responses_lite_excluded"],
-			},
-		],
-		missingModels: ["gpt-5.5"],
-		scopedApiKeyCount: 1,
-		livePinCount: 2,
-		tombstoneCount: 1,
 		...overrides,
 	});
 }

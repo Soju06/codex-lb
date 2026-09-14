@@ -30,6 +30,7 @@ from app.db.models import (
     DashboardAuthProvider,
     DashboardSettings,
     DashboardUser,
+    DashboardUserStatus,
     LocalLoginPolicy,
 )
 
@@ -42,6 +43,7 @@ NEW_PASSWORD = "recovered-" + "password-1"
 STORED_TOTP_SECRET = b"an-" + b"encrypted-" + b"blob"
 OTHER_STORED_TOTP_SECRET = b"another-" + b"encrypted-" + b"blob"
 STALE_BOOTSTRAP_HASH = b"stale-" + b"bootstrap-" + b"digest"
+STALE_BOOTSTRAP_CIPHERTEXT = b"stale-" + b"encrypted-" + b"bootstrap-" + b"material"
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,23 +281,33 @@ def test_reset_password_does_not_touch_a_policy_that_refuses_nobody(
         assert recovery.settings_row().local_login_policy == policy.value, policy
 
 
-def test_reset_password_mirrors_the_legacy_columns_for_the_compat_admin(
-    recovery: _Recovery, terminal: None, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("username", [COMPAT_ADMIN_USERNAME, "alice"])
+def test_reset_password_kills_the_bootstrap_token_whatever_the_account_is_called(
+    recovery: _Recovery, terminal: None, monkeypatch: pytest.MonkeyPatch, username: str
 ) -> None:
-    """A replica on the previous release still reads the legacy credential."""
+    """An account holds a password again, so the token that grants first-run admin must not.
 
-    recovery.add_user(COMPAT_ADMIN_USERNAME)
+    The account's name has nothing to do with it: the bootstrapped account can
+    be renamed, and a rule keyed on the old name would silently stop firing.
+
+    Both columns are seeded and both are asserted: the token is only inert once
+    the verifier *and* the material it decrypts are gone, so clearing one of
+    the two would leave a usable half behind and still pass a one-column test.
+    """
+
+    recovery.add_user(username)
     with recovery.session() as session, session.begin():
         row = session.execute(select(DashboardSettings)).scalar_one()
-        row.password_hash = "stale-hash"
         row.bootstrap_token_hash = STALE_BOOTSTRAP_HASH
+        row.bootstrap_token_encrypted = STALE_BOOTSTRAP_CIPHERTEXT
     _answer(monkeypatch, NEW_PASSWORD, NEW_PASSWORD)
 
-    _run("admin", "reset-password", COMPAT_ADMIN_USERNAME)
+    _run("admin", "reset-password", username)
 
+    assert recovery.user(username).password_hash != "stale-hash"
     settings_row = recovery.settings_row()
-    assert settings_row.password_hash == recovery.user(COMPAT_ADMIN_USERNAME).password_hash
     assert settings_row.bootstrap_token_hash is None
+    assert settings_row.bootstrap_token_encrypted is None
 
 
 def test_reset_password_refuses_a_mismatch_and_changes_nothing(
@@ -322,6 +334,41 @@ def test_reset_password_never_takes_the_password_from_the_arguments(recovery: _R
         _run("admin", "reset-password", "rescue")
     assert "from a terminal" in str(refused.value)
     assert recovery.audit() == []
+
+
+def _set_status(recovery: _Recovery, user_id: str, status: DashboardUserStatus) -> None:
+    with recovery.session() as session, session.begin():
+        user = session.get(DashboardUser, user_id)
+        assert user is not None
+        user.status = status.value
+
+
+def test_reset_password_says_so_when_the_account_it_reset_cannot_sign_in(
+    recovery: _Recovery, terminal: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The bootstrap account can be disabled now, and a password is no way in for one that is.
+
+    The command still does what it was asked; re-enabling somebody an
+    administrator turned off is an administrator's decision. What it must not
+    do is report a reset that reads like an open door.
+    """
+
+    user_id = recovery.add_user("rescue")
+    _set_status(recovery, user_id, DashboardUserStatus.DISABLED)
+    _answer(monkeypatch, NEW_PASSWORD, NEW_PASSWORD)
+
+    _run("admin", "reset-password", "rescue")
+
+    printed = capsys.readouterr().out
+    assert "disabled" in printed and "cannot sign in until an administrator re-enables it" in printed
+    # The status itself is left to an administrator, and the write still happened.
+    user = recovery.user("rescue")
+    assert user.status == DashboardUserStatus.DISABLED.value and user.password_hash != "stale-hash"
+
+    _set_status(recovery, user_id, DashboardUserStatus.ACTIVE)
+    _answer(monkeypatch, NEW_PASSWORD, NEW_PASSWORD)
+    _run("admin", "reset-password", "rescue")
+    assert "cannot sign in" not in capsys.readouterr().out
 
 
 def test_reset_password_names_the_account_it_cannot_find(

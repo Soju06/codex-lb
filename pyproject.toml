@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.25.0-beta.8"
+version = "1.25.0-beta.9"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -50,6 +50,12 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "pygments>=2.20.0",
+    # 2.13.0 is the first release without an advisory against ``jwt.decode``
+    # itself: unknown ``crit`` header extensions accepted (< 2.12.0), unbounded
+    # Base64URL decoding of the unused payload segment and the public-key-as-HMAC
+    # -secret key confusion (both < 2.13.0). The ID token is the only thing this
+    # product verifies with it, so the floor has to exclude them.
+    "pyjwt[crypto]>=2.13.0",
     "python-socks[asyncio]>=2.7.2",
     "pyotp>=2.9.0",
     "python-dotenv>=1.2.2",
@@ -102,7 +108,6 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
-    "overflow_drill: subscription-overflow canary drill rehearsals (see docs/routing.md)",
     "unit: fast isolated tests",
     "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]

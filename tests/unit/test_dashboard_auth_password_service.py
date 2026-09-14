@@ -14,11 +14,13 @@ from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.providers import DEFAULT_PROVIDER_KEY, PasswordProvider
 from app.core.auth.providers.registry import ActiveProvider
 from app.db.models import (
+    COMPAT_ADMIN_USER_ID,
     COMPAT_ADMIN_USERNAME,
     AuthProviderKind,
     DashboardAuthProvider,
     DashboardRoleRecord,
     DashboardUser,
+    DashboardUserStatus,
 )
 from app.modules.dashboard_auth.service import (
     DashboardAuthService,
@@ -85,6 +87,8 @@ class _FakeSettings:
     totp_required_on_login: bool = False
     totp_required_for_admin_role: bool = False
     local_login_policy: str = "enabled"
+    bootstrap_token_encrypted: bytes | None = None
+    bootstrap_token_hash: bytes | None = None
 
 
 def _role(slug: PresetRoleSlug) -> DashboardRoleRecord:
@@ -152,9 +156,6 @@ class _FakeRepository:
     async def list_active_local_password_users(self) -> Sequence[DashboardUser]:
         return self._active_password_users()
 
-    async def count_active_users(self) -> int:
-        return sum(1 for u in self.users.values() if u.status == "active")
-
     async def count_user_identities(self, user_id: str) -> int:
         return self.identities.get(user_id, 0)
 
@@ -192,22 +193,40 @@ class _FakeRepository:
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None:
         if (await self.get_local_auth_state()).requires_auth:
             return None
-        existing = await self.get_user_by_username(COMPAT_ADMIN_USERNAME)
+        # Production keys the re-arm on the bootstrap row's deterministic id and
+        # its break-glass designation, never on its name -- the account can be
+        # renamed, and a name lookup would miss it.
+        existing = self.users.get(COMPAT_ADMIN_USER_ID)
         if existing is not None:
+            if not existing.is_break_glass:
+                return None
+            if existing.password_hash is not None and existing.status == DashboardUserStatus.ACTIVE.value:
+                return None
+            # The row is re-armed out of whatever it was edited into: a
+            # disabled bootstrap row still holds its hash, so a re-arm keyed on
+            # "has no password" would never match it again.
             existing.password_hash = password_hash
+            existing.status = DashboardUserStatus.ACTIVE.value
+            existing.role_id = PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]
+            self._clear_bootstrap_token()
             return existing
         user = _make_user(COMPAT_ADMIN_USERNAME, password_hash=password_hash)
+        user.id = COMPAT_ADMIN_USER_ID
         user.is_break_glass = True
+        self._clear_bootstrap_token()
         return self.add(user)
 
-    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser:
-        self.users[user_id].password_hash = password_hash
-        return self.users[user_id]
+    def _clear_bootstrap_token(self) -> None:
+        """Every password write kills the remote bootstrap token, whoever wrote it."""
+
+        self.settings.bootstrap_token_encrypted = None
+        self.settings.bootstrap_token_hash = None
 
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser:
         user = self.users[user_id]
         user.password_hash = password_hash
         user.session_generation += 1
+        self._clear_bootstrap_token()
         return user
 
     async def set_user_totp_secret(
@@ -221,8 +240,12 @@ class _FakeRepository:
         user = self.users[user_id]
         user.totp_secret_encrypted = secret_encrypted
         user.totp_last_verified_step = None
-        if secret_encrypted is None:
-            self.settings.totp_required_on_login = False
+        # Self-service disable clears the install-wide requirement only where
+        # the acting account *is* the install -- every account it holds, in any
+        # status; an administrative reset (``preserve_policy``) never touches it.
+        if secret_encrypted is None and not preserve_policy:
+            if (await self.get_user_counts()).total <= 1:
+                self.settings.totp_required_on_login = False
         return user
 
     async def try_advance_user_totp_step(self, user_id: str, step: int) -> bool:
@@ -243,7 +266,12 @@ class _FakeRepository:
         user.totp_last_verified_step = None
         user.session_generation += 1
         self.identities.pop(user_id, None)
+        # The route is restricted to a one-account install, so the install is
+        # passwordless after this: a requirement left on would make sign-in
+        # mandatory with no account able to present a factor.
+        self._clear_bootstrap_token()
         self.settings.totp_required_on_login = False
+        self.settings.totp_required_for_admin_role = False
         return user
 
     async def touch_last_login(self, user_id: str) -> None:
@@ -667,6 +695,12 @@ async def test_remove_password_clears_credentials_only_on_solo_installs() -> Non
     other = repository.add(_make_user("ops", slug=PresetRoleSlug.OPERATOR, password_hash="x"))
     with pytest.raises(OtherUsersExistError):
         await service.remove_password(admin, "password123")
+    # A *disabled* account is still an account: it keeps its role, its keys and
+    # its hash, and only an account with ``users:manage`` can bring it back --
+    # which the implicit local admin a removal would hand the install to is not.
+    other.status = DashboardUserStatus.DISABLED.value
+    with pytest.raises(OtherUsersExistError):
+        await service.remove_password(admin, "password123")
     del repository.users[other.id]
     repository.identities[admin.id] = 1
     with pytest.raises(OtherUsersExistError):
@@ -683,6 +717,34 @@ async def test_remove_password_clears_credentials_only_on_solo_installs() -> Non
     # The install is passwordless again, so first-run setup re-arms the same account.
     again = await service.setup_password("password456")
     assert again is admin
+
+
+@pytest.mark.asyncio
+async def test_setup_re_arms_a_disabled_bootstrap_account_that_still_holds_a_hash() -> None:
+    """Disabling the bootstrap account must not be a one-way door.
+
+    The row keeps its hash, so a re-arm keyed on ``password_hash IS NULL``
+    never matches it again: no account could sign in and no setup could ever
+    succeed. The condition is "not an active password holder" -- the same fact
+    the gate above the compare-and-set tests -- and the write puts the row back
+    into the state setup promises.
+    """
+
+    repository = _FakeRepository()
+    service = _service(repository)
+    admin = await service.setup_password("password123")
+    assert admin.status == DashboardUserStatus.ACTIVE.value
+
+    with pytest.raises(PasswordAlreadyConfiguredError):
+        await service.setup_password("password456")
+
+    admin.status = DashboardUserStatus.DISABLED.value
+    admin.role_id = PRESET_ROLE_IDS[PresetRoleSlug.VIEWER]
+    again = await service.setup_password("password456")
+    assert again is admin
+    assert again.status == DashboardUserStatus.ACTIVE.value
+    assert again.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]
+    assert await service.verify_password("password456") is admin
 
 
 @pytest.mark.asyncio

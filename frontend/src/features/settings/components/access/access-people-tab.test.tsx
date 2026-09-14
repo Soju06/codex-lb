@@ -79,7 +79,7 @@ describe("AccessPeopleTab", () => {
     expect(await screen.findByText("Two-factor is required for everyone at sign-in.")).toBeInTheDocument();
   });
 
-  it("fails closed while the TOTP policy is unknown: no statement, no compat reset, retry re-requests", async () => {
+  it("fails closed while the TOTP policy is unknown: no statement, retry re-requests", async () => {
     const user = userEvent.setup();
     let settingsRequests = 0;
     let fail = true;
@@ -98,7 +98,16 @@ describe("AccessPeopleTab", () => {
     expect(alert).toHaveTextContent("Could not load the sign-in requirements.");
     expect(screen.queryByText("Two-factor is not required for everyone at sign-in.")).not.toBeInTheDocument();
     expect(screen.queryByText("Two-factor is required for everyone at sign-in.")).not.toBeInTheDocument();
-    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
+    // An unknown policy withholds the statement, not a row action: the rows
+    // offer what any row offers and the server answers for itself.
+    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual([
+      "Change role",
+      "Rename",
+      "Disable",
+      "Reset two-factor",
+      "Log out everywhere",
+      "Delete",
+    ]);
     await user.keyboard("{Escape}");
 
     fail = false;
@@ -193,7 +202,7 @@ describe("AccessPeopleTab", () => {
     await screen.findByTestId("people-row-admin");
     expect(screen.getByTestId("sign-in-requirements-loading")).toBeInTheDocument();
     expect(screen.queryByText(/required at sign-in/)).not.toBeInTheDocument();
-    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
+    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toContain("Reset two-factor");
   });
 
   it("marks SSO-only rows as awaiting sign-in and offers no link to copy", async () => {
@@ -223,7 +232,7 @@ describe("AccessPeopleTab", () => {
     expect(menuLabels(await openRowMenu(user, "sso.person", "sso.person"))).toEqual(["Revoke invite"]);
   });
 
-  it("gates row actions: self, invited and the migrated admin row", async () => {
+  it("gates row actions: self and invited rows only", async () => {
     const user = userEvent.setup();
     renderTab();
 
@@ -233,6 +242,7 @@ describe("AccessPeopleTab", () => {
 
     expect(menuLabels(await openRowMenu(user, "ops", "Sarah Kim"))).toEqual([
       "Change role",
+      "Rename",
       "Disable",
       "Log out everywhere",
       "Delete",
@@ -242,19 +252,137 @@ describe("AccessPeopleTab", () => {
     expect(menuLabels(await openRowMenu(user, "lee", "lee"))).toEqual(["Copy new link", "Revoke invite"]);
     await user.keyboard("{Escape}");
 
-    // Signed in as the operator: the migrated `admin` row keeps role, status and existence.
+    // Signed in as the operator: the account the install bootstrapped is an
+    // ordinary row now -- same menu as anyone else, minus nothing.
     signInAsTeamAdmin({ user: createSessionUser({ id: "user_ops", username: "ops" }) });
-    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Reset two-factor", "Log out everywhere"]);
+    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual([
+      "Change role",
+      "Rename",
+      "Disable",
+      "Reset two-factor",
+      "Log out everywhere",
+      "Delete",
+    ]);
   });
 
-  it("hides Reset two-factor on the migrated admin row while TOTP is required at sign-in", async () => {
+  it("keeps the migrated admin row's menu whole while TOTP is required at sign-in", async () => {
     const user = userEvent.setup();
     server.use(http.get("/api/settings", () => HttpResponse.json(createDashboardSettings({ totpRequiredOnLogin: true }))));
     signInAsTeamAdmin({ user: createSessionUser({ id: "user_ops", username: "ops" }) });
     renderTab();
 
     await screen.findByText("Two-factor is required for everyone at sign-in.");
-    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual(["Log out everywhere"]);
+    expect(menuLabels(await openRowMenu(user, "admin", "admin"))).toEqual([
+      "Change role",
+      "Rename",
+      "Disable",
+      "Reset two-factor",
+      "Log out everywhere",
+      "Delete",
+    ]);
+  });
+
+  it("renames an account from the row menu and surfaces a taken name inline", async () => {
+    const user = userEvent.setup();
+    const patched: unknown[] = [];
+    server.events.on("request:start", ({ request }) => {
+      if (request.method === "PATCH") patched.push(request.url);
+    });
+    renderTab();
+
+    // A name another row already holds comes back from the server, not from a
+    // list the client keeps: the row is untouched.
+    await user.click(within(await openRowMenu(user, "ops", "Sarah Kim")).getByRole("menuitem", { name: "Rename" }));
+    let dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    const field = within(dialog).getByLabelText("New username");
+    expect(field).toHaveValue("ops");
+    await user.clear(field);
+    await user.type(field, "lee");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("That username is already taken.");
+    expect(within(screen.getByTestId("people-row-ops")).getByText("ops")).toBeInTheDocument();
+
+    await user.click(within(await openRowMenu(user, "ops", "Sarah Kim")).getByRole("menuitem", { name: "Rename" }));
+    dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    await user.clear(within(dialog).getByLabelText("New username"));
+    await user.type(within(dialog).getByLabelText("New username"), "sarah.kim");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+
+    expect(await screen.findByTestId("people-row-sarah.kim")).toBeInTheDocument();
+    expect(patched).toHaveLength(2);
+  });
+
+  it("renames the account the install bootstrapped like any other", async () => {
+    const user = userEvent.setup();
+    const patched: unknown[] = [];
+    server.use(
+      http.patch("/api/dashboard-users/user_admin", async ({ request }) => {
+        patched.push(await request.json());
+        return HttpResponse.json(createDashboardUser({ username: "rosa" }));
+      }),
+    );
+    signInAsTeamAdmin({ user: createSessionUser({ id: "user_ops", username: "ops" }) });
+    renderTab();
+
+    await user.click(within(await openRowMenu(user, "admin", "admin")).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    await user.clear(within(dialog).getByLabelText("New username"));
+    await user.type(within(dialog).getByLabelText("New username"), "Rosa");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+
+    // Normalised the way the invite dialog normalises a name it offers.
+    await waitFor(() => expect(patched).toEqual([{ username: "rosa" }]));
+  });
+
+  it("never lets another account take the name the bootstrap account was renamed away from", async () => {
+    const user = userEvent.setup();
+    signInAsTeamAdmin({ user: createSessionUser({ id: "user_ops", username: "ops" }) });
+    renderTab();
+
+    // The reservation is one-way: the bootstrap account may leave `admin`...
+    await user.click(within(await openRowMenu(user, "admin", "admin")).getByRole("menuitem", { name: "Rename" }));
+    let dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    await user.clear(within(dialog).getByLabelText("New username"));
+    await user.type(within(dialog).getByLabelText("New username"), "rosa");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+    expect(await screen.findByTestId("people-row-rosa")).toBeInTheDocument();
+
+    // ...and nobody, not even that same account, may take the freed name back,
+    // so the name the recovery runbooks use can never mean somebody else. A
+    // mock that only looked for a duplicate would accept this, because no row
+    // holds `admin` any more.
+    await user.click(within(await openRowMenu(user, "rosa", "rosa")).getByRole("menuitem", { name: "Rename" }));
+    dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    await user.clear(within(dialog).getByLabelText("New username"));
+    await user.type(within(dialog).getByLabelText("New username"), "admin");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "'admin' is reserved for the local break-glass account",
+    );
+    expect(await screen.findByTestId("people-row-rosa")).toBeInTheDocument();
+    expect(screen.queryByTestId("people-row-admin")).not.toBeInTheDocument();
+  });
+
+  it("refuses a malformed name before the round-trip", async () => {
+    const user = userEvent.setup();
+    const patched: string[] = [];
+    server.events.on("request:start", ({ request }) => {
+      if (request.method === "PATCH") patched.push(request.url);
+    });
+    renderTab();
+
+    await user.click(within(await openRowMenu(user, "ops", "Sarah Kim")).getByRole("menuitem", { name: "Rename" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rename account" });
+    await user.clear(within(dialog).getByLabelText("New username"));
+    await user.type(within(dialog).getByLabelText("New username"), "sarah kim!");
+    await user.click(within(dialog).getByRole("button", { name: "Save name" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Use letters, digits, dots, dashes or underscores.",
+    );
+    expect(patched).toEqual([]);
   });
 
   it("signs the self row out everywhere through the store, not the admin endpoint", async () => {
@@ -276,7 +404,7 @@ describe("AccessPeopleTab", () => {
   it.each([
     ["last_admin_protected", "At least one active admin must remain."],
     ["insufficient_delegation", "You can only grant or act on roles within your own permissions."],
-    ["compat_user_locked", "The migrated admin account cannot be changed in this release."],
+    ["username_taken", "That username is already taken."],
     [
       "last_break_glass_protected",
       "This is the only emergency account that can still get in while password sign-in is restricted. Set up another one first.",
@@ -416,7 +544,7 @@ describe("AccessPeopleTab", () => {
     renderTab();
 
     const menu = await openRowMenu(user, "paused", "paused");
-    expect(menuLabels(menu)).toEqual(["Change role", "Enable", "Log out everywhere", "Delete"]);
+    expect(menuLabels(menu)).toEqual(["Change role", "Rename", "Enable", "Log out everywhere", "Delete"]);
     await user.click(within(menu).getByRole("menuitem", { name: "Enable" }));
 
     await waitFor(() => expect(patched).toEqual([{ status: "active" }]));

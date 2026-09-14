@@ -6,7 +6,6 @@ import {
   ModelContextWindowOverrideUpsertRequestSchema,
   ModelContextWindowOverridesSchema,
   SettingsUpdateRequestSchema,
-  SubscriptionOverflowPreflightSchema,
   TelemetryConsentSchema,
   TelemetryConsentUpdateRequestSchema,
   UpstreamProxyAdminSchema,
@@ -32,13 +31,6 @@ export function updateSettings(payload: unknown) {
   return put(SETTINGS_PATH, DashboardSettingsSchema, {
     body: validated,
   });
-}
-
-export function getSubscriptionOverflowPreflight(sourceId: string) {
-  return get(
-    `${SETTINGS_PATH}/subscription-overflow/preflight?source_id=${encodeURIComponent(sourceId)}`,
-    SubscriptionOverflowPreflightSchema,
-  );
 }
 
 export function getTelemetryConsent(options: { includePreview?: boolean } = {}) {

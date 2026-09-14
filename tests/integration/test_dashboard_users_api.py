@@ -541,10 +541,12 @@ async def test_role_change_is_audited_and_ends_the_targets_sessions(async_client
         gone = await bob.get("/api/dashboard-auth/me")
         assert gone.status_code == 401
 
-    # The compat admin keeps its role and status this release; its profile stays editable.
+    # The migrated admin is an ordinary account: its own role and status are
+    # refused because it is the *caller's*, not because of any compatibility
+    # lock, and its profile stays editable.
     for body in ({"roleId": VIEWER_ROLE}, {"status": "disabled"}):
-        locked = await async_client.patch(f"{USERS}/{admin_id}", json=body)
-        assert locked.status_code == 409 and _error(locked) == "compat_user_locked"
+        refused_self = await async_client.patch(f"{USERS}/{admin_id}", json=body)
+        assert refused_self.status_code == 409 and _error(refused_self) == "self_modification_forbidden"
     self_profile = await async_client.patch(f"{USERS}/{admin_id}", json={"displayName": "Me"})
     assert self_profile.status_code == 200 and self_profile.json()["displayName"] == "Me"
 
@@ -585,7 +587,7 @@ async def _count_active_admins() -> int:
 async def _two_admins(
     admin_client: AsyncClient, app_instance, stack: AsyncExitStack
 ) -> tuple[AsyncClient, str, AsyncClient, str]:
-    """Two non-compat admins signed in; callers park the compat admin as disabled (release N cannot via the API)."""
+    """Two further admins signed in; callers then park the migrated admin as disabled."""
 
     a = await _create(admin_client, "alice", role_id=ADMIN_ROLE)
     b = await _create(admin_client, "bruce", role_id=ADMIN_ROLE)
@@ -607,9 +609,10 @@ async def test_last_active_admin_is_protected(async_client: AsyncClient, app_ins
         alice, alice_id, bruce, bruce_id = await _two_admins(async_client, app_instance, stack)
         root_client = await stack.enter_async_context(_client(app_instance))
         await _accept(root_client, root["invite"]["token"])
-        locked = await root_client.delete(f"{USERS}/{admin_id}")
-        assert locked.status_code == 409 and _error(locked) == "compat_user_locked"
-        await _set_status(admin_id, "disabled")
+        # The migrated admin is disabled through the API like anyone else,
+        # under the same rules (two other active admins exist).
+        disabled_compat = await root_client.patch(f"{USERS}/{admin_id}", json={"status": "disabled"})
+        assert disabled_compat.status_code == 200, disabled_compat.text
         assert (await async_client.get("/api/dashboard-auth/me")).status_code == 401
 
         # Two active admins: alice may be disabled by bruce...
@@ -629,7 +632,10 @@ async def test_last_active_admin_is_protected(async_client: AsyncClient, app_ins
         deleted = await root_client.delete(f"{USERS}/{bruce_id}")
         assert deleted.status_code == 204
         assert (await bruce.get("/api/dashboard-auth/me")).status_code == 401
-    assert len(await _rows("user_disabled")) == 1 and len(await _rows("user_enabled")) == 1
+    # Two disables: the migrated admin (now an ordinary account, disabled
+    # through the API) and alice, who was then re-enabled.
+    assert {row.target_id for row in await _rows("user_disabled")} == {admin_id, alice_id}
+    assert [row.target_id for row in await _rows("user_enabled")] == [alice_id]
     (deleted_row,) = await _rows("user_deleted")
     assert deleted_row.actor_username == "root" and deleted_row.target_id == bruce_id
 
@@ -641,7 +647,7 @@ async def test_concurrent_admin_mutations_keep_exactly_one_admin(async_client: A
     admin_id = await _setup_admin(async_client)
     async with AsyncExitStack() as stack:
         alice, alice_id, bruce, bruce_id = await _two_admins(async_client, app_instance, stack)
-        await _set_status(admin_id, "disabled")
+        assert (await alice.patch(f"{USERS}/{admin_id}", json={"status": "disabled"})).status_code == 200
         first, second = await asyncio.gather(
             alice.patch(f"{USERS}/{bruce_id}", json={"status": "disabled"}),
             bruce.patch(f"{USERS}/{alice_id}", json={"status": "disabled"}),
@@ -851,15 +857,38 @@ async def _totp_policy(enabled: bool) -> None:
     await get_dashboard_users_cache().invalidate()
 
 
+async def _both_totp_requirements(enabled: bool) -> None:
+    async with SessionLocal() as session:
+        row = (await session.execute(select(DashboardSettings))).scalar_one()
+        row.totp_required_on_login = enabled
+        row.totp_required_for_admin_role = enabled
+        await session.commit()
+    await get_settings_cache().invalidate()
+    await get_dashboard_users_cache().invalidate()
+
+
+async def _disable_own_totp(client: AsyncClient) -> None:
+    """Enrol, turn the requirement on, verify, then drop the secret through ``/totp/disable``."""
+
+    secret = await _enrol_totp(client)
+    await _totp_policy(True)
+    verified = await client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
+    assert verified.status_code == 200, verified.text
+    # One step ahead of the code just spent on /totp/verify: still inside the
+    # verification window, and not a replay of a consumed step.
+    code = pyotp.TOTP(secret).at(datetime.now(UTC) + timedelta(seconds=30))
+    disabled = await client.post("/api/dashboard-auth/totp/disable", json={"code": code})
+    assert disabled.status_code == 200, disabled.text
+    await get_settings_cache().invalidate()
+
+
 async def _policy_flag() -> bool:
     async with SessionLocal() as session:
         return bool((await session.execute(select(DashboardSettings))).scalar_one().totp_required_on_login)
 
 
 @pytest.mark.asyncio
-async def test_reset_totp_keeps_the_install_policy_and_locks_the_compat_admin(
-    async_client: AsyncClient, app_instance
-) -> None:
+async def test_reset_totp_keeps_the_install_policy_on_every_account(async_client: AsyncClient, app_instance) -> None:
     admin_id = await _setup_admin(async_client)
     second = await _create(async_client, "admin2", role_id=ADMIN_ROLE)
     async with _client(app_instance) as admin2:
@@ -867,7 +896,7 @@ async def test_reset_totp_keeps_the_install_policy_and_locks_the_compat_admin(
         admin_secret = await _enrol_totp(async_client)
         admin2_secret = await _enrol_totp(admin2)
 
-        # Policy off: resetting the compat admin is allowed and leaves the flag off.
+        # Policy off: resetting the migrated admin is allowed and leaves the flag off.
         reset = await admin2.post(f"{USERS}/{admin_id}/reset-totp")
         assert reset.status_code == 200, reset.text
         assert await _policy_flag() is False
@@ -886,10 +915,8 @@ async def test_reset_totp_keeps_the_install_policy_and_locks_the_compat_admin(
             verified = await client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
             assert verified.status_code == 200, verified.text
 
-        # Policy on: the compat admin's TOTP cannot be reset (an N-1 replica would lock that account out).
-        locked = await admin2.post(f"{USERS}/{admin_id}/reset-totp")
-        assert locked.status_code == 409 and _error(locked) == "compat_user_locked"
-        # Resetting another admin clears only that account and keeps the install-wide policy on.
+        # Policy on: resetting another admin clears only that account and keeps
+        # the install-wide policy on.
         reset = await async_client.post(f"{USERS}/{second['user']['id']}/reset-totp")
         assert reset.status_code == 200, reset.text
         assert await _policy_flag() is True
@@ -901,6 +928,25 @@ async def test_reset_totp_keeps_the_install_policy_and_locks_the_compat_admin(
         assert login.json()["totpEnrollmentRequired"] is True
         held = await admin2.get(USERS)
         assert held.status_code == 403 and _error(held) == "totp_enrollment_required"
+
+        # And the migrated admin is not exempt: with the policy still on it is
+        # reset like anyone else and meets the same enrolment gate. Release N
+        # refused this with 409 compat_user_locked to protect a previous-release
+        # replica; there is no such replica and no such refusal.
+        admin2_secret = await _enrol_totp(admin2)
+        assert (
+            await admin2.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(admin2_secret).now()})
+        ).status_code == 200
+        reset_compat = await admin2.post(f"{USERS}/{admin_id}/reset-totp")
+        assert reset_compat.status_code == 200, reset_compat.text
+        assert await _policy_flag() is True
+        assert (await async_client.get("/api/dashboard-auth/me")).status_code == 401
+        back = await async_client.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin", "password": "password123"}
+        )
+        assert back.status_code == 200 and back.json()["totpEnrollmentRequired"] is True
+        held_compat = await async_client.get(USERS)
+        assert held_compat.status_code == 403 and _error(held_compat) == "totp_enrollment_required"
     await _totp_policy(False)
 
 
@@ -913,6 +959,50 @@ async def test_password_removal_is_refused_while_an_invite_is_pending(async_clie
     assert (await async_client.delete(f"{USERS}/{pending['user']['id']}/invite")).status_code == 204
     removed = await async_client.request("DELETE", "/api/dashboard-auth/password", json={"password": "password123"})
     assert removed.status_code == 200, removed.text
+
+
+@pytest.mark.asyncio
+async def test_password_removal_is_refused_while_a_disabled_account_exists(
+    async_client: AsyncClient, app_instance
+) -> None:
+    """A disabled account is still an account, and only an account can manage it.
+
+    Removing the last password returns the install to the passwordless
+    bootstrap state, where local requests are served as an implicit admin that
+    holds no account and therefore cannot enable, delete or act as anybody.
+    Allowing it while a disabled row survives strands that row for good: it
+    cannot sign in (``disabled_user``), nobody can re-enable it, and -- because
+    the removal also clears both install-wide TOTP requirements on the grounds
+    that this account *is* the install -- it would come back exempt from a
+    requirement the install still meant to have.
+    """
+
+    admin_id = await _setup_admin(async_client)
+    second = await _create(async_client, "bob", role_id=ADMIN_ROLE)
+    async with _client(app_instance) as bob:
+        await _accept(bob, second["invite"]["token"])
+        assert (await bob.patch(f"{USERS}/{admin_id}", json={"status": "disabled"})).status_code == 200
+
+        refused = await bob.request("DELETE", "/api/dashboard-auth/password", json={"password": PASSWORD})
+        assert refused.status_code == 409 and _error(refused) == "other_users_exist"
+
+        # The install still demands a sign-in, so the disabled row is still
+        # reachable by somebody who can manage it.
+        async with _client(app_instance) as anonymous:
+            state = await anonymous.get("/api/dashboard-auth/session")
+            assert state.json()["passwordRequired"] is True and state.json()["authenticated"] is False
+        assert (await bob.patch(f"{USERS}/{admin_id}", json={"status": "active"})).status_code == 200
+        assert (await bob.patch(f"{USERS}/{admin_id}", json={"status": "disabled"})).status_code == 200
+
+        # Deleting it is the way through, and the route says so.
+        assert (await bob.delete(f"{USERS}/{admin_id}")).status_code == 204
+        removed = await bob.request("DELETE", "/api/dashboard-auth/password", json={"password": PASSWORD})
+        assert removed.status_code == 200, removed.text
+
+    # ...and the install that is left is the passwordless one, re-bootstrappable.
+    async with _client(app_instance) as fresh:
+        again = await fresh.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+        assert again.status_code == 200, again.text
 
 
 async def _owner_and_keys_consistent(owner_id: str, key_ids: list[str]) -> None:
@@ -1156,3 +1246,174 @@ async def test_an_externally_managed_role_is_changed_only_with_force(async_clien
     assert again.status_code == 200, again.text
     assert len(await _rows("role_source_overridden")) == 1
     assert len(await _rows("user_role_changed")) == 2
+
+
+# --- rename ---
+
+
+@pytest.mark.asyncio
+async def test_the_bootstrap_account_can_be_renamed(async_client: AsyncClient, app_instance) -> None:
+    """Release N pinned the name because the legacy mirror was keyed on it; nothing is now."""
+
+    admin_id = await _setup_admin(async_client)
+    created = await _create(async_client, "bob", role_id=OPERATOR_ROLE)
+    async with _client(app_instance) as bob:
+        await _accept(bob, created["invite"]["token"])
+
+        renamed = await async_client.patch(f"{USERS}/{admin_id}", json={"username": "Alice"})
+        assert renamed.status_code == 200, renamed.text
+        # Normalised exactly as a username chosen at creation is.
+        assert renamed.json()["username"] == "alice" and renamed.json()["id"] == admin_id
+        (row,) = await _rows("user_renamed")
+        assert row.target_id == admin_id
+        assert '"from": "admin"' in (row.details or "") and '"to": "alice"' in (row.details or "")
+
+        # A rename is not a role or status change: the session survives it, and
+        # the account signs in under the new name.
+        assert (await async_client.get("/api/dashboard-auth/me")).json()["username"] == "alice"
+        stored = await _user(admin_id)
+        assert stored is not None and stored.session_generation == 0
+        await async_client.post("/api/dashboard-auth/logout", json={})
+        stale = await async_client.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin", "password": "password123"}
+        )
+        assert stale.status_code == 401
+        login = await async_client.post(
+            "/api/dashboard-auth/password/login", json={"username": "alice", "password": "password123"}
+        )
+        assert login.status_code == 200, login.text
+
+        # Taken and reserved names are refused, and nothing changes.
+        taken = await async_client.patch(f"{USERS}/{admin_id}", json={"username": "bob"})
+        assert taken.status_code == 409 and _error(taken) == "username_taken"
+        back = await async_client.patch(f"{USERS}/{admin_id}", json={"username": "admin"})
+        assert back.status_code == 422 and _error(back) == "validation_error"
+        cleared = await async_client.patch(f"{USERS}/{admin_id}", json={"username": None})
+        assert cleared.status_code == 422
+        unchanged = await _user(admin_id)
+        assert unchanged is not None and unchanged.username == "alice"
+        assert len(await _rows("user_renamed")) == 1
+
+        # Renaming somebody else works the same way, and re-using the name the
+        # bootstrap account left is still refused: the reservation is one-way.
+        other = await async_client.patch(f"{USERS}/{created['user']['id']}", json={"username": "robert"})
+        assert other.status_code == 200 and other.json()["username"] == "robert"
+        assert (await bob.get("/api/dashboard-auth/me")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_install_can_still_be_re_bootstrapped(async_client: AsyncClient) -> None:
+    """The rename trap: setup re-arms the row by its id, never by the name it happens to carry.
+
+    A lookup by ``admin`` would miss the renamed row, collide on the
+    deterministic id and answer ``409 password_already_configured`` forever.
+    """
+
+    admin_id = await _setup_admin(async_client)
+    assert (await async_client.patch(f"{USERS}/{admin_id}", json={"username": "alice"})).status_code == 200
+
+    removed = await async_client.request("DELETE", "/api/dashboard-auth/password", json={"password": "password123"})
+    assert removed.status_code == 200, removed.text
+    again = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password456"})
+    assert again.status_code == 200, again.text
+    assert again.json()["user"]["id"] == admin_id
+    assert again.json()["user"]["username"] == "alice"  # re-armed in place, not re-created as `admin`
+    async with SessionLocal() as session:
+        assert (await session.execute(text("SELECT COUNT(*) FROM dashboard_users"))).scalar_one() == 1
+    login = await async_client.post(
+        "/api/dashboard-auth/password/login", json={"username": "alice", "password": "password456"}
+    )
+    assert login.status_code == 200, login.text
+
+
+@pytest.mark.asyncio
+async def test_password_removal_clears_both_requirements_on_a_renamed_account(async_client: AsyncClient) -> None:
+    """The install-wide reset is decided by the operation, not by the account's name.
+
+    Release N keyed it on ``admin``, so on a renamed install it would silently
+    have stopped firing -- leaving sign-in mandatory with no account able to
+    present the factor it demands.
+    """
+
+    admin_id = await _setup_admin(async_client)
+    assert (await async_client.patch(f"{USERS}/{admin_id}", json={"username": "alice"})).status_code == 200
+    secret = await _enrol_totp(async_client)
+    await _both_totp_requirements(True)
+    assert (
+        await async_client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
+    ).status_code == 200
+
+    removed = await async_client.request("DELETE", "/api/dashboard-auth/password", json={"password": "password123"})
+    assert removed.status_code == 200, removed.text
+    async with SessionLocal() as session:
+        row = (await session.execute(select(DashboardSettings))).scalar_one()
+    assert row.totp_required_on_login is False and row.totp_required_for_admin_role is False
+    await get_settings_cache().invalidate()
+    # No sign-in is required, and the install is not holding a door nobody can open.
+    assert (await async_client.get("/api/settings")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_cannot_turn_off_the_install_requirement_from_totp_disable(
+    async_client: AsyncClient, app_instance
+) -> None:
+    """``/totp/disable`` carries no ``security:write``; on a team it may not move an install-wide setting."""
+
+    await _setup_admin(async_client)
+    second = await _create(async_client, "admin2", role_id=ADMIN_ROLE)
+    async with _client(app_instance) as admin2:
+        await _accept(admin2, second["invite"]["token"])
+        admin_secret = await _enrol_totp(async_client)
+        admin2_secret = await _enrol_totp(admin2)
+        await _totp_policy(True)
+        for client, secret in ((async_client, admin_secret), (admin2, admin2_secret)):
+            verified = await client.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).now()})
+            assert verified.status_code == 200, verified.text
+
+        # One step ahead of the code just spent on /totp/verify: still inside
+        # the verification window, and not a replay of a consumed step.
+        next_step_code = pyotp.TOTP(admin2_secret).at(datetime.now(UTC) + timedelta(seconds=30))
+        disabled = await admin2.post("/api/dashboard-auth/totp/disable", json={"code": next_step_code})
+        assert disabled.status_code == 200, disabled.text
+        async with SessionLocal() as session:
+            row = (await session.execute(select(DashboardSettings))).scalar_one()
+        assert row.totp_required_on_login is True
+        await get_settings_cache().invalidate()
+        # ...and that account meets the gate it left standing.
+        assert (await admin2.get("/api/dashboard-auth/me")).status_code in (200, 403)
+        await admin2.post("/api/dashboard-auth/logout", json={})
+        login = await admin2.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin2", "password": PASSWORD}
+        )
+        assert login.status_code == 200 and login.json()["totpEnrollmentRequired"] is True
+    await _totp_policy(False)
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_colleague_still_counts_as_a_second_account_for_totp_disable(
+    async_client: AsyncClient, app_instance
+) -> None:
+    """An install is every account it holds, not the ones that happen to be active today.
+
+    A disabled account keeps its role and can be enabled again by anybody with
+    ``users:manage``, so turning the install-wide requirement off because it was
+    not counted is the self-service route deciding somebody else's sign-in.
+    """
+
+    admin_id = await _setup_admin(async_client)
+    second = await _create(async_client, "admin2", role_id=ADMIN_ROLE)
+    async with _client(app_instance) as admin2:
+        await _accept(admin2, second["invite"]["token"])
+        assert (await admin2.patch(f"{USERS}/{admin_id}", json={"status": "disabled"})).status_code == 200
+
+        # One active account, one disabled one: the requirement stays on.
+        await _disable_own_totp(admin2)
+        assert await _policy_flag() is True
+        await _totp_policy(False)
+
+        # The disabled account is deleted; now the acting account really is the
+        # install, and the same route turns the requirement off.
+        assert (await admin2.delete(f"{USERS}/{admin_id}")).status_code == 204
+        await _disable_own_totp(admin2)
+        assert await _policy_flag() is False
+    await _totp_policy(False)

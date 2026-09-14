@@ -34,11 +34,28 @@ export const ORGANISATION_REFUSED_HASH = "#organisation-refused";
 /** The login-policy card's own anchor: the id is on the card's `<section>`. */
 export const ORGANISATION_LOGIN_POLICY_ID = "organisation-login-policy";
 export const ORGANISATION_LOGIN_POLICY_HASH = `#${ORGANISATION_LOGIN_POLICY_ID}`;
+/**
+ * The company sign-in card's anchor. The id and the query flag are not this
+ * module's choice: the OIDC callback already redirects a completed pre-flight
+ * to `OIDC_SETTINGS_PATH` (`app/modules/dashboard_auth/oidc_api.py`), so the
+ * frontend has to answer to that URL or the return lands on a collapsed group.
+ */
+export const ORGANISATION_OIDC_ID = "oidc";
+export const ORGANISATION_OIDC_HASH = `#${ORGANISATION_OIDC_ID}`;
+const ORGANISATION_QUERY_FLAG = "org";
+export const ORGANISATION_SETTINGS_RETURN_URL = `/settings?${ORGANISATION_QUERY_FLAG}=1${ORGANISATION_OIDC_HASH}`;
 
-export function shouldExpandOrganisationSettings(hash: string): boolean {
-  return (
-    hash === ORGANISATION_HASH ||
-    hash === ORGANISATION_REFUSED_HASH ||
-    hash === ORGANISATION_LOGIN_POLICY_HASH
-  );
+const ORGANISATION_HASHES = new Set([
+  ORGANISATION_HASH,
+  ORGANISATION_REFUSED_HASH,
+  ORGANISATION_LOGIN_POLICY_HASH,
+  ORGANISATION_OIDC_HASH,
+]);
+
+export function shouldExpandOrganisationSettings(search: string, hash: string): boolean {
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  if (new URLSearchParams(query).get(ORGANISATION_QUERY_FLAG) === "1") {
+    return true;
+  }
+  return ORGANISATION_HASHES.has(hash);
 }

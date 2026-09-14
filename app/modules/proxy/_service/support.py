@@ -1127,6 +1127,8 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Verified prefix boundary before direct-WebSocket anchor injection.
+    fresh_upstream_request_stored_input_count: int | None = None
     # Memo for the account installation-id stamp applied to ``request_text`` /
     # ``fresh_upstream_request_text`` on the HTTP bridge submit path. The stamp
     # is re-applied at several submit and retry sites; these fields remember the

@@ -1441,27 +1441,37 @@ def test_backend_responses_websocket_session_ended_auth_failure_fails_over_befor
     assert permanent_failures == [("acct_ws_expired", "account_session_expired")]
 
 
+@pytest.mark.parametrize(
+    ("event_type", "error_code"),
+    [("response.failed", "invalid_api_key"), ("response.failed", "token_revoked"), ("error", "token_revoked")],
+)
+@pytest.mark.parametrize("created_first", [False, True], ids=["terminal-id", "accepted-id"])
 def test_backend_responses_websocket_id_bearing_auth_failure_is_forwarded_without_replay(
     app_instance,
     monkeypatch,
+    event_type,
+    error_code,
+    created_first,
 ):
-    failure = {
-        "type": "response.failed",
-        "response": {
-            "id": "resp_ws_id_bearing_auth_failure",
-            "status": "failed",
-            "error": {
-                "type": "authentication_error",
-                "code": "invalid_api_key",
-                "message": "Authentication token expired",
-            },
-        },
-    }
+    error = {"code": error_code, "message": "Authentication token expired"}
+    if error_code == "invalid_api_key":
+        error["type"] = "authentication_error"
+    response_id = "resp_ws_id_bearing_auth_failure"
+    failure = (
+        {"type": event_type, "response": {"id": response_id, "status": "failed", "error": error}}
+        if event_type == "response.failed"
+        else {"type": event_type, "response_id": response_id, "error": error}
+    )
+    created = {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}}
+    messages = [created, failure] if created_first else [failure]
     first_upstream = _SequencedUpstreamWebSocket(
         [],
-        deferred_message_batches=[[_FakeUpstreamMessage("text", text=json.dumps(failure, separators=(",", ":")))]],
+        deferred_message_batches=[
+            [_FakeUpstreamMessage("text", text=json.dumps(event, separators=(",", ":"))) for event in messages]
+        ],
     )
     connect_accounts: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -1509,10 +1519,15 @@ def test_backend_responses_websocket_id_bearing_auth_failure_is_forwarded_withou
         connect_accounts.append("acct_ws_id_bearing_auth_failure")
         return SimpleNamespace(id="acct_ws_id_bearing_auth_failure"), first_upstream
 
+    async def fake_mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", fake_mark_permanent_failure)
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
@@ -1526,31 +1541,40 @@ def test_backend_responses_websocket_id_bearing_auth_failure_is_forwarded_withou
                     }
                 )
             )
+            if created_first:
+                assert json.loads(websocket.receive_text()) == created
             forwarded = json.loads(websocket.receive_text())
 
     assert forwarded == failure
     assert connect_accounts == ["acct_ws_id_bearing_auth_failure"]
+    assert len(first_upstream.sent_text) == 1
+    assert first_upstream.closed
+    expected_failures = [("acct_ws_id_bearing_auth_failure", "token_revoked")] if error_code == "token_revoked" else []
+    assert permanent_failures == expected_failures
 
 
+@pytest.mark.parametrize(
+    ("event_type", "error_code"),
+    [("error", "invalid_api_key"), ("error", "token_revoked"), ("response.failed", "token_revoked")],
+)
 def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fails_over(
     app_instance,
     monkeypatch,
+    event_type,
+    error_code,
 ):
+    error = {"code": error_code, "message": "token invalidated"}
+    if error_code == "invalid_api_key":
+        error["type"] = "authentication_error"
+    failure = (
+        {"type": event_type, "response": {"status": "failed", "error": error}}
+        if event_type == "response.failed"
+        else {"type": event_type, "error": error}
+    )
     auth_failure_batch = [
         _FakeUpstreamMessage(
             "text",
-            text=json.dumps(
-                {
-                    "type": "error",
-                    "status": 401,
-                    "error": {
-                        "type": "authentication_error",
-                        "code": "invalid_api_key",
-                        "message": "token invalidated",
-                    },
-                },
-                separators=(",", ":"),
-            ),
+            text=json.dumps(failure, separators=(",", ":")),
         )
     ]
     first_upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=[auth_failure_batch])
@@ -1584,6 +1608,8 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
     )
     connect_accounts: list[str] = []
     forced_refresh_markers: list[str | None] = []
+    replay_request_states: list[object] = []
+    selection_exclusions: list[set[str]] = []
     permanent_failures: list[tuple[str, str]] = []
 
     class _FakeSettingsCache:
@@ -1629,7 +1655,9 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
             websocket,
         )
         forced_refresh_markers.append(getattr(request_state, "force_refresh_account_id", None))
+        replay_request_states.append(request_state)
         excluded = getattr(request_state, "excluded_account_ids", set())
+        selection_exclusions.append(set(excluded))
         if "acct_ws_auth" in excluded:
             connect_accounts.append("acct_ws_auth_recovered")
             return SimpleNamespace(id="acct_ws_auth_recovered"), recovered_upstream
@@ -1667,8 +1695,13 @@ def test_backend_responses_websocket_generic_auth_failure_refreshes_once_then_fa
     assert completed["type"] == "response.completed"
     assert completed["response"]["id"] == "resp_ws_auth_recovered"
     assert connect_accounts == ["acct_ws_auth", "acct_ws_auth", "acct_ws_auth_recovered"]
-    assert forced_refresh_markers[1] == "acct_ws_auth"
+    assert forced_refresh_markers == [None, "acct_ws_auth", None]
+    assert selection_exclusions == [set(), set(), {"acct_ws_auth"}]
+    assert all(state is replay_request_states[0] for state in replay_request_states)
     assert permanent_failures == [("acct_ws_auth", "account_auth_invalidated")]
+    assert len(first_upstream.sent_text) == len(refreshed_upstream.sent_text) == len(recovered_upstream.sent_text) == 1
+    assert first_upstream.sent_text == refreshed_upstream.sent_text == recovered_upstream.sent_text
+    assert first_upstream.closed and refreshed_upstream.closed and recovered_upstream.closed
 
 
 def test_backend_responses_websocket_generic_auth_refresh_budget_is_per_account(

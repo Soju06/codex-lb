@@ -273,6 +273,19 @@ The Codex-base and `/v1` image generation and edit routes MUST require a valid p
 - **WHEN** an Images request omits the required-capability carrier
 - **THEN** the route retains its existing authentication, validation, account-routing, observability, and response behavior
 
+### Requirement: Revoked-token Images errors retain authentication status
+
+Non-streaming image generation and edit routes, including their Codex-base aliases, MUST return HTTP 401 when an upstream terminal `response.failed` or `error` event carries `code = token_revoked` after permitted failover is exhausted. The status MUST NOT depend on an upstream authentication error type being present. The OpenAI error envelope MUST preserve the upstream error code and message.
+
+#### Scenario: Revoked-token terminal event omits its error type
+
+- **WHEN** a non-streaming image generation or edit request reaches an exhausted
+  upstream stream with `response.failed` or `error`, `code = token_revoked`, and
+  no error type
+- **THEN** the canonical and Codex-base routes return HTTP 401
+- **AND** the JSON error envelope preserves `token_revoked` and the upstream
+  message even when the collector defaults the error type to `server_error`
+
 ### Requirement: Internal host selection
 Images generation and edit routes MUST select the first candidate with nonempty registry plan visibility and no suppression, ordered as `gpt-5.6-luna`, `gpt-5.5`. If none qualifies, they MUST use `gpt-5.6-luna`. Public image model IDs MUST remain unchanged.
 

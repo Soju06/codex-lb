@@ -821,7 +821,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
-
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -881,7 +880,9 @@ _WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES = frozenset(
         "server_is_overloaded",
     }
 )
-_WEBSOCKET_AUTH_FAILURE_CODES = frozenset({"invalid_api_key", "invalid_authentication", "token_invalidated"})
+_WEBSOCKET_AUTH_FAILURE_CODES = frozenset(
+    {"invalid_api_key", "invalid_authentication", "token_invalidated", "token_revoked"}
+)
 _WEBSOCKET_REAUTH_REQUIRED_MESSAGE_MARKERS = (
     "session has ended",
     "session expired",

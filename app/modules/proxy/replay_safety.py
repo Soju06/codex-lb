@@ -130,12 +130,23 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 # ratchet is full.
 RELOCATION_TRANSCRIPT_MAX_TURNS = 128
 RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
-# How the owner account recorded an item rather than what was said in it, and
-# the wire admits a restatement carrying neither, so neither may decide whether
-# one input restates another.
-_RESTATED_ITEM_BOOKKEEPING_FIELDS = frozenset({_ANNOTATIONS_FIELD, "status"})
-# Cannot collide with a comparison key: every key is JSON text.
-_OVERLAP_SENTINEL = "\x00"
+# Turns and bytes bound neither of the things every per-item cost here scales
+# with: the smallest legal item repeated until the byte budget is spent is six
+# figures of them inside a chain of one turn. Wide enough for a 128-turn thread
+# whose every stored request restated the whole conversation, which is what the
+# turn cap and a full-resend client produce together.
+RELOCATION_TRANSCRIPT_MAX_ITEMS = 32768
+# Compares equal to nothing, itself included, because identity is the only thing
+# ever asked of it. A sentinel that is merely an unlikely key is an argument
+# about what keys look like, and the prefix function below is wrong rather than
+# imprecise if that argument ever stops holding.
+_OVERLAP_SENTINEL = object()
+_RELOCATION_TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
+# Which field carries a call's arguments depends on the tool: a function call
+# spells them ``arguments``, a custom tool ``input``, an apply-patch call one of
+# ``operation``, ``patch`` or ``input``. All four are read together so the
+# identity does not depend on knowing which.
+_TOOL_CALL_ARGUMENT_FIELDS = ("arguments", "input", "operation", "patch")
 
 _RESPONSE_CREATE_EVENT_TYPE = "response.create"
 _ATTEMPT_START_EVENT_TYPE = "response.created"
@@ -1100,6 +1111,7 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     current_payload: Mapping[str, JsonValue],
     max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+    max_items: int = RELOCATION_TRANSCRIPT_MAX_ITEMS,
 ) -> RelocatedReplayBody | None:
     """Rebuild an anchor-free request body from a durable parent-response chain.
 
@@ -1142,8 +1154,9 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     if len(chain) > max_turns or (chain and not (isinstance(current_input, list) and current_input)):
         return None
 
-    rebuilt = _RelocationAccumulation(items=[], keys=[])
+    rebuilt: list[_RelocatedItem] = []
     remaining_bytes = max_bytes
+    remaining_items = max_items
     expected_parent_response_id: str | None = None
     linked_response_ids: set[str] = set()
     for turn in chain:
@@ -1176,6 +1189,13 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         terminal_output = _terminal_response_output_items(events)
         if turn_input is None or terminal_output is None:
             return None
+        # Decremented across the whole walk like the byte bound, and checked
+        # before anything is done per item: parsing a turn is bounded by the
+        # bytes it holds, but canonicalizing, projecting and joining are not, and
+        # one legal turn can carry the whole transcript's items on its own.
+        remaining_items -= len(turn_input) + len(terminal_output)
+        if remaining_items < 0:
+            return None
         # The spool holds these turns as the owner account produced them, item
         # ids and reasoning included, and none of that resolves anywhere else.
         # Emptiness only becomes real here: a turn whose whole answer is
@@ -1189,8 +1209,7 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
         # The join belongs to stored requests. An answer is what its turn
         # produced, so one that reads like the accumulated tail is a coincidence,
         # and shortening on it deletes a turn the conversation already holds.
-        rebuilt.items.extend(replayable_answer)
-        rebuilt.keys.extend(_relocation_comparison_key(item) for item in replayable_answer)
+        rebuilt.extend((item, _relocation_comparison_key(item)) for item in replayable_answer)
     if expected_parent_response_id != anchor:
         return None
 
@@ -1198,12 +1217,18 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     replay_payload.pop("previous_response_id", None)
     carries_durable_items = False
     if isinstance(current_input, list):
+        # The client's own items cost the same per-item work the chain's do, so
+        # the bound covers them too -- refusing to relocate keeps today's
+        # behaviour, while exempting them leaves the work this bound exists for
+        # unbounded on the one input nobody rebuilt.
+        if len(current_input) > remaining_items:
+            return None
         # Verbatim. Projection here would be the proxy editing a turn the user
         # just wrote: it drops reasoning and settled search bookkeeping
         # outright, and an item it drops is a message that never reaches the
         # replacement account while the verdict still reports the turn as moved.
         carries_durable_items = _join_relocated_input(rebuilt, cast(list[JsonValue], current_input)) > 0
-        replay_payload["input"] = cast(JsonValue, rebuilt.items)
+        replay_payload["input"] = cast(JsonValue, [item for item, _ in rebuilt])
     dispatched_input = replay_payload.get("input")
     # A body with nothing to send is not a turn another account can serve, and
     # calling it movable spends a relocation attempt -- on the ambiguous lane the
@@ -1217,21 +1242,20 @@ def project_durable_transcript_for_account_neutral_fresh_replay(
     return RelocatedReplayBody(payload=replay_payload, carries_durable_items=carries_durable_items)
 
 
-@dataclass(slots=True)
-class _RelocationAccumulation:
-    """The conversation rebuilt so far, beside the key each of its items is compared on.
+_RelocatedItem = tuple[JsonValue, object]
+"""One item as the rebuild will dispatch it, paired with the key it is compared on.
 
-    The keys travel with the items so each is canonicalized once: the caps bound
-    turns and bytes, not items, so a chain legal under both can carry six figures
-    of them, and re-deriving a key per comparison would put minutes of blocking
-    work inside a failover path that exists to be faster than losing the thread.
-    """
+Paired rather than kept in a second list so the keys cannot fall out of step
+with the items they describe. The join truncates the accumulation, and two lists
+truncated separately are one edit away from dropping an item while keeping its
+key, which silently shifts every later comparison onto the wrong item. Pairing
+also canonicalizes each item exactly once: re-deriving a key per comparison
+would put the transcript's whole item count of serialization work into every
+step of a search that exists to be quicker than losing the conversation.
+"""
 
-    items: list[JsonValue]
-    keys: list[str]
 
-
-def _join_relocated_input(accumulated: _RelocationAccumulation, input_items: list[JsonValue]) -> int:
+def _join_relocated_input(accumulated: list[_RelocatedItem], input_items: list[JsonValue]) -> int:
     """Fold one input into the conversation rebuilt so far; return what survived of the chain.
 
     The chain is this proxy's own reconstruction of turns the client is not
@@ -1252,46 +1276,92 @@ def _join_relocated_input(accumulated: _RelocationAccumulation, input_items: lis
     normalizing a body are different acts, and only the first is this one's.
     """
 
-    incoming_keys = [_relocation_comparison_key(item) for item in input_items]
-    overlap = _tail_overlap_length(accumulated.keys, incoming_keys)
-    del accumulated.items[len(accumulated.items) - overlap :]
-    del accumulated.keys[len(accumulated.keys) - overlap :]
-    retained = len(accumulated.items)
-    accumulated.items.extend(input_items)
-    accumulated.keys.extend(incoming_keys)
+    incoming = [(item, _relocation_comparison_key(item)) for item in input_items]
+    overlap = _tail_overlap_length(accumulated, incoming)
+    del accumulated[len(accumulated) - overlap :]
+    retained = len(accumulated)
+    accumulated.extend(incoming)
     return retained
 
 
-def _relocation_comparison_key(item: JsonValue) -> str:
-    """The form both sides of a join are compared on -- never the form dispatched.
+def _relocation_comparison_key(item: JsonValue) -> object:
+    """What identifies this item, enumerated positively -- never the form dispatched.
 
-    The chain's items have been through the account-neutral projection and the
-    client's have not, so comparing them as they stand makes the overlap turn on
-    how the owner account recorded an item rather than on what was said in it: an
-    assistant message restated without its ``status``, which the wire allows,
-    reads as a different item and doubles the whole conversation. Erring towards
-    forgiving is deliberate: only the chain's copies are ever discarded, so a key
-    that matches too readily costs at most a chain item the client's own copy
-    stands in for, while one that matches too rarely costs the conversation
-    twice over.
+    A message is its role and what was said in it; a tool call is which call it
+    is and what it was asked; a tool output is which call it answers and what it
+    answered. Nothing else is read, so how an item was recorded cannot decide
+    whether one input restates another -- the owner's item id, the ``status`` it
+    was spooled under, the ``phase`` it was tagged with, the ``annotations`` on
+    every part the Responses API produces and the turn metadata a client echoes
+    back are all absent from the key without being named in it.
+
+    Subtracting those instead would have to know every field the wire may carry
+    that a recording may drop, which is not a closed set: a field nobody listed
+    reads as a difference, and one difference collapses the overlap and
+    dispatches the whole conversation twice. What a turn *is* is closed, so
+    enumerating that leaves a field nobody thought of ignored by default.
+
+    An item type this does not identify gets a key equal to nothing, itself
+    included, so no overlap is claimed across it and the rebuild fails closed
+    rather than guessing; the strict predicate admits no such item anyway.
     """
 
-    projected = _project_account_neutral_replay_item(item, preserve_developer_message_ids=False)
-    return json.dumps(_without_restated_bookkeeping(projected), sort_keys=True, separators=(",", ":"), default=repr)
+    if not isinstance(item, Mapping):
+        return object()
+    item_type = item.get("type")
+    if item_type is None or item_type == "message":
+        return ("message", item.get("role"), _relocation_content_identity(item.get("content")))
+    if not isinstance(item_type, str):
+        return object()
+    if item_type in _ACCOUNT_NEUTRAL_CONTENT_FIELDS:
+        return ("part", _relocation_content_part_identity(item))
+    if item_type == "additional_tools":
+        return (item_type, item.get("role"), _relocation_identity_text(item.get("tools")))
+    if item_type in _TOOL_CALL_TYPES:
+        arguments = [item.get(field) for field in _TOOL_CALL_ARGUMENT_FIELDS]
+        return (item_type, item.get("call_id"), item.get("name"), _relocation_identity_text(arguments))
+    if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE:
+        return (item_type, item.get("call_id"), _relocation_identity_text(item.get("output")))
+    return object()
 
 
-def _without_restated_bookkeeping(value: JsonValue) -> JsonValue:
-    if isinstance(value, Mapping):
-        return {
-            name: _without_restated_bookkeeping(nested)
-            for name, nested in value.items()
-            if name not in _RESTATED_ITEM_BOOKKEEPING_FIELDS
-        }
-    return [_without_restated_bookkeeping(entry) for entry in value] if isinstance(value, list) else value
+def _relocation_content_identity(content: JsonValue | None) -> object:
+    # The wire spells a single stretch of text either as the string itself or as
+    # one part holding it, and a chain turn whose stored input was a scalar is
+    # rebuilt into the second spelling, so both have to name the same content.
+    if isinstance(content, str):
+        return (("text", content),)
+    if not isinstance(content, list):
+        return object()
+    return tuple(_relocation_content_part_identity(part) for part in content)
 
 
-def _tail_overlap_length(accumulated_keys: Sequence[str], incoming_keys: Sequence[str]) -> int:
-    """The longest tail of ``accumulated_keys`` that ``incoming_keys`` restates from its start.
+def _relocation_content_part_identity(part: JsonValue) -> object:
+    if not isinstance(part, Mapping):
+        return object()
+    part_type = part.get("type")
+    if part_type in _RELOCATION_TEXT_PART_TYPES:
+        # Which of the three spellings a part uses is a function of where it sits
+        # rather than of what it says, and the role that decides it is already in
+        # the message's own identity.
+        return ("text", part.get("text"))
+    if part_type == "refusal":
+        return ("refusal", part.get("refusal"))
+    if part_type == "input_image":
+        return ("input_image", part.get("file_id"), part.get("image_url"))
+    if part_type == "input_file":
+        return ("input_file", part.get("file_data"), part.get("file_id"), part.get("file_url"))
+    return object()
+
+
+def _relocation_identity_text(value: JsonValue | None) -> str:
+    """One comparable form for a slot whose whole value is part of what it identifies."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=repr)
+
+
+def _tail_overlap_length(accumulated: Sequence[_RelocatedItem], incoming: Sequence[_RelocatedItem]) -> int:
+    """The longest tail of ``accumulated`` that ``incoming`` restates from its start.
 
     Anchored at both ends deliberately. A match anywhere else is a coincidence
     -- a client whose new message happens to repeat something said earlier -- and
@@ -1308,8 +1378,12 @@ def _tail_overlap_length(accumulated_keys: Sequence[str], incoming_keys: Sequenc
     items.
     """
 
-    window = min(len(accumulated_keys), len(incoming_keys))
-    scanned = [*incoming_keys[:window], _OVERLAP_SENTINEL, *accumulated_keys[len(accumulated_keys) - window :]]
+    window = min(len(accumulated), len(incoming))
+    scanned: list[object] = [
+        *(key for _, key in incoming[:window]),
+        _OVERLAP_SENTINEL,
+        *(key for _, key in accumulated[len(accumulated) - window :]),
+    ]
     borders = [0] * len(scanned)
     border = 0
     for index in range(1, len(scanned)):

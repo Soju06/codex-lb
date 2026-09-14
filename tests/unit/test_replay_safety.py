@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import pathlib
 from collections.abc import Sequence
@@ -17,6 +19,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     RELOCATION_TRANSCRIPT_MAX_BYTES,
+    RELOCATION_TRANSCRIPT_MAX_ITEMS,
     RELOCATION_TRANSCRIPT_MAX_TURNS,
     RelocatedReplayBody,
     _relocation_comparison_key,
@@ -2845,6 +2848,7 @@ def _rebuild_result(
     anchor_response_id: str | None = None,
     max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+    max_items: int = RELOCATION_TRANSCRIPT_MAX_ITEMS,
     **extra: JsonValue,
 ) -> RelocatedReplayBody | None:
     anchor = _newest_response_id(transcript) if anchor_response_id is None else anchor_response_id
@@ -2854,6 +2858,7 @@ def _rebuild_result(
         current_payload=_current_payload(current_input, anchor, **extra),
         max_turns=max_turns,
         max_bytes=max_bytes,
+        max_items=max_items,
     )
 
 
@@ -2864,6 +2869,7 @@ def _rebuild(
     anchor_response_id: str | None = None,
     max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
     max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+    max_items: int = RELOCATION_TRANSCRIPT_MAX_ITEMS,
     **extra: JsonValue,
 ) -> dict[str, JsonValue] | None:
     rebuilt = _rebuild_result(
@@ -2872,6 +2878,7 @@ def _rebuild(
         anchor_response_id=anchor_response_id,
         max_turns=max_turns,
         max_bytes=max_bytes,
+        max_items=max_items,
         **extra,
     )
     return None if rebuilt is None else rebuilt.payload
@@ -3247,6 +3254,37 @@ def test_durable_rebuild_expands_a_stored_scalar_turn_input() -> None:
     assert rebuilt["input"] == [_user_item("first"), _replayed_assistant_item("answer"), _user_item("second")]
 
 
+def test_a_scalar_message_restates_the_turn_the_chain_holds_as_one_text_part() -> None:
+    # The wire spells one stretch of text either as the string itself or as a
+    # single part carrying it. The chain holds that turn in the second spelling,
+    # because a stored scalar has to become an item to sit behind others; a
+    # client restating it in the first is restating the same turn, and reading
+    # the two as different material dispatches the whole thread twice.
+    transcript = (
+        _TranscriptTurn(
+            operation=_TranscriptOperation(request_text=_request_frame({"model": "gpt-5.4", "input": "first"})),
+            events=(
+                _sse_block(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_1", "output": [_assistant_item("answer", item_id="msg_1")]},
+                    }
+                ),
+            ),
+        ),
+    )
+    client_turn: list[JsonValue] = [
+        {"role": "user", "content": "first"},
+        _restated_assistant_item("answer"),
+        _wire_user_item("second"),
+    ]
+
+    rebuilt = _rebuild(transcript, client_turn)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == client_turn
+
+
 @pytest.mark.parametrize(
     "client_turn",
     [
@@ -3430,15 +3468,67 @@ _JOIN_TABLE: list[tuple[str, tuple[object, ...], list[JsonValue], list[JsonValue
 ]
 
 
+def _rule_part_identity(part: JsonValue) -> object:
+    if not isinstance(part, dict):
+        return object()
+    kind = part.get("type")
+    if kind in {"input_text", "output_text", "text"}:
+        return "wrote", part.get("text")
+    if kind == "refusal":
+        return "refused", part.get("refusal")
+    if kind in {"input_file", "input_image"}:
+        return "attached", kind, part.get("file_data"), part.get("file_id"), part.get("file_url"), part.get("image_url")
+    return object()
+
+
+def _rule_content_identity(content: JsonValue | None) -> object:
+    if isinstance(content, str):
+        return (("wrote", content),)
+    if not isinstance(content, list):
+        return object()
+    return tuple(_rule_part_identity(part) for part in content)
+
+
+def _rule_identity(item: JsonValue) -> object:
+    """What the requirement says identifies an item, read off its words and nothing else.
+
+    "A message's role and content, a tool call's identity and arguments, a tool
+    output's call and result" -- plus the tool bundle, which is identified by
+    what it declares. Written out here rather than borrowed from the module: a
+    checker that shares the implementation's helpers checks the fast path against
+    itself, and a defect in a shared helper passes both. So nothing the module
+    builds its own key from is used below.
+    """
+
+    if not isinstance(item, dict):
+        return object()
+    kind = item.get("type")
+    if kind is None or kind == "message":
+        return "said", item.get("role"), _rule_content_identity(item.get("content"))
+    if not isinstance(kind, str):
+        return object()
+    if kind in {"input_file", "input_image", "input_text", "output_text", "refusal", "text"}:
+        return "alone", _rule_part_identity(item)
+    if kind == "additional_tools":
+        return "declared", item.get("role"), json.dumps(item.get("tools"), sort_keys=True)
+    if kind.endswith("_call_output"):
+        return "answered", kind, item.get("call_id"), json.dumps(item.get("output"), sort_keys=True)
+    if kind.endswith("_call"):
+        arguments = [item.get(name) for name in ("arguments", "input", "operation", "patch")]
+        return "asked", kind, item.get("call_id"), item.get("name"), json.dumps(arguments, sort_keys=True)
+    return object()
+
+
 def _restated_tail_length(accumulated: Sequence[JsonValue], client_input: Sequence[JsonValue]) -> int:
     """The rule stated as a search: the longest tail of the chain the client restates.
 
-    Deliberately the slow reading of the requirement, so the fast one in the
-    module is checked against the rule rather than against itself.
+    Deliberately the slow reading of the requirement, and deliberately built on
+    its own identity, so the fast one in the module is checked against the rule
+    rather than against itself.
     """
 
-    chain_keys = [_relocation_comparison_key(item) for item in accumulated]
-    client_keys = [_relocation_comparison_key(item) for item in client_input]
+    chain_keys = [_rule_identity(item) for item in accumulated]
+    client_keys = [_rule_identity(item) for item in client_input]
     return next(
         (
             length
@@ -3457,11 +3547,333 @@ def test_the_overlap_is_the_longest_restated_tail_not_the_shortest() -> None:
     accumulated: list[JsonValue] = [_wire_user_item("a"), _replayed_assistant_item("b"), _wire_user_item("a")]
     incoming: list[JsonValue] = [*accumulated, _wire_user_item("c")]
 
-    assert _tail_overlap_length(*_keys_of(accumulated, incoming)) == 3
+    assert _tail_overlap_length(*_paired(accumulated, incoming)) == 3
 
 
-def _keys_of(*item_lists: Sequence[JsonValue]) -> list[list[str]]:
-    return [[_relocation_comparison_key(item) for item in items] for items in item_lists]
+def _paired(*item_lists: Sequence[JsonValue]) -> list[list[tuple[JsonValue, object]]]:
+    return [[(item, _relocation_comparison_key(item)) for item in items] for items in item_lists]
+
+
+_SAMPLE_ITEM_BY_TYPE: dict[str, dict[str, JsonValue]] = {
+    "additional_tools": {
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "function", "name": "lookup"}],
+    },
+    "apply_patch_call": {"type": "apply_patch_call", "call_id": "call_p", "patch": "*** Begin Patch"},
+    "apply_patch_call_output": {"type": "apply_patch_call_output", "call_id": "call_p", "output": "done"},
+    "custom_tool_call": {"type": "custom_tool_call", "call_id": "call_c", "name": "shell", "input": "ls"},
+    "custom_tool_call_output": {"type": "custom_tool_call_output", "call_id": "call_c", "output": "ok"},
+    "function_call": {"type": "function_call", "call_id": "call_f", "name": "lookup", "arguments": "{}"},
+    "function_call_output": {"type": "function_call_output", "call_id": "call_f", "output": "ok"},
+    "input_file": {"type": "input_file", "file_url": "https://example.test/a.txt", "filename": "a.txt"},
+    "input_image": {"type": "input_image", "image_url": "https://example.test/a.png", "detail": "low"},
+    "input_text": {"type": "input_text", "text": "go"},
+    "message": _user_item("go"),
+}
+_IDENTITY_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
+    "message": frozenset({"content", "role", "type"}),
+    "function_call": frozenset({"arguments", "call_id", "input", "name", "operation", "patch", "type"}),
+    "function_call_output": frozenset({"call_id", "output", "type"}),
+}
+_WIRE_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
+    "message": replay_safety_module._ACCOUNT_NEUTRAL_MESSAGE_FIELDS,
+    "function_call": replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["function_call"],
+    "function_call_output": replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS["function_call_output"],
+}
+_LEGAL_FIELD_VALUES: dict[str, JsonValue] = {
+    "caller": {"type": "direct"},
+    "id": "msg_owner",
+    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+    "phase": "final_answer",
+    "status": "completed",
+}
+# Taken from the strict predicate's own field lists rather than hand-written, so
+# a field admitted there later arrives here without a value and fails until
+# somebody decides whether it identifies an item.
+_UNENUMERATED_LEGAL_FIELDS: list[tuple[str, str]] = sorted(
+    (kind, field) for kind, fields in _WIRE_FIELDS_BY_KIND.items() for field in fields - _IDENTITY_FIELDS_BY_KIND[kind]
+)
+
+
+def test_the_key_identifies_every_item_type_a_dispatched_body_may_carry() -> None:
+    # An item type the key does not enumerate gets a key equal to nothing, itself
+    # included, so no overlap is ever claimed across it and a client restating a
+    # turn containing one has its whole conversation dispatched twice. The strict
+    # predicate's own list of admitted types is the closed set this has to cover.
+    assert set(_SAMPLE_ITEM_BY_TYPE) == replay_safety_module._ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES
+    for item_type, item in sorted(_SAMPLE_ITEM_BY_TYPE.items()):
+        assert _relocation_comparison_key(dict(item)) == _relocation_comparison_key(dict(item)), item_type
+
+
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    _UNENUMERATED_LEGAL_FIELDS,
+    ids=[f"{kind}.{field}" for kind, field in _UNENUMERATED_LEGAL_FIELDS],
+)
+def test_no_legal_field_outside_the_identity_set_changes_an_items_key(kind: str, field: str) -> None:
+    # Every field the wire admits on a restatable item and the key does not
+    # enumerate, one per row. Two rounds built this key by subtracting a
+    # hand-listed set instead, and each was defeated by a field nobody had listed
+    # -- first ``status``, then ``phase``. The list cannot be finished, so the
+    # key reads what identifies an item and a field nobody thought of is ignored.
+    item = _SAMPLE_ITEM_BY_TYPE[kind]
+
+    assert _relocation_comparison_key({**item, field: _LEGAL_FIELD_VALUES[field]}) == _relocation_comparison_key(
+        dict(item)
+    )
+
+
+_DISTINCT_ITEM_PAIRS: list[tuple[str, JsonValue, JsonValue]] = [
+    ("same words, different speaker", _wire_user_item("same"), _restated_assistant_item("same")),
+    ("different words", _wire_user_item("one"), _wire_user_item("other")),
+    (
+        "same call, different arguments",
+        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": '{"q":1}'},
+        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": '{"q":2}'},
+    ),
+    (
+        "same call id, different tool",
+        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call", "call_id": "c", "name": "search", "arguments": "{}"},
+    ),
+    (
+        "different call, same arguments",
+        {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call", "call_id": "d", "name": "lookup", "arguments": "{}"},
+    ),
+    (
+        "same call answered differently",
+        {"type": "function_call_output", "call_id": "c", "output": "yes"},
+        {"type": "function_call_output", "call_id": "c", "output": "no"},
+    ),
+    (
+        "different bundles of tools",
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "lookup"}]},
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "search"}]},
+    ),
+    (
+        "different images",
+        {"type": "input_image", "image_url": "https://example.test/one.png"},
+        {"type": "input_image", "image_url": "https://example.test/other.png"},
+    ),
+    (
+        "different files",
+        {"type": "input_file", "file_url": "https://example.test/one.txt"},
+        {"type": "input_file", "file_url": "https://example.test/other.txt"},
+    ),
+    (
+        "an answer and the refusal of it",
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "no"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "no"}]},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [row[1:] for row in _DISTINCT_ITEM_PAIRS],
+    ids=[row[0] for row in _DISTINCT_ITEM_PAIRS],
+)
+def test_items_saying_different_things_do_not_share_a_key(left: JsonValue, right: JsonValue) -> None:
+    # The other half of a positive key: a field that does identify an item has to
+    # be in it. An identity missing one of these makes two different items read
+    # as a restatement of each other, and the chain's copy is then discarded for
+    # a client item that does not stand in for it.
+    assert _relocation_comparison_key(left) != _relocation_comparison_key(right)
+
+
+def test_no_items_key_equals_the_marker_that_separates_the_two_halves() -> None:
+    # The search reads the longest border of "the client's input, a marker, the
+    # chain's tail", and a marker some item's key can equal is a border allowed
+    # to straddle the two halves -- a restatement claimed where none was made.
+    # The degenerate shapes below are what a marker spelled as a value would
+    # most plausibly collide with.
+    degenerate: list[JsonValue] = [{}, {"content": []}, {"role": None, "content": []}, {"content": 7}, "not an item"]
+
+    for item in [*_SAMPLE_ITEM_BY_TYPE.values(), *degenerate]:
+        assert _relocation_comparison_key(item) != replay_safety_module._OVERLAP_SENTINEL
+
+
+def _strings_in(value: object) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return _strings_in(list(value)) | _strings_in(list(value.values()))
+    if isinstance(value, (frozenset, set, tuple, list)):
+        return {name for entry in value for name in _strings_in(entry)}
+    return set()
+
+
+def _key_builder_field_names() -> set[str]:
+    """Every field or type name the key builder can read, literal or via a constant it names.
+
+    Its prose names the fields it promises to ignore, so a grep over the source as
+    written matches the explanation rather than the code; and a name read out of a
+    module-level set is as much a field the key reads as one spelled inline.
+    """
+
+    parsed = ast.parse(pathlib.Path(inspect.getfile(replay_safety_module)).read_text(encoding="utf-8"))
+    wanted = {
+        "_relocation_comparison_key",
+        "_relocation_content_identity",
+        "_relocation_content_part_identity",
+        "_relocation_identity_text",
+    }
+    built = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    assert {node.name for node in built} == wanted
+    names: set[str] = set()
+    for node in built:
+        node.body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                names.add(child.value)
+            elif isinstance(child, ast.Name):
+                names |= _strings_in(getattr(replay_safety_module, child.id, None))
+    return names
+
+
+def test_the_key_builder_names_no_field_outside_the_identity_set() -> None:
+    # The behavioural rows above pass for a subtractive key too, as long as its
+    # list happens to be complete today. This is the structural half: the code
+    # that builds a key cannot name a bookkeeping field at all, so there is no
+    # list left to be incomplete.
+    names = _key_builder_field_names()
+
+    assert {"role", "content", "call_id", "name", "output", "tools"} <= names
+    assert not names & {field for _, field in _UNENUMERATED_LEGAL_FIELDS}
+
+
+_RESTATABLE_MESSAGE_BOOKKEEPING = sorted(_WIRE_FIELDS_BY_KIND["message"] - _IDENTITY_FIELDS_BY_KIND["message"] - {"id"})
+
+
+@pytest.mark.parametrize("field", _RESTATABLE_MESSAGE_BOOKKEEPING)
+def test_an_unenumerated_legal_field_does_not_double_the_conversation(field: str) -> None:
+    # The public entry point, on the four-turn thread, with a field the wire
+    # permits on every restated answer and the key has never been told about.
+    # Reading it as a difference collapses the overlap to zero and dispatches
+    # all four exchanges twice -- on the fenced lane at the cost of the one
+    # relocation that operation will ever get.
+    restated = [
+        {**cast(dict[str, JsonValue], item), field: _LEGAL_FIELD_VALUES[field]}
+        if cast(dict[str, JsonValue], item).get("role") == "assistant"
+        else item
+        for item in _RESTATED_THREAD
+    ]
+    client_input: list[JsonValue] = [*restated, _wire_user_item("q5")]
+
+    rebuilt = _rebuild(_CHAIN, client_input)
+
+    assert rebuilt is not None
+    assert rebuilt["input"] == client_input
+
+
+def test_the_owner_item_id_is_the_one_wire_field_a_dispatched_body_may_not_carry() -> None:
+    # ``id`` is why the row above cannot simply run over every field the wire
+    # admits: an item carrying one fails the strict predicate wherever it sits,
+    # so a restatement that keeps the owner's ids relocates nowhere at all. The
+    # key ignoring it is pinned by the unit row instead of here.
+    restated: list[JsonValue] = [{**cast(dict[str, JsonValue], item), "id": "msg_owner"} for item in _RESTATED_THREAD]
+
+    assert _rebuild(_CHAIN, [*restated, _wire_user_item("q5")]) is None
+
+
+_OVERLAP_ALPHABET: dict[str, JsonValue] = {
+    "a": _wire_user_item("a"),
+    "b": _replayed_assistant_item("b"),
+    "c": _wire_user_item("c"),
+    "x": _wire_user_item("x"),
+}
+
+
+def _overlap_items(spelling: str) -> list[JsonValue]:
+    return [_OVERLAP_ALPHABET[letter] for letter in spelling]
+
+
+@pytest.mark.parametrize(
+    ("accumulated", "incoming", "expected"),
+    [
+        # The overlap is the whole accumulation: the client restated everything
+        # the walk holds, and every item of it repeats.
+        ("aa", "aa", 2),
+        ("aaa", "aaaa", 3),
+        # A restatement whose own prefix recurs inside it. The search meets a
+        # mismatch after a partial match and has to fall back to the next
+        # shorter border rather than starting over or giving up.
+        ("aab", "aaba", 3),
+        ("aaab", "aab", 3),
+        ("abab", "ababc", 4),
+        ("aabaa", "aabaab", 5),
+        ("abaab", "aabab", 3),
+        ("aba", "abab", 3),
+        # Partial matches that are not the answer: one item, then none.
+        ("ba", "aa", 1),
+        ("xaa", "aax", 2),
+    ],
+)
+def test_the_overlap_search_reads_a_restatement_that_repeats_inside_itself(
+    accumulated: str,
+    incoming: str,
+    expected: int,
+) -> None:
+    # Repeats are where a prefix function goes wrong while staying green on
+    # fixtures whose items all differ: the fallback loop, the separator between
+    # the two halves and the window each only matter here.
+    assert _tail_overlap_length(*_paired(_overlap_items(accumulated), _overlap_items(incoming))) == expected
+
+
+def _overlap_spellings(max_length: int) -> list[str]:
+    return [
+        "".join("ab"[(index >> position) & 1] for position in range(length))
+        for length in range(1, max_length + 1)
+        for index in range(2**length)
+    ]
+
+
+def test_the_overlap_search_agrees_with_the_rule_on_every_short_shape() -> None:
+    # Exhaustive over repeats, borders and self-repeating prefixes up to five
+    # items, each answer checked against the quadratic reading of the
+    # requirement. A plausible-looking edit to the search survives any fixture
+    # whose items happen to differ; it does not survive all of these.
+    shapes = [(spelling, _overlap_items(spelling)) for spelling in _overlap_spellings(5)]
+    keyed = {spelling: _paired(items)[0] for spelling, items in shapes}
+
+    for accumulated, accumulated_items in shapes:
+        for incoming, incoming_items in shapes:
+            assert _tail_overlap_length(keyed[accumulated], keyed[incoming]) == _restated_tail_length(
+                accumulated_items, incoming_items
+            ), f"{accumulated} / {incoming}"
+
+
+def test_a_later_fold_measures_its_overlap_against_what_the_earlier_one_left() -> None:
+    # Two truncating folds in a row. The chain's second turn restates the first,
+    # and the client then restates the second -- so the client's overlap is
+    # measured against an accumulation the previous fold already shortened. An
+    # accumulation that keeps a stale view of what it holds finds the overlap at
+    # the wrong offset and drops items the walk never restated.
+    transcript = (
+        _transcript_turn([_wire_user_item("q1")], [_assistant_item("a1", item_id="msg_1")]),
+        _transcript_turn(
+            [_wire_user_item("q1"), _replayed_assistant_item("a1"), _wire_user_item("q2")],
+            [_assistant_item("a2", item_id="msg_2")],
+            response_id="resp_2",
+            parent_response_id="resp_1",
+        ),
+    )
+    client_input: list[JsonValue] = [*_restated_exchange(2), _wire_user_item("q3")]
+    accumulated: list[JsonValue] = [
+        _wire_user_item("q1"),
+        _replayed_assistant_item("a1"),
+        _wire_user_item("q2"),
+        _replayed_assistant_item("a2"),
+    ]
+
+    rebuilt = _rebuild(transcript, client_input)
+
+    assert rebuilt is not None
+    dispatched = cast(list[JsonValue], rebuilt["input"])
+    assert dispatched == [*accumulated[:2], *client_input]
+    _assert_join_invariants(dispatched, accumulated=accumulated, client_input=client_input)
 
 
 def _assert_join_invariants(
@@ -4141,6 +4553,18 @@ _POPULATED_ANNOTATIONS: list[dict[str, JsonValue]] = [
 ]
 
 
+@pytest.mark.parametrize("annotations", [[], *[[annotation] for annotation in _POPULATED_ANNOTATIONS]])
+def test_the_annotations_on_a_recorded_answer_do_not_change_its_key(annotations: list[JsonValue]) -> None:
+    # The chain's copy of an answer has ``annotations`` removed so the dispatched
+    # body can pass the strict predicate, which does not admit the field on a
+    # content part at all; the client's copy is joined as written. Neither side's
+    # key reads it, so the two name the same answer whichever of them carries it
+    # -- the stripping decides what may be dispatched, not what restates what.
+    assert _relocation_comparison_key(_assistant_item("answer", annotations=annotations)) == (
+        _relocation_comparison_key(_replayed_assistant_item("answer"))
+    )
+
+
 @pytest.mark.parametrize("annotation", _POPULATED_ANNOTATIONS)
 def test_durable_rebuild_refuses_a_populated_annotation_list(annotation: dict[str, JsonValue]) -> None:
     transcript = (
@@ -4439,6 +4863,7 @@ def test_the_relocation_transcript_caps_are_the_values_the_change_states() -> No
     # ever assert themselves and could be widened without a failing test.
     assert RELOCATION_TRANSCRIPT_MAX_TURNS == 128
     assert RELOCATION_TRANSCRIPT_MAX_BYTES == 8 * 1024 * 1024
+    assert RELOCATION_TRANSCRIPT_MAX_ITEMS == 32768
 
 
 def test_durable_rebuild_accepts_a_chain_at_the_turn_cap() -> None:
@@ -4516,6 +4941,64 @@ def test_durable_rebuild_refuses_material_one_byte_past_the_cap() -> None:
     turn_bytes = len(turn.operation.request_text or "") + sum(len(event) for event in turn.events)
 
     assert _rebuild(transcript, [_user_item("next")], max_bytes=turn_bytes - 1) is None
+
+
+def _chain_of_item_heavy_turns(turn_count: int, *, items_per_turn: int) -> tuple[object, ...]:
+    """A chain whose turns each carry many items while staying inside every cap on their own."""
+
+    return tuple(
+        _transcript_turn(
+            [_user_item(f"q{index}-{position}") for position in range(items_per_turn)],
+            [_assistant_item(f"answer {index}", item_id=f"msg_{index}")],
+            response_id=f"resp_{index}",
+            parent_response_id=None if index == 0 else f"resp_{index - 1}",
+        )
+        for index in range(turn_count)
+    )
+
+
+def test_the_item_bound_is_measured_across_the_whole_transcript() -> None:
+    # Three turns of 12,000 items. Each one is comfortably inside the 32,768
+    # bound and the whole transcript is inside the byte bound, because a legal
+    # item is about fifty bytes; together they pass the item bound. A bound
+    # re-read per turn admits all three, and at the turn cap the same reading
+    # admits a million and a half items -- which is what canonicalization, the
+    # strict predicate and the join each scale with.
+    transcript = _chain_of_item_heavy_turns(3, items_per_turn=12_000)
+    for turn in transcript:
+        stored = cast(_TranscriptTurn, turn)
+        turn_items = len(cast(Any, json.loads(stored.operation.request_text or "{}"))["input"]) + 1
+
+        assert turn_items < RELOCATION_TRANSCRIPT_MAX_ITEMS
+
+    assert _rebuild(transcript, [_user_item("next")]) is None
+
+
+def test_durable_rebuild_admits_a_transcript_inside_an_explicit_item_cap() -> None:
+    # Two stored questions, one answer, one client message: four items exactly.
+    transcript = _chain_of_item_heavy_turns(1, items_per_turn=2)
+
+    assert _rebuild(transcript, [_user_item("next")], max_items=4) is not None
+
+
+@pytest.mark.parametrize("max_items", [3, 2])
+def test_durable_rebuild_refuses_a_transcript_past_an_explicit_item_cap(max_items: int) -> None:
+    # Three at the client's own items, two inside the chain walk: the same
+    # budget, spent in the two places items arrive from.
+    transcript = _chain_of_item_heavy_turns(1, items_per_turn=2)
+
+    assert _rebuild(transcript, [_user_item("next")], max_items=max_items) is None
+
+
+def test_the_clients_own_items_count_against_the_item_bound() -> None:
+    # The client's input costs the same canonicalization, join and strict-predicate
+    # work the chain's does, and it is the one input nobody rebuilt -- so a bound
+    # that exempts it leaves the work it exists to bound unbounded.
+    transcript = _chain_of_item_heavy_turns(1, items_per_turn=2)
+    client_input = [_user_item("next"), _user_item("and one more")]
+
+    assert _rebuild(transcript, client_input, max_items=5) is not None
+    assert _rebuild(transcript, client_input, max_items=4) is None
 
 
 def _utf8_turn(prompt: str, answer: str) -> _TranscriptTurn:
@@ -4639,8 +5122,8 @@ def test_a_turns_answer_is_appended_whole_even_when_it_opens_on_the_accumulated_
     ]
 
 
-class _CountedKeys(Sequence[str]):
-    """A key sequence that records how many elements the search asked it for.
+class _CountedItems(Sequence[tuple[JsonValue, object]]):
+    """An item sequence that records how many elements the search asked it for.
 
     Reads are the honest measure of this search's cost. Comparisons are not: the
     nested scan this replaced failed at the first element of nearly every
@@ -4649,19 +5132,19 @@ class _CountedKeys(Sequence[str]):
     differently on every machine.
     """
 
-    def __init__(self, keys: list[str]) -> None:
-        self._keys = keys
+    def __init__(self, entries: list[tuple[JsonValue, object]]) -> None:
+        self._entries = entries
         self.reads = 0
 
     def __len__(self) -> int:
-        return len(self._keys)
+        return len(self._entries)
 
     def __getitem__(self, index: Any) -> Any:
         if isinstance(index, slice):
-            self.reads += len(range(*index.indices(len(self._keys))))
+            self.reads += len(range(*index.indices(len(self._entries))))
         else:
             self.reads += 1
-        return self._keys[index]
+        return self._entries[index]
 
 
 def _overlap_search_reads(item_count: int) -> int:
@@ -4671,8 +5154,13 @@ def _overlap_search_reads(item_count: int) -> int:
     matches, so no candidate length can end it early.
     """
 
-    accumulated = _CountedKeys([_relocation_comparison_key(_user_item(f"q{index}")) for index in range(item_count)])
-    incoming = _CountedKeys([_relocation_comparison_key(_user_item(f"other {index}")) for index in range(item_count)])
+    accumulated, incoming = (
+        _CountedItems(entries)
+        for entries in _paired(
+            [_user_item(f"q{index}") for index in range(item_count)],
+            [_user_item(f"other {index}") for index in range(item_count)],
+        )
+    )
 
     assert _tail_overlap_length(accumulated, incoming) == 0
     return accumulated.reads + incoming.reads
@@ -4693,6 +5181,24 @@ def test_the_overlap_search_is_linear_in_the_number_of_items() -> None:
     # each side is read a bounded number of times, not once per candidate.
     assert large_reads <= 6 * small_reads
     assert large_reads <= 4 * 2 * 2000
+
+
+def test_one_fold_reads_only_as_much_of_the_accumulation_as_could_overlap() -> None:
+    # Every fold is handed the whole conversation so far and a turn that can
+    # restate at most its own length of it, so a fold that scans the whole
+    # accumulation is linear per fold and quadratic over the walk. That is the
+    # same cost the nested scan had, reached from the other direction, and no cap
+    # bounds it: the caps count turns and bytes, and this counts items.
+    accumulated, incoming = (
+        _CountedItems(entries)
+        for entries in _paired(
+            [_user_item(f"q{index}") for index in range(2000)],
+            [_user_item("one new message")],
+        )
+    )
+
+    assert _tail_overlap_length(accumulated, incoming) == 0
+    assert accumulated.reads <= 4 * len(incoming)
 
 
 def test_the_join_canonicalizes_each_item_once_rather_than_once_per_comparison(

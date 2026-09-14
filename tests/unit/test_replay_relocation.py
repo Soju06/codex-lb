@@ -947,15 +947,20 @@ def _owner_answer(text: str, response_id: str) -> dict[str, JsonValue]:
     }
 
 
-def _restated_answer(text: str, *, status: str | None) -> dict[str, JsonValue]:
-    """The same answer as a client sends it back, with or without the status it was recorded under."""
+def _restated_answer(text: str, bookkeeping: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """The same answer as a client sends it back, under whichever recording fields it kept.
 
-    item: dict[str, JsonValue] = {
+    ``status``, ``phase`` and the turn metadata are all optional on the wire and
+    all say how the owner account recorded the answer rather than what it said,
+    so every spelling below names the same exchange.
+    """
+
+    return {
         "type": "message",
         "role": "assistant",
         "content": [{"type": "output_text", "text": text}],
+        **bookkeeping,
     }
-    return item if status is None else {**item, "status": status}
 
 
 _WIRE_CHAIN = tuple(
@@ -978,38 +983,49 @@ _WIRE_CHAIN = tuple(
 )
 
 
-def _wire_full_resend(*statuses: str | None) -> list[JsonValue]:
-    """The whole four-turn thread restated, each answer carrying the status named for it."""
+def _wire_full_resend(*bookkeeping: dict[str, JsonValue]) -> list[JsonValue]:
+    """The whole four-turn thread restated, each answer carrying the recording fields named for it."""
 
     resend: list[JsonValue] = []
-    for index, status in enumerate(statuses, start=1):
-        resend.extend((_wire_user(f"q{index}"), _restated_answer(f"a{index}", status=status)))
+    for index, fields in enumerate(bookkeeping, start=1):
+        resend.extend((_wire_user(f"q{index}"), _restated_answer(f"a{index}", fields)))
     resend.append(_wire_user("q5"))
     return resend
 
 
+_RECORDED: dict[str, JsonValue] = {"status": "completed"}
+_FINAL: dict[str, JsonValue] = {"phase": "final_answer"}
+_TURN_METADATA: dict[str, JsonValue] = {"internal_chat_message_metadata_passthrough": {"turn_id": "turn-restated"}}
+
+
 @pytest.mark.parametrize("transport", _TRANSPORTS)
 @pytest.mark.parametrize(
-    "statuses",
+    "bookkeeping",
     [
-        # The recorded spelling, then the two the wire also allows. All three
-        # name the same four exchanges.
-        ("completed", "completed", "completed", "completed"),
-        (None, None, None, None),
-        ("completed", "completed", "completed", None),
+        # The spelling the spool records, then the bare one the wire also allows.
+        (_RECORDED,) * 4,
+        ({},) * 4,
+        (_RECORDED, _RECORDED, _RECORDED, {}),
+        # ``phase`` rides on the assistant message a Codex client actually
+        # resends -- it is on this file's own production full-resend fixture.
+        (_FINAL,) * 4,
+        ({**_RECORDED, **_FINAL},) * 4,
+        (_TURN_METADATA,) * 4,
+        ({}, _FINAL, {**_RECORDED, "phase": "commentary"}, {**_TURN_METADATA, **_FINAL}),
     ],
 )
 def test_a_legal_field_difference_does_not_double_the_conversation(
     transport: RelocationTransport,
-    statuses: tuple[str | None, ...],
+    bookkeeping: tuple[dict[str, JsonValue], ...],
 ) -> None:
-    # ``status`` is how the owner account recorded the answer, not part of it,
-    # and a client restating a turn need not echo it. Comparing the chain's
-    # projected items against the client's verbatim ones makes a restatement
-    # that omits it read as new material, so the chain is kept as well and every
-    # turn is dispatched twice -- on the fenced lane, at the cost of the one
-    # relocation that operation will ever get.
-    resend = _wire_full_resend(*statuses)
+    # Every one of these fields says how the owner account recorded the answer
+    # rather than what it said, and a client restating a turn need not echo any
+    # of them. A comparison that reads one as content makes the restatement look
+    # like new material, so the chain is kept as well and every turn is
+    # dispatched twice -- on the fenced lane, at the cost of the one relocation
+    # that operation will ever get. Two rounds each lost to a different one of
+    # them, which is why the key names none of them.
+    resend = _wire_full_resend(*bookkeeping)
 
     verdict = decide_relocation(
         RelocationInputs(

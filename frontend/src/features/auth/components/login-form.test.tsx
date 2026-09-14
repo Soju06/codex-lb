@@ -158,9 +158,20 @@ describe("LoginForm", () => {
       expect(screen.getByText("Enter your username and password to continue.")).toBeInTheDocument();
     });
 
-    it("does not treat the default admin username as a reason to show the field", () => {
+    // The account the install bootstrapped can be renamed, so no particular
+    // name may mean "this is the default": a remembered name reveals the field
+    // whatever it says, and the store forgets it after a sign-in that comes
+    // back `hidden` (see use-auth) so the install converges on its own.
+    it("reveals the field for any remembered name, the bootstrap default included", () => {
       window.localStorage.setItem(LAST_USERNAME_STORAGE_KEY, "admin");
 
+      render(<LoginForm />);
+
+      expect(screen.getByLabelText("Username")).toHaveValue("admin");
+      expect(screen.getByText("Enter your username and password to continue.")).toBeInTheDocument();
+    });
+
+    it("is password-only again once nothing is remembered", () => {
       render(<LoginForm />);
 
       expect(screen.queryByLabelText("Username")).not.toBeInTheDocument();
@@ -216,6 +227,163 @@ describe("LoginForm", () => {
       await user.click(screen.getByRole("button", { name: "Sign In" }));
 
       expect(login).toHaveBeenCalledWith("secret-pass");
+    });
+  });
+  describe("login policy", () => {
+    const PROXY = { kind: "trusted_header", providerKey: "default", label: "Reverse proxy", loginUrl: null };
+    const SSO = { kind: "oidc", providerKey: "okta", label: "Okta", loginUrl: "https://sso.example.com/start" };
+
+    it("renders the form as usual when nothing is restricted", () => {
+      render(<LoginForm localForm="shown" />);
+
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      expect(screen.queryByText("Sign in with a password instead")).not.toBeInTheDocument();
+    });
+
+    it("collapses the form behind a link under admins_only and reveals it in place", async () => {
+      const user = userEvent.setup();
+      render(<LoginForm localForm="collapsed" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Sign in with a password instead" }));
+
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+    });
+
+    it("renders no field and no reveal link under break_glass_only, only the providers", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", providers: [PROXY], localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+      expect(screen.getByTestId("login-providers")).toHaveTextContent("Reverse proxy");
+    });
+
+    it("says the door is shut rather than rendering an empty card", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.getByText("Signing in with a password is restricted on this install.")).toBeInTheDocument();
+    });
+
+    it("puts the company sign-in first and never names an account", () => {
+      window.localStorage.setItem(LAST_USERNAME_STORAGE_KEY, "rescue");
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({
+          usernameField: "shown",
+          providers: [
+            { kind: "password", providerKey: "default", label: "Password", loginUrl: null },
+            SSO,
+          ],
+          localLogin: "admins_only",
+        }),
+      });
+      const { container } = render(<LoginForm localForm="collapsed" />);
+
+      const providers = screen.getByTestId("login-providers");
+      const link = screen.getByRole("link", { name: "Continue with Okta" });
+      expect(link).toHaveAttribute("href", "https://sso.example.com/start");
+      // The provider block is drawn before the local password disclosure.
+      expect(providers.compareDocumentPosition(screen.getByRole("button", { name: "Sign in with a password instead" })))
+        .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      // The local password provider is not offered twice.
+      expect(providers).not.toHaveTextContent("Password");
+      // The only name on screen is the one this browser remembered.
+      expect(container.textContent).not.toContain("admin");
+    });
+
+    it("tells the person where the reverse proxy sends them instead of drawing a dead button", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "shown", providers: [PROXY], localLogin: "admins_only" }),
+      });
+      render(<LoginForm localForm="collapsed" />);
+
+      expect(screen.getByTestId("login-providers")).toHaveTextContent(
+        "Sign in through Reverse proxy first, then open this dashboard again.",
+      );
+      expect(screen.queryByRole("link", { name: /Reverse proxy/ })).not.toBeInTheDocument();
+    });
+
+    it("shows the company sign-in under every policy, and the local form only as the policy allows", () => {
+      const providers = [
+        { kind: "password", providerKey: "default", label: "Password", loginUrl: null },
+        SSO,
+      ];
+      const hint = (localLogin: "enabled" | "admins_only" | "break_glass_only") =>
+        LoginHintSchema.parse({ usernameField: "hidden", providers, localLogin });
+
+      // `enabled`: the button first, the form as every install has always had it.
+      useAuthStore.setState({ loginHint: hint("enabled") });
+      const open = render(<LoginForm localForm="shown" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Password")).toBeInTheDocument();
+      open.unmount();
+
+      // `admins_only`: the form is one click away, not gone.
+      useAuthStore.setState({ loginHint: hint("admins_only") });
+      const collapsed = render(<LoginForm localForm="collapsed" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in with a password instead" })).toBeInTheDocument();
+      collapsed.unmount();
+
+      // `break_glass_only` at `/`: the company control and nothing else.
+      useAuthStore.setState({ loginHint: hint("break_glass_only") });
+      const closed = render(<LoginForm localForm="hidden" />);
+      expect(screen.getByRole("link", { name: "Continue with Okta" })).toBeInTheDocument();
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Sign in with a password instead" })).not.toBeInTheDocument();
+      closed.unmount();
+
+      // The same policy at `/login?local=1`, which is what the gate resolves to
+      // `shown`: the password field is back, beneath the company control.
+      useAuthStore.setState({ loginHint: hint("break_glass_only") });
+      render(<LoginForm localForm="shown" />);
+      const block = screen.getByTestId("login-providers");
+      expect(block.compareDocumentPosition(screen.getByLabelText("Password"))).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    });
+
+    it("says a company sign-in did not finish without saying why, or who", () => {
+      useAuthStore.setState({
+        loginHint: LoginHintSchema.parse({ usernameField: "shown", providers: [SSO], localLogin: "enabled" }),
+      });
+      const { container } = render(<LoginForm localForm="shown" signInFailed />);
+
+      const notice = screen.getByText("That sign-in did not finish. Try again.");
+      // Above the way back in, so the sentence and the button read as one thing.
+      expect(notice.compareDocumentPosition(screen.getByTestId("login-providers"))).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      // The server collapses every cause into one marker; the screen must not
+      // undo that, and must not say anything about who exists.
+      expect(container.textContent).not.toMatch(/expired|nonce|state|denied|unknown|no account|not allowed/i);
+      expect(screen.queryByText(/@/)).not.toBeInTheDocument();
+    });
+
+    it("draws no notice when the URL carries no marker", () => {
+      render(<LoginForm localForm="shown" />);
+
+      expect(screen.queryByText("That sign-in did not finish. Try again.")).not.toBeInTheDocument();
+    });
+
+    it("keeps the guest block reachable while the password form is hidden", () => {
+      useAuthStore.setState({
+        guestAccessEnabled: true,
+        guestPasswordRequired: false,
+        loginHint: LoginHintSchema.parse({ usernameField: "hidden", localLogin: "break_glass_only" }),
+      });
+      render(<LoginForm localForm="hidden" />);
+
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "View as Guest" })).toBeInTheDocument();
     });
   });
 });

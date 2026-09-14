@@ -21,6 +21,7 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - [Configuration](configuration.md) — the few settings that matter
 - [Anonymous Telemetry](telemetry.md) — collected fields, consent, disabling, and retention
 - [Authentication](authentication.md) — dashboard auth modes
+- [Company Sign-In](sso.md) — local sign-in policy, the emergency account, host recovery commands
 - [Conversations](conversations.md) — dashboard view and conversation APIs
 - [API Keys](api-keys.md) — protecting proxy routes
 - [Routing](routing.md) — routing strategy guide

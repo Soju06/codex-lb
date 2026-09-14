@@ -51,13 +51,23 @@ DASHBOARD_TIMEOUT_SETTINGS: Final[tuple[str, ...]] = (
 # ``await`` in the hot path that reads them.
 DASHBOARD_SWITCH_SETTINGS: Final[tuple[str, ...]] = ("http_responses_session_bridge_codex_prewarm_enabled",)
 
+# Dashboard-managed *enumerated* values, overlaid the same way. Unlike the
+# switches these are strings, which is why ``DashboardOverrideValue`` admits
+# ``str``: the thread cache identity mode has to be overlaid here and not only
+# folded into the settings API response, or the proxy would keep serving
+# ``shared`` while ``GET /api/settings`` reported the operator's choice as the
+# effective value.
+DASHBOARD_MODE_SETTINGS: Final[tuple[str, ...]] = ("thread_cache_identity_mode",)
+
 # Every ``Settings`` field whose dashboard column overrides the environment
 # value at runtime (the account-capacity caps have their own consumer path
 # through ``SettingsService``, and the resilience toggles their own task-bound
 # ``ResilienceToggles``; neither is overlaid here).
-DASHBOARD_OVERRIDE_SETTINGS: Final[tuple[str, ...]] = DASHBOARD_TIMEOUT_SETTINGS + DASHBOARD_SWITCH_SETTINGS
+DASHBOARD_OVERRIDE_SETTINGS: Final[tuple[str, ...]] = (
+    DASHBOARD_TIMEOUT_SETTINGS + DASHBOARD_SWITCH_SETTINGS + DASHBOARD_MODE_SETTINGS
+)
 
-type DashboardOverrideValue = float | bool
+type DashboardOverrideValue = float | bool | str
 
 
 def dashboard_overrides(row: DashboardSettings) -> dict[str, DashboardOverrideValue]:

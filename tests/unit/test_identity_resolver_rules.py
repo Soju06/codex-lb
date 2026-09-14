@@ -82,7 +82,14 @@ def _row(kind: str, *, enabled: bool = True) -> DashboardAuthProvider:
         ("trusted_header", True, DashboardAuthMode.STANDARD, False),
         ("trusted_header", True, DashboardAuthMode.TRUSTED_HEADER, True),
         ("trusted_header", False, DashboardAuthMode.TRUSTED_HEADER, False),
-        ("oidc", True, DashboardAuthMode.STANDARD, False),
+        # OIDC serves both modes that have a dashboard sign-in, and never the
+        # one that has turned dashboard authentication off: an install that
+        # bypasses auth must not grow a flow that mints sessions.
+        ("oidc", True, DashboardAuthMode.STANDARD, True),
+        ("oidc", True, DashboardAuthMode.TRUSTED_HEADER, True),
+        ("oidc", True, DashboardAuthMode.DISABLED, False),
+        ("oidc", False, DashboardAuthMode.STANDARD, False),
+        # A kind with no implementation is never active.
         ("saml", True, DashboardAuthMode.STANDARD, False),
     ],
 )

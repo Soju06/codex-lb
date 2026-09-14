@@ -5,7 +5,7 @@ import { ShieldX } from "lucide-react";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import type { AuditEntry } from "@/features/organisation/api";
-import { REFUSED_WINDOW_DAYS } from "@/features/organisation/rules";
+import { maskEmail, REFUSED_WINDOW_DAYS } from "@/features/organisation/rules";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -53,7 +53,14 @@ export function RefusedSignInsSheet({ open, onOpenChange, entries, loading }: Re
               return (
                 <div key={entry.id} data-testid="refused-sign-in-row" className="rounded-lg border p-3">
                   <p className="font-mono text-xs font-medium">{subject}</p>
-                  {email ? <p className="text-xs text-muted-foreground">{email}</p> : null}
+                  {/* The masked form beside the address itself: it is the
+                      reference the refused person is shown, so an administrator
+                      they quote it to can find this entry by searching the page. */}
+                  {email ? (
+                    <p className="text-xs text-muted-foreground">
+                      {email} <span className="font-mono">({maskEmail(email)})</span>
+                    </p>
+                  ) : null}
                   <p className="text-[11px] text-muted-foreground">
                     {when.date} {when.time}
                   </p>

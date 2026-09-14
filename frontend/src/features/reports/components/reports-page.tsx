@@ -6,7 +6,11 @@ import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
 import { getRequestLogOptions } from "@/features/dashboard/api";
-import { useReports, useReportsOptions } from "@/features/reports/hooks/use-reports";
+import {
+  useReports,
+  useReportsOptions,
+  useThreadIdentity,
+} from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
@@ -19,6 +23,7 @@ import type { QueueWaitChartProps } from "./queue-wait-chart";
 import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
+import { ThreadIdentityCard } from "./thread-identity-card";
 import {
   daysAgoLocalISO,
   getBrowserReportsTimeZone,
@@ -118,6 +123,12 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   }, []);
 
   const reportsQuery = useReports(filters, reportsTimeZone);
+  // Raw-log scan: only issued while the operator keeps the card visible.
+  const threadIdentityQuery = useThreadIdentity(
+    filters,
+    reportsTimeZone,
+    visibleChartIds.includes("threadIdentity"),
+  );
   const filterCatalogQuery = useReportsOptions(filters, reportsTimeZone);
   const {
     data: accountsData,
@@ -181,6 +192,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
   const accountOptionsError = getErrorMessageOrNull(accountsError);
   const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
+  const threadIdentityError = getErrorMessageOrNull(threadIdentityQuery.error);
 
   const hasAnyError = Boolean(
     mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
@@ -197,6 +209,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       filterCatalogQuery.refetch(),
       refetchAccounts(),
       refetchApiKeys(),
+      ...(visibleChartIds.includes("threadIdentity") ? [threadIdentityQuery.refetch()] : []),
     ]);
   };
 
@@ -371,6 +384,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
                 </Suspense>
               ) : null}
             </div>
+          ) : null}
+          {visibleChartIds.includes("threadIdentity") ? (
+            threadIdentityError ? (
+              <AlertMessage variant="error">
+                {t("reports.errors.threadIdentity", { error: threadIdentityError })}
+              </AlertMessage>
+            ) : threadIdentityQuery.data ? (
+              <ThreadIdentityCard data={threadIdentityQuery.data} />
+            ) : null
           ) : null}
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="space-y-4 lg:col-span-1">

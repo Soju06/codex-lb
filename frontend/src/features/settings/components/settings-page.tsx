@@ -10,7 +10,6 @@ import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section"
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
-import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
@@ -31,6 +30,7 @@ import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
+import { CacheIsolationProbeSection } from "@/features/cache-probe/components/cache-isolation-probe-section";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
@@ -64,12 +64,14 @@ export function SettingsPage() {
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const [initialRetryError, setInitialRetryError] = useState<string | null>(null);
   const { accountsQuery } = useAccounts();
-  const { modelSourcesQuery } = useModelSources();
   const authMode = useAuthStore((state) => state.authMode);
   const canWrite = useAuthStore((state) => state.canWrite);
   // Security-bearing controls (API-key auth policy, firewall, proxy endpoints)
   // need `security:write`; an Operator sees them read-only instead of a 403.
   const canWriteSecurity = usePermission("security:write");
+  // The probe spends account quota, so it mirrors its backend `ops:write` gate
+  // rather than the coarse write alias.
+  const canWriteOps = usePermission("ops:write");
   // A fully signed-in account without `write` (a Viewer) still owns its password and two-factor.
   // Any signed-in account reaches its own password/two-factor controls: a
   // reverse-proxy account has no password session and still needs to enrol a
@@ -241,9 +243,6 @@ export function SettingsPage() {
                 settings={settings}
                 accounts={accountsQuery.data ?? []}
                 accountsLoading={accountsQuery.isLoading}
-                modelSources={modelSourcesQuery.data?.sources ?? []}
-                modelSourcesLoading={modelSourcesQuery.isLoading}
-                modelSourcesError={modelSourcesQuery.error !== null}
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
@@ -269,6 +268,8 @@ export function SettingsPage() {
               <FirewallSection disabled={controlsDisabled || !canWriteSecurity} />
               <QuotaPlannerSection disabled={controlsDisabled} />
               {canWrite ? <StickySessionsSection disabled={controlsDisabled} /> : null}
+              {/* Next to sticky sessions: both answer "which account served this, and what did it reuse?" */}
+              {canWriteOps ? <CacheIsolationProbeSection disabled={controlsDisabled} /> : null}
               <DataRetentionSettings
                 key={[
                   settings.requestLogRetentionOverrideDays,

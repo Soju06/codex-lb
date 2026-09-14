@@ -26,6 +26,7 @@ from app.db.models import DashboardUser, DashboardUserInvite
 from app.dependencies import DashboardUsersContext, get_dashboard_users_context
 from app.modules.dashboard_auth.service import role_summary
 from app.modules.dashboard_roles.service import RoleNotAssignableError
+from app.modules.dashboard_users.break_glass import BreakGlassRoleRequiredError, LastBreakGlassProtectedError
 from app.modules.dashboard_users.credentials import CredentialRequiredError
 from app.modules.dashboard_users.schemas import (
     DashboardUserCreateRequest,
@@ -39,7 +40,6 @@ from app.modules.dashboard_users.schemas import (
 )
 from app.modules.dashboard_users.service import (
     AdminAccountRequiredError,
-    CompatUserLockedError,
     EmailTakenError,
     ForceWithoutRoleChangeError,
     IdentityTakenError,
@@ -76,7 +76,8 @@ _ERROR_MAP: dict[type[Exception], tuple[type[AppError], str]] = {
     InsufficientDelegationError: (DashboardPermissionError, "insufficient_delegation"),
     SelfModificationForbiddenError: (DashboardConflictError, "self_modification_forbidden"),
     LastAdminProtectedError: (DashboardConflictError, "last_admin_protected"),
-    CompatUserLockedError: (DashboardConflictError, "compat_user_locked"),
+    LastBreakGlassProtectedError: (DashboardConflictError, "last_break_glass_protected"),
+    BreakGlassRoleRequiredError: (DashboardValidationError, "validation_error"),
     InviteNotPendingError: (DashboardConflictError, "invite_not_pending"),
     InvitePendingError: (DashboardConflictError, "invite_pending"),
     UserNotActiveError: (DashboardConflictError, "user_not_active"),

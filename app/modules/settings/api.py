@@ -9,12 +9,12 @@ from typing import Any, cast
 import aiohttp
 import httpx
 from aiohttp_socks import ProxyConnector
-from fastapi import APIRouter, Body, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Request
 from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.audit.service import AuditActor, AuditService, AuditSeverity, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
@@ -53,10 +53,9 @@ from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.core.timeout_invariants import find_timeout_invariant_violations
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
-from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
     get_account_selection_cache,
@@ -70,12 +69,12 @@ from app.modules.settings.schemas import (
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    LocalLoginPolicyLiteral,
     ModelContextWindowOverrideResponse,
     ModelContextWindowOverridesResponse,
     ModelContextWindowOverrideUpsertRequest,
     RuntimeConnectAddressResponse,
     SettingProvenance,
-    SubscriptionOverflowPreflightResponse,
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
     UpstreamProxyEndpointResponse,
@@ -84,13 +83,7 @@ from app.modules.settings.schemas import (
     UpstreamProxyPoolMemberRequest,
     UpstreamProxyPoolResponse,
 )
-from app.modules.settings.service import CompatAdminUnenrolledError, DashboardSettingsUpdateData
-from app.modules.settings.subscription_overflow import (
-    load_subscription_overflow_preflight,
-    resolve_drain_until,
-    resolve_pins_expire_by,
-    validate_overflow_source,
-)
+from app.modules.settings.service import DashboardSettingsUpdateData
 from app.modules.usage.additional_quota_keys import (
     get_additional_quota_routing_policy,
     list_additional_quota_definitions,
@@ -203,6 +196,8 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         upstream_stream_transport=settings.upstream_stream_transport,
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
+        thread_cache_identity_mode=settings.thread_cache_identity_mode,
+        thread_cache_identity_mode_override=settings.thread_cache_identity_mode_override,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
         proxy_account_response_create_limit_environment_value=(
             getattr(
@@ -257,9 +252,6 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
         single_account_id=settings.single_account_id,
-        subscription_overflow_source_id=settings.subscription_overflow_source_id,
-        subscription_overflow_drain_until=settings.subscription_overflow_drain_until,
-        subscription_overflow_pins_expire_by=resolve_pins_expire_by(settings.subscription_overflow_drain_until),
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
@@ -278,6 +270,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
         totp_required_for_admin_role=settings.totp_required_for_admin_role,
+        local_login_policy=cast(LocalLoginPolicyLiteral, settings.local_login_policy),
         users_without_totp_count=settings.users_without_totp_count,
         admins_without_totp_count=settings.admins_without_totp_count,
         api_key_auth_enabled=settings.api_key_auth_enabled,
@@ -352,25 +345,6 @@ async def get_settings(
 ) -> DashboardSettingsResponse:
     settings = await context.service.get_settings(actor_user_id=principal.user_id)
     return _dashboard_settings_response(settings, principal=principal)
-
-
-@router.get("/subscription-overflow/preflight", response_model=SubscriptionOverflowPreflightResponse)
-async def get_subscription_overflow_preflight(
-    source_id: str = Query(min_length=1, max_length=255),
-    _write_access=Depends(require_dashboard_write_access),
-    context: SettingsContext = Depends(get_settings_context),
-) -> SubscriptionOverflowPreflightResponse:
-    # Write access rather than session-only: the report enumerates the source
-    # catalog and key scoping, which a read-only guest must not see.
-    settings = await context.repository.get_or_create()
-    preflight = await load_subscription_overflow_preflight(
-        context.session,
-        source_id,
-        drain_until=settings.subscription_overflow_drain_until,
-    )
-    if preflight is None:
-        raise DashboardNotFoundError("Model source not found")
-    return preflight
 
 
 @router.get(
@@ -1080,22 +1054,6 @@ async def update_settings(
         and payload.upstream_proxy_default_pool_id is not None
     ):
         await _validate_proxy_pool_id(context, payload.upstream_proxy_default_pool_id)
-    overflow_provided = "subscription_overflow_source_id" in payload.model_fields_set
-    overflow_source_id = (
-        payload.subscription_overflow_source_id if overflow_provided else current.subscription_overflow_source_id
-    )
-    if (
-        overflow_provided
-        and overflow_source_id is not None
-        and overflow_source_id != current.subscription_overflow_source_id
-    ):
-        validate_overflow_source(await ModelSourcesRepository(context.session).get_by_id(overflow_source_id))
-    overflow_drain_until = resolve_drain_until(
-        current.subscription_overflow_source_id,
-        overflow_source_id,
-        current.subscription_overflow_drain_until,
-        utcnow(),
-    )
     # The reset-credit refresh loop is the sole driver of automatic redemption,
     # so "auto-redeem on, polling off" is a setting that can never run. The gate
     # gets the effective (dashboard-aware) values this request would leave
@@ -1200,6 +1158,8 @@ async def update_settings(
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
                 ),
+                thread_cache_identity_mode=_dashboard_value(payload, "thread_cache_identity_mode"),
+                clear_thread_cache_identity_mode=_clears_dashboard_value(payload, "thread_cache_identity_mode"),
                 proxy_account_response_create_limit=(
                     payload.proxy_account_response_create_limit
                     if "proxy_account_response_create_limit" in payload.model_fields_set
@@ -1303,12 +1263,6 @@ async def update_settings(
                     else current.relative_availability_top_k
                 ),
                 single_account_id=single_account_id,
-                subscription_overflow_source_id=overflow_source_id,
-                clear_subscription_overflow_source=overflow_provided and overflow_source_id is None,
-                subscription_overflow_drain_until=overflow_drain_until,
-                set_subscription_overflow_drain_until=(
-                    overflow_drain_until != current.subscription_overflow_drain_until
-                ),
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
@@ -1364,6 +1318,9 @@ async def update_settings(
                     payload.totp_required_for_admin_role
                     if payload.totp_required_for_admin_role is not None
                     else current.totp_required_for_admin_role
+                ),
+                local_login_policy=(
+                    payload.local_login_policy if payload.local_login_policy is not None else current.local_login_policy
                 ),
                 api_key_auth_enabled=(
                     payload.api_key_auth_enabled
@@ -1538,10 +1495,17 @@ async def update_settings(
             actor_user_id=principal.user_id,
             expected_version=current.version,
         )
+    except BreakGlassRequiresTotpError as exc:
+        # Before the generic ValueError arm: this refusal is a 409 whose body
+        # names the account that would clear it, not a malformed-input 400.
+        raise DashboardConflictError(
+            str(exc),
+            code="break_glass_requires_totp",
+            param=exc.username,
+            details={"username": exc.username},
+        ) from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
-    except CompatAdminUnenrolledError as exc:
-        raise DashboardConflictError(str(exc), code="compat_user_locked") from exc
 
     upstream_route_inputs_changed = (
         current.upstream_proxy_routing_enabled != updated.upstream_proxy_routing_enabled
@@ -1559,6 +1523,7 @@ async def update_settings(
             "upstream_stream_transport",
             "prohibit_fast_mode",
             "http_downstream_transport_policy",
+            "thread_cache_identity_mode",
             "proxy_account_response_create_limit",
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",
@@ -1575,8 +1540,6 @@ async def update_settings(
             "relative_availability_power",
             "relative_availability_top_k",
             "single_account_id",
-            "subscription_overflow_source_id",
-            "subscription_overflow_drain_until",
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
@@ -1590,6 +1553,7 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "totp_required_for_admin_role",
+            "local_login_policy",
             "api_key_auth_enabled",
             "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
@@ -1683,6 +1647,17 @@ async def update_settings(
         target=AuditTarget("settings", "dashboard"),
         details={"changed_fields": changed_fields},
     )
+    if current.local_login_policy != updated.local_login_policy:
+        # Who may use the local password form is a security decision with its
+        # own event: ``settings_changed`` lists field names, this names values.
+        AuditService.log_async(
+            "login_policy_changed",
+            actor_ip=actor_ip,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("settings", "local_login_policy"),
+            details={"from": current.local_login_policy, "to": updated.local_login_policy},
+            severity=AuditSeverity.WARNING,
+        )
     # M5 conversation archive: enabling turns the proxy into a full
     # prompt/response recorder readable by the same dashboard admin, so every
     # effective on/off change is a dedicated audit event with the actor, not

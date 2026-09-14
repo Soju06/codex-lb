@@ -64,14 +64,36 @@ export const LoginProviderSchema = z.object({
   loginUrl: z.string().nullable().default(null),
 });
 
+// Who may still sign in with a local password (`dashboard_settings.local_login_policy`).
+// The strict enum is what a *request* must satisfy: `updateSettings` takes
+// `unknown`, so this schema is the only thing standing between a bad value and
+// the wire, and a fallback there would silently send the most open policy of
+// the three.
+export const StrictLocalLoginPolicySchema = z.enum(["enabled", "admins_only", "break_glass_only"]);
+// Responses get the fallback instead: a value this build does not know must not
+// fail the whole session parse. Nothing may echo the fallen-back value into an
+// update — see `buildSettingsUpdateRequest`.
+export const LocalLoginPolicySchema = StrictLocalLoginPolicySchema.catch("enabled");
+
+// What a browser the identity resolver refused may be told about its own
+// arrival: the provider's public label (the same string its sign-in button
+// carries) and the reference the server computed from the address the identity
+// provider asserted. Both are the server's words; the client renders them and
+// derives nothing. Absent for a reverse-proxy refusal and for an expired marker.
+export const PendingArrivalSchema = z.object({
+  provider: z.string(),
+  reference: z.string(),
+});
+
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
   providers: z
     .array(LoginProviderSchema)
     .default([{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }]),
-  localLogin: z.string().default("enabled"),
+  localLogin: LocalLoginPolicySchema.default("enabled"),
   // The request carried a provider identity that has no account here yet.
   pendingIdentity: z.boolean().default(false),
+  pendingArrival: PendingArrivalSchema.nullable().default(null),
 });
 
 // Team-size facts served only to `users:manage` holders; `null` for everyone
@@ -88,17 +110,24 @@ export const AccessSummarySchema = z.object({
   roleMappings: z.number().int().default(0),
   scimTokens: z.number().int().default(0),
   auditSinks: z.number().int().default(0),
-  localLoginPolicy: z.string().default("enabled"),
+  localLoginPolicy: LocalLoginPolicySchema.default("enabled"),
 });
 
 // Step-up (re-verification for sensitive changes): when the account last
 // re-verified, and which factors `/step-up` will ask for. Empty `methods`
 // means the account must enrol two-factor or set a password first.
-export const StepUpMethodSchema = z.enum(["password", "totp"]);
+export const StepUpMethodSchema = z.enum(["password", "totp", "oidc"]);
 export const StepUpStateSchema = z.object({
   verifiedAt: z.number().int().nullable().default(null),
   expiresAt: z.number().int().nullable().default(null),
   methods: z.array(StepUpMethodSchema).default([]),
+});
+
+// Where to send the browser to begin a signed-in round trip at the identity
+// provider. The server builds the URL from the stored configuration; the app
+// only follows it.
+export const OidcStartResponseSchema = z.object({
+  authorizationUrl: z.string(),
 });
 
 export const AuthSessionSchema = z.object({
@@ -132,6 +161,9 @@ export const AuthSessionSchema = z.object({
   accessSummary: AccessSummarySchema.nullable().default(null),
   assignableRoleIds: z.array(z.string()).default([]),
   stepUp: StepUpStateSchema.nullable().default(null),
+  // The session was minted for an account carrying the break-glass
+  // designation; the header says so, nothing else changes.
+  breakGlassSession: z.boolean().default(false),
 });
 
 // Mirrors the backend username rule (case-folded on the server).
@@ -218,6 +250,8 @@ export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
 export type LoginProvider = z.infer<typeof LoginProviderSchema>;
+export type PendingArrival = z.infer<typeof PendingArrivalSchema>;
+export type LocalLoginPolicy = z.infer<typeof LocalLoginPolicySchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;
 export type PermissionScope = z.infer<typeof PermissionScopeSchema>;
@@ -238,6 +272,7 @@ export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
 export type StepUpState = z.infer<typeof StepUpStateSchema>;
 export type StepUpRequest = z.infer<typeof StepUpRequestSchema>;
+export type OidcStartResponse = z.infer<typeof OidcStartResponseSchema>;
 
 export function getFirstZodIssueMessage(error: unknown): string | null {
   if (!(error instanceof z.ZodError)) {

@@ -22,7 +22,7 @@ async def _compat_user() -> DashboardUser:
         ).scalar_one()
 
 
-async def _legacy_settings() -> DashboardSettings:
+async def _settings_row() -> DashboardSettings:
     async with SessionLocal() as session:
         return (await session.execute(select(DashboardSettings))).scalar_one()
 
@@ -139,6 +139,16 @@ async def test_dashboard_password_and_totp_flow(async_client, monkeypatch):
     )
     assert confirm.status_code == 200
 
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
+
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -225,6 +235,16 @@ async def test_disable_totp_requires_totp_verified_session(async_client, monkeyp
     )
     assert confirm.status_code == 200
 
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
+
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -273,6 +293,16 @@ async def test_disable_totp_rejects_replayed_step_code(async_client, monkeypatch
         json={"secret": secret, "code": setup_code},
     )
     assert confirm.status_code == 200
+
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
 
     enable = await async_client.put(
         "/api/settings",
@@ -349,6 +379,16 @@ async def test_password_management_requires_totp_when_totp_required(async_client
         json={"secret": secret, "code": setup_code},
     )
     assert confirm.status_code == 200
+
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
 
     enable = await async_client.put(
         "/api/settings",
@@ -439,6 +479,16 @@ async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatc
     )
     assert confirm.status_code == 200
 
+    # The migrated ``admin`` row is the designated emergency account, so the
+    # secret it just enrolled is mandatory from the next request onwards
+    # whatever the toggles say: it presents it once here.
+    current_epoch["value"] += 30
+    enrolled = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    current_epoch["value"] += 30
+
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -468,7 +518,7 @@ async def test_verify_rejects_one_of_concurrent_replays(async_client, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_totp_lifecycle_is_per_user_and_mirrored_to_legacy_settings(async_client, monkeypatch):
+async def test_totp_lifecycle_lives_on_the_account_row(async_client, monkeypatch):
     current_epoch = {"value": 1_700_000_000}
 
     import app.core.auth.totp as totp_module
@@ -490,9 +540,8 @@ async def test_totp_lifecycle_is_per_user_and_mirrored_to_legacy_settings(async_
         json={"secret": secret, "code": pyotp.TOTP(secret).at(current_epoch["value"])},
     )
     assert confirm.status_code == 200
-    user, legacy = await _compat_user(), await _legacy_settings()
+    user = await _compat_user()
     assert user.totp_secret_encrypted is not None
-    assert user.totp_secret_encrypted == legacy.totp_secret_encrypted
     assert user.totp_last_verified_step is None
 
     session = await async_client.get("/api/dashboard-auth/session")
@@ -510,11 +559,11 @@ async def test_totp_lifecycle_is_per_user_and_mirrored_to_legacy_settings(async_
     code = pyotp.TOTP(secret).at(current_epoch["value"])
     verify = await async_client.post("/api/dashboard-auth/totp/verify", json={"code": code})
     assert verify.status_code == 200
-    user, legacy = await _compat_user(), await _legacy_settings()
-    assert user.totp_last_verified_step is not None
-    assert user.totp_last_verified_step == legacy.totp_last_verified_step
+    user = await _compat_user()
+    consumed_step = user.totp_last_verified_step
+    assert consumed_step is not None
 
-    # Replay of the same step is refused on both rows.
+    # The same step is spent: the conditional UPDATE changes zero rows.
     replay = await async_client.post("/api/dashboard-auth/totp/disable", json={"code": code})
     assert replay.status_code == 400
     assert replay.json()["error"]["code"] == "invalid_totp_code"
@@ -524,10 +573,12 @@ async def test_totp_lifecycle_is_per_user_and_mirrored_to_legacy_settings(async_
         "/api/dashboard-auth/totp/disable", json={"code": pyotp.TOTP(secret).at(current_epoch["value"])}
     )
     assert disable.status_code == 200
-    user, legacy = await _compat_user(), await _legacy_settings()
-    assert user.totp_secret_encrypted is None and legacy.totp_secret_encrypted is None
-    assert user.totp_last_verified_step is None and legacy.totp_last_verified_step is None
-    assert legacy.totp_required_on_login is False
+    user, settings_row = await _compat_user(), await _settings_row()
+    assert user.totp_secret_encrypted is None
+    assert user.totp_last_verified_step is None
+    # One active account, so "I turned two-factor off" and "this install no
+    # longer requires two-factor" are the same statement.
+    assert settings_row.totp_required_on_login is False
 
 
 @pytest.mark.asyncio

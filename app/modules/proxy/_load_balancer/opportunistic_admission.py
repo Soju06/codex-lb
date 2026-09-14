@@ -15,9 +15,6 @@ which stale leases are expired exactly as the live path expires them, so the
 answer matches the live check while not even the usage-derived health-tier
 refresh, its ``version`` / ``health_version`` bumps, or the lease housekeeping
 touch the live balancer.
-The read-only pool-exhaustion probe (``exhaustion_probe.py``) rides on this
-path with ``lease_kind=None``, so a ``usage_limit_reached`` answer there is the
-spec's 429 predicate evaluated over the request's own eligible pool.
 """
 
 from __future__ import annotations

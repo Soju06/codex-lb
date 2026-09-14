@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config.settings import get_settings
+from app.db.migration_progress import revision_progress
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 
@@ -60,8 +61,9 @@ def run_migrations_online() -> None:
             render_as_batch=connection.dialect.name == "sqlite",
         )
 
-        with context.begin_transaction():
-            context.run_migrations()
+        with revision_progress(context.get_context()):
+            with context.begin_transaction():
+                context.run_migrations()
 
 
 if context.is_offline_mode():

@@ -1,7 +1,7 @@
 """Add the OIDC login-flow table, the provider's test-login proof and its seeded row.
 
-Revision ID: 20260913_000000_add_oidc_provider_flow
-Revises: 20260912_010000_drop_legacy_dashboard_credentials
+Revision ID: 20260913_010000_add_oidc_provider_flow
+Revises: 20260913_000000_drop_legacy_dashboard_credentials
 Create Date: 2026-09-13
 
 The connection settings themselves need no column: ``config_encrypted`` was
@@ -23,8 +23,8 @@ from alembic import op
 
 from app.modules.auth_providers.seed import seed_default_auth_providers
 
-revision = "20260913_000000_add_oidc_provider_flow"
-down_revision = "20260912_010000_drop_legacy_dashboard_credentials"
+revision = "20260913_010000_add_oidc_provider_flow"
+down_revision = "20260913_000000_drop_legacy_dashboard_credentials"
 branch_labels = None
 depends_on = None
 

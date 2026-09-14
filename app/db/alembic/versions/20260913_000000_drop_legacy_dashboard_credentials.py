@@ -1,6 +1,6 @@
 """Drop the legacy dashboard credential columns from ``dashboard_settings``.
 
-Revision ID: 20260912_010000_drop_legacy_dashboard_credentials
+Revision ID: 20260913_000000_drop_legacy_dashboard_credentials
 Revises: 20260912_000000_merge_thread_cache_and_bridge_retirement_heads
 Create Date: 2026-09-12
 
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260912_010000_drop_legacy_dashboard_credentials"
+revision = "20260913_000000_drop_legacy_dashboard_credentials"
 down_revision = "20260912_000000_merge_thread_cache_and_bridge_retirement_heads"
 branch_labels = None
 depends_on = None

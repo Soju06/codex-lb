@@ -31,7 +31,7 @@ Four host commands act on the database directly to re-open local sign-in, reset 
 
 **Symptom.** The migration succeeded and the new pods are healthy, but pods still running the
 previous release answer `500` on anything that loads dashboard settings — sign-in included. The
-migration log carries one warning naming `20260912_010000_drop_legacy_dashboard_credentials`.
+migration log carries one warning naming `20260913_000000_drop_legacy_dashboard_credentials`.
 
 That release drops three `dashboard_settings` columns that every earlier build still maps, and those
 builds load the settings row whole. The database is correct and complete: the same upgrade copied the

@@ -695,7 +695,7 @@ def _resolved_lock_timeout_seconds(lock_timeout_seconds: float | None) -> float:
 #: any older revision reaches head in one command with its credentials intact,
 #: and refusing that jump would keep every existing install from starting.
 CREDENTIAL_REPROJECTION_REVISION = "20260909_020000_reproject_compat_admin_credentials"
-CREDENTIAL_DROP_REVISION = "20260912_010000_drop_legacy_dashboard_credentials"
+CREDENTIAL_DROP_REVISION = "20260913_000000_drop_legacy_dashboard_credentials"
 
 #: The table the dropped columns live in, and therefore the evidence that there
 #: is an install here at all: a replica of an earlier release maps those columns

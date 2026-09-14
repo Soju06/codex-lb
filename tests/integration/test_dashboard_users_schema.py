@@ -370,7 +370,7 @@ async def test_dashboard_users_migration_backfills_the_compat_admin(tmp_path, le
 
 
 REPROJECT_REVISION = "20260909_020000_reproject_compat_admin_credentials"
-DROP_LEGACY_REVISION = "20260912_010000_drop_legacy_dashboard_credentials"
+DROP_LEGACY_REVISION = "20260913_000000_drop_legacy_dashboard_credentials"
 DROP_LEGACY_PARENT = "20260912_000000_merge_thread_cache_and_bridge_retirement_heads"
 #: What the drop takes, and what it must leave alone.
 _DROPPED_LEGACY_COLUMNS = {"password_hash", "totp_secret_encrypted", "totp_last_verified_step"}

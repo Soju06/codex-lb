@@ -3540,7 +3540,7 @@ async def test_http_bridge_recovery_column_repair_runs_after_deployed_head(tmp_p
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-column-repair.sqlite'}"
     deployed_head = "20260911_030000_add_local_login_policy"
-    repair_head = "20260912_030000_merge_terminal_append_lineage"
+    repair_head = "20260914_000000_merge_http_bridge_and_oidc_heads"
     alias_table = "http_bridge_session_aliases"
     alias_column = "target_response_id"
     indexes_to_repair = {
@@ -3818,7 +3818,7 @@ async def test_http_bridge_recovery_repair_rehomes_legacy_ownership_for_historic
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-recovery-rehome.sqlite'}"
     parent_revision = "20260911_060000_add_bridge_session_continuity_abandonment"
     repair_revision = "20260911_070000_repair_http_bridge_recovery_columns"
-    head_revision = "20260912_030000_merge_terminal_append_lineage"
+    head_revision = "20260914_000000_merge_http_bridge_and_oidc_heads"
     downgrade_revision = "20260821_020000_add_http_bridge_replay_snapshot"
     operation_table = "http_bridge_operations"
     alias_table = "http_bridge_session_aliases"

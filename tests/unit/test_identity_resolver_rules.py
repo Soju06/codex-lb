@@ -11,6 +11,7 @@ from app.core.auth.providers import TrustedHeaderProvider
 from app.core.auth.providers.registry import provider_active
 from app.db.models import AuthProviderKind, DashboardAuthProvider
 from app.modules.dashboard_users.identity_resolver import jit_username_candidates, slugify_subject
+from app.modules.scim.service import SLUG_PREFIX
 
 pytestmark = pytest.mark.unit
 
@@ -37,6 +38,22 @@ def test_slugify_subject_falls_back_to_hash_when_empty() -> None:
     assert slug.startswith("th-") and len(slug) == 11
     assert slug == slugify_subject("!!!")
     assert slug != slugify_subject("???")
+
+
+def test_the_provisioning_path_shares_the_rules_and_takes_its_own_empty_prefix() -> None:
+    """One copy of the slug rules serves both paths (spec: Just-in-time usernames).
+
+    The only difference is the marker a value that slugifies to nothing falls
+    back to, so a name says which path made it and no account provisioned
+    before SCIM existed changes its name.
+    """
+
+    for value in ("Alice.Smith", "alice@example.com", "al ice!", "admin"):
+        assert slugify_subject(value, empty_prefix=SLUG_PREFIX) == slugify_subject(value)
+
+    from_scim = slugify_subject("!!!", empty_prefix=SLUG_PREFIX)
+    assert from_scim.startswith(SLUG_PREFIX)
+    assert from_scim.removeprefix(SLUG_PREFIX) == slugify_subject("!!!").removeprefix("th-")
 
 
 def test_jit_username_candidates_number_collisions() -> None:

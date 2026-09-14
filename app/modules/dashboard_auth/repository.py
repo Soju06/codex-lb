@@ -36,6 +36,7 @@ from app.modules.dashboard_users.repository import (
     utc_now,
 )
 from app.modules.role_mappings.repository import RoleMappingsRepository
+from app.modules.scim.repository import ScimTokensRepository
 from app.modules.settings.repository import SettingsRepository
 
 _SETTINGS_ID = 1
@@ -64,6 +65,7 @@ class DashboardAuthRepository:
         self._users = DashboardUsersRepository(session)
         self._roles = DashboardRolesRepository(session)
         self._mappings = RoleMappingsRepository(session)
+        self._scim_tokens = ScimTokensRepository(session)
 
     # --- settings (guest access, policy flags, bootstrap token) ---
 
@@ -168,6 +170,9 @@ class DashboardAuthRepository:
 
     async def count_role_mappings(self) -> int:
         return await self._mappings.count_mappings()
+
+    async def count_scim_tokens(self) -> int:
+        return await self._scim_tokens.count_tokens()
 
     # --- users: writes ---
 

@@ -1048,6 +1048,12 @@ class DashboardIdentity(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: What the provider calls this person, as pushed and unslugified. Only the
+    #: SCIM path writes it, because only SCIM has to answer a filter on the
+    #: provider's own spelling: our usernames have no ``@``, so an address can
+    #: never equal one and an identity provider reconciling its own resources
+    #: would otherwise match nothing it created.
+    user_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -1196,6 +1202,38 @@ class DashboardOidcLoginFlow(Base):
     config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DashboardScimToken(Base):
+    """A bearer credential that may reach ``/scim/v2`` and nothing else.
+
+    Only the SHA-256 digest of the secret is stored, in a unique index, so the
+    lookup is an index equality and no copy of the credential exists after it
+    is issued; ``token_prefix`` is the non-secret head of the value, kept in
+    clear so an operator can tell two tokens apart. Rotation replaces the
+    digest and the prefix on the same row, so the id, the label and the sync
+    history survive and the previous secret stops working the moment the write
+    commits. ``provider_key`` is the identity namespace the token writes and
+    reads: it comes from this row on every request and never from the caller.
+    """
+
+    __tablename__ = "dashboard_scim_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    #: A snapshot link, cleared rather than cascaded: revoking a token is an
+    #: act of its own and must not be a side effect of deleting its issuer.
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DashboardRoleMappingClaim(str, Enum):

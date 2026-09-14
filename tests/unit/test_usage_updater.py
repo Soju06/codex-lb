@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import time
 from collections.abc import Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import account_status_for_permanent_failure
+from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
 from app.core.clients import usage as usage_client_module
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
@@ -574,6 +577,7 @@ def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuse
     deactivated.status = AccountStatus.DEACTIVATED
     reauth_required = _make_account("acc_reauth", "workspace_reauth")
     reauth_required.status = AccountStatus.REAUTH_REQUIRED
+    reauth_required.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
     active_a = _make_account("acc_a", "workspace_a")
 
     ordered = refresh_scheduler_module._ordered_usage_refresh_accounts(
@@ -913,6 +917,59 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["scheduled", "forced", "requested"])
+@pytest.mark.parametrize("credential_state", ["valid", "unknown", "expired", "rejected"])
+async def test_usage_refresh_reauth_access_eligibility(
+    monkeypatch: pytest.MonkeyPatch, path: str, credential_state: str
+) -> None:
+    account = _make_account("acc_reauth_access", "workspace_reauth_access")
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.deactivation_reason = PERMANENT_FAILURE_CODES["refresh_token_invalidated"]
+    expiry = time.time() + (-60 if credential_state == "expired" else 3600)
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    token = "opaque" if credential_state == "unknown" else f"e30.{payload}.signature"
+    account.access_token_encrypted = TokenEncryptor().encrypt(token)
+    if credential_state == "rejected":
+        account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    fetch = AsyncMock(return_value=UsagePayload(plan_type="plus"))
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fetch)
+    updater = UsageUpdater(StubUsageRepository())
+
+    if path == "scheduled":
+        accounts = refresh_scheduler_module._ordered_usage_refresh_accounts([account])
+        await updater.refresh_accounts(accounts, latest_usage={})
+    elif path == "forced":
+        await updater.force_refresh_result(account)
+    else:
+        _install_owned_session_row(monkeypatch, account, lookups=[])
+        monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", StubAdditionalUsageRepository)
+        await usage_updater_module._run_requested_refresh(account.id)
+
+    assert fetch.await_count == (0 if credential_state in ("expired", "rejected") else 1)
+    if fetch.await_count:
+        assert fetch.await_args is not None
+        assert fetch.await_args.kwargs["access_token"] == token
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_reauth_401_does_not_retry_dead_refresh_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_reauth_401", "workspace_reauth_401")
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.deactivation_reason = PERMANENT_FAILURE_CODES["refresh_token_invalidated"]
+    auth_manager = cast(Any, SimpleNamespace(ensure_fresh=AsyncMock()))
+    updater = UsageUpdater(StubUsageRepository(), auth_manager=auth_manager)
+    fetch = AsyncMock(side_effect=usage_client_module.UsageFetchError(401, "unauthorized"))
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fetch)
+
+    result = await updater.force_refresh_result(account)
+
+    assert not result.fetch_succeeded
+    assert fetch.await_count == 1
+    auth_manager.ensure_fresh.assert_not_awaited()
 
 
 def _route() -> ResolvedUpstreamRoute:
@@ -5223,6 +5280,7 @@ async def test_requested_refresh_skips_missing_or_ineligible_rows(
     if stored_status is not None:
         stored_account = _make_account("acc_request_ineligible", "workspace_request_ineligible")
         stored_account.status = stored_status
+        stored_account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
     lookups: list[str] = []
     _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
     monkeypatch.setattr(

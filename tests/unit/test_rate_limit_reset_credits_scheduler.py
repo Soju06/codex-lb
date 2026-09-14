@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import random
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsSnapshot,
     ResetCreditFetchError,
@@ -107,7 +111,7 @@ def _response_expiring_in(seconds: int) -> ResetCreditsResponse:
 
 
 @pytest.mark.asyncio
-async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
+async def test_refresh_skips_paused_rejected_and_deactivated_accounts() -> None:
     store = RateLimitResetCreditsStore()
     stale = RateLimitResetCreditsSnapshot(available_count=5)
     await store.set("acc_paused", stale)
@@ -125,6 +129,7 @@ async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
         _make_account("acc_deactivated", status=AccountStatus.DEACTIVATED),
         _make_account("acc_active"),
     ]
+    accounts[1].deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
 
     await refresh_reset_credits_for_accounts(
         accounts=accounts,
@@ -139,6 +144,29 @@ async def test_refresh_skips_paused_reauth_and_deactivated_accounts() -> None:
     assert store.get("acc_reauth") is stale
     assert store.get("acc_deactivated") is stale
     assert store.get("acc_active") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credential_state", ["valid", "unknown", "expired", "rejected"])
+async def test_reset_credit_refresh_reauth_access_eligibility(credential_state: str) -> None:
+    account = _make_account("acc_reauth", status=AccountStatus.REAUTH_REQUIRED)
+    account.deactivation_reason = PERMANENT_FAILURE_CODES["refresh_token_invalidated"]
+    expiry = time.time() + (-60 if credential_state == "expired" else 3600)
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    token = "opaque" if credential_state == "unknown" else f"e30.{payload}.signature"
+    encryptor = TokenEncryptor()
+    account.access_token_encrypted = encryptor.encrypt(token)
+    if credential_state == "rejected":
+        account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    store = RateLimitResetCreditsStore()
+    fetch = AsyncMock(return_value=_response())
+
+    await refresh_reset_credits_for_accounts(accounts=[account], encryptor=encryptor, store=store, fetch_fn=fetch)
+
+    eligible = credential_state in ("valid", "unknown")
+    assert fetch.await_count == int(eligible)
+    assert (store.get(account.id) is not None) == eligible
+    assert account.status == AccountStatus.REAUTH_REQUIRED
 
 
 @pytest.mark.asyncio

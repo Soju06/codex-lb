@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
+from app.core.crypto import TokenEncryptor
 from app.core.plan_types import normalize_account_plan_type
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
@@ -27,6 +28,7 @@ from app.modules.limit_warmup.service import (
     usage_reset_confirmed,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 from app.modules.proxy.load_balancer import background_recovery_state_from_account, effective_routing_tunables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -338,11 +340,13 @@ def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
 
 
 def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
+    encryptor = TokenEncryptor()
     return sorted(
         (
             account
             for account in accounts
-            if account.status not in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED)
+            if account.status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+            and not account_reauth_credentials_are_unavailable(account, encryptor)
         ),
         key=lambda account: account.id,
     )

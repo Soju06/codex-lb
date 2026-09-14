@@ -1742,7 +1742,7 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
-            routing_generation = account_cache.get_routing_availability_cache().generation
+            routing_generation = account_cache.get_routing_availability_cache().generation_for_account(account.id)
             async with self._repo_factory() as repos:
                 # AuthManager CAS-persists refresh-only failures and may update this object. This fallback also
                 # covers other failures and singleflight joiners without overwriting repaired credentials.

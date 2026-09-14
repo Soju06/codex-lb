@@ -26,6 +26,7 @@ from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -36,9 +37,7 @@ from app.modules.usage.updater import UsageUpdater, _resolve_upstream_route_for_
 
 logger = logging.getLogger(__name__)
 
-_RESET_CREDITS_SKIP_STATUSES = frozenset(
-    {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-)
+_RESET_CREDITS_SKIP_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 ResetCreditsFetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ResetCreditsRedeemFn = Callable[..., Awaitable[Any]]
@@ -190,7 +189,9 @@ async def refresh_reset_credits_for_accounts(
     stays owned by usage refresh. One account failing must not abort the loop.
     """
     for account in accounts:
-        if account.status in _RESET_CREDITS_SKIP_STATUSES:
+        if account.status in _RESET_CREDITS_SKIP_STATUSES or account_reauth_credentials_are_unavailable(
+            account, encryptor
+        ):
             continue
         if not account.chatgpt_account_id:
             continue
@@ -347,7 +348,11 @@ async def _auto_redeem_reset_credit(
                 account.id,
             )
             return
-        if latest_account.status in _RESET_CREDITS_SKIP_STATUSES or not latest_account.chatgpt_account_id:
+        if (
+            latest_account.status in _RESET_CREDITS_SKIP_STATUSES
+            or account_reauth_credentials_are_unavailable(latest_account, encryptor)
+            or not latest_account.chatgpt_account_id
+        ):
             logger.info(
                 "Skipping automatic reset credit redeem because account is no longer eligible "
                 "account_id=%s status=%s has_chatgpt_account_id=%s",

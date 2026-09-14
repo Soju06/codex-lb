@@ -1622,7 +1622,10 @@ async def test_refresh_adopts_peer_rotation_at_cas_exhaustion_boundary(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm(monkeypatch):
+@pytest.mark.parametrize("concurrent_access_rejection", [False, True])
+async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm(
+    monkeypatch, concurrent_access_rejection
+):
     """Regression (P1 "Do not retry after dropping rotated tokens"): when the
     guarded compare-and-set keeps missing on a sustained same-plaintext
     re-encryption storm through BOTH the bounded budget AND the dedicated
@@ -1643,6 +1646,9 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
     already-consumed token), NOT a blind-retry ``invalid_grant`` knockout."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        if concurrent_access_rejection:
+            account.status = AccountStatus.REAUTH_REQUIRED
+            account.deactivation_reason = auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
         return TokenRefreshResult(
             access_token="access-new",
             refresh_token="refresh-new",
@@ -1676,6 +1682,10 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
     assert result.status == AccountStatus.REAUTH_REQUIRED
     assert result.deactivation_reason is not None
     assert "re-login" in result.deactivation_reason
+    if concurrent_access_rejection:
+        assert result.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+        assert repo.status_payload is not None
+        assert repo.status_payload["deactivation_reason"] == result.deactivation_reason
     # The reauth flag landed through the guarded status compare-and-set (keyed on
     # the last-observed ciphertext), NOT an unguarded status write.
     assert repo.status_payload is not None

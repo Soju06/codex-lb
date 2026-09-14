@@ -126,24 +126,26 @@ class RoutingAvailabilityCache:
         self._snapshot: dict[str, tuple[AccountStatus, str | None]] | None = None
         self._local_marks: set[str] = set()
         self._generation = 0
+        self._snapshot_generation = 0
+        self._repair_generations: dict[str, int] = {}
 
-    @property
-    def generation(self) -> int:
-        return self._generation
+    def generation_for_account(self, account_id: str) -> int:
+        return self._repair_generations.get(account_id, self._snapshot_generation)
 
     @property
     def seeded(self) -> bool:
         return self._snapshot is not None
 
     def mark_unavailable(self, account_id: str, *, generation: int | None = None) -> None:
-        # A snapshot or repair observed during a guarded write takes precedence
-        # over its stale local mark. Always queue a post-write reconciliation.
-        if generation is None or generation == self._generation:
+        # A snapshot or same-account repair observed during a guarded write takes
+        # precedence over its stale mark. Always queue post-write reconciliation.
+        if generation is None or generation == self.generation_for_account(account_id):
             self._local_marks.add(account_id)
         _request_account_routing_bump()
 
     def clear_unavailable(self, account_id: str) -> None:
         self._generation += 1
+        self._repair_generations[account_id] = self._generation
         self._local_marks.discard(account_id)
         if self._snapshot is not None:
             self._snapshot[account_id] = (AccountStatus.ACTIVE, None)
@@ -185,6 +187,8 @@ class RoutingAvailabilityCache:
             await close_session(session)
         self._snapshot = snapshot
         self._generation += 1
+        self._snapshot_generation = self._generation
+        self._repair_generations.clear()
         self._local_marks = {
             account_id
             for account_id in self._local_marks
@@ -194,6 +198,8 @@ class RoutingAvailabilityCache:
     def reset(self) -> None:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""
         self._generation += 1
+        self._snapshot_generation = self._generation
+        self._repair_generations.clear()
         self._snapshot = None
         self._local_marks.clear()
 

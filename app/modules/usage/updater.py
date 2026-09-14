@@ -33,6 +33,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager, _clean_optional
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.plan_downgrade_observations import (
@@ -312,7 +313,9 @@ class UsageUpdater:
         interval = USAGE_REFRESH_INTERVAL_SECONDS
         _prune_usage_refresh_auth_cooldowns()
         for account in accounts:
-            if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if account.status == AccountStatus.DEACTIVATED or account_reauth_credentials_are_unavailable(
+                account, self._encryptor
+            ):
                 continue
             if _is_usage_refresh_in_cooldown(account.id):
                 continue
@@ -414,7 +417,9 @@ class UsageUpdater:
         access_token_override: str | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
-        if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status == AccountStatus.DEACTIVATED or account_reauth_credentials_are_unavailable(
+            account, self._encryptor
+        ):
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         try:
             result = await _USAGE_REFRESH_SINGLEFLIGHT.run(
@@ -559,7 +564,10 @@ class UsageUpdater:
         account = await accounts_repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (
+            AccountStatus.PAUSED,
+            AccountStatus.DEACTIVATED,
+        ) or account_reauth_credentials_are_unavailable(account, TokenEncryptor()):
             return None
         updater = UsageUpdater(
             BackgroundUsageRepository(),
@@ -617,7 +625,7 @@ class UsageUpdater:
             if access_token_override is not None:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            if exc.status_code != 401 or not self._auth_manager:
+            if exc.status_code != 401 or not self._auth_manager or account.status == AccountStatus.REAUTH_REQUIRED:
                 _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             try:

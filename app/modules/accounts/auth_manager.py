@@ -942,7 +942,6 @@ class AuthManager:
         never overwritten in any branch.
         """
         status = AccountStatus.REAUTH_REQUIRED
-        reason = "Refresh token persistence conflict; stored token is stale - re-login required"
         expected = expected_refresh_token_encrypted
         for _attempt in range(_FINAL_PERSIST_MAX_ATTEMPTS):
             latest = await self._repo.get_by_id_fresh(account.id)
@@ -955,6 +954,11 @@ class AuthManager:
                 # ADOPT it; do NOT flag reauth on a healthy rotated row.
                 return _adopt_account_row(account, latest)
             expected = latest.refresh_token_encrypted
+            reason = (
+                latest.deactivation_reason
+                if reauth_reason_blocks_routing(latest.deactivation_reason)
+                else "Refresh token persistence conflict; stored token is stale - re-login required"
+            )
             applied = await self._repo.update_status_if_current(
                 account.id,
                 status,

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import time
 from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Request
@@ -12,6 +16,7 @@ from fastapi import Request
 from app.core.auth.dashboard_access import DashboardAuthMode, Permission, admin_principal
 from app.core.auth.dependencies import require_dashboard_permission
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ConsumeResetCreditResponse,
@@ -207,6 +212,7 @@ async def test_get_invalidates_cached_snapshot_for_ineligible_status(
         async def get_by_id(self, account_id: str) -> Account | None:
             account = _account(account_id)
             account.status = status
+            account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
             return account
 
     fake_context = SimpleNamespace(repository=_Repo())
@@ -215,6 +221,61 @@ async def test_get_invalidates_cached_snapshot_for_ineligible_status(
 
     assert response is None
     assert store.get("acc_1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credential_state", ["valid", "unknown", "expired", "rejected"])
+async def test_reset_credit_get_and_redeem_reauth_access_eligibility(
+    monkeypatch: pytest.MonkeyPatch, credential_state: str
+) -> None:
+    account = _account()
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.deactivation_reason = PERMANENT_FAILURE_CODES["refresh_token_invalidated"]
+    expiry = time.time() + (-60 if credential_state == "expired" else 3600)
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    token = "opaque" if credential_state == "unknown" else f"e30.{payload}.signature"
+    encryptor = TokenEncryptor()
+    account.access_token_encrypted = encryptor.encrypt(token)
+    if credential_state == "rejected":
+        account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    store = RateLimitResetCreditsStore()
+    snapshot = _snapshot([_credit("only")], available_count=1)
+    await store.set(account.id, snapshot)
+    monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
+    context = SimpleNamespace(repository=SimpleNamespace(get_by_id=AsyncMock(return_value=account)))
+
+    response = await get_rate_limit_reset_credits(account.id, context=cast(Any, context))
+    fetch = AsyncMock(return_value=_response([_credit("only")]))
+    consume = AsyncMock(
+        return_value=ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 2, "credit": {"id": "only", "status": "redeemed"}}
+        )
+    )
+    if credential_state in ("valid", "unknown"):
+        assert response is not None
+        outcome = await _redeem_soonest_reset_credit(
+            account=account,
+            store=store,
+            encryptor=encryptor,
+            fetch_fn=fetch,
+            consume_fn=consume,
+        )
+        assert outcome.response.windows_reset == 2
+        assert consume.await_count == 1
+        assert consume.await_args is not None
+        assert consume.await_args.args[0] == token
+    else:
+        assert response is None
+        with pytest.raises(DashboardConflictError):
+            await _redeem_soonest_reset_credit(
+                account=account,
+                store=store,
+                encryptor=encryptor,
+                fetch_fn=fetch,
+                consume_fn=consume,
+            )
+        fetch.assert_not_awaited()
+        consume.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1415,7 @@ async def test_redeem_reports_zero_available_count_after_last_credit() -> None:
 def test_assert_account_can_redeem_reset_credit_rejects_non_applicable_statuses(status: AccountStatus) -> None:
     account = _account()
     account.status = status
+    account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
     with pytest.raises(DashboardConflictError) as excinfo:
         _assert_account_can_redeem_reset_credit(account)
     assert excinfo.value.code == "account_not_reset_credit_applicable"

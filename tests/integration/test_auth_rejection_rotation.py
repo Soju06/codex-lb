@@ -233,8 +233,25 @@ async def test_rotation_without_new_access_material_does_not_clear_rejection(db_
 
 
 @pytest.mark.asyncio
-async def test_refresh_with_unchanged_rejected_access_material_keeps_account_unavailable(async_client, monkeypatch):
+@pytest.mark.parametrize("persist_conflict", [False, True])
+async def test_refresh_with_unchanged_rejected_access_material_keeps_account_unavailable(
+    async_client, monkeypatch, persist_conflict
+):
     stale = await _create_account()
+    rotate_tokens = AccountsRepository.rotate_tokens
+    rotation_attempts = 0
+
+    async def lose_rotation_to_reencryption(self, account_id, *args, **kwargs):
+        nonlocal rotation_attempts
+        rotation_attempts += 1
+        row = await self.session.get(Account, account_id)
+        assert row is not None
+        row.refresh_token_encrypted = TokenEncryptor().encrypt("old-refresh")
+        await self.session.commit()
+        return await rotate_tokens(self, account_id, *args, **kwargs)
+
+    if persist_conflict:
+        monkeypatch.setattr(AccountsRepository, "rotate_tokens", lose_rotation_to_reencryption)
 
     async def refresh_tokens(self, token, *, account):
         async with SessionLocal() as session:
@@ -256,9 +273,18 @@ async def test_refresh_with_unchanged_rejected_access_material_keeps_account_una
     async with SessionLocal() as session:
         refreshed = await AuthManager(AccountsRepository(session)).refresh_account(clone_row(stale))
 
-    assert refreshed.access_token_encrypted != stale.access_token_encrypted
+    if persist_conflict:
+        assert rotation_attempts > 1
+        assert refreshed.access_token_encrypted == stale.access_token_encrypted
+    else:
+        assert refreshed.access_token_encrypted != stale.access_token_encrypted
     assert TokenEncryptor().decrypt(refreshed.access_token_encrypted) == "old-access"
     assert refreshed.status == AccountStatus.REAUTH_REQUIRED
     assert refreshed.deactivation_reason == _REJECTED_REASON
+    async with SessionLocal() as session:
+        row = await session.get(Account, stale.id)
+        assert row is not None
+        assert row.status == AccountStatus.REAUTH_REQUIRED
+        assert row.deactivation_reason == _REJECTED_REASON
     balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
     assert (await balancer.select_account()).account is None

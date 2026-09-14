@@ -67,6 +67,21 @@ def reauth_credentials_are_unavailable(
     )
 
 
+def account_reauth_credentials_are_unavailable(
+    account: Account,
+    encryptor: TokenEncryptor,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Apply the shared reason/expiry rule to an account snapshot."""
+    return account.status == AccountStatus.REAUTH_REQUIRED and reauth_credentials_are_unavailable(
+        account.status,
+        account_access_token_expires_at(account, encryptor),
+        now=now,
+        deactivation_reason=account.deactivation_reason,
+    )
+
+
 def all_accounts_require_reauthentication(
     accounts: Collection[Account],
     encryptor: TokenEncryptor,

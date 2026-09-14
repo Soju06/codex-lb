@@ -212,9 +212,22 @@ retry, so rate-limit activity cannot prevent rejection from becoming durable.
 Same-value re-encryption is compared by material with bounded retries; actual
 credential replacement, pause, deactivation, or deletion vetoes stale rejection.
 
-Local unavailable marks are fenced against repair clears and snapshot refreshes
-observed during the guarded write. A newer cache observation wins over the stale
+Local unavailable marks are fenced against same-account repair clears and snapshot refreshes
+observed during the guarded write. A newer relevant cache observation wins over the stale
 mark. The successful write still queues a routing invalidation, even if its mark
 is suppressed, so a snapshot read before the write cannot hide the committed
 rejection beyond the normal bus convergence bound. A missed guarded write adds
 no speculative mark and clears no newer routing state.
+
+Repair generations are account-scoped between snapshots. Repairing B cannot
+suppress A's committed rejection, even when A's bridge still holds an ACTIVE
+account object. A snapshot refresh fences all outstanding marks and clears the
+per-account generation map. Persistence-conflict fallback also keeps an existing
+blocking rejection reason when it cannot save rotated tokens; the weaker
+persistence warning must not make the old access token routable again.
+
+Access-token-authenticated usage and reset-credit operations and weekly capacity
+accounting share the reason-and-expiry gate. A refresh-only warning with usable
+access credentials continues receiving those services without proactive token
+refresh. A proven-rejected or known-expired warning is excluded. Independent
+pause, deactivation, identity, plan, and quota restrictions remain in force.

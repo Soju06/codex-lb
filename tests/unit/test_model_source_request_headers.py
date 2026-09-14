@@ -1,6 +1,6 @@
-"""Source-direction request headers are constructed, never forwarded (#2123 WP-C2; preflight finding v).
+"""Source-direction request headers are constructed, never forwarded.
 
-An overflow dispatch to a non-ChatGPT source must never carry ChatGPT-internal
+A dispatch to a non-ChatGPT source must never carry ChatGPT-internal
 telemetry (``x-openai-subagent``, ``x-openai-memgen-request``, ``x-codex-*``,
 ``session-id``, ``thread-id``, ``x-client-request-id``, ``x-oai-attestation``,
 ``chatgpt-account-id``, ``originator`` ...). The guarantee is structural rather
@@ -8,9 +8,8 @@ than a filter: ``forwarding._source_headers`` builds ``Accept``,
 ``Content-Type`` and the source's own ``Authorization`` from scratch, every
 ``aiohttp`` call in the module passes exactly that builder's result, and the
 module has no access to the inbound request at all. Direct source routing is
-therefore unchanged by construction; the route-level captures live in
-``tests/integration/test_model_source_routing.py`` (direct) and
-``tests/integration/test_subscription_overflow_routing.py`` (overflow).
+therefore unchanged by construction; the route-level capture lives in
+``tests/integration/test_model_source_routing.py``.
 """
 
 from __future__ import annotations
@@ -138,7 +137,7 @@ def test_source_header_builder_signature_has_no_inbound_input() -> None:
 # -- shared with the route-level captures ---------------------------------------------------------------
 
 # ChatGPT-internal telemetry a native Codex request carries (responses_metadata.rs, client.rs); none of it may
-# reach an OpenAI-compatible source, on the overflow path or on direct routing.
+# reach an OpenAI-compatible source.
 CODEX_TELEMETRY_REQUEST_HEADERS: dict[str, str] = {
     "user-agent": "codex_cli_rs/0.153.4 (Linux 6.8.0; x86_64) header-proof",
     "originator": "codex_cli_rs",

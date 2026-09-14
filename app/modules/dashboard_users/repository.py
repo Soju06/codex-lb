@@ -148,6 +148,23 @@ class DashboardUsersRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def has_identity(self, user_id: str, *, provider: str, provider_key: str) -> bool:
+        """Whether this account holds any identity on that provider.
+
+        The other direction of :meth:`get_identity`, and deliberately a bare
+        existence check: the caller (step-up availability) needs to know that
+        the provider can vouch for the account, not which subject it uses.
+        """
+
+        stmt = (
+            select(DashboardIdentity.id)
+            .where(DashboardIdentity.user_id == user_id)
+            .where(DashboardIdentity.provider == provider)
+            .where(DashboardIdentity.provider_key == provider_key)
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def list_users(self) -> Sequence[DashboardUser]:
         stmt = _user_query().order_by(DashboardUser.created_at.asc(), DashboardUser.id.asc())
         return (await self._session.execute(stmt)).scalars().all()

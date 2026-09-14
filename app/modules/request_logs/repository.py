@@ -1267,7 +1267,6 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
-        sources: list[str] | None = None,
         *,
         cache_mode: str = "since",
         timeframe: str | None = None,
@@ -1292,7 +1291,6 @@ class RequestLogsRepository:
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
-            sources=sources,
             exclude_soft_deleted=True,
             include_sensitive_metadata=include_sensitive_metadata,
             include_account_identity=include_account_identity,
@@ -1315,10 +1313,7 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        # ``source`` is not a demand-rollup dimension (its primary key carries no
-        # ``source`` column), so an active source filter must not be counted from
-        # the rollup -- it would silently return the unfiltered total.
-        if search is None and not error_codes_in and not error_codes_excluding and not sources:
+        if search is None and not error_codes_in and not error_codes_excluding:
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1351,7 +1346,6 @@ class RequestLogsRepository:
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
-            tuple(sources or ()),
             include_sensitive_metadata,
             include_account_identity,
             include_api_key_identity,
@@ -1664,7 +1658,6 @@ class RequestLogsRepository:
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
-        sources: list[str] | None = None,
         exclude_soft_deleted: bool = False,
         include_sensitive_metadata: bool = True,
         include_account_identity: bool = True,
@@ -1683,11 +1676,6 @@ class RequestLogsRepository:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if api_key_ids:
             conditions.append(RequestLog.api_key_id.in_(api_key_ids))
-        if sources:
-            # Opaque equality set (``request_logs.source`` is a plain nullable
-            # string, no enum), served by ``idx_logs_source_requested_at``.
-            conditions.append(RequestLog.source.in_(sources))
-
         if model_options:
             pair_conditions = []
             for model, effort in model_options:

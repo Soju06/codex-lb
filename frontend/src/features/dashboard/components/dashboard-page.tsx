@@ -38,10 +38,6 @@ import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { REQUEST_LOG_COLUMN_OPTIONS } from "@/features/dashboard/request-log-columns";
-import {
-  REQUEST_LOG_SOURCE_OVERFLOW,
-  REQUEST_LOG_SOURCE_OVERFLOW_PINNED,
-} from "@/features/dashboard/request-log-source";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
@@ -372,21 +368,6 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses, t],
   );
 
-  // A closed two-value domain, so no facet query: the values are constants and
-  // the control is gated on the same signal as the overflow tile. An install
-  // that never overflowed reports `null` here and sees no new control.
-  const overflowObserved = overview?.summary.subscriptionOverflow != null;
-  const sourceOptions = useMemo(
-    () =>
-      overflowObserved
-        ? [
-            { value: REQUEST_LOG_SOURCE_OVERFLOW, label: t("dashboard.filters.sourceOverflow") },
-            { value: REQUEST_LOG_SOURCE_OVERFLOW_PINNED, label: t("dashboard.filters.sourceOverflowPinned") },
-          ]
-        : [],
-    [overflowObserved, t],
-  );
-
   const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
   if (
     retainedDashboardLoadError !== null &&
@@ -626,7 +607,6 @@ export function DashboardPage() {
                       apiKeyOptions={apiKeyOptions}
                       modelOptions={modelOptions}
                       statusOptions={statusOptions}
-                      sourceOptions={sourceOptions}
                       showApiKeyFilter={canReadApiKeys}
                       onSearchChange={(search) => updateFilters({ search, offset: 0 })}
                       onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
@@ -636,7 +616,6 @@ export function DashboardPage() {
                         updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
                       }
                       onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
-                      onSourceChange={(sources) => updateFilters({ sources, offset: 0 })}
                       onConversationDismiss={handleConversationDismiss}
                       onReset={() =>
                         updateFilters({
@@ -646,7 +625,6 @@ export function DashboardPage() {
                           apiKeyIds: [],
                           modelOptions: [],
                           statuses: [],
-                          sources: [],
                           conversationId: null,
                           offset: 0,
                         })

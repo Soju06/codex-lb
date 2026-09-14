@@ -4,7 +4,6 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 from app.core.auth.dashboard_access import is_admin_level
@@ -72,8 +71,6 @@ class DashboardSettingsData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
-    subscription_overflow_source_id: str | None
-    subscription_overflow_drain_until: datetime | None
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -193,12 +190,6 @@ class DashboardSettingsUpdateData:
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
-    # Tri-state designation: value = designate, clear flag = off, neither =
-    # untouched. The drain deadline is written only when its set flag is on.
-    subscription_overflow_source_id: str | None
-    clear_subscription_overflow_source: bool
-    subscription_overflow_drain_until: datetime | None
-    set_subscription_overflow_drain_until: bool
     openai_cache_affinity_max_age_seconds: int
     dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
@@ -406,10 +397,6 @@ class SettingsService:
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             single_account_id=payload.single_account_id,
-            subscription_overflow_source_id=payload.subscription_overflow_source_id,
-            clear_subscription_overflow_source=payload.clear_subscription_overflow_source,
-            subscription_overflow_drain_until=payload.subscription_overflow_drain_until,
-            set_subscription_overflow_drain_until=payload.set_subscription_overflow_drain_until,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
             dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
@@ -665,8 +652,6 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
         relative_availability_power=row.relative_availability_power,
         relative_availability_top_k=row.relative_availability_top_k,
         single_account_id=row.single_account_id,
-        subscription_overflow_source_id=row.subscription_overflow_source_id,
-        subscription_overflow_drain_until=row.subscription_overflow_drain_until,
         openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(

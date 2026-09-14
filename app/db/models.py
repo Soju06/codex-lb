@@ -2639,6 +2639,15 @@ class HttpBridgeOperationRecord(Base):
         default=HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
         server_default=text("'rows_v1'"),
     )
+    # Versioned, account-neutral transcript material retained for a later
+    # recovery reader.  This release only expands the durable schema; capture
+    # and replay remain unwired until their gated follow-up releases land.
+    transcript_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    response_output_items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_output_items_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    response_replay_input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_replay_input_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    response_replay_input_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2659,6 +2668,8 @@ class HttpBridgeOperationRecord(Base):
         ),
         Index("idx_http_bridge_operations_session_parent_state", "session_id", "parent_response_id", "state"),
         Index("idx_http_bridge_operations_parent_state", "parent_response_id", "state", "updated_at"),
+        Index("idx_http_bridge_operations_session_state_created", "session_id", "state", "created_at"),
+        Index("idx_http_bridge_operations_response_state", "response_id", "state"),
         Index("idx_http_bridge_operations_state_updated", "state", "updated_at"),
     )
 

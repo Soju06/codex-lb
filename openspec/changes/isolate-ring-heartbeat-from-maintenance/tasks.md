@@ -27,6 +27,6 @@
 
 ## 5. Verification and Rollout Evidence
 
-- [ ] 5.1 Run focused health, ring-membership, bridge lifecycle, cap-partition, shutdown, SQLite, and PostgreSQL suites and record passing results plus any proven unrelated baseline failures.
+- [x] 5.1 Run focused health, ring-membership, bridge lifecycle, cap-partition, shutdown, SQLite, and PostgreSQL suites and record passing results plus any proven unrelated baseline failures.
 - [x] 5.2 Run repository formatting, lint, type, architecture, and strict change-local OpenSpec validation; run repository-wide OpenSpec validation and record any pre-existing failure separately.
-- [ ] 5.3 Build a candidate image and exercise blocked-maintenance, heartbeat failure/recovery, and shutdown-during-overdue-phase scenarios against a verified database copy; verify heartbeat age, readiness, ring size, maintenance metrics, task counts, and event-loop lag before recommending production rollout.
+- [x] 5.3 Build a candidate image and exercise blocked-maintenance, heartbeat failure/recovery, and shutdown-during-overdue-phase scenarios against a verified database copy; verify heartbeat age, readiness, ring size, maintenance metrics, task counts, and event-loop lag before recommending production rollout.

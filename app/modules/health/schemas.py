@@ -26,3 +26,7 @@ class HealthCheckResponse(BaseModel):
     status: str
     checks: dict[str, str] | None = None
     bridge_ring: BridgeRingInfo | None = None
+
+
+class HealthCheckUnavailableResponse(HealthCheckResponse):
+    detail: str

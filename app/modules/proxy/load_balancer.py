@@ -1741,12 +1741,13 @@ class LoadBalancer:
         async with lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
+            if error_code == "account_auth_invalidated":
+                # Preserve persisted cooldown evidence, including on a cold replica.
+                state.reset_at, state.blocked_at = account.reset_at, account.blocked_at
             self._sync_runtime_state(account, state)
             routing_generation = account_cache.get_routing_availability_cache().generation_for_account(account.id)
             async with self._repo_factory() as repos:
-                # AuthManager CAS-persists refresh-only failures and may update this object. This fallback also
-                # covers other failures and singleflight joiners without overwriting repaired credentials.
-                # Proven access rejection additionally guards the access token even when status already matches.
+                # Fence failure writes against credential repair, including singleflight joiners.
                 rejected_snapshot = _clone_account(account)
                 downgraded = await self._persist_state_if_current(
                     repos.accounts,
@@ -1755,7 +1756,9 @@ class LoadBalancer:
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
                 if not downgraded and error_code == "account_auth_invalidated":
-                    rejected = await repos.accounts.persist_access_rejection(rejected_snapshot)
+                    rejected = await repos.accounts.persist_access_rejection(
+                        rejected_snapshot, encryptor=self._encryptor
+                    )
                     downgraded = rejected is not None
                     if rejected is not None:
                         account.status, account.deactivation_reason = rejected.status, rejected.deactivation_reason

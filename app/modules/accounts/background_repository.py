@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -95,6 +96,7 @@ class BackgroundAccountsRepository:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -111,6 +113,7 @@ class BackgroundAccountsRepository:
                 id_token_encrypted=id_token_encrypted,
                 last_refresh=last_refresh,
                 expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                encryptor=encryptor,
                 plan_type=plan_type,
                 email=email,
                 chatgpt_account_id=chatgpt_account_id,

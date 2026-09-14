@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from datetime import datetime, timezone
 
 import pytest
 
+import app.modules.accounts.repository as accounts_repository
 from app.core.auth.refresh import TokenRefreshResult
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.crypto import TokenEncryptor
@@ -15,6 +18,7 @@ from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy import account_cache
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -194,7 +198,7 @@ async def test_rotation_preserves_independent_status_and_quota_state(db_setup, s
         row = await session.get(Account, stale.id)
         assert row is not None
         repaired = status == AccountStatus.REAUTH_REQUIRED and reason == _REJECTED_REASON
-        assert row.status == (AccountStatus.ACTIVE if repaired else status)
+        assert row.status == (AccountStatus.RATE_LIMITED if repaired else status)
         assert row.deactivation_reason == (None if repaired else reason)
         assert row.reset_at == reset_at
         assert row.blocked_at == blocked_at
@@ -230,6 +234,91 @@ async def test_rotation_without_new_access_material_does_not_clear_rejection(db_
     assert routing_cache.is_unavailable(stale.id)
     await routing_cache.refresh_from_db()
     assert routing_cache.is_unavailable(stale.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access_material", ["repaired", "unchanged", "reencrypted"])
+@pytest.mark.parametrize("current_snapshot", [False, True])
+async def test_rejection_repair_preserves_cooldown_until_selection_reset(
+    async_client, monkeypatch, access_material, current_snapshot
+):
+    now = 1_800_000_000
+    monkeypatch.setattr(time, "time", lambda: now)
+    stale = await _create_account()
+    encryptor = TokenEncryptor()
+    reencrypted_refresh = encryptor.encrypt("old-refresh")
+    reset_at = now + 600
+    blocked_at = now - 60
+    async with SessionLocal() as session:
+        row = await session.get(Account, stale.id)
+        assert row is not None
+        row.plan_type = "free"
+        row.access_token_encrypted = encryptor.encrypt("old-access")
+        row.refresh_token_encrypted = reencrypted_refresh
+        assert await AccountsRepository(session).update_status(
+            stale.id, AccountStatus.RATE_LIMITED, reset_at=reset_at, blocked_at=blocked_at
+        )
+        await session.refresh(row)
+        rejected_snapshot = clone_row(row) if current_snapshot else clone_row(stale)
+        await UsageRepository(session).add_entry(
+            account_id=stale.id,
+            used_percent=10.0,
+            window="monthly",
+            reset_at=now + 30 * 24 * 3600,
+            window_minutes=43_200,
+            recorded_at=datetime.fromtimestamp(now - 70, timezone.utc).replace(tzinfo=None),
+        )
+
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    assert stale.id not in balancer._runtime
+
+    def unexpected_encryptor():
+        raise AssertionError("Repository must reuse the owner's encryptor")
+
+    monkeypatch.setattr(accounts_repository, "TokenEncryptor", unexpected_encryptor)
+    assert await balancer.mark_permanent_failure(rejected_snapshot, "account_auth_invalidated")
+    async with SessionLocal() as session:
+        rejected = await session.get(Account, stale.id)
+        assert rejected is not None
+        assert rejected.status == AccountStatus.REAUTH_REQUIRED
+        assert rejected.deactivation_reason == _REJECTED_REASON
+        assert (rejected.reset_at, rejected.blocked_at) == (reset_at, blocked_at)
+
+    access = {
+        "repaired": encryptor.encrypt("new-access"),
+        "unchanged": rejected.access_token_encrypted,
+        "reencrypted": encryptor.encrypt("old-access"),
+    }[access_material]
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).rotate_tokens(
+            stale.id,
+            access,
+            encryptor.encrypt("new-refresh"),
+            encryptor.encrypt("new-id"),
+            utcnow(),
+            expected_refresh_token_encrypted=reencrypted_refresh,
+            encryptor=encryptor,
+        )
+
+    async with SessionLocal() as session:
+        row = await session.get(Account, stale.id)
+        assert row is not None
+        assert row.deactivation_reason == (None if access_material == "repaired" else _REJECTED_REASON)
+        assert (row.reset_at, row.blocked_at) == (reset_at, blocked_at)
+
+    assert (await balancer.select_account()).account is None
+    assert row.status == (
+        AccountStatus.RATE_LIMITED if access_material == "repaired" else AccountStatus.REAUTH_REQUIRED
+    )
+    now = reset_at + 1
+    selected = await balancer.select_account()
+    if access_material == "repaired":
+        assert selected.account is not None
+        assert selected.account.id == stale.id
+        assert selected.account.status == AccountStatus.ACTIVE
+        assert encryptor.decrypt(selected.account.access_token_encrypted) == "new-access"
+    else:
+        assert selected.account is None
 
 
 @pytest.mark.asyncio

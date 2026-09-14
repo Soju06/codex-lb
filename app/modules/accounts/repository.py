@@ -842,9 +842,10 @@ class AccountsRepository:
             await self._session.commit()
             return updated_id is not None
 
-    async def persist_access_rejection(self, rejected: Account) -> Account | None:
+    async def persist_access_rejection(
+        self, rejected: Account, *, encryptor: TokenEncryptor | None = None
+    ) -> Account | None:
         """Persist proven rejection without competing with unrelated health writes."""
-        encryptor = TokenEncryptor()
         access = rejected.access_token_encrypted
         refresh = rejected.refresh_token_encrypted
         for _ in range(3):
@@ -856,14 +857,15 @@ class AccountsRepository:
             ):
                 return None
             try:
-                if (
-                    current.access_token_encrypted != access
-                    and encryptor.decrypt(current.access_token_encrypted) != encryptor.decrypt(access)
-                ) or (
-                    current.refresh_token_encrypted != refresh
-                    and encryptor.decrypt(current.refresh_token_encrypted) != encryptor.decrypt(refresh)
+                for current_token, rejected_token in (
+                    (current.access_token_encrypted, access),
+                    (current.refresh_token_encrypted, refresh),
                 ):
-                    return None
+                    if current_token != rejected_token:
+                        if encryptor is None:
+                            encryptor = TokenEncryptor()
+                        if encryptor.decrypt(current_token) != encryptor.decrypt(rejected_token):
+                            return None
             except (InvalidToken, UnicodeDecodeError):
                 return None
             async with sqlite_writer_section():
@@ -1289,6 +1291,7 @@ class AccountsRepository:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1325,7 +1328,8 @@ class AccountsRepository:
                 return False
             access_material_changed = False
             if current_access != access_token_encrypted:
-                encryptor = TokenEncryptor()
+                if encryptor is None:
+                    encryptor = TokenEncryptor()
                 try:
                     access_material_changed = encryptor.decrypt(current_access) != encryptor.decrypt(
                         access_token_encrypted
@@ -1358,6 +1362,10 @@ class AccountsRepository:
                 Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
                 literal(access_material_changed),
             )
+            repaired_status = case(
+                (Account.reset_at > time.time(), AccountStatus.RATE_LIMITED),
+                else_=AccountStatus.ACTIVE,
+            )
             stmt = (
                 update(Account)
                 .where(Account.id == account_id)
@@ -1368,10 +1376,9 @@ class AccountsRepository:
                 .where(Account.access_token_encrypted == current_access)
                 .values(
                     **values,
-                    # Authentication rejection belongs to the replaced access
-                    # credentials. Reconcile it atomically without changing
-                    # independent operator, quota, or reset state.
-                    status=case((repaired_rejection, AccountStatus.ACTIVE), else_=Account.status),
+                    # Rejection masks the prior status, but a live reset still
+                    # excludes the account after its credentials are repaired.
+                    status=case((repaired_rejection, repaired_status), else_=Account.status),
                     deactivation_reason=case((repaired_rejection, None), else_=Account.deactivation_reason),
                 )
                 .returning(Account.status, Account.deactivation_reason)

@@ -35,7 +35,8 @@ def test_weekly_pace_excludes_unavailable_reauth_capacity(credential_state: str)
     expiry = naive_utc_to_epoch(NOW) + (-60 if credential_state == "expired" else 3600)
     payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
     token = "opaque" if credential_state == "unknown" else f"e30.{payload}.signature"
-    reauth.access_token_encrypted = TokenEncryptor().encrypt(token)
+    encryptor = TokenEncryptor()
+    reauth.access_token_encrypted = encryptor.encrypt(token)
     if credential_state == "rejected":
         reauth.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
 
@@ -45,6 +46,7 @@ def test_weekly_pace_excludes_unavailable_reauth_capacity(credential_state: str)
         secondary_history={account.id: [_row(account.id, 20, NOW)] for account in [active, reauth]},
         now=NOW,
         usage_refresh_interval_seconds=60,
+        encryptor=encryptor,
     )
 
     assert pace is not None
@@ -110,6 +112,7 @@ def _build(
         secondary_history=histories,
         now=NOW,
         usage_refresh_interval_seconds=60,
+        encryptor=TokenEncryptor(),
         trailing_demand_used_percent_by_account=trailing_demand_used_percent_by_account,
     )
     assert pace is not None

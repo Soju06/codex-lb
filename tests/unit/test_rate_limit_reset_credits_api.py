@@ -149,7 +149,7 @@ async def test_get_returns_null_when_no_snapshot_cached(monkeypatch: pytest.Monk
         async def get_by_id(self, account_id: str) -> Account | None:
             return None
 
-    fake_context = SimpleNamespace(repository=_Repo())
+    fake_context = SimpleNamespace(repository=_Repo(), service=SimpleNamespace(_encryptor=StubEncryptor()))
     response = await get_rate_limit_reset_credits("acc_missing", context=cast(Any, fake_context))
     assert response is None
 
@@ -165,7 +165,7 @@ async def test_get_returns_null_on_cache_miss_for_active_account(monkeypatch: py
 
     fake_context = SimpleNamespace(
         repository=_Repo(),
-        service=SimpleNamespace(_auth_manager=None),
+        service=SimpleNamespace(_auth_manager=None, _encryptor=StubEncryptor()),
     )
     response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
@@ -186,7 +186,7 @@ async def test_get_returns_cached_snapshot_shape(monkeypatch: pytest.MonkeyPatch
         async def get_by_id(self, account_id: str) -> Account | None:
             return _account(account_id)
 
-    fake_context = SimpleNamespace(repository=_Repo())
+    fake_context = SimpleNamespace(repository=_Repo(), service=SimpleNamespace(_encryptor=StubEncryptor()))
     response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
     assert response is not None
@@ -215,7 +215,7 @@ async def test_get_invalidates_cached_snapshot_for_ineligible_status(
             account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
             return account
 
-    fake_context = SimpleNamespace(repository=_Repo())
+    fake_context = SimpleNamespace(repository=_Repo(), service=SimpleNamespace(_encryptor=StubEncryptor()))
 
     response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
@@ -242,7 +242,10 @@ async def test_reset_credit_get_and_redeem_reauth_access_eligibility(
     snapshot = _snapshot([_credit("only")], available_count=1)
     await store.set(account.id, snapshot)
     monkeypatch.setattr(reset_credits_api, "get_rate_limit_reset_credits_store", lambda: store)
-    context = SimpleNamespace(repository=SimpleNamespace(get_by_id=AsyncMock(return_value=account)))
+    context = SimpleNamespace(
+        repository=SimpleNamespace(get_by_id=AsyncMock(return_value=account)),
+        service=SimpleNamespace(_encryptor=encryptor),
+    )
 
     response = await get_rate_limit_reset_credits(account.id, context=cast(Any, context))
     fetch = AsyncMock(return_value=_response([_credit("only")]))
@@ -292,7 +295,7 @@ async def test_get_invalidates_cached_snapshot_without_chatgpt_account_id(
             account.chatgpt_account_id = None
             return account
 
-    fake_context = SimpleNamespace(repository=_Repo())
+    fake_context = SimpleNamespace(repository=_Repo(), service=SimpleNamespace(_encryptor=StubEncryptor()))
 
     response = await get_rate_limit_reset_credits("acc_1", context=cast(Any, fake_context))
 
@@ -1417,7 +1420,7 @@ def test_assert_account_can_redeem_reset_credit_rejects_non_applicable_statuses(
     account.status = status
     account.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
     with pytest.raises(DashboardConflictError) as excinfo:
-        _assert_account_can_redeem_reset_credit(account)
+        _assert_account_can_redeem_reset_credit(account, encryptor=StubEncryptor())
     assert excinfo.value.code == "account_not_reset_credit_applicable"
 
 
@@ -1425,7 +1428,7 @@ def test_assert_account_can_redeem_reset_credit_rejects_missing_chatgpt_account_
     account = _account()
     account.chatgpt_account_id = None
     with pytest.raises(DashboardConflictError) as excinfo:
-        _assert_account_can_redeem_reset_credit(account)
+        _assert_account_can_redeem_reset_credit(account, encryptor=StubEncryptor())
     assert excinfo.value.code == "account_not_reset_credit_applicable"
 
 
@@ -1438,7 +1441,7 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
         async def get_by_id(self, account_id: str) -> Account | None:
             return None
 
-    fake_context = SimpleNamespace(repository=_Repo())
+    fake_context = SimpleNamespace(repository=_Repo(), service=SimpleNamespace(_encryptor=StubEncryptor()))
 
     with pytest.raises(DashboardNotFoundError):
         await consume_rate_limit_reset_credit(
@@ -1478,7 +1481,7 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
 
     fake_context = SimpleNamespace(
         repository=_Repo(),
-        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None, _encryptor=StubEncryptor()),
     )
     response = await consume_rate_limit_reset_credit(
         _fake_request(),
@@ -1517,7 +1520,7 @@ async def test_consume_handler_invalidates_selection_cache_on_permanent_refresh_
 
     fake_context = SimpleNamespace(
         repository=_Repo(),
-        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None, _encryptor=StubEncryptor()),
     )
     with pytest.raises(DashboardConflictError) as excinfo:
         await consume_rate_limit_reset_credit(
@@ -1555,7 +1558,7 @@ async def test_consume_handler_keeps_selection_cache_on_transient_refresh_error(
 
     fake_context = SimpleNamespace(
         repository=_Repo(),
-        service=SimpleNamespace(_auth_manager=None, _usage_updater=None),
+        service=SimpleNamespace(_auth_manager=None, _usage_updater=None, _encryptor=StubEncryptor()),
     )
     with pytest.raises(DashboardConflictError) as excinfo:
         await consume_rate_limit_reset_credit(

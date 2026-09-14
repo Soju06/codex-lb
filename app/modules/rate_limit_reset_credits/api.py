@@ -141,7 +141,7 @@ async def get_rate_limit_reset_credits(
         return None
     if (
         account.status in _NON_REDEEMABLE_STATUSES
-        or account_reauth_credentials_are_unavailable(account, TokenEncryptor())
+        or account_reauth_credentials_are_unavailable(account, context.service._encryptor)
         or not account.chatgpt_account_id
     ):
         await store.invalidate(account_id)
@@ -177,7 +177,7 @@ async def consume_rate_limit_reset_credit(
         outcome = await _redeem_soonest_reset_credit(
             account=account,
             store=store,
-            encryptor=TokenEncryptor(),
+            encryptor=context.service._encryptor,
             lock_session=getattr(context, "session", None),
             auth_manager=context.service._auth_manager,
             refresh_usage=_build_refresh_usage_callback(context),
@@ -447,8 +447,8 @@ async def _redeem_soonest_reset_credit_locked(
     )
 
 
-def _assert_account_can_redeem_reset_credit(account: Account, *, encryptor: TokenEncryptor | None = None) -> None:
-    credentials_unavailable = account_reauth_credentials_are_unavailable(account, encryptor or TokenEncryptor())
+def _assert_account_can_redeem_reset_credit(account: Account, *, encryptor: TokenEncryptor) -> None:
+    credentials_unavailable = account_reauth_credentials_are_unavailable(account, encryptor)
     if account.status in _NON_REDEEMABLE_STATUSES or credentials_unavailable or not account.chatgpt_account_id:
         msg = (
             f"Account is {account.status.value} and cannot redeem a reset credit"

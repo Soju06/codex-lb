@@ -126,19 +126,18 @@ class RoutingAvailabilityCache:
         self._snapshot: dict[str, tuple[AccountStatus, str | None]] | None = None
         self._local_marks: set[str] = set()
         self._generation = 0
-        self._snapshot_generation = 0
         self._repair_generations: dict[str, int] = {}
 
     def generation_for_account(self, account_id: str) -> int:
-        return self._repair_generations.get(account_id, self._snapshot_generation)
+        return self._repair_generations.get(account_id, 0)
 
     @property
     def seeded(self) -> bool:
         return self._snapshot is not None
 
     def mark_unavailable(self, account_id: str, *, generation: int | None = None) -> None:
-        # A snapshot or same-account repair observed during a guarded write takes
-        # precedence over its stale mark. Always queue post-write reconciliation.
+        # Only same-account repair supersedes a guarded write's local mark.
+        # A snapshot may have read before it committed. Always reconcile afterward.
         if generation is None or generation == self.generation_for_account(account_id):
             self._local_marks.add(account_id)
         _request_account_routing_bump()
@@ -186,9 +185,6 @@ class RoutingAvailabilityCache:
         finally:
             await close_session(session)
         self._snapshot = snapshot
-        self._generation += 1
-        self._snapshot_generation = self._generation
-        self._repair_generations.clear()
         self._local_marks = {
             account_id
             for account_id in self._local_marks
@@ -196,10 +192,7 @@ class RoutingAvailabilityCache:
         }
 
     def reset(self) -> None:
-        """Drop all state (snapshot back to unseeded). Test isolation helper."""
-        self._generation += 1
-        self._snapshot_generation = self._generation
-        self._repair_generations.clear()
+        """Drop snapshot and marks without forgetting in-flight repair fences."""
         self._snapshot = None
         self._local_marks.clear()
 

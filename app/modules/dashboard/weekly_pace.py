@@ -74,6 +74,7 @@ def build_weekly_credit_pace(
     secondary_history: dict[str, list[UsageHistory]],
     now: datetime,
     usage_refresh_interval_seconds: int,
+    encryptor: TokenEncryptor,
     top_api_keys: list[WeeklyCreditApiKeyAttribution] | None = None,
     trailing_demand_used_percent_by_account: Mapping[str, float] | None = None,
     working_days: set[int] | None = None,
@@ -95,7 +96,6 @@ def build_weekly_credit_pace(
         return None
 
     accounts_by_id = {account.id: account for account in accounts}
-    encryptor = TokenEncryptor()
     freshness_cutoff = now - timedelta(seconds=_freshness_seconds(usage_refresh_interval_seconds))
 
     pace_accounts: list[_PaceAccount] = []

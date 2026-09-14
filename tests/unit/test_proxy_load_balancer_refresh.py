@@ -95,7 +95,9 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
-    async def persist_access_rejection(self, rejected: Account) -> Account | None:
+    async def persist_access_rejection(
+        self, rejected: Account, *, encryptor: TokenEncryptor | None = None
+    ) -> Account | None:
         current = self._find_account(rejected.id)
         if current is None or (
             current.access_token_encrypted != rejected.access_token_encrypted

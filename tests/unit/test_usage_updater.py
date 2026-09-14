@@ -581,7 +581,7 @@ def test_usage_refresh_scheduler_orders_accounts_and_skips_unrefreshable_statuse
     active_a = _make_account("acc_a", "workspace_a")
 
     ordered = refresh_scheduler_module._ordered_usage_refresh_accounts(
-        [active_b, paused, deactivated, reauth_required, active_a]
+        [active_b, paused, deactivated, reauth_required, active_a], encryptor=TokenEncryptor()
     )
 
     assert [account.id for account in ordered] == ["acc_a", "acc_b"]
@@ -939,7 +939,7 @@ async def test_usage_refresh_reauth_access_eligibility(
     updater = UsageUpdater(StubUsageRepository())
 
     if path == "scheduled":
-        accounts = refresh_scheduler_module._ordered_usage_refresh_accounts([account])
+        accounts = refresh_scheduler_module._ordered_usage_refresh_accounts([account], encryptor=updater._encryptor)
         await updater.refresh_accounts(accounts, latest_usage={})
     elif path == "forced":
         await updater.force_refresh_result(account)
@@ -2964,6 +2964,7 @@ class StubAccountsRepository:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,

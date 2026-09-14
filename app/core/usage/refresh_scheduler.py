@@ -177,6 +177,7 @@ class UsageRefreshScheduler:
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _encryptor: TokenEncryptor = field(default_factory=TokenEncryptor, init=False, repr=False)
 
     async def start(self) -> None:
         if not self.enabled:
@@ -220,7 +221,9 @@ class UsageRefreshScheduler:
                 async with get_background_session() as session:
                     usage_repo = UsageRepository(session)
                     accounts_repo = AccountsRepository(session)
-                    accounts = _ordered_usage_refresh_accounts(await accounts_repo.list_accounts())
+                    accounts = _ordered_usage_refresh_accounts(
+                        await accounts_repo.list_accounts(), encryptor=self._encryptor
+                    )
                     selected_account, cycle_complete = self._select_next_account(accounts)
                     if selected_account is not None:
                         selected_account_ids = [selected_account.id]
@@ -339,8 +342,7 @@ def build_usage_refresh_scheduler() -> UsageRefreshScheduler:
     return UsageRefreshScheduler(interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS, enabled=True)
 
 
-def _ordered_usage_refresh_accounts(accounts: list[Account]) -> list[Account]:
-    encryptor = TokenEncryptor()
+def _ordered_usage_refresh_accounts(accounts: list[Account], *, encryptor: TokenEncryptor) -> list[Account]:
     return sorted(
         (
             account

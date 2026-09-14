@@ -76,6 +76,7 @@ class AccountsRepositoryPort(Protocol):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -662,6 +663,7 @@ class AuthManager:
                 workspace_label=new_workspace_label,
                 seat_type=new_seat_type,
                 expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                encryptor=self._encryptor,
             )
 
         adopted = await self._persist_refreshed_tokens(

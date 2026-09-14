@@ -46,7 +46,13 @@ def output_item_identity_is_valid(identity: Mapping[str, str]) -> bool:
         return bool(identity.get("id")) and bool(identity.get("call_id"))
     if item_type in _TOOL_OUTPUT_TYPES:
         return bool(identity.get("call_id"))
-    return True
+    # A persisted non-tool output is replayable only when it can be matched to
+    # the same provider item on a subsequent echo.  ``compaction`` is the one
+    # intentional identity-less envelope: it represents a boundary marker,
+    # not a repeatable output item.
+    if item_type == "compaction":
+        return True
+    return bool(identity.get("id"))
 
 
 def output_item_identities_match(expected: Mapping[str, str], actual: Mapping[str, str]) -> bool:
@@ -108,6 +114,10 @@ def deduplicate_exact_replayed_tool_items(items: Iterable[JsonValue]) -> list[Js
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
+        if not isinstance(item_type, str):
+            # Preserve malformed entries for the caller's normal validation;
+            # checking membership on an array/object would raise TypeError.
+            continue
         if item_type not in _TOOL_ITEM_TYPES:
             continue
         call_id = item.get("call_id")

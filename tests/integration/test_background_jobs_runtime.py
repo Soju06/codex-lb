@@ -67,7 +67,6 @@ async def test_auth_guardian_pass_follows_dashboard_toggle_without_restart(async
     scheduler = AuthGuardianScheduler(
         interval_seconds=3600,
         enabled=True,
-        max_age_seconds=3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,

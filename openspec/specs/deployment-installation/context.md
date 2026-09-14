@@ -212,10 +212,13 @@ Phase 1 (24 removed, 1 added; zero-risk internals):
   (`http://localhost:1455/auth/callback`), `CODEX_LB_OAUTH_CALLBACK_PORT`
   (1455) — module constants in `app/core/config/settings.py`; changing any
   of them breaks login.
-- Auth guardian tuning (7): interval 21600, max refresh age 43200, batch
-  size 100, concurrency 3, jitter 300.0, failure backoff base 300.0 / max
-  3600.0 — constants in `app/core/auth/guardian.py`; the single switch
-  is the dashboard setting `auth_guardian_enabled`
+- Auth guardian tuning (7 fields removed): interval 21600, max refresh
+  age 43200, batch size 100, concurrency 3, jitter 300.0, failure backoff
+  base 300.0 / max 3600.0. The separate max-age constant was later retired;
+  candidate selection now reuses the fixed eight-day
+  `TOKEN_REFRESH_INTERVAL_DAYS` policy in `app/core/auth/refresh.py`. The
+  remaining guardian constants live in `app/core/auth/guardian.py`, and the
+  single switch is the dashboard setting `auth_guardian_enabled`
   (`CODEX_LB_AUTH_GUARDIAN_ENABLED` is a deprecated fallback while the
   dashboard value is unset).
 - Debug log booleans (6): the `CODEX_LB_LOG_PROXY_*` /

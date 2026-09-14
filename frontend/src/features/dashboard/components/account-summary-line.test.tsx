@@ -36,6 +36,31 @@ describe("AccountSummaryLine", () => {
     );
   });
 
+  it("counts locally blocked active accounts as unavailable", () => {
+    render(
+      <AccountSummaryLine
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-reached",
+            usageLimitEnabled: true,
+            usageLimitPercent: 10,
+            usageLimitState: "reached",
+          }),
+          createAccountSummary({
+            accountId: "acc-usage-unavailable",
+            usageLimitEnabled: true,
+            usageLimitPercent: 10,
+            usageLimitState: "data_unavailable",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("dashboard-account-summary-line")).toHaveTextContent(
+      /2.*registered.*0.*active.*2.*unavailable/,
+    );
+  });
+
   it("renders zero counts for an empty dashboard account list", () => {
     render(<AccountSummaryLine accounts={[]} />);
 

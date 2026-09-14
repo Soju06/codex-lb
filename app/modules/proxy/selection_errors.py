@@ -6,6 +6,7 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.resilience.overload import is_local_overload_error_code
 
 USAGE_LIMIT_REACHED = "usage_limit_reached"
+OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 
 
 class SelectionFailure(Protocol):

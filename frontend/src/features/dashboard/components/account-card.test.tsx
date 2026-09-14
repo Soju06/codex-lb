@@ -162,6 +162,48 @@ describe("AccountCard", () => {
     expect(screen.getByRole("button", { name: "Re-auth" })).toBeInTheDocument();
   });
 
+  it("shows a reached local usage limit for an otherwise active account", () => {
+    const account = createAccountSummary({
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Limit reached")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
+  it("keeps a non-active upstream status ahead of a reached local limit", () => {
+    const account = createAccountSummary({
+      status: "quota_exceeded",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Quota exceeded")).toBeInTheDocument();
+    expect(screen.queryByText("Limit reached")).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable usage as blocked for an otherwise active account", () => {
+    const account = createAccountSummary({
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "data_unavailable",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Usage unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
   it("disables the limit warm-up toggle for read-only guests", () => {
     const account = createAccountSummary({
       displayName: "Read Only Account",

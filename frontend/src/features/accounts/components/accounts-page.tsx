@@ -52,6 +52,7 @@ export function AccountsPage() {
     updateMutation,
     deleteMutation,
     routingPolicyMutation,
+    usageLimitMutation,
     exportAuthMutation,
   } = useAccounts();
   const { settingsQuery } = useSettings();
@@ -129,6 +130,7 @@ export function AccountsPage() {
     limitWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
+    usageLimitMutation.isPending ||
     exportAuthMutation.isPending ||
     updateMutation.isPending ||
     accountBindingMutation.isPending ||
@@ -144,8 +146,10 @@ export function AccountsPage() {
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
+    getErrorMessageOrNull(usageLimitMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
+    getErrorMessageOrNull(accountsQuery.error) ||
     getErrorMessageOrNull(settingsQuery.error) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(accountBindingMutation.error) ||
@@ -236,6 +240,9 @@ export function AccountsPage() {
                 accountId,
                 routingPolicy,
               })
+            }
+            onUsageLimitChange={(accountId, update) =>
+              void usageLimitMutation.mutateAsync({ accountId, update })
             }
             onSecurityWorkAuthorizedChange={(accountId, enabled) =>
               void updateMutation.mutateAsync({

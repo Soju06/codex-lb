@@ -1,6 +1,7 @@
 import type { RequestActivityDay } from "@/features/dashboard/schemas";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const REQUEST_ACTIVITY_DAYS = 180;
 
 export type RequestActivityLevel = 0 | 1 | 2 | 3 | 4;
 
@@ -67,7 +68,7 @@ export function buildRequestActivityCalendar(
   timeZone = "UTC",
 ): RequestActivityCalendar {
   const end = startOfTimeZoneDayAsUtcDate(today, timeZone);
-  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 5, 1));
+  const start = addDays(end, -(REQUEST_ACTIVITY_DAYS - 1));
   const startDate = formatDateOnly(start);
   const endDate = formatDateOnly(end);
   const requestsByDate = new Map<string, number>();

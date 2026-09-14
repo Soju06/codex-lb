@@ -562,6 +562,7 @@ def _install_fresh_replay_body(
     *,
     account_neutral: bool,
     release_owner_pin: bool = True,
+    preserve_client_prefix: bool = False,
 ) -> str:
     """Swap the retained fresh body in and re-derive the owner requirement from it.
 
@@ -591,9 +592,6 @@ def _install_fresh_replay_body(
         request_state.preferred_account_id
         if request_state.affinity_policy.codex_session_source == "turn_state"
         else None
-    )
-    preserve_client_prefix = (
-        request_state.proxy_injected_previous_response_id and request_state.input_full_fingerprint is not None
     )
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
@@ -703,7 +701,42 @@ def _prepare_websocket_request_state_for_account_switch(
         if not _websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text):
             return None
         return request_state.request_text
-    return _install_verified_fresh_replay(request_state)
+    replay_text = _install_verified_fresh_replay(request_state)
+    if replay_text is not None:
+        return replay_text
+    stored_count = request_state.fresh_upstream_request_stored_input_count
+    if (
+        not (
+            request_state.proxy_injected_previous_response_id
+            and request_state.fresh_upstream_request_is_retry_safe
+            and request_state.fresh_upstream_request_text
+            and stored_count is not None
+        )
+        or request_state.file_required_preferred_account
+        or _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy)
+    ):
+        return None
+    try:
+        payload = json.loads(request_state.fresh_upstream_request_text)
+    except json.JSONDecodeError:
+        return None
+    # A size-slimmed resend no longer proves the client's complete history.
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("input"), list)
+        or len(payload["input"]) != request_state.input_item_count
+        or _facade()._fingerprint_input_items(payload["input"]) != request_state.input_full_fingerprint
+    ):
+        return None
+    projected = _project_websocket_full_resend_for_replay(payload, stored_count=stored_count)
+    if projected is None:
+        return None
+    return _install_fresh_replay_body(
+        request_state,
+        json.dumps(projected, ensure_ascii=True, separators=(",", ":")),
+        account_neutral=True,
+        preserve_client_prefix=True,
+    )
 
 
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
@@ -756,14 +789,14 @@ def _websocket_continuity_anchor_for_payload(
 
 
 def _project_websocket_full_resend_for_replay(
-    payload: ResponsesRequest,
+    payload: dict[str, JsonValue],
     *,
     stored_count: int,
-) -> ResponsesRequest:
+) -> dict[str, JsonValue] | None:
     """Project a prefix-verified resend only if it retains the prior reply."""
-    if not isinstance(payload.input, list):
-        return payload
-    input_items = cast(list[JsonValue], payload.input)
+    if not isinstance(payload.get("input"), list):
+        return None
+    input_items = cast(list[JsonValue], payload["input"])
     evidence = project_responses_input_for_account_neutral_fresh_replay(
         input_items, stored_count=stored_count, preserve_developer_message_ids=True
     )
@@ -772,15 +805,16 @@ def _project_websocket_full_resend_for_replay(
         stored_count=evidence.stored_prefix_count,
         canonical_lite_developer_index=evidence.canonical_lite_developer_index,
     ):
-        return payload
+        return None
     projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=stored_count)
     if projection is None:
-        return payload
-    projected_payload = payload.model_copy(update={"input": projection.input_items})
-    replay_payload = dict(projected_payload.to_replay_safety_payload())
-    replay_payload.pop("type", None)
+        return None
+    projected_payload = {**payload, "input": projection.input_items}
+    replay_payload = dict(projected_payload)
+    if replay_payload.get("type") == "response.create":
+        replay_payload.pop("type")
     if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
-        return payload
+        return None
     return projected_payload
 
 

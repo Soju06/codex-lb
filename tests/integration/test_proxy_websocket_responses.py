@@ -13929,7 +13929,17 @@ def _completed_first_turn_upstream_batch(response_id: str) -> list[_FakeUpstream
 
 
 @pytest.mark.parametrize(
-    "resend_kind", ["complete", "missing_reply", "item_reference", "client_anchor", "visible_output"]
+    "resend_kind",
+    [
+        "complete",
+        "missing_reply",
+        "item_reference",
+        "client_anchor",
+        "visible_output",
+        "same_account_capacity",
+        "same_account_close",
+        "stale_anchor",
+    ],
 )
 def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
     app_instance,
@@ -13938,6 +13948,7 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
 ):
     """Replay only a complete portable transcript after a pre-output quota failure."""
     monkeypatch.setattr(proxy_module.LoadBalancer, "mark_rate_limit", AsyncMock())
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error", AsyncMock())
     reasoning = {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "owner-ciphertext"}
     assistant = {
         "type": "message",
@@ -13957,6 +13968,26 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
             _ws_event({"type": "response.output_text.delta", "response_id": "resp_partial", "delta": "partial"}),
             *failure,
         ]
+    elif resend_kind == "same_account_close":
+        failure = [*_accepted_output_free_prelude("resp_accepted"), _FakeUpstreamMessage("close", close_code=1011)]
+    elif resend_kind == "same_account_capacity":
+        failure = [
+            *_accepted_output_free_prelude("resp_accepted"),
+            _ws_event({"type": "error", "error": {"code": "server_is_overloaded", "message": "Overloaded"}}),
+        ]
+    elif resend_kind == "stale_anchor":
+        failure = [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "previous_response_not_found",
+                        "param": "previous_response_id",
+                        "message": "Previous response not found",
+                    },
+                }
+            )
+        ]
     first_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[first_turn, failure],
@@ -13969,6 +14000,14 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
         ],
     )
     failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    if resend_kind in {"same_account_capacity", "same_account_close", "stale_anchor"}:
+        failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].append(recovered_upstream)
+    if resend_kind == "same_account_capacity":
+        monkeypatch.setattr(
+            proxy_module.ProxyService,
+            "_resolve_file_account_for_responses",
+            AsyncMock(return_value=failover.FIRST_ACCOUNT_ID),
+        )
     failover.install(monkeypatch)
     suffix = [reasoning, assistant, failover.FOLLOW_UP_INPUT]
     if resend_kind == "missing_reply":
@@ -13995,6 +14034,17 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
     assert anchored_payload["previous_response_id"] == "resp_quota_anchor"
     if resend_kind != "client_anchor":
         assert anchored_payload["input"] == suffix
+    if resend_kind in {"same_account_capacity", "same_account_close", "stale_anchor"}:
+        _assert_ws_single_response_lifecycle_completed(events, disconnect)
+        assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID]
+        replay = json.loads(recovered_upstream.sent_text[0])
+        if resend_kind == "same_account_capacity":
+            assert replay["previous_response_id"] == "resp_quota_anchor"
+            assert replay["input"] == suffix
+            return
+        assert "previous_response_id" not in replay
+        assert replay["input"] == [failover.HISTORICAL_INPUT, *suffix]
+        return
     if resend_kind != "complete":
         if resend_kind == "visible_output":
             assert [event["type"] for event in events] == ["response.created", "response.output_text.delta", "error"]

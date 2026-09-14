@@ -10866,7 +10866,7 @@ SDK parser failure.
 
 ### Requirement: Direct WebSocket full resends can omit response-owned bookkeeping for safe replay
 
-When direct WebSocket continuity verifies a full resend's raw input prefix and injects `previous_response_id`, the proxy SHALL retain an account-neutral projection for replay if the projected suffix retains a completed prior assistant reply followed by fresh input and the complete projected payload passes the existing account-neutral replay validator. The projection SHALL use the existing rules for removing response-owned bookkeeping and item IDs, preserving message content and paired tool calls and outputs.
+When direct WebSocket continuity verifies a full resend's raw input prefix and injects `previous_response_id`, the proxy SHALL retain the original replay body subject to the existing size guard. Account-switch preparation MAY project that body only if its complete input still matches the original client fingerprint, the projected suffix retains a completed prior assistant reply followed by fresh input, and the complete projected payload passes the existing account-neutral replay validator. The projection SHALL use the existing rules for removing response-owned bookkeeping and item IDs, preserving message content and paired tool calls and outputs.
 
 The normal anchored upstream request SHALL remain unchanged. Projection SHALL NOT make client-supplied anchors, file ownership, turn-state ownership, or requests with already-visible model output eligible for cross-account replay. A resend that fails completeness or portability validation SHALL retain its existing replay behavior.
 
@@ -10886,3 +10886,13 @@ The normal anchored upstream request SHALL remain unchanged. Projection SHALL NO
 - **GIVEN** a proxy-anchored resend with response-owned bookkeeping
 - **WHEN** projection lacks the retained prior assistant reply or leaves an account-bound reference
 - **THEN** projection SHALL NOT authorize cross-account replay
+
+#### Scenario: Same-account retries retain response-owned state
+- **WHEN** a stale-anchor or accepted capacity retry remains on the owner account
+- **THEN** it SHALL use the retained body with its reasoning and item IDs intact
+
+#### Scenario: Size-slimmed input cannot preserve the client fingerprint
+- **GIVEN** the size guard replaced historical tool output or image content in the retained body
+- **WHEN** account-switch preparation compares that input to the client fingerprint
+- **THEN** it SHALL reject projection
+- **AND** a same-account replay SHALL refresh its fingerprint from the actual retained body

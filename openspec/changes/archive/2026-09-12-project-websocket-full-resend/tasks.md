@@ -5,4 +5,4 @@
 - [x] Cover successful account switching, the following turn, and unsafe resends; run proxy tests, lint, typing, and spec validation.
 - [x] Verify and archive the change.
 
-Verification: 459 WebSocket and replay-safety tests plus 4 existing ownership/replay tests passed. Lint, architecture checks, typing, and strict OpenSpec validation passed. Full local CI stops at frontend installation because Bun is unavailable.
+Verification after maintainer review: 2,846 tests passed across the complete WebSocket integration, proxy-utils, proxy-HTTP-bridge, replay-safety, and new projection unit suites. The existing fresh-replay fingerprint regression passes unchanged. Added same-account retry, size-slimming, and unknown-envelope coverage. Lint, architecture checks, typing, contributor attribution, and strict validation of all 65 specs passed. Full local CI stops at frontend installation because Bun is unavailable.

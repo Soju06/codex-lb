@@ -22,6 +22,8 @@ export class ApiError extends Error {
   readonly code: string;
   readonly details: unknown;
   readonly payload: unknown;
+  /** Seconds from `Retry-After`, when the server sent one. Never echoed as a retry. */
+  readonly retryAfter: number | null;
 
   constructor(params: {
     message: string;
@@ -29,6 +31,7 @@ export class ApiError extends Error {
     code: string;
     details?: unknown;
     payload?: unknown;
+    retryAfter?: number | null;
   }) {
     super(params.message);
     this.name = "ApiError";
@@ -36,7 +39,23 @@ export class ApiError extends Error {
     this.code = params.code;
     this.details = params.details;
     this.payload = params.payload;
+    this.retryAfter = params.retryAfter ?? null;
   }
+}
+
+/**
+ * The wait a rate limit names, in seconds. It lives in a header rather than the
+ * envelope, so an interface that wants to say how long to wait cannot read it
+ * off `details` — and the alternative, showing the raw server message, is the
+ * one thing an explained refusal must not do.
+ */
+function retryAfterSeconds(response: Response): number | null {
+  const header = response.headers.get("Retry-After");
+  if (header === null) {
+    return null;
+  }
+  const seconds = Number.parseInt(header, 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 let unauthorizedHandler: (() => void) | null = null;
@@ -214,6 +233,7 @@ async function request<T>(
       message: parsedError.message,
       details: parsedError.details,
       payload,
+      retryAfter: retryAfterSeconds(response),
     });
   }
 

@@ -37,6 +37,20 @@ class DashboardLoginProvider(DashboardModel):
     login_url: str | None = None
 
 
+class DashboardPendingArrival(DashboardModel):
+    """What a browser the identity resolver refused may be told about its own arrival.
+
+    ``provider`` is the row's operator-chosen label -- the same public string
+    the sign-in button carries -- and ``reference`` the masked form of the
+    address the identity provider asserted, which is a lossy projection of
+    something this browser itself presented. Neither says whether any account
+    exists, and no subject, group, claim or address in clear appears here.
+    """
+
+    provider: str
+    reference: str
+
+
 class DashboardLoginHint(DashboardModel):
     """Login-screen hints served to unauthenticated clients too; never carries a username.
 
@@ -52,6 +66,11 @@ class DashboardLoginHint(DashboardModel):
     #: (``break_glass_only``). The account name is never sent here.
     local_login: LocalLoginPolicyValue = "enabled"
     pending_identity: bool = False
+    #: Set only from the sealed marker an OIDC refusal left for this browser,
+    #: and from nothing else -- not from the active providers, not from any
+    #: account lookup -- so no caller can ask for the block of an address of
+    #: their choosing. A reverse-proxy refusal keeps the bare boolean above.
+    pending_arrival: DashboardPendingArrival | None = None
 
 
 class DashboardAccessSummary(DashboardModel):

@@ -45,7 +45,13 @@ from app.db.session import SessionLocal
 from app.modules.auth_providers.config import build_oidc_config, seal_oidc_config
 from app.modules.auth_providers.seed import auth_provider_id
 from app.modules.dashboard_auth.oidc_api import OIDC_DASHBOARD_PATH, OIDC_FAILURE_PATH, OIDC_PENDING_PATH
-from app.modules.dashboard_auth.oidc_flows import OIDC_FLOW_COOKIE, OidcFlowPurpose, OidcFlowRepository
+from app.modules.dashboard_auth.oidc_flows import (
+    OIDC_FLOW_COOKIE,
+    OIDC_PENDING_COOKIE,
+    OIDC_PENDING_COOKIE_PATH,
+    OidcFlowPurpose,
+    OidcFlowRepository,
+)
 from tests.fixtures.fake_idp import (
     CLIENT_SECRET,
     REDIRECT_URI,
@@ -334,6 +340,85 @@ async def test_an_unknown_identity_lands_on_the_pending_screen(async_client: Asy
     details = json.loads(unknown[0].details or "{}")
     assert details["provider"] == "oidc" and details["subject"] == "stranger"
     assert details["email"] == "stranger@example.com" and details["groups"] == ["contractors"]
+
+
+@pytest.mark.asyncio
+async def test_the_refused_browser_is_handed_the_provider_and_a_masked_reference(
+    async_client: AsyncClient, app_instance, idp: FakeIdp
+) -> None:
+    """The one destination that carries something back, and only to the browser it refused."""
+
+    await _configure_provider(unknown_identity_role_id=None)
+    # An install that asks anyone to sign in: without an account the dashboard
+    # is open to the implicit local admin, and a session answers the question
+    # the marker exists to answer.
+    async with _client(app_instance) as admin:
+        created = await admin.post("/api/dashboard-auth/password/setup", json={"password": ADMIN_PASSWORD})
+        assert created.status_code == 200, created.text
+    await _converge_caches()
+
+    refused = await _sign_in(
+        async_client, idp, subject="stranger", claims={"email": "stranger@example.com", "groups": ["Contractors"]}
+    )
+
+    assert refused.headers["location"] == OIDC_PENDING_PATH
+    assert async_client.cookies.get(OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH) is not None
+    # The address never leaves in clear -- not in the redirect, not in a header,
+    # and the sealed value is not the address with a wrapper around it.
+    assert "stranger@example.com" not in str(refused.headers)
+
+    session = (await async_client.get(SESSION)).json()
+    assert session["authenticated"] is False and session["user"] is None
+    assert session["login"]["pendingIdentity"] is True
+    assert session["login"]["pendingArrival"] == {"provider": "Single sign-on", "reference": "s***@example.com"}
+    assert "stranger@example.com" not in json.dumps(session)
+    # Nothing about the connection, and no statement that any account exists.
+    assert "stranger" not in json.dumps(session["login"])
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_this_browsers_alone_and_every_other_ending_clears_it(
+    async_client: AsyncClient, app_instance, idp: FakeIdp
+) -> None:
+    await _configure_provider(unknown_identity_role_id=None)
+    await _sign_in(async_client, idp, subject="stranger", claims={"email": "stranger@example.com"})
+
+    # A second browser, with no marker of its own, learns nothing.
+    async with _client(app_instance) as other:
+        elsewhere = (await other.get(SESSION)).json()
+    assert elsewhere["login"]["pendingIdentity"] is False
+    assert elsewhere["login"]["pendingArrival"] is None
+
+    # Signing out is how a refused person leaves the screen.
+    await async_client.post("/api/dashboard-auth/logout")
+    assert async_client.cookies.get(OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH) is None
+    assert (await async_client.get(SESSION)).json()["login"]["pendingArrival"] is None
+
+    # And so is being refused for a reason that is not "no account here": every
+    # other destination deletes the marker rather than leaving the last one up.
+    await _configure_provider(unknown_identity_role_id=None)
+    await _sign_in(async_client, idp, subject="stranger", claims={"email": "stranger@example.com"})
+    assert async_client.cookies.get(OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH) is not None
+    failed = await _callback(async_client, state="not-a-state-this-browser-started")
+    assert failed.headers["location"] == OIDC_FAILURE_PATH
+    assert async_client.cookies.get(OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH) is None
+
+
+@pytest.mark.asyncio
+async def test_an_identity_provider_that_asserts_no_address_leaves_no_marker(
+    async_client: AsyncClient, idp: FakeIdp
+) -> None:
+    """There would be no reference to quote, and the audit row has no address either."""
+
+    await _configure_provider(unknown_identity_role_id=None)
+
+    refused = await _sign_in(async_client, idp, subject="stranger")
+
+    assert refused.headers["location"] == OIDC_PENDING_PATH
+    assert async_client.cookies.get(OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH) is None
+    session = (await async_client.get(SESSION)).json()
+    assert session["login"]["pendingIdentity"] is False
+    assert session["login"]["pendingArrival"] is None
 
 
 @pytest.mark.asyncio

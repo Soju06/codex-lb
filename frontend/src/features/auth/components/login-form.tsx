@@ -50,9 +50,16 @@ export type LoginFormProps = {
    * A prop, not a URL read, so the form still renders without a router.
    */
   localForm?: LocalFormDisclosure;
+  /**
+   * A company sign-in came back unfinished. A prop for the same reason, and a
+   * bare fact for a different one: the server collapses every cause into one
+   * marker so an unauthenticated caller cannot tell them apart, and there is
+   * nothing here to enrich it with.
+   */
+  signInFailed?: boolean;
 };
 
-export function LoginForm({ localForm = "shown" }: LoginFormProps = {}) {
+export function LoginForm({ localForm = "shown", signInFailed = false }: LoginFormProps = {}) {
   const { t } = useTranslation();
   const login = useAuthStore((state) => state.login);
   const loginGuest = useAuthStore((state) => state.loginGuest);
@@ -123,6 +130,12 @@ export function LoginForm({ localForm = "shown" }: LoginFormProps = {}) {
 
   return (
     <div className="rounded-2xl border bg-card p-6 shadow-[var(--shadow-md)]">
+      {signInFailed ? (
+        <AlertMessage variant="warning" className="mb-5">
+          {t("auth.login.signInFailed")}
+        </AlertMessage>
+      ) : null}
+
       {external.length > 0 ? (
         <div className={showLocalForm || showLocalLink ? "mb-5 border-b pb-5" : ""}>
           <ProviderBlock providers={external} />

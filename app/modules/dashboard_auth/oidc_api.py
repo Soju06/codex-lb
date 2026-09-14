@@ -38,7 +38,7 @@ from app.core.auth.dependencies import (
     require_dashboard_permission,
     validate_dashboard_session,
 )
-from app.core.auth.providers import DEFAULT_PROVIDER_KEY
+from app.core.auth.providers import DEFAULT_PROVIDER_KEY, ExternalIdentity
 from app.core.auth.providers.oidc import (
     OIDC_CLOCK_SKEW_SECONDS,
     OidcCompletion,
@@ -58,6 +58,7 @@ from app.core.exceptions import (
     DashboardRateLimitError,
     DashboardUpstreamError,
 )
+from app.core.utils.masking import mask_email
 from app.core.utils.time import utcnow
 from app.db.models import AuthProviderKind, DashboardAuthProvider, DashboardUser
 from app.dependencies import DashboardAuthContext, get_dashboard_auth_context
@@ -80,7 +81,9 @@ from app.modules.dashboard_auth.oidc_flows import (
     OidcFlowPurpose,
     OidcFlowRecord,
     OidcFlowRepository,
+    clear_pending_marker,
     get_oidc_flow_cookie_store,
+    set_pending_marker,
 )
 from app.modules.dashboard_auth.schemas import OidcStartResponse
 from app.modules.dashboard_auth.service import (
@@ -113,6 +116,37 @@ _REDIRECT_STATUS: Final[int] = 303
 def _redirect(path: str) -> RedirectResponse:
     response = RedirectResponse(path, status_code=_REDIRECT_STATUS)
     _clear_flow_cookie(response)
+    # Every destination except the pending screen clears the refusal marker:
+    # a completed sign-in, a completed pre-flight, a completed
+    # re-authentication and every failure are all answers to "who are you"
+    # that supersede the last refusal this browser was handed.
+    clear_pending_marker(response)
+    return response
+
+
+def _pending_redirect(request: Request, row: DashboardAuthProvider, identity: ExternalIdentity) -> RedirectResponse:
+    """The one destination that carries something back, and only to the browser it refused.
+
+    The person behind this browser has just authenticated at the company
+    identity provider and holds no session, so the screen would otherwise have
+    nothing to say. The marker names the row (the screen resolves its label,
+    which is public: it is what the sign-in button says) and the masked address
+    the identity provider asserted, which the administrator's refused sign-ins
+    list masks the same way -- so the two strings match by eye. Nothing else
+    goes in: no subject, no groups, no claim, no address in clear.
+
+    An identity provider that asserted no address leaves no marker. There would
+    be no reference to quote and the audit row it would be matched against has
+    no address either, so the screen keeps its general copy instead of naming a
+    provider with nothing to look up.
+    """
+
+    email = (identity.email or "").strip()
+    if not email:
+        return _redirect(OIDC_PENDING_PATH)
+    response = RedirectResponse(OIDC_PENDING_PATH, status_code=_REDIRECT_STATUS)
+    _clear_flow_cookie(response)
+    set_pending_marker(response, request, provider_id=row.id, reference=mask_email(email))
     return response
 
 
@@ -510,7 +544,7 @@ async def _complete_sign_in(
         # row naming the provider, subject, e-mail and groups; this route adds
         # nothing to it. The pending screen is the one place a failure is
         # allowed to differ, because the person did authenticate.
-        return _redirect(OIDC_PENDING_PATH), True
+        return _pending_redirect(request, row, completion.identity), True
 
     user = await DashboardUsersRepository(context.session).get_by_id(resolution.user_id)
     if user is None:  # pragma: no cover - resolved a moment ago

@@ -15,9 +15,11 @@ import {
   useRoleMappings,
 } from "@/features/organisation/hooks";
 import {
+  companyLoginLabel,
   hasCompanyLogin,
   isLocalLoginRestricted,
   isOrganisationConfigured,
+  oidcProvider,
   rulesOf,
   trustedHeaderProvider,
 } from "@/features/organisation/rules";
@@ -25,6 +27,8 @@ import {
   ORGANISATION_GROUP_ID,
   ORGANISATION_LOGIN_POLICY_HASH,
   ORGANISATION_LOGIN_POLICY_ID,
+  ORGANISATION_OIDC_HASH,
+  ORGANISATION_OIDC_ID,
   ORGANISATION_REFUSED_HASH,
   shouldExpandOrganisationSettings,
 } from "@/features/settings/advanced-settings-deeplink";
@@ -34,6 +38,7 @@ import {
 } from "@/features/settings/components/advanced-settings-group";
 import { GroupRulesCard } from "@/features/settings/components/organisation/group-rules-card";
 import { LoginPolicyCard } from "@/features/settings/components/organisation/login-policy-card";
+import { OidcCard } from "@/features/settings/components/organisation/oidc-card";
 import { ReverseProxyCard } from "@/features/settings/components/organisation/reverse-proxy-card";
 
 const LABEL_KEYS = {
@@ -54,6 +59,37 @@ const POLICY_ONLY_LABELS: SettingsGroupLabelKeys = {
   ...LABEL_KEYS,
   description: "organisation.group.summaryPolicyOnly",
 };
+// With exactly one company sign-in active the summary names it, from the login
+// hint every session already carries. `access_summary` lists provider kinds and
+// never labels, and a collapsed group may not ask.
+const NAMED_LABELS: SettingsGroupLabelKeys = { ...LABEL_KEYS, description: "organisation.group.summaryNamed" };
+const NAMED_RESTRICTED_LABELS: SettingsGroupLabelKeys = {
+  ...LABEL_KEYS,
+  description: "organisation.group.summaryNamedRestricted",
+};
+
+function labelsFor({
+  configured,
+  companyLogin,
+  restricted,
+  named,
+}: {
+  configured: boolean;
+  companyLogin: boolean;
+  restricted: boolean;
+  named: boolean;
+}): SettingsGroupLabelKeys {
+  if (!configured) {
+    return UNCONFIGURED_LABELS;
+  }
+  if (!companyLogin) {
+    return POLICY_ONLY_LABELS;
+  }
+  if (named) {
+    return restricted ? NAMED_RESTRICTED_LABELS : NAMED_LABELS;
+  }
+  return restricted ? RESTRICTED_LABELS : CONFIGURED_LABELS;
+}
 
 // The three queries `OrganisationGroupBody` holds its spinner for. The group
 // scrolls to its target on one animation frame and never retries, and
@@ -66,6 +102,12 @@ const ORGANISATION_LAYOUT_QUERY_KEYS = [
   MAPPINGS_QUERY_KEY,
   ASSIGNABLE_ROLES_QUERY_KEY,
 ] as const;
+
+/** Hashes that name a card rather than the group; anything else lands on the group. */
+const CARD_ANCHORS: Record<string, string | undefined> = {
+  [ORGANISATION_LOGIN_POLICY_HASH]: ORGANISATION_LOGIN_POLICY_ID,
+  [ORGANISATION_OIDC_HASH]: ORGANISATION_OIDC_ID,
+};
 
 /** Everything the group's cards need, fetched only once the group is open. */
 function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean; disabled: boolean }) {
@@ -90,10 +132,11 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
   }
 
   const provider = trustedHeaderProvider(providersQuery.data);
+  const oidc = oidcProvider(providersQuery.data);
   const roles = rolesQuery.data ?? [];
   // The login-policy card describes the local sign-in every install has, so it
-  // renders even here, where there is no company sign-in method to configure:
-  // that install's operator is exactly the one who needs the emergency URL.
+  // renders even on an install with nothing else in this group: that install's
+  // operator is exactly the one who needs the emergency URL.
   // The queries go in whole, not their `data`: the card is the only thing that
   // can say "this could not be loaded" in the right place, and `undefined` on
   // its own cannot tell a pending request from a failed one.
@@ -107,27 +150,30 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
     />
   );
 
-  if (provider === null) {
-    return (
-      <>
-        <p className="text-xs text-muted-foreground">{t("organisation.group.noProvider")}</p>
-        {loginPolicyCard}
-      </>
-    );
-  }
-
+  // Order per PLAN §4.8: company sign-in, reverse proxy, rules, login policy.
+  // The first and the last render on every install — every install can connect
+  // an identity provider, and every install has a local sign-in — while the
+  // proxy cards describe a deployment that may simply not exist. Saying so is a
+  // neutral fact about the topology, never a missing piece.
   return (
     <>
-      <ReverseProxyCard provider={provider} roles={roles} mutations={mutations} disabled={disabled} />
-      <GroupRulesCard
-        provider={provider}
-        roles={roles}
-        rules={rulesOf(mappingsQuery.data, provider)}
-        mutations={mutations}
-        canReadAudit={canReadAudit}
-        refusedOpen={refusedOpen}
-        disabled={disabled}
-      />
+      {oidc === null ? null : <OidcCard provider={oidc} mutations={mutations} disabled={disabled} />}
+      {provider === null ? (
+        <p className="text-xs text-muted-foreground">{t("organisation.group.noReverseProxy")}</p>
+      ) : (
+        <>
+          <ReverseProxyCard provider={provider} roles={roles} mutations={mutations} disabled={disabled} />
+          <GroupRulesCard
+            provider={provider}
+            roles={roles}
+            rules={rulesOf(mappingsQuery.data, provider)}
+            mutations={mutations}
+            canReadAudit={canReadAudit}
+            refusedOpen={refusedOpen}
+            disabled={disabled}
+          />
+        </>
+      )}
       {loginPolicyCard}
     </>
   );
@@ -144,41 +190,36 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
  * carries rather than a request of its own.
  */
 export function OrganisationSettingsGroup({ disabled = false }: { disabled?: boolean }) {
-  const { hash } = useLocation();
+  const { search, hash } = useLocation();
   const canWriteSecurity = usePermission("security:write");
   const accessSummary = useAuthStore((state) => state.accessSummary);
+  const providers = useAuthStore((state) => state.loginHint.providers);
 
   if (!canWriteSecurity) {
     return null;
   }
 
-  const configured = isOrganisationConfigured(accessSummary);
-  const restricted = isLocalLoginRestricted(accessSummary);
-  const companyLogin = hasCompanyLogin(accessSummary);
-  const labels = !configured
-    ? UNCONFIGURED_LABELS
-    : companyLogin
-      ? restricted
-        ? RESTRICTED_LABELS
-        : CONFIGURED_LABELS
-      : POLICY_ONLY_LABELS;
-  const expand = shouldExpandOrganisationSettings(hash);
+  // The operator's own word for their identity provider, quoted verbatim: the
+  // banned-word rule governs the copy this product writes, not a customer's
+  // name for their own system.
+  const providerLabel = companyLoginLabel(providers);
+  const labels = labelsFor({
+    configured: isOrganisationConfigured(accessSummary),
+    companyLogin: hasCompanyLogin(accessSummary),
+    restricted: isLocalLoginRestricted(accessSummary),
+    named: providerLabel !== null,
+  });
+  const expand = shouldExpandOrganisationSettings(search, hash);
 
   return (
     <div id={ORGANISATION_GROUP_ID} className="scroll-mt-16">
       <AdvancedSettingsGroup
         key={expand ? `open:${hash}` : "closed"}
         defaultOpen={expand}
-        scrollToId={
-          expand
-            ? hash === ORGANISATION_LOGIN_POLICY_HASH
-              ? ORGANISATION_LOGIN_POLICY_ID
-              : ORGANISATION_GROUP_ID
-            : undefined
-        }
+        scrollToId={expand ? CARD_ANCHORS[hash] ?? ORGANISATION_GROUP_ID : undefined}
         waitForQueryKeys={ORGANISATION_LAYOUT_QUERY_KEYS}
         labels={labels}
-        descriptionValues={{ count: accessSummary?.roleMappings ?? 0 }}
+        descriptionValues={{ count: accessSummary?.roleMappings ?? 0, provider: providerLabel ?? "" }}
         descriptionTestId="organisation-group-line"
       >
         <OrganisationGroupBody refusedOpen={hash === ORGANISATION_REFUSED_HASH} disabled={disabled} />

@@ -35,6 +35,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.external_identity import ExternalResolution, resolve_trusted_header_request
+from app.core.auth.providers.registry import get_auth_provider_registry
 from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, step_up_expires_at
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
@@ -62,9 +63,16 @@ from app.dependencies import (
     get_dashboard_auth_context,
     get_dashboard_users_context,
 )
+from app.modules.dashboard_auth.oidc_flows import (
+    OIDC_PENDING_COOKIE,
+    clear_pending_marker,
+    get_oidc_pending_cookie_store,
+)
 from app.modules.dashboard_auth.schemas import (
     DashboardAuthSessionResponse,
+    DashboardLoginHint,
     DashboardMeResponse,
+    DashboardPendingArrival,
     GuestLoginRequest,
     GuestPasswordSetRequest,
     InviteAcceptRequest,
@@ -221,6 +229,37 @@ _UNAUTHENTICATED_ACCOUNT_FIELDS: dict[str, object] = {
 }
 
 
+async def _refused_company_sign_in(request: Request, login: DashboardLoginHint | None) -> DashboardLoginHint | None:
+    """This browser's own refusal marker, projected onto the login hint, or ``None``.
+
+    The marker is read here and nowhere else, and only for a caller that holds
+    no session: what it carries is a lossy echo of an identity this very
+    browser presented a moment ago, so handing it back to that browser tells it
+    nothing it did not already know, and there is no request shape that gets it
+    for anybody else's address.
+
+    A marker naming a row that no longer exists yields nothing rather than a
+    guess. The label belongs to the row; an install that deleted it has no
+    label to give, and inventing one from the active providers would be the
+    screen asserting which provider refused somebody.
+    """
+
+    if login is None:
+        return None
+    marker = get_oidc_pending_cookie_store().get(request.cookies.get(OIDC_PENDING_COOKIE))
+    if marker is None:
+        return None
+    row = next((row for row in await get_auth_provider_registry().rows() if row.id == marker.provider_id), None)
+    if row is None:
+        return None
+    return login.model_copy(
+        update={
+            "pending_identity": True,
+            "pending_arrival": DashboardPendingArrival(provider=row.label, reference=marker.reference),
+        }
+    )
+
+
 async def _decorate_session_response(
     description: SessionDescription,
     *,
@@ -265,6 +304,13 @@ async def _decorate_session_response(
                 update["authenticated"] = False
                 update["password_required"] = False
                 update.update(_UNAUTHENTICATED_ACCOUNT_FIELDS)
+        # A company sign-in this install refused, described to the browser it
+        # refused -- and only while that browser has nothing better: a session
+        # is the answer to the same question and supersedes the marker.
+        if not bool(update.get("authenticated", response.authenticated)):
+            refused = await _refused_company_sign_in(request, response.login)
+            if refused is not None:
+                update["login"] = refused
         return response.model_copy(update=update)
 
     if request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
@@ -1274,6 +1320,9 @@ async def logout_dashboard(
     context.service.logout(session_id)
     response = JSONResponse(status_code=200, content={"status": "ok"})
     response.delete_cookie(key=DASHBOARD_SESSION_COOKIE, path="/")
+    # The pending screen's Logout is how a refused person leaves it, so the
+    # refusal marker goes with the session; otherwise the screen comes back.
+    clear_pending_marker(response)
     return response
 
 

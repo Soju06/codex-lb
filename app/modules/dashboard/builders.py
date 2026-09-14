@@ -10,7 +10,6 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewSummary,
     DashboardOverviewTimeframe,
     DashboardOverviewTimeframeKey,
-    DashboardSubscriptionOverflow,
     DashboardUsageCost,
     DashboardUsageMetrics,
 )
@@ -76,7 +75,6 @@ def build_dashboard_overview_summary(
     activity_cost: ActivityCostSummary,
     activity_metrics: ActivityMetricsSummary,
     comparison: DashboardMetricsComparison | None = None,
-    subscription_overflow: DashboardSubscriptionOverflow | None = None,
 ) -> DashboardOverviewSummary:
     account_map = {account.id: account for account in accounts}
     primary_summary = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
@@ -106,5 +104,4 @@ def build_dashboard_overview_summary(
             }
         ),
         comparison=comparison,
-        subscription_overflow=subscription_overflow,
     )

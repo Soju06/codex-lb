@@ -75,6 +75,16 @@ export const StrictLocalLoginPolicySchema = z.enum(["enabled", "admins_only", "b
 // update — see `buildSettingsUpdateRequest`.
 export const LocalLoginPolicySchema = StrictLocalLoginPolicySchema.catch("enabled");
 
+// What a browser the identity resolver refused may be told about its own
+// arrival: the provider's public label (the same string its sign-in button
+// carries) and the reference the server computed from the address the identity
+// provider asserted. Both are the server's words; the client renders them and
+// derives nothing. Absent for a reverse-proxy refusal and for an expired marker.
+export const PendingArrivalSchema = z.object({
+  provider: z.string(),
+  reference: z.string(),
+});
+
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
   providers: z
@@ -83,6 +93,7 @@ export const LoginHintSchema = z.object({
   localLogin: LocalLoginPolicySchema.default("enabled"),
   // The request carried a provider identity that has no account here yet.
   pendingIdentity: z.boolean().default(false),
+  pendingArrival: PendingArrivalSchema.nullable().default(null),
 });
 
 // Team-size facts served only to `users:manage` holders; `null` for everyone
@@ -239,6 +250,7 @@ export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
 export type LoginProvider = z.infer<typeof LoginProviderSchema>;
+export type PendingArrival = z.infer<typeof PendingArrivalSchema>;
 export type LocalLoginPolicy = z.infer<typeof LocalLoginPolicySchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;

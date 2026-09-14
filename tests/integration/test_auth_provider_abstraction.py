@@ -234,6 +234,9 @@ async def test_refused_identity_gets_pending_session_and_401(async_client: Async
     assert body["user"] is None
     assert body["accessSummary"] is None
     assert body["login"]["pendingIdentity"] is True
+    # A proxy refusal keeps the bare boolean: the arrival block is derived from
+    # the OIDC refusal marker and from nothing else, so there is none here.
+    assert body["login"]["pendingArrival"] is None
 
     blocked = await async_client.get("/api/settings", headers=_as("nobody@example.com"))
     assert blocked.status_code == 401

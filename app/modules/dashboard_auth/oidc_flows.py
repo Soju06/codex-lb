@@ -24,6 +24,7 @@ from enum import StrEnum
 from time import time
 from typing import Any, Final
 
+from fastapi import Request, Response
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +45,14 @@ OIDC_LOGIN_START_PATH: Final[str] = "/api/dashboard-auth/oidc/login/start"
 #: Long enough for a password plus a second factor at the identity provider,
 #: short enough that a captured authorization URL goes stale quickly.
 OIDC_FLOW_TTL_SECONDS: Final[int] = 600
+
+#: The one thing a refused sign-in carries back. Scoped to the dashboard-auth
+#: path because the session response is the only reader, and given the same
+#: lifetime as a flow: long enough to read the screen and retry, short enough
+#: that a borrowed browser does not keep answering for somebody else.
+OIDC_PENDING_COOKIE: Final[str] = "codex_lb_oidc_pending"
+OIDC_PENDING_COOKIE_PATH: Final[str] = "/api/dashboard-auth"
+OIDC_PENDING_TTL_SECONDS: Final[int] = OIDC_FLOW_TTL_SECONDS
 
 
 class OidcFlowPurpose(StrEnum):
@@ -190,11 +199,14 @@ class OidcFlowRepository:
         await self._session.commit()
 
 
-class OidcFlowCookieStore:
-    """The browser's half of the flow: the ``state``, sealed, and nothing else.
+class _SealedCookieStore:
+    """Sealed JSON with a payload version and its own expiry, as the step-up cookie is.
 
-    Same shape as the step-up cookie -- sealed JSON with a payload version and
-    its own expiry -- so the browser cannot read, forge or extend it.
+    The seal is the product's single :class:`TokenEncryptor`, so the browser can
+    neither read, forge nor extend what it carries. Each subclass names its own
+    fields and rejects a payload that does not carry them, which is also what
+    keeps one of these cookies from being read as another: a value pasted into
+    the wrong cookie opens and is then missing everything that cookie needs.
     """
 
     PAYLOAD_VERSION = 1
@@ -207,16 +219,12 @@ class OidcFlowCookieStore:
             self._encryptor = TokenEncryptor()
         return self._encryptor
 
-    def create(self, state: str, *, ttl_seconds: int = OIDC_FLOW_TTL_SECONDS) -> str:
-        payload: dict[str, Any] = {
-            "v": self.PAYLOAD_VERSION,
-            "st": state,
-            "exp": int(time()) + ttl_seconds,
-        }
-        return self._get_encryptor().encrypt(json.dumps(payload, separators=(",", ":"))).decode("ascii")
+    def _seal(self, payload: dict[str, Any], *, ttl_seconds: int) -> str:
+        sealed: dict[str, Any] = {"v": self.PAYLOAD_VERSION, "exp": int(time()) + ttl_seconds, **payload}
+        return self._get_encryptor().encrypt(json.dumps(sealed, separators=(",", ":"))).decode("ascii")
 
-    def get(self, token: str | None) -> str | None:
-        """The ``state`` this browser started, or ``None`` for anything unreadable."""
+    def _open(self, token: str | None) -> dict[str, Any] | None:
+        """The payload this browser was given, or ``None`` for anything unreadable."""
 
         if not token:
             return None
@@ -229,12 +237,94 @@ class OidcFlowCookieStore:
         expires_at = data.get("exp")
         if not isinstance(expires_at, int) or isinstance(expires_at, bool) or expires_at < int(time()):
             return None
-        state = data.get("st")
+        return data
+
+
+class OidcFlowCookieStore(_SealedCookieStore):
+    """The browser's half of the flow: the ``state``, sealed, and nothing else."""
+
+    def create(self, state: str, *, ttl_seconds: int = OIDC_FLOW_TTL_SECONDS) -> str:
+        return self._seal({"st": state}, ttl_seconds=ttl_seconds)
+
+    def get(self, token: str | None) -> str | None:
+        """The ``state`` this browser started, or ``None`` for anything unreadable."""
+
+        data = self._open(token)
+        state = None if data is None else data.get("st")
         return state if isinstance(state, str) and state else None
 
 
+@dataclass(frozen=True, slots=True)
+class OidcPendingArrival:
+    """Who the identity provider said this browser was, as much as it may be told.
+
+    ``reference`` is already masked when it gets here: the address in clear is
+    never written to the cookie, so nothing downstream has the option of
+    rendering it.
+    """
+
+    provider_id: str
+    reference: str
+
+
+class OidcPendingCookieStore(_SealedCookieStore):
+    """The refusal marker a pending redirect leaves for the browser it refused.
+
+    Not single-use: the pending screen's **Try again** re-reads the session, and
+    a marker that evaporated on the first read would blank the screen the person
+    is still looking at. It expires instead, and every other destination the
+    flow can end at deletes it.
+    """
+
+    def create(self, *, provider_id: str, reference: str, ttl_seconds: int = OIDC_PENDING_TTL_SECONDS) -> str:
+        return self._seal({"pid": provider_id, "ref": reference}, ttl_seconds=ttl_seconds)
+
+    def get(self, token: str | None) -> OidcPendingArrival | None:
+        data = self._open(token)
+        if data is None:
+            return None
+        provider_id, reference = data.get("pid"), data.get("ref")
+        if not isinstance(provider_id, str) or not provider_id or not isinstance(reference, str) or not reference:
+            return None
+        return OidcPendingArrival(provider_id=provider_id, reference=reference)
+
+
+def set_pending_marker(response: Response, request: Request, *, provider_id: str, reference: str) -> None:
+    """Write the marker with the attributes :func:`clear_pending_marker` deletes it with."""
+
+    response.set_cookie(
+        key=OIDC_PENDING_COOKIE,
+        value=get_oidc_pending_cookie_store().create(provider_id=provider_id, reference=reference),
+        httponly=True,
+        secure=request.url.scheme == "https",
+        # Lax for the same reason the flow cookie is: it is written on a
+        # top-level cross-site navigation back from the identity provider.
+        samesite="lax",
+        max_age=OIDC_PENDING_TTL_SECONDS,
+        path=OIDC_PENDING_COOKIE_PATH,
+    )
+
+
+def clear_pending_marker(response: Response) -> None:
+    """Drop the marker, with the attributes it was written with.
+
+    Set and cleared from one place because the pair has to agree: a delete that
+    names a different path leaves the cookie in the browser, and the session
+    response would keep answering with a refusal the person has moved past.
+    Signing out clears it too -- the marker outlives the redirect that set it,
+    and the next person on this browser is not the one who was refused.
+    """
+
+    response.delete_cookie(key=OIDC_PENDING_COOKIE, path=OIDC_PENDING_COOKIE_PATH)
+
+
 _flow_cookie_store = OidcFlowCookieStore()
+_pending_cookie_store = OidcPendingCookieStore()
 
 
 def get_oidc_flow_cookie_store() -> OidcFlowCookieStore:
     return _flow_cookie_store
+
+
+def get_oidc_pending_cookie_store() -> OidcPendingCookieStore:
+    return _pending_cookie_store

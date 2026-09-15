@@ -11,9 +11,28 @@ from app.modules.proxy._service.websocket.helpers import (
     _install_verified_fresh_replay,
     _prepare_websocket_request_state_for_account_switch,
     _project_websocket_full_resend_for_replay,
+    _websocket_request_text_is_account_neutral_fresh_replay,
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    ("lite", "reasoning", "expected"),
+    [
+        (True, {"context": "all_turns", "effort": "high"}, True),
+        (False, {"context": "all_turns"}, False),
+        (True, {"context": "last_turn"}, False),
+        (True, {"context": {"id": "rs_owner"}}, False),
+        (True, {"context": "all_turns", "unknown": "value"}, False),
+    ],
+)
+def test_websocket_lite_replay_accepts_only_canonical_context(lite, reasoning, expected):
+    items = [{"role": "user", "content": "hello"}]
+    if lite:
+        items.insert(0, {"type": "additional_tools", "role": "developer", "tools": []})
+    payload = {"type": "response.create", "model": "gpt-5.4", "input": items, "reasoning": reasoning}
+    assert _websocket_request_text_is_account_neutral_fresh_replay(json.dumps(payload)) is expected
 
 
 @pytest.mark.parametrize("unsafe", [None, "missing_reply", "unpaired_call", "file", "prompt", "unknown_type"])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import update
 
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.dashboard_overrides import dashboard_overrides_bound
 from app.core.config.settings_cache import get_settings_cache
@@ -2695,6 +2698,71 @@ async def test_automations_due_run_does_not_execute_same_day_when_job_is_updated
 
         executed_next_day = await service.run_due_jobs(now_utc=slot_time + timedelta(days=1, minutes=1))
         assert executed_next_day == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["manual", "scheduled"])
+async def test_automations_skip_unavailable_reauth_credentials(async_client, monkeypatch, trigger):
+    accounts = await _create_accounts("reauth-rejected", "reauth-expired", "reauth-warning")
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        for account, reason, expires_at in zip(
+            accounts,
+            ("account_auth_invalidated", "refresh_token_expired", "refresh_token_expired"),
+            (4102444800, 1, 4102444800),
+            strict=True,
+        ):
+            body = base64.urlsafe_b64encode(json.dumps({"exp": expires_at}).encode()).rstrip(b"=").decode()
+            await session.execute(
+                update(Account)
+                .where(Account.id == account.id)
+                .values(
+                    status=AccountStatus.REAUTH_REQUIRED,
+                    deactivation_reason=PERMANENT_FAILURE_CODES[reason],
+                    access_token_encrypted=encryptor.encrypt(f"header.{body}.sig"),
+                )
+            )
+        await session.commit()
+
+    calls: list[str | None] = []
+
+    async def _fake_compact(*_args, **kwargs):
+        calls.append(kwargs.get("account_id"))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
+    now = utcnow().replace(second=0, microsecond=0)
+    create_response = await async_client.post(
+        "/api/automations",
+        json={
+            "name": "Reauthentication eligibility",
+            "enabled": trigger == "scheduled",
+            "allAccounts": True,
+            "schedule": {
+                "type": "daily",
+                "time": now.strftime("%H:%M"),
+                "timezone": "UTC",
+                "thresholdMinutes": 0,
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            },
+            "model": "gpt-5.3-codex",
+            "prompt": "ping",
+            "accountIds": [],
+        },
+    )
+    assert create_response.status_code == 200
+    job_id = create_response.json()["id"]
+    if trigger == "manual":
+        response = await async_client.post(f"/api/automations/{job_id}/run-now")
+        assert response.status_code == 202
+    else:
+        await _set_job_updated_at(job_id, now)
+        assert await _run_due_jobs(now_utc=now + timedelta(seconds=5)) == 1
+
+    assert calls == [accounts[2].chatgpt_account_id]
+    runs = await async_client.get(f"/api/automations/{job_id}/runs")
+    assert runs.status_code == 200
+    assert [entry["accountId"] for entry in runs.json()["items"]] == [accounts[2].id]
 
 
 @pytest.mark.asyncio

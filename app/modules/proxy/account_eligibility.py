@@ -4,6 +4,7 @@ import time
 from collections.abc import Collection
 
 from app.core.auth import token_expiry_epoch_ms
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 
@@ -21,7 +22,7 @@ HARD_OWNER_UNAVAILABLE_STATUSES = frozenset(
 )
 """Statuses a hard continuity owner can sit in while it cannot serve its thread.
 
-Usable directly in SQL, unlike :func:`reauth_access_token_is_expired`, which
+Usable directly in SQL, unlike :func:`reauth_credentials_are_unavailable`, which
 needs a decrypted token. ``REAUTH_REQUIRED`` belongs here only because every
 consumer pairs the set with a long inactivity grace: an owner that has been
 warning about reauthentication for hours without serving its thread is not
@@ -52,17 +53,32 @@ def account_access_token_expires_at(account: Account, encryptor: TokenEncryptor)
     return stored_access_token_expires_at(encrypted_access_token, encryptor)
 
 
-def reauth_access_token_is_expired(
+def reauth_credentials_are_unavailable(
     status: AccountStatus,
     access_token_expires_at: float | None,
     *,
     now: float | None = None,
+    deactivation_reason: str | None = None,
 ) -> bool:
     """Return whether a reauthentication-warning account is known unusable."""
-    return (
-        status == AccountStatus.REAUTH_REQUIRED
-        and access_token_expires_at is not None
-        and access_token_expires_at <= (time.time() if now is None else now)
+    return status == AccountStatus.REAUTH_REQUIRED and (
+        reauth_reason_blocks_routing(deactivation_reason)
+        or (access_token_expires_at is not None and access_token_expires_at <= (time.time() if now is None else now))
+    )
+
+
+def account_reauth_credentials_are_unavailable(
+    account: Account,
+    encryptor: TokenEncryptor,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Apply the shared reason/expiry rule to an account snapshot."""
+    return account.status == AccountStatus.REAUTH_REQUIRED and reauth_credentials_are_unavailable(
+        account.status,
+        account_access_token_expires_at(account, encryptor),
+        now=now,
+        deactivation_reason=account.deactivation_reason,
     )
 
 
@@ -78,10 +94,11 @@ def all_accounts_require_reauthentication(
     ``self._clock.time()``) so selection never mixes clock domains.
     """
     return bool(accounts) and all(
-        reauth_access_token_is_expired(
+        reauth_credentials_are_unavailable(
             account.status,
             account_access_token_expires_at(account, encryptor),
             now=now,
+            deactivation_reason=account.deactivation_reason,
         )
         for account in accounts
     )

@@ -43,6 +43,8 @@ from app.core.metrics.prometheus import (
 )
 from app.db.models import Account, AccountStatus, CacheInvalidation
 from app.db.session import SessionLocal, engine
+from app.dependencies import get_proxy_service_for_app
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._service.http_bridge.helpers import _http_bridge_session_account_active
 from app.modules.proxy.account_cache import (
     AccountSelectionCache,
@@ -619,6 +621,180 @@ async def test_local_mark_during_inflight_refresh_survives(db_setup, poller_slot
     await _set_account_status(account_id, AccountStatus.ACTIVE)
     await cache.refresh_from_db()
     assert cache.is_unavailable(account_id) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_before_write", [False, True])
+async def test_guarded_routing_mark_respects_refresh_and_reconciles_committed_status(
+    db_setup, poller_slot, monkeypatch, refresh_before_write: bool
+) -> None:
+    account_id = "acct-guarded-mark-refresh"
+    await _insert_account(account_id)
+    cache = RoutingAvailabilityCache(SessionLocal)
+    poller = CacheInvalidationPoller(SessionLocal)
+    set_cache_invalidation_poller(poller)
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", cache)
+    poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, cache.refresh_from_db)
+    await poller.prime()
+    await cache.refresh_from_db()
+    generation = cache.generation_for_account(account_id)
+
+    if refresh_before_write:
+        await cache.refresh_from_db()
+        await _set_account_status(account_id, AccountStatus.DEACTIVATED)
+    else:
+        await _set_account_status(account_id, AccountStatus.DEACTIVATED)
+        await _set_account_status(account_id, AccountStatus.ACTIVE)
+        await cache.refresh_from_db()
+
+    mark_account_routing_unavailable(account_id, generation=generation)
+
+    # A snapshot is not proof of repair; the committed mark blocks reuse now.
+    assert cache.is_unavailable(account_id)
+    # A later poll reconciles actual committed repair or rejection state.
+    await poller._poll_once()
+    assert cache.is_unavailable(account_id) is refresh_before_write
+    stale_session = _fake_bridge_session(_make_account(account_id, AccountStatus.ACTIVE))
+    assert _http_bridge_session_account_active(stale_session) is not refresh_before_write
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset_cache", [False, True], ids=["refresh", "reset"])
+async def test_same_account_repair_fence_survives_snapshot_rebuild(db_setup, poller_slot, reset_cache) -> None:
+    account_id = "acct-repair-before-snapshot"
+    await _insert_account(account_id)
+    cache = RoutingAvailabilityCache(SessionLocal)
+    set_cache_invalidation_poller(None)
+    await cache.refresh_from_db()
+    generation = cache.generation_for_account(account_id)
+    cache.clear_unavailable(account_id)
+    if reset_cache:
+        cache.reset()
+    await cache.refresh_from_db()
+
+    cache.mark_unavailable(account_id, generation=generation)
+
+    assert not cache.is_unavailable(account_id)
+    assert cache.generation_for_account(account_id) != generation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seeded", [False, True])
+async def test_stale_snapshot_cannot_suppress_committed_rejection_or_allow_bridge_reuse(
+    async_client, poller_slot, monkeypatch, seeded: bool
+) -> None:
+    account_id = "acct-rejection-after-snapshot-read"
+    await _insert_account(account_id)
+    cache = RoutingAvailabilityCache(SessionLocal)
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", cache)
+    set_cache_invalidation_poller(None)
+    if seeded:
+        await cache.refresh_from_db()
+
+    from app.modules.proxy import account_cache as cache_module
+
+    original_close = cache_module.close_session
+    original_update = AccountsRepository.update_status_if_current
+    write_started = asyncio.Event()
+    allow_commit = asyncio.Event()
+    rejection_committed = asyncio.Event()
+    allow_mark = asyncio.Event()
+    snapshot_read = asyncio.Event()
+    publish_snapshot = asyncio.Event()
+
+    async def delayed_close(session):
+        await original_close(session)
+        snapshot_read.set()
+        await publish_snapshot.wait()
+
+    async def delayed_update(self, *args, **kwargs):
+        write_started.set()
+        await allow_commit.wait()
+        applied = await original_update(self, *args, **kwargs)
+        rejection_committed.set()
+        await allow_mark.wait()
+        return applied
+
+    monkeypatch.setattr(cache_module, "close_session", delayed_close)
+    monkeypatch.setattr(AccountsRepository, "update_status_if_current", delayed_update)
+    stale_session = _fake_bridge_session(_make_account(account_id))
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    rejection = asyncio.create_task(
+        balancer.mark_permanent_failure(_make_account(account_id), "account_auth_invalidated")
+    )
+    refresh = None
+    try:
+        await asyncio.wait_for(write_started.wait(), 2)
+        refresh = asyncio.create_task(cache.refresh_from_db())
+        await asyncio.wait_for(snapshot_read.wait(), 2)
+        allow_commit.set()
+        await asyncio.wait_for(rejection_committed.wait(), 2)
+        publish_snapshot.set()
+        await asyncio.wait_for(refresh, 2)
+        allow_mark.set()
+        assert await asyncio.wait_for(rejection, 2)
+    finally:
+        allow_commit.set()
+        allow_mark.set()
+        publish_snapshot.set()
+        await rejection
+        if refresh is not None:
+            await refresh
+
+    assert cache.is_unavailable(account_id)
+    assert not _http_bridge_session_account_active(stale_session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seeded", [False, True])
+async def test_unrelated_repair_cannot_suppress_rejection_mark_or_allow_stale_bridge_reuse(
+    async_client, poller_slot, monkeypatch, seeded: bool
+) -> None:
+    rejected_id = "acct-rejected-during-unrelated-repair"
+    repaired_id = "acct-unrelated-repair"
+    await _insert_account(rejected_id)
+    await _insert_account(repaired_id, AccountStatus.DEACTIVATED)
+    cache = RoutingAvailabilityCache(SessionLocal)
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", cache)
+    # No poll may hide a missing immediate local mark.
+    set_cache_invalidation_poller(None)
+    if seeded:
+        await cache.refresh_from_db()
+    stale_session = _fake_bridge_session(_make_account(rejected_id))
+    assert _http_bridge_session_account_active(stale_session)
+    rejection_committed = asyncio.Event()
+    finish_rejection = asyncio.Event()
+    original_update = AccountsRepository.update_status_if_current
+
+    async def delay_rejection_mark(self, *args, **kwargs):
+        applied = await original_update(self, *args, **kwargs)
+        if applied:
+            rejection_committed.set()
+            await finish_rejection.wait()
+        return applied
+
+    monkeypatch.setattr(AccountsRepository, "update_status_if_current", delay_rejection_mark)
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    rejection = asyncio.create_task(
+        balancer.mark_permanent_failure(_make_account(rejected_id), "account_auth_invalidated")
+    )
+    try:
+        await asyncio.wait_for(rejection_committed.wait(), 2)
+        await _set_account_status(repaired_id, AccountStatus.ACTIVE)
+        cache.clear_unavailable(repaired_id)
+        finish_rejection.set()
+        assert await asyncio.wait_for(rejection, 5)
+    finally:
+        finish_rejection.set()
+        await rejection
+
+    async with SessionLocal() as session:
+        rejected = await session.get(Account, rejected_id)
+        assert rejected is not None
+        assert rejected.status == AccountStatus.REAUTH_REQUIRED
+    assert cache.is_unavailable(rejected_id)
+    assert not _http_bridge_session_account_active(stale_session)
+    assert not cache.is_unavailable(repaired_id)
 
 
 class _BrokenSession:

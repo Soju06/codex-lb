@@ -7,13 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from cryptography.fernet import InvalidToken
+from sqlalchemy import and_, case, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import extract_id_token_claims, resolve_seat_identity
+from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -48,6 +51,7 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_hard_delete_into_time_rollups,
     mirror_account_soft_delete_into_time_rollups,
 )
+from app.modules.proxy.account_cache import clear_account_routing_unavailable, get_account_selection_cache
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -736,6 +740,16 @@ class AccountsRepository:
                 "deactivation_reason": deactivation_reason,
                 "reset_at": reset_at,
             }
+            if status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+                # Health settlement cannot repair rejected access credentials.
+                rejected_access = and_(
+                    Account.status == AccountStatus.REAUTH_REQUIRED,
+                    Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                )
+                values["status"] = case((rejected_access, Account.status), else_=status)
+                values["deactivation_reason"] = case(
+                    (rejected_access, Account.deactivation_reason), else_=deactivation_reason
+                )
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
             result = await self._session.execute(
@@ -749,16 +763,16 @@ class AccountsRepository:
                 # (which clears the marker) may resurrect the row.
                 .where(Account.delete_requested_at.is_(None))
                 .values(**values)
-                .returning(Account.id)
+                .returning(Account.status)
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+            stored_status = result.scalar_one_or_none()
+            if stored_status is not None and self._hard_sticky_outage_started(previous_status, stored_status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status == AccountStatus.DEACTIVATED:
+            if stored_status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return updated_id is not None
+            return stored_status is not None
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
@@ -788,6 +802,7 @@ class AccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_access_token_encrypted: bytes | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             values: dict[str, object | None] = {
@@ -825,6 +840,8 @@ class AccountsRepository:
                 # re-auth/import rotates the token ciphertext without touching
                 # status/reason/reset, and this write must lose that race.
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
+            if expected_access_token_encrypted is not None:
+                stmt = stmt.where(Account.access_token_encrypted == expected_access_token_encrypted)
             result = await self._session.execute(stmt)
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
@@ -834,6 +851,52 @@ class AccountsRepository:
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
             return updated_id is not None
+
+    async def persist_access_rejection(
+        self, rejected: Account, *, encryptor: TokenEncryptor | None = None
+    ) -> Account | None:
+        """Persist proven rejection without competing with unrelated health writes."""
+        access = rejected.access_token_encrypted
+        for _ in range(3):
+            current = await self.get_by_id_fresh(rejected.id)
+            if (
+                current is None
+                or current.delete_requested_at is not None
+                or current.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+            ):
+                return None
+            try:
+                if current.access_token_encrypted != access:
+                    if encryptor is None:
+                        encryptor = TokenEncryptor()
+                    if encryptor.decrypt(current.access_token_encrypted) != encryptor.decrypt(access):
+                        return None
+            except (InvalidToken, UnicodeDecodeError):
+                return None
+            async with sqlite_writer_section():
+                # Status, reason and cooldown may change independently of the rejected tokens.
+                # Refresh ciphertext fences the write but does not prove access repair.
+                result = await self._session.execute(
+                    update(Account)
+                    .where(
+                        Account.id == rejected.id,
+                        Account.delete_requested_at.is_(None),
+                        Account.status.not_in((AccountStatus.PAUSED, AccountStatus.DEACTIVATED)),
+                        Account.access_token_encrypted == current.access_token_encrypted,
+                        Account.refresh_token_encrypted == current.refresh_token_encrypted,
+                    )
+                    .values(
+                        status=AccountStatus.REAUTH_REQUIRED,
+                        deactivation_reason=PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                    )
+                    .returning(Account)
+                    .execution_options(populate_existing=True)
+                )
+                updated = result.scalar_one_or_none()
+                await self._session.commit()
+            if updated is not None:
+                return updated
+        return None
 
     @staticmethod
     def _hard_sticky_outage_started(
@@ -1233,6 +1296,7 @@ class AccountsRepository:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1258,6 +1322,26 @@ class AccountsRepository:
         async with sqlite_writer_section():
             if self._dialect_name() == "postgresql":
                 await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
+            current_access = await self._session.scalar(
+                select(Account.access_token_encrypted).where(
+                    Account.id == account_id,
+                    Account.refresh_token_encrypted == expected_refresh_token_encrypted,
+                )
+            )
+            if current_access is None:
+                await self._session.commit()
+                return False
+            access_material_changed = False
+            if current_access != access_token_encrypted:
+                if encryptor is None:
+                    encryptor = TokenEncryptor()
+                try:
+                    access_material_changed = encryptor.decrypt(current_access) != encryptor.decrypt(
+                        access_token_encrypted
+                    )
+                except (InvalidToken, UnicodeDecodeError):
+                    # Unverifiable material must not restore a rejected account.
+                    pass
             values: dict[str, bytes | datetime | str] = {
                 "access_token_encrypted": access_token_encrypted,
                 "refresh_token_encrypted": refresh_token_encrypted,
@@ -1278,6 +1362,15 @@ class AccountsRepository:
                 values["workspace_label"] = workspace_label
             if seat_type is not None:
                 values["seat_type"] = seat_type
+            repaired_rejection = and_(
+                Account.status == AccountStatus.REAUTH_REQUIRED,
+                Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                literal(access_material_changed),
+            )
+            repaired_status = case(
+                (Account.reset_at > time.time(), AccountStatus.RATE_LIMITED),
+                else_=AccountStatus.ACTIVE,
+            )
             stmt = (
                 update(Account)
                 .where(Account.id == account_id)
@@ -1285,12 +1378,30 @@ class AccountsRepository:
                 # the upstream exchange, so a concurrent rotation is never
                 # clobbered by a slower writer.
                 .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
-                .values(**values)
-                .returning(Account.id)
+                .where(Account.access_token_encrypted == current_access)
+                .values(
+                    **values,
+                    # Rejection masks the prior status, but a live reset still
+                    # excludes the account after its credentials are repaired.
+                    status=case((repaired_rejection, repaired_status), else_=Account.status),
+                    deactivation_reason=case((repaired_rejection, None), else_=Account.deactivation_reason),
+                )
+                .returning(Account.status, Account.deactivation_reason)
             )
             result = await self._session.execute(stmt)
+            rotated = result.one_or_none()
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            if rotated is None:
+                return False
+            status, reason = rotated
+            if (
+                access_material_changed
+                and status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+                and not (status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason))
+            ):
+                clear_account_routing_unavailable(account_id)
+            get_account_selection_cache().invalidate()
+            return True
 
     async def update_account_metadata(
         self,

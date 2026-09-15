@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 
 from app.db.models import Account, AccountStatus
-from app.modules.automations.repository import AutomationRunRecord, run_claim_timeout_seconds
+from app.modules.accounts.repository import AccountsRepository
+from app.modules.automations.repository import AutomationRunRecord, AutomationsRepository, run_claim_timeout_seconds
 from app.modules.automations.service import (
     AutomationsService,
     AutomationValidationError,
@@ -196,6 +198,7 @@ def test_scheduled_slot_key_depends_on_due_slot_and_account_only() -> None:
 
 
 def test_is_account_eligible_for_automation_allows_reauth_required() -> None:
+    service = AutomationsService(Mock(spec=AutomationsRepository), Mock(spec=AccountsRepository))
     account = Account(
         id="acct-reauth",
         email="reauth@example.com",
@@ -207,7 +210,7 @@ def test_is_account_eligible_for_automation_allows_reauth_required() -> None:
         status=AccountStatus.REAUTH_REQUIRED,
     )
     assert (
-        AutomationsService._is_account_eligible_for_automation(
+        service._is_account_eligible_for_automation(
             account,
             include_paused_accounts=False,
         )

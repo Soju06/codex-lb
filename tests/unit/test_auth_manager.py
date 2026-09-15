@@ -102,6 +102,7 @@ class _DummyRepo:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -125,6 +126,23 @@ class _DummyRepo:
             "seat_type": seat_type,
             "expected_refresh_token_encrypted": expected_refresh_token_encrypted,
         }
+        latest = self.accounts_by_id.get(account_id)
+        if latest is not None:
+            latest.access_token_encrypted = access_token_encrypted
+            latest.refresh_token_encrypted = refresh_token_encrypted
+            latest.id_token_encrypted = id_token_encrypted
+            latest.last_refresh = last_refresh
+            for field, value in (
+                ("plan_type", plan_type),
+                ("email", email),
+                ("chatgpt_account_id", chatgpt_account_id),
+                ("chatgpt_user_id", chatgpt_user_id),
+                ("workspace_id", workspace_id),
+                ("workspace_label", workspace_label),
+                ("seat_type", seat_type),
+            ):
+                if value is not None:
+                    setattr(latest, field, value)
         return True
 
     async def update_account_metadata(
@@ -1127,6 +1145,33 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
 
 
 @pytest.mark.asyncio
+async def test_permanent_refresh_failure_preserves_proven_access_rejection():
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_auth_rejected",
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason=auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+        access_token_encrypted=encryptor.encrypt("rejected-access"),
+        refresh_token_encrypted=encryptor.encrypt("rejected-refresh"),
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    await manager._handle_permanent_refresh_failure(
+        account,
+        RefreshError("invalid_grant", "Rejected refresh", True),
+        auth_manager_module._refresh_token_material_fingerprint(encryptor, account.refresh_token_encrypted),
+    )
+    assert repo.status_payload is not None
+    assert repo.status_payload["status"] == AccountStatus.REAUTH_REQUIRED
+    assert (
+        repo.status_payload["deactivation_reason"]
+        == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+    )
+    assert account.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+
+
+@pytest.mark.asyncio
 async def test_refresh_account_does_not_deactivate_when_repo_has_newer_refresh_token(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         raise RefreshError("invalid_grant", "refresh failed", True)
@@ -1226,6 +1271,7 @@ class _TokenCasMissRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1402,6 +1448,7 @@ class _TokenCasAlwaysMissRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1487,6 +1534,7 @@ class _TokenCasPeerRotationAtExhaustionRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1578,7 +1626,10 @@ async def test_refresh_adopts_peer_rotation_at_cas_exhaustion_boundary(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm(monkeypatch):
+@pytest.mark.parametrize("concurrent_access_rejection", [False, True])
+async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm(
+    monkeypatch, concurrent_access_rejection
+):
     """Regression (P1 "Do not retry after dropping rotated tokens"): when the
     guarded compare-and-set keeps missing on a sustained same-plaintext
     re-encryption storm through BOTH the bounded budget AND the dedicated
@@ -1599,6 +1650,9 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
     already-consumed token), NOT a blind-retry ``invalid_grant`` knockout."""
 
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        if concurrent_access_rejection:
+            account.status = AccountStatus.REAUTH_REQUIRED
+            account.deactivation_reason = auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
         return TokenRefreshResult(
             access_token="access-new",
             refresh_token="refresh-new",
@@ -1632,6 +1686,10 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
     assert result.status == AccountStatus.REAUTH_REQUIRED
     assert result.deactivation_reason is not None
     assert "re-login" in result.deactivation_reason
+    if concurrent_access_rejection:
+        assert result.deactivation_reason == auth_manager_module.PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+        assert repo.status_payload is not None
+        assert repo.status_payload["deactivation_reason"] == result.deactivation_reason
     # The reauth flag landed through the guarded status compare-and-set (keyed on
     # the last-observed ciphertext), NOT an unguarded status write.
     assert repo.status_payload is not None
@@ -1815,6 +1873,7 @@ class _TokenCasStabilizesOnSecondFinalAttemptRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -1972,6 +2031,7 @@ class _TokenCasLandsOnFinalGuardedPersistRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -2103,6 +2163,7 @@ class _TokenCasPeerRotationOnFinalPersistRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -2252,6 +2313,7 @@ class _TokenCasPeerRotationInReadWriteGapRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -2375,6 +2437,7 @@ class _TokenCasSamePlaintextInReadWriteGapRepo(_DummyRepo):
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,

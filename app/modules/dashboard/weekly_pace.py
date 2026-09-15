@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil, isfinite
 from typing import Literal
 
+from app.core.crypto import TokenEncryptor
 from app.core.usage import PLAN_CAPACITY_CREDITS_SECONDARY
 from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
@@ -18,6 +19,7 @@ from app.modules.dashboard.schemas import (
     WeeklyCreditResetEvent,
     WeeklyCreditRunwayStatus,
 )
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 
 PRO_WEEKLY_CAPACITY_CREDITS = PLAN_CAPACITY_CREDITS_SECONDARY["pro"]
 RECENT_BURN_WINDOW = timedelta(hours=6)
@@ -72,6 +74,7 @@ def build_weekly_credit_pace(
     secondary_history: dict[str, list[UsageHistory]],
     now: datetime,
     usage_refresh_interval_seconds: int,
+    encryptor: TokenEncryptor,
     top_api_keys: list[WeeklyCreditApiKeyAttribution] | None = None,
     trailing_demand_used_percent_by_account: Mapping[str, float] | None = None,
     working_days: set[int] | None = None,
@@ -112,7 +115,11 @@ def build_weekly_credit_pace(
             continue
 
         account = accounts_by_id.get(summary.account_id)
-        if account is None or account.status not in PACE_ELIGIBLE_ACCOUNT_STATUSES:
+        if (
+            account is None
+            or account.status not in PACE_ELIGIBLE_ACCOUNT_STATUSES
+            or account_reauth_credentials_are_unavailable(account, encryptor, now=now_ms / 1000.0)
+        ):
             inactive_account_count += 1
             continue
 

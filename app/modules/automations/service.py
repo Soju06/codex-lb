@@ -39,6 +39,7 @@ from app.modules.automations.repository import (
     run_stale_started_before,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_eligibility import account_access_token_expires_at, reauth_credentials_are_unavailable
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.request_policy import resolve_wire_reasoning_effort
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -2079,8 +2080,8 @@ class AutomationsService:
             return False
         return error_code.lower() in _RETRYABLE_ACCOUNT_FAILURE_CODES
 
-    @staticmethod
     def _is_account_eligible_for_automation(
+        self,
         account: Account,
         *,
         include_paused_accounts: bool,
@@ -2089,7 +2090,13 @@ class AutomationsService:
             return False
         if account.status == AccountStatus.PAUSED and not include_paused_accounts:
             return False
-        return True
+        return not reauth_credentials_are_unavailable(
+            account.status,
+            account_access_token_expires_at(account, self._encryptor)
+            if account.status == AccountStatus.REAUTH_REQUIRED
+            else None,
+            deactivation_reason=account.deactivation_reason,
+        )
 
     async def _write_request_log(
         self,

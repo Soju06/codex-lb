@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -8,8 +9,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core import shutdown as shutdown_state
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestKind, RequestLog, StickySession, StickySessionKind
 from app.db.session import SessionLocal
@@ -1032,9 +1035,78 @@ async def test_fleet_refresh_reports_bounded_attempt_without_sensitive_fields(as
     assert payload["ok"] is True
     assert payload["usageWritten"] is False
     assert payload["accountCount"] == 4
-    assert payload["attemptedCount"] == 1
+    assert payload["attemptedCount"] == 2
     assert payload["generatedAt"] is not None
     _assert_no_forbidden_keys(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usage_refresh_request_path
+async def test_fleet_refresh_attempts_only_usable_reauthentication_warnings(async_client, db_setup, monkeypatch):
+    plain_key = await _create_api_key("fleet-refresh-reauth-key")
+    encryptor = TokenEncryptor()
+    future_expiry = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+    valid_payload = base64.urlsafe_b64encode(json.dumps({"exp": future_expiry}).encode()).decode().rstrip("=")
+    expired_payload = base64.urlsafe_b64encode(json.dumps({"exp": 1}).encode()).decode().rstrip("=")
+    valid_token = f"e30.{valid_payload}.signature"
+    expired_token = f"e30.{expired_payload}.signature"
+    refresh_warning = PERMANENT_FAILURE_CODES["refresh_token_invalidated"]
+    accounts = [
+        ("active", AccountStatus.ACTIVE, valid_token, None),
+        ("valid", AccountStatus.REAUTH_REQUIRED, valid_token, refresh_warning),
+        ("unknown", AccountStatus.REAUTH_REQUIRED, "opaque-access-token", refresh_warning),
+        ("expired", AccountStatus.REAUTH_REQUIRED, expired_token, refresh_warning),
+        ("rejected", AccountStatus.REAUTH_REQUIRED, valid_token, PERMANENT_FAILURE_CODES["account_auth_invalidated"]),
+        ("paused", AccountStatus.PAUSED, valid_token, None),
+        ("deactivated", AccountStatus.DEACTIVATED, valid_token, None),
+    ]
+    async with SessionLocal() as session:
+        repository = AccountsRepository(session)
+        for suffix, status, token, reason in accounts:
+            account = _make_account(f"fleet_reauth_{suffix}", f"{suffix}@example.com", status=status)
+            account.chatgpt_account_id = account.id
+            account.access_token_encrypted = encryptor.encrypt(token)
+            account.deactivation_reason = reason
+            await repository.upsert(account)
+
+    fetch_calls: list[tuple[str | None, str]] = []
+
+    async def fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        fetch_calls.append((account_id, access_token))
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=15.0,
+                    reset_at=future_expiry,
+                    limit_window_seconds=_PRIMARY_WINDOW_MINUTES * 60,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch_usage)
+
+    response = await async_client.post("/api/fleet/refresh", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accountCount"] == 7
+    assert payload["attemptedCount"] == 3
+    assert payload["usageWritten"] is True
+    assert set(fetch_calls) == {
+        ("fleet_reauth_active", valid_token),
+        ("fleet_reauth_valid", valid_token),
+        ("fleet_reauth_unknown", "opaque-access-token"),
+    }
+    assert len(fetch_calls) == 3
+    async with SessionLocal() as session:
+        latest_usage = await UsageRepository(session).latest_by_account(window="primary")
+        assert set(latest_usage) == {account_id for account_id, _ in fetch_calls}
+        assert all(usage.used_percent == 15.0 for usage in latest_usage.values())
+        for account in await AccountsRepository(session).list_accounts():
+            expected = next(item for item in accounts if account.id == f"fleet_reauth_{item[0]}")
+            assert account.status == expected[1]
+            assert account.deactivation_reason == expected[3]
 
 
 @pytest.mark.asyncio
@@ -1068,6 +1140,7 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
             self.usage_repo = usage_repo
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
+            self._encryptor = TokenEncryptor()
 
         async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
             assert own_singleflight_sessions is True
@@ -1169,6 +1242,7 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
             self.usage_repo = usage_repo
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
+            self._encryptor = TokenEncryptor()
 
         async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
             assert own_singleflight_sessions is True
@@ -1241,6 +1315,7 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
             self.usage_repo = usage_repo
             self.accounts_repo = accounts_repo
             self.additional_usage_repo = additional_usage_repo
+            self._encryptor = TokenEncryptor()
 
         async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
             assert own_singleflight_sessions is True

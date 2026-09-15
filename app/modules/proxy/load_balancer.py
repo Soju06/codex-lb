@@ -36,6 +36,7 @@ from app.core.balancer import (
 from app.core.balancer import (
     select_account as select_account,
 )
+from app.core.balancer.logic import reauth_reason_blocks_routing
 from app.core.balancer.types import UpstreamError
 from app.core.clock import REAL_CLOCK, Clock
 from app.core.config.dashboard_overrides import with_dashboard_overrides
@@ -64,6 +65,7 @@ from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.proxy import account_cache
 from app.modules.proxy._load_balancer.error_rate import (
     ErrorRateWeightingPolicy,
     error_rate_weight_multiplier,
@@ -150,7 +152,6 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -313,7 +314,7 @@ class LoadBalancer:
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
         self._account_locks_registry_lock = asyncio.Lock()
-        self._selection_inputs_cache = get_account_selection_cache()
+        self._selection_inputs_cache = account_cache.get_account_selection_cache()
         # C2-2 routing/overload: the most recent request-path snapshot; paths
         # without one (stream error funnel, unkeyed bridge reacquires) reuse it.
         self._routing_tunables: RoutingTunables | None = None
@@ -1730,46 +1731,41 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status.
+        """Downgrade current credentials, preserving repairs and refresh-only routability.
 
-        Returns whether the permanent downgrade applied (or was already in
-        effect). When the guarded status write MISSES because a peer replica
-        concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account keeps its
-        repaired state. A landed DEACTIVATED downgrade is excluded from local
-        routing; REAUTH_REQUIRED remains request-routable with its stored access
-        token while still blocking future refresh-token exchange.
-        """
+        Returns whether the downgrade applied or was already in effect."""
         lock = await self._get_account_lock(account.id)
         async with lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
+            if error_code == "account_auth_invalidated":
+                # Preserve persisted cooldown evidence, including on a cold replica.
+                state.reset_at, state.blocked_at = account.reset_at, account.blocked_at
             self._sync_runtime_state(account, state)
+            routing_generation = account_cache.get_routing_availability_cache().generation_for_account(account.id)
             async with self._repo_factory() as repos:
-                # Guard the DB permanent-status downgrade on the refresh-token
-                # ciphertext this replica currently holds so a concurrent peer
-                # re-auth/import rotation (which changes the ciphertext) is never
-                # clobbered back to a permanent-failure status. On the refresh
-                # path AuthManager._handle_permanent_refresh_failure is the
-                # PRIMARY guarded authority: it has already CAS-written the
-                # downgrade and, in the single-caller case, mutated THIS object's
-                # status to the failure status, so the predicate inside
-                # _persist_state_if_current sees no status change and issues no
-                # redundant write (exactly one guarded downgrade total). This
-                # guarded write covers only the callers whose in-memory object
-                # did not go through that CAS -- an intra-process singleflight
-                # joiner sharing the winner's permanent error, and non-refresh
-                # permanent failures -- without reintroducing the unguarded
-                # update_status that would clobber a peer's ACTIVE/rotated repair
-                # and tear down its live sticky/bridge sessions.
+                # Fence failure writes against credential repair, including singleflight joiners.
+                rejected_snapshot = _clone_account(account)
                 downgraded = await self._persist_state_if_current(
                     repos.accounts,
                     account,
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
-                mark_account_routing_unavailable(account.id)
+                if not downgraded and error_code == "account_auth_invalidated":
+                    rejected = await repos.accounts.persist_access_rejection(
+                        rejected_snapshot, encryptor=self._encryptor
+                    )
+                    downgraded = rejected is not None
+                    if rejected is not None:
+                        account.status, account.deactivation_reason = rejected.status, rejected.deactivation_reason
+                        account.reset_at, account.blocked_at = rejected.reset_at, rejected.blocked_at
+                        state.reset_at, state.blocked_at = rejected.reset_at, rejected.blocked_at
+                        self._sync_runtime_state(account, state)
+            if downgraded and (
+                state.status == AccountStatus.DEACTIVATED or reauth_reason_blocks_routing(state.deactivation_reason)
+            ):
+                account_cache.mark_account_routing_unavailable(account.id, generation=routing_generation)
             self._selection_inputs_cache.invalidate()
             return downgraded
 
@@ -2041,10 +2037,13 @@ class LoadBalancer:
                 reset_at_int,
                 blocked_at=blocked_at_int,
             )
-            account.status = state.status
-            account.deactivation_reason = state.deactivation_reason
-            account.reset_at = reset_at_int
-            account.blocked_at = blocked_at_int
+            stored = await accounts_repo.get_by_id_fresh(account.id)
+            if stored is not None:
+                account.status, account.deactivation_reason = stored.status, stored.deactivation_reason
+                account.reset_at, account.blocked_at = stored.reset_at, stored.blocked_at
+                state.status, state.deactivation_reason = stored.status, stored.deactivation_reason
+                state.reset_at, state.blocked_at = stored.reset_at, stored.blocked_at
+                self._sync_runtime_state(account, state)
 
     async def _persist_state_if_current(
         self,
@@ -2061,7 +2060,15 @@ class LoadBalancer:
         reset_changed = account.reset_at != reset_at_int
         blocked_changed = account.blocked_at != blocked_at_int
 
-        if status_changed or reason_changed or reset_changed or blocked_changed:
+        if (
+            status_changed
+            or reason_changed
+            or reset_changed
+            or blocked_changed
+            or (
+                expected_refresh_token_encrypted is not None and reauth_reason_blocks_routing(state.deactivation_reason)
+            )
+        ):
             updated = await accounts_repo.update_status_if_current(
                 account.id,
                 state.status,
@@ -2073,6 +2080,11 @@ class LoadBalancer:
                 expected_reset_at=account.reset_at,
                 expected_blocked_at=account.blocked_at,
                 expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                **(
+                    {"expected_access_token_encrypted": account.access_token_encrypted}
+                    if reauth_reason_blocks_routing(state.deactivation_reason)
+                    else {}
+                ),
             )
             if updated:
                 account.status = state.status

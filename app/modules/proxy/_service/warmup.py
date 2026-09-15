@@ -19,6 +19,7 @@ from app.core.auth.refresh import (
 )
 from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.clock import clock_for
 from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -30,6 +31,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
+from app.modules.proxy.account_eligibility import reauth_credentials_are_unavailable, stored_access_token_expires_at
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import (
     apply_prohibit_fast_mode,
@@ -295,8 +297,20 @@ class _WarmupMixin:
         *,
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
+        proxy = cast(_WarmupServiceProtocol, self)
+        now = clock_for(proxy).time()
         active_accounts = [
-            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            account
+            for account in accounts
+            if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            and not reauth_credentials_are_unavailable(
+                account.status,
+                stored_access_token_expires_at(account.access_token_encrypted, proxy._encryptor)
+                if account.status == AccountStatus.REAUTH_REQUIRED
+                else None,
+                now=now,
+                deactivation_reason=account.deactivation_reason,
+            )
         ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts

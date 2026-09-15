@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
+import json
 from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
 from sqlalchemy import Table
 
+from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog, UsageHistory
 from app.db.session import SessionLocal
@@ -18,6 +22,38 @@ NOW = datetime(2026, 8, 17, 12, 0, 0)
 
 def _account(account_id: str) -> Account:
     return Account(id=account_id, status=AccountStatus.ACTIVE)
+
+
+@pytest.mark.parametrize("credential_state", ["valid", "unknown", "expired", "rejected"])
+def test_weekly_pace_excludes_unavailable_reauth_capacity(credential_state: str) -> None:
+    active = _account("active")
+    reauth = Account(
+        id="reauth",
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason=PERMANENT_FAILURE_CODES["refresh_token_invalidated"],
+    )
+    expiry = naive_utc_to_epoch(NOW) + (-60 if credential_state == "expired" else 3600)
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    token = "opaque" if credential_state == "unknown" else f"e30.{payload}.signature"
+    encryptor = TokenEncryptor()
+    reauth.access_token_encrypted = encryptor.encrypt(token)
+    if credential_state == "rejected":
+        reauth.deactivation_reason = PERMANENT_FAILURE_CODES["account_auth_invalidated"]
+
+    pace = build_weekly_credit_pace(
+        accounts=[active, reauth],
+        account_summaries=[_summary(account.id, used_percent=20, reset_in_hours=24) for account in [active, reauth]],
+        secondary_history={account.id: [_row(account.id, 20, NOW)] for account in [active, reauth]},
+        now=NOW,
+        usage_refresh_interval_seconds=60,
+        encryptor=encryptor,
+    )
+
+    assert pace is not None
+    expected_count = 2 if credential_state in ("valid", "unknown") else 1
+    assert pace.account_count == expected_count
+    assert pace.inactive_account_count == 2 - expected_count
+    assert pace.total_full_credits == expected_count * PRO_WEEKLY_CAPACITY_CREDITS
 
 
 def _summary(
@@ -76,6 +112,7 @@ def _build(
         secondary_history=histories,
         now=NOW,
         usage_refresh_interval_seconds=60,
+        encryptor=TokenEncryptor(),
         trailing_demand_used_percent_by_account=trailing_demand_used_percent_by_account,
     )
     assert pace is not None

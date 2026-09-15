@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import update
 
 from app.core.auth import generate_unique_account_id
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
     RateLimitResetCreditsSnapshot,
     ResetCreditItem,
     ResetCreditsResponse,
 )
+from app.core.crypto import TokenEncryptor
+from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
@@ -90,7 +95,10 @@ async def test_consume_paused_account_returns_409(async_client, monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_consume_active_account_returns_success_with_mocked_upstream(async_client, monkeypatch) -> None:
+@pytest.mark.parametrize("credential_state", ["active", "valid", "unknown"])
+async def test_consume_usable_account_returns_success_with_mocked_upstream(
+    async_client, monkeypatch, credential_state: str
+) -> None:
     captured: dict[str, Any] = {}
 
     async def _fake_fetch(access_token: str, account_id: str | None, **kwargs: Any) -> ResetCreditsResponse:
@@ -137,6 +145,19 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
         email="reset-active@example.com",
         account_id="acc_reset_active",
     )
+    if credential_state != "active":
+        access_token = _encode_jwt({"exp": time.time() + 3600}) if credential_state == "valid" else "opaque"
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(
+                    status=AccountStatus.REAUTH_REQUIRED,
+                    deactivation_reason=PERMANENT_FAILURE_CODES["refresh_token_invalidated"],
+                    access_token_encrypted=TokenEncryptor().encrypt(access_token),
+                )
+            )
+            await session.commit()
 
     await get_rate_limit_reset_credits_store().set(account_id, _snapshot([_credit("credit-1")]))
 
@@ -178,7 +199,8 @@ async def test_consume_without_cached_snapshot_returns_409_without_fetch(async_c
 
 
 @pytest.mark.asyncio
-async def test_consume_reauth_required_account_returns_409(async_client, monkeypatch) -> None:
+@pytest.mark.parametrize("credential_state", ["expired", "rejected"])
+async def test_consume_unavailable_reauth_account_returns_409(async_client, monkeypatch, credential_state: str) -> None:
     async def _should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
         raise AssertionError("reauth account should not invoke upstream fetch")
 
@@ -191,12 +213,18 @@ async def test_consume_reauth_required_account_returns_409(async_client, monkeyp
     )
 
     async with SessionLocal() as session:
-        from sqlalchemy import update
-
-        from app.db.models import Account, AccountStatus
-
         await session.execute(
-            update(Account).where(Account.id == account_id).values(status=AccountStatus.REAUTH_REQUIRED)
+            update(Account)
+            .where(Account.id == account_id)
+            .values(
+                status=AccountStatus.REAUTH_REQUIRED,
+                deactivation_reason=PERMANENT_FAILURE_CODES[
+                    "account_auth_invalidated" if credential_state == "rejected" else "refresh_token_invalidated"
+                ],
+                access_token_encrypted=TokenEncryptor().encrypt(
+                    _encode_jwt({"exp": time.time() + (-60 if credential_state == "expired" else 3600)})
+                ),
+            )
         )
         await session.commit()
 

@@ -48,6 +48,7 @@ from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 from app.modules.rate_limit_reset_credits.redeem_coordination import (
     RedeemClaimTimeoutError,
     acquire_redeem_claim,
@@ -77,7 +78,7 @@ ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 RefreshUsageFn = Callable[[Account], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
-_NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
+_NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
 
 _redeem_locks: dict[str, asyncio.Lock] = {}
 _redeem_locks_registry_lock = asyncio.Lock()
@@ -138,7 +139,11 @@ async def get_rate_limit_reset_credits(
     if account is None or account.delete_requested_at is not None:
         await store.invalidate(account_id)
         return None
-    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+    if (
+        account.status in _NON_REDEEMABLE_STATUSES
+        or account_reauth_credentials_are_unavailable(account, context.service._encryptor)
+        or not account.chatgpt_account_id
+    ):
         await store.invalidate(account_id)
         return None
 
@@ -172,7 +177,7 @@ async def consume_rate_limit_reset_credit(
         outcome = await _redeem_soonest_reset_credit(
             account=account,
             store=store,
-            encryptor=TokenEncryptor(),
+            encryptor=context.service._encryptor,
             lock_session=getattr(context, "session", None),
             auth_manager=context.service._auth_manager,
             refresh_usage=_build_refresh_usage_callback(context),
@@ -224,7 +229,7 @@ async def _redeem_soonest_reset_credit(
     expected_credit_id: str | None = None,
     expected_credit_expires_at: datetime | None = None,
 ) -> _RedeemResetCreditOutcome:
-    _assert_account_can_redeem_reset_credit(account)
+    _assert_account_can_redeem_reset_credit(account, encryptor=encryptor)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
     effective_consume_fn = consume_fn or consume_reset_credit
 
@@ -442,11 +447,12 @@ async def _redeem_soonest_reset_credit_locked(
     )
 
 
-def _assert_account_can_redeem_reset_credit(account: Account) -> None:
-    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+def _assert_account_can_redeem_reset_credit(account: Account, *, encryptor: TokenEncryptor) -> None:
+    credentials_unavailable = account_reauth_credentials_are_unavailable(account, encryptor)
+    if account.status in _NON_REDEEMABLE_STATUSES or credentials_unavailable or not account.chatgpt_account_id:
         msg = (
             f"Account is {account.status.value} and cannot redeem a reset credit"
-            if account.status in _NON_REDEEMABLE_STATUSES
+            if account.status in _NON_REDEEMABLE_STATUSES or credentials_unavailable
             else "Account has no ChatGPT account ID and cannot redeem a reset credit"
         )
         raise DashboardConflictError(

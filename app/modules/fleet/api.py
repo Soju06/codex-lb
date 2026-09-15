@@ -19,6 +19,7 @@ from app.modules.fleet.mappers import build_fleet_account_summaries
 from app.modules.fleet.observability import build_fleet_observability
 from app.modules.fleet.schemas import FleetObservabilityResponse, FleetRefreshResponse, FleetSummaryResponse
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.account_eligibility import account_reauth_credentials_are_unavailable
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -31,7 +32,7 @@ router = APIRouter(
     dependencies=[Depends(set_dashboard_error_format)],
 )
 
-_REFRESH_SKIP_STATUSES = {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+_REFRESH_SKIP_STATUSES = {AccountStatus.PAUSED, AccountStatus.DEACTIVATED}
 # Every route-owned refresh is registered at creation. Caller cancellation only
 # changes who observes its outcome; it does not establish task ownership.
 _BACKGROUND_REFRESH_TASKS: set[asyncio.Task[FleetRefreshResponse]] = set()
@@ -127,13 +128,17 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
             if visible_account_ids is not None
             else await accounts_repo.list_accounts(refresh_existing=True)
         )
-        eligible_accounts = [account for account in accounts if account.status not in _REFRESH_SKIP_STATUSES]
+        updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
+        eligible_accounts = [
+            account
+            for account in accounts
+            if account.status not in _REFRESH_SKIP_STATUSES
+            and not account_reauth_credentials_are_unavailable(account, updater._encryptor)
+        ]
         latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=visible_account_ids)
-        usage_written = await UsageUpdater(
-            usage_repo,
-            accounts_repo,
-            additional_usage_repo,
-        ).refresh_accounts(eligible_accounts, latest_primary, own_singleflight_sessions=True)
+        usage_written = await updater.refresh_accounts(
+            eligible_accounts, latest_primary, own_singleflight_sessions=True
+        )
         if usage_written:
             await get_rate_limit_headers_cache().invalidate()
             get_account_selection_cache().invalidate()

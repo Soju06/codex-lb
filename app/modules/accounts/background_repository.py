@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -55,6 +56,7 @@ class BackgroundAccountsRepository:
         expected_reset_at: int | None = None,
         expected_blocked_at: int | None | object = _UNSET,
         expected_refresh_token_encrypted: bytes | None = None,
+        expected_access_token_encrypted: bytes | None = None,
     ) -> bool:
         async with get_background_session() as session:
             repo = AccountsRepository(session)
@@ -72,6 +74,7 @@ class BackgroundAccountsRepository:
                     status,
                     deactivation_reason,
                     reset_at,
+                    expected_access_token_encrypted=expected_access_token_encrypted,
                     **kwargs,
                 )
             return await repo.update_status_if_current(
@@ -80,6 +83,7 @@ class BackgroundAccountsRepository:
                 deactivation_reason,
                 reset_at,
                 blocked_at,
+                expected_access_token_encrypted=expected_access_token_encrypted,
                 **kwargs,
             )
 
@@ -92,6 +96,7 @@ class BackgroundAccountsRepository:
         last_refresh: datetime,
         *,
         expected_refresh_token_encrypted: bytes,
+        encryptor: TokenEncryptor | None = None,
         plan_type: str | None = None,
         email: str | None = None,
         chatgpt_account_id: str | None = None,
@@ -108,6 +113,7 @@ class BackgroundAccountsRepository:
                 id_token_encrypted=id_token_encrypted,
                 last_refresh=last_refresh,
                 expected_refresh_token_encrypted=expected_refresh_token_encrypted,
+                encryptor=encryptor,
                 plan_type=plan_type,
                 email=email,
                 chatgpt_account_id=chatgpt_account_id,

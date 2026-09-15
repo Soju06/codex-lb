@@ -5421,6 +5421,12 @@ class _WebSocketMixin:
         parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
         clock: Clock | None = None,
     ) -> str:
+        """Apply one upstream frame and return the text to forward downstream.
+
+        Pending-request matching and replay guards retain account ownership.
+        Eligible retries carry the original health evidence and signal frame
+        suppression through upstream_control while a replay is staged.
+        """
         proxy = cast(_WebSocketServiceProtocol, self)
         # The reader loop resolves the owner clock once per connection and
         # passes it per frame; the fallback only serves direct callers (tests).

@@ -703,6 +703,11 @@ def _normalize_error_payload(payload: Mapping[str, JsonValue]) -> dict[str, Json
 
 
 def _coerce_number(value: JsonValue) -> int | float | None:
+    """Accept numeric error metadata, ignoring booleans and unparseable values.
+
+    Reset-horizon validation belongs to the account-health consumer; this
+    conversion only normalizes numbers and numeric strings for OpenAIError.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):

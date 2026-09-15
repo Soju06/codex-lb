@@ -10876,6 +10876,18 @@ The normal anchored upstream request SHALL remain unchanged. Projection SHALL NO
 - **THEN** the existing replay path SHALL exclude the exhausted account and send the projected full transcript without `previous_response_id` to an eligible account
 - **AND** the client SHALL receive only the replacement response lifecycle
 
+#### Scenario: Canonical Lite resends retain transport reasoning context
+- **GIVEN** an eligible body-derived Responses-Lite full resend
+- **WHEN** projection validates its transport payload
+- **THEN** it SHALL accept and retain the canonical `reasoning.context = "all_turns"` while validating all other reasoning controls
+
+#### Scenario: Keyed quota replay waits for settlement before health writes
+- **GIVEN** an eligible full resend with an open API-key usage reservation
+- **WHEN** a quota rejection before response creation triggers replay
+- **THEN** the exhausted account SHALL be excluded without waiting for a health penalty
+- **AND** its health penalty SHALL remain deferred until settlement or release succeeds
+- **AND** failed settlement SHALL NOT write the deferred penalty
+
 #### Scenario: The next turn matches the original client history
 - **GIVEN** a projected replay completes on the replacement account
 - **WHEN** the client resends its original history followed by the replacement reply and new input

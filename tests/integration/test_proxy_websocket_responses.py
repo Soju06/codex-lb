@@ -13932,6 +13932,9 @@ def _completed_first_turn_upstream_batch(response_id: str) -> list[_FakeUpstream
     "resend_kind",
     [
         "complete",
+        "lite",
+        "keyed",
+        "settlement_failure",
         "missing_reply",
         "item_reference",
         "client_anchor",
@@ -14009,6 +14012,21 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
             AsyncMock(return_value=failover.FIRST_ACCOUNT_ID),
         )
     failover.install(monkeypatch)
+    settlement_attempts = []
+    if resend_kind in {"keyed", "settlement_failure"}:
+        reservation = proxy_module.ApiKeyUsageReservationData(
+            reservation_id="resv_quota_projection", key_id="key_quota_projection", model="gpt-5.4"
+        )
+        monkeypatch.setattr(
+            proxy_module.ProxyService, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation)
+        )
+
+        async def settle_usage(self, *args, **kwargs):
+            assert failover.stream_errors == []
+            settlement_attempts.append(kwargs.get("wait_for_settlement"))
+            return resend_kind != "settlement_failure"
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_settle_stream_api_key_usage", settle_usage)
     suffix = [reasoning, assistant, failover.FOLLOW_UP_INPUT]
     if resend_kind == "missing_reply":
         suffix.remove(assistant)
@@ -14018,6 +14036,9 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
     if resend_kind == "client_anchor":
         follow_up["previous_response_id"] = "resp_quota_anchor"
     requests = [failover.response_create([failover.HISTORICAL_INPUT]), follow_up]
+    if resend_kind == "lite":
+        for request in requests:
+            request["input"].insert(0, {"type": "additional_tools", "role": "developer", "tools": []})
     next_suffix = [{**assistant, "id": "msg_recovered"}, {"role": "user", "content": "next turn"}]
     if resend_kind == "complete":
         requests.append(failover.response_create([failover.HISTORICAL_INPUT, *suffix, *next_suffix]))
@@ -14045,7 +14066,7 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
         assert "previous_response_id" not in replay
         assert replay["input"] == [failover.HISTORICAL_INPUT, *suffix]
         return
-    if resend_kind != "complete":
+    if resend_kind not in {"complete", "lite", "keyed", "settlement_failure"}:
         if resend_kind == "visible_output":
             assert [event["type"] for event in events] == ["response.created", "response.output_text.delta", "error"]
             assert events[-1]["error"]["code"] == "usage_limit_reached"
@@ -14056,6 +14077,19 @@ def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
         return
 
     assert _assert_ws_single_response_lifecycle_completed(failover.turn_events[1], None) == "resp_quota_recovered"
+    if resend_kind in {"lite", "keyed", "settlement_failure"}:
+        failover.assert_retried_on_another_account()
+        replay = json.loads(recovered_upstream.sent_text[0])
+        assert "previous_response_id" not in replay
+        assert all(item.get("type") != "reasoning" for item in replay["input"])
+        if resend_kind == "lite":
+            assert replay["reasoning"] == {"context": "all_turns"}
+        else:
+            assert settlement_attempts and all(settlement_attempts)
+            assert failover.stream_errors == (
+                [] if resend_kind == "settlement_failure" else [(failover.FIRST_ACCOUNT_ID, "usage_limit_reached")]
+            )
+        return
     assert _assert_ws_single_response_lifecycle_completed(events, disconnect) == "resp_next_turn"
     failover.assert_retried_on_another_account()
     assert len(recovered_upstream.sent_text) == 2

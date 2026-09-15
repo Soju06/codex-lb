@@ -24,6 +24,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _payload_uses_responses_lite,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -514,11 +515,24 @@ def _websocket_request_text_is_account_neutral_fresh_replay(request_text: str | 
         return False
     if not isinstance(payload, dict):
         return False
+    return _websocket_payload_is_account_neutral_fresh_replay(payload)
+
+
+def _websocket_payload_is_account_neutral_fresh_replay(payload: dict[str, JsonValue]) -> bool:
+    payload = dict(payload)
     event_type = payload.get("type")
     if event_type is not None and event_type != "response.create":
         return False
     payload.pop("type", None)
-    return responses_payload_is_account_neutral_fresh_replay(cast(dict[str, JsonValue], payload))
+    reasoning = payload.get("reasoning")
+    if (
+        _payload_uses_responses_lite(payload)
+        and isinstance(reasoning, dict)
+        and reasoning.get("context") == "all_turns"
+    ):
+        # Validate portable controls without the canonical transport-injected context.
+        payload["reasoning"] = {key: value for key, value in reasoning.items() if key != "context"}
+    return responses_payload_is_account_neutral_fresh_replay(payload)
 
 
 def _bind_websocket_request_dispatch_owner(
@@ -671,9 +685,9 @@ async def _record_or_defer_websocket_accepted_replay_health(
     error_message: str | None,
     error_code: str,
 ) -> None:
-    """Penalize the account an accepted replay leaves, now or after settlement.
+    """Penalize the account a replay leaves, now or after settlement.
 
-    The accepted request keeps its API-key reservation open across the
+    Accepted and pre-created owner replays keep their API-key reservation open across the
     re-send, and account health must not be written while a reservation is
     unsettled (api-keys spec settlement-ordering invariant; bridge parity with
     ``_handle_or_defer_precreated_stream_health``). A keyed request queues the
@@ -810,10 +824,7 @@ def _project_websocket_full_resend_for_replay(
     if projection is None:
         return None
     projected_payload = {**payload, "input": projection.input_items}
-    replay_payload = dict(projected_payload)
-    if replay_payload.get("type") == "response.create":
-        replay_payload.pop("type")
-    if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
+    if not _websocket_payload_is_account_neutral_fresh_replay(projected_payload):
         return None
     return projected_payload
 

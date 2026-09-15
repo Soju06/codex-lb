@@ -6051,12 +6051,11 @@ class _WebSocketMixin:
                     request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
-                if accepted_lifecycle_replay:
-                    # The accepted request still holds its API-key reservation:
-                    # the health write waits for its settlement (bridge parity).
-                    # Pre-created replays keep the immediate write; they are not
-                    # excluded from the reconnect and rely on the penalty to
-                    # steer selection away from this account.
+                if accepted_lifecycle_replay or (
+                    retry_safe_owner_replay and request_state.api_key_reservation is not None
+                ):
+                    # Replays keep their reservation open until finalization.
+                    # Health writes must wait for settlement, even before created.
                     await _record_or_defer_websocket_accepted_replay_health(
                         proxy,
                         request_state,

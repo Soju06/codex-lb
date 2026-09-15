@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { addDays, format } from "date-fns";
 import { CalendarIcon, ChevronDown, Infinity as InfinityIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { ja } from "react-day-picker/locale";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -22,7 +23,7 @@ export type ExpiryPickerProps = {
 };
 
 export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [todayStart] = useState(() => {
@@ -110,6 +111,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               </button>
             </div>
             <Calendar
+              locale={i18n.resolvedLanguage === "ja" ? ja : undefined}
               mode="single"
               selected={value ?? undefined}
               onSelect={handleCalendarSelect}

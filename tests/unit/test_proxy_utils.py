@@ -31687,6 +31687,39 @@ async def test_process_upstream_websocket_text_preserves_first_turn_missing_tool
     assert list(pending_requests) == [first_turn_request]
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        pytest.param(None, {"message": "Upstream error"}, id="missing-error"),
+        pytest.param(
+            {"type": "error", "error": {"message": "limit reached", "resets_at": True, "resets_in_seconds": False}},
+            {"message": "limit reached"},
+            id="boolean-reset-metadata-is-not-numeric",
+        ),
+        pytest.param(
+            {"type": "error", "code": "usage_limit_reached", "message": "  ", "resets_in_seconds": 14_555.5},
+            {"message": "Upstream error", "resets_in_seconds": 14_555.5},
+            id="flattened-error-without-message",
+        ),
+        pytest.param(
+            {
+                "type": "error",
+                "error": {"message": " limit reached ", "param": ["input"], "resets_at": 1_778_790_595},
+            },
+            {"message": "limit reached", "resets_at": 1_778_790_595},
+            id="malformed-param-keeps-valid-reset",
+        ),
+    ],
+)
+def test_websocket_event_upstream_error_preserves_metadata_across_error_shapes(
+    payload: dict[str, JsonValue] | None,
+    expected: UpstreamError,
+) -> None:
+    from app.modules.proxy._service.websocket.helpers import _websocket_event_upstream_error
+
+    assert _websocket_event_upstream_error("error", payload) == expected
+
+
 @pytest.mark.asyncio
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_failure(
     monkeypatch,
@@ -31726,7 +31759,12 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
         "response": {
             "id": "resp_ws_precreated_fail",
             "status": "failed",
-            "error": {"code": "usage_limit_reached", "message": "usage limit reached"},
+            "error": {
+                "code": "usage_limit_reached",
+                "message": "usage limit reached",
+                "resets_at": 1_778_790_595,
+                "resets_in_seconds": 14_555,
+            },
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         },
     }
@@ -31749,6 +31787,11 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     handle_call = handle_stream_error.await_args
     assert handle_call is not None
     assert handle_call.args[0] == account
+    assert handle_call.args[1] == {
+        "message": "usage limit reached",
+        "resets_at": 1_778_790_595,
+        "resets_in_seconds": 14_555,
+    }
     assert handle_call.args[2] == "usage_limit_reached"
     assert upstream_control.reconnect_requested is True
     assert upstream_control.suppress_downstream_event is True
@@ -32114,6 +32157,7 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
             "type": "invalid_request_error",
             "code": "usage_limit_reached",
             "message": "The usage limit has been reached",
+            "resets_in_seconds": 14_555,
         },
     }
     upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
@@ -32135,6 +32179,10 @@ async def test_process_upstream_websocket_text_transparently_retries_precreated_
     handle_call = handle_stream_error.await_args
     assert handle_call is not None
     assert handle_call.args[0] == account
+    assert handle_call.args[1] == {
+        "message": "The usage limit has been reached",
+        "resets_in_seconds": 14_555,
+    }
     assert handle_call.args[2] == "usage_limit_reached"
     assert upstream_control.reconnect_requested is True
     assert upstream_control.suppress_downstream_event is True
@@ -32364,6 +32412,7 @@ async def test_process_upstream_websocket_text_maps_previous_response_usage_limi
             "type": "invalid_request_error",
             "code": "usage_limit_reached",
             "message": "The usage limit has been reached",
+            "resets_at": 1_778_790_595,
         },
     }
     upstream_text = json.dumps(upstream_payload, separators=(",", ":"))
@@ -32384,6 +32433,10 @@ async def test_process_upstream_websocket_text_maps_previous_response_usage_limi
     handle_call = handle_stream_error.await_args
     assert handle_call is not None
     assert handle_call.args[0] == account
+    assert handle_call.args[1] == {
+        "message": "The usage limit has been reached",
+        "resets_at": 1_778_790_595,
+    }
     assert handle_call.args[2] == "usage_limit_reached"
     finalize_request_state.assert_awaited_once()
     finalize_call = finalize_request_state.await_args
@@ -33136,6 +33189,7 @@ async def test_process_upstream_websocket_text_keeps_file_backed_verified_anchor
             "type": "invalid_request_error",
             "code": "usage_limit_reached",
             "message": "The usage limit has been reached",
+            "resets_in_seconds": 14_555,
         },
     }
 
@@ -33152,7 +33206,11 @@ async def test_process_upstream_websocket_text_keeps_file_backed_verified_anchor
 
     assert '"code":"upstream_unavailable"' in downstream_text
     assert "usage_limit_reached" not in downstream_text
-    handle_stream_error.assert_awaited_once()
+    handle_stream_error.assert_awaited_once_with(
+        account,
+        {"message": "The usage limit has been reached", "resets_in_seconds": 14_555},
+        "usage_limit_reached",
+    )
     finalize_request_state.assert_awaited_once()
     assert upstream_control.reconnect_requested is False
     assert upstream_control.suppress_downstream_event is False
@@ -54922,16 +54980,18 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     ``_handle_or_defer_precreated_stream_health``)."""
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     calls: list[str] = []
+    health_errors: list[UpstreamError] = []
 
     async def settle_usage(*_args: object, **_kwargs: object) -> bool:
         calls.append("settle")
         return True
 
     async def handle_stream_error(
-        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+        account: Account, error: UpstreamError, code: str, http_status: int | None = None, **_kwargs
     ) -> None:
         del http_status
         calls.append(f"health:{account.id}:{code}")
+        health_errors.append(error)
 
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
@@ -54972,7 +55032,11 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     await process(
         failing_account, {"type": "response.in_progress", "response": {"id": "resp_x", "status": "in_progress"}}
     )
-    await process(failing_account, _accepted_capacity_error_payload())
+    capacity_error = _accepted_capacity_error_payload()
+    cast(dict[str, JsonValue], capacity_error["error"]).update(
+        {"resets_at": 1_778_790_595, "resets_in_seconds": 14_555}
+    )
+    await process(failing_account, capacity_error)
 
     assert upstream_control.replay_request_state is request_state
     assert request_state.excluded_account_ids == {failing_account.id}
@@ -55010,6 +55074,13 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     assert json.loads(completed_text)["response"]["id"] == "resp_x"
     assert pending_requests == deque()
     assert calls == ["settle", f"health:{failing_account.id}:server_is_overloaded"]
+    assert health_errors == [
+        {
+            "message": "Our servers are currently overloaded. Please try again later.",
+            "resets_at": 1_778_790_595,
+            "resets_in_seconds": 14_555,
+        }
+    ]
     assert request_state.deferred_keyed_stream_health == []
     assert request_state.api_key_reservation is None
 

@@ -8962,6 +8962,96 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("reset_field", ["resets_at", "resets_in_seconds"])
+async def test_http_bridge_usage_limit_preserves_reset_and_retires_unavailable_owner(
+    async_client, app_instance, monkeypatch, path, reset_field
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    now = 2_000_000_000.0
+    reset_at = 2_000_432_000
+    monkeypatch.setattr("time.time", lambda: now)
+    owner_id = await _import_account(async_client, "acc_reset_owner", "reset-owner@example.com")
+    owner = await _get_account(owner_id)
+
+    class LimitedOwnerWebSocket(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            if not self.sent_text:
+                await super().send_text(text)
+                return
+            self.sent_text.append(text)
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 429,
+                            "error": {
+                                "type": "usage_limit_reached",
+                                "message": "The usage limit has been reached",
+                                reset_field: reset_at if reset_field == "resets_at" else 432_000,
+                            },
+                        }
+                    ),
+                )
+            )
+
+    owner_upstream = LimitedOwnerWebSocket("resp_reset_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_reset_replacement")
+    connected_accounts: list[str] = []
+
+    async def fresh_account(self, target, *, force=False, timeout_seconds):
+        return target
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        connected_accounts.append(account_id_header)
+        return owner_upstream if account_id_header == owner.chatgpt_account_id else replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh_account)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    headers = {"session_id": "reset-session", "thread-id": "reset-thread"}
+    body = {"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": "hello", "stream": True}
+    first, first_headers = await _collect_sse_events_with_headers(async_client, path, json_body=body, headers=headers)
+    assert first[-1]["response"]["id"] == "resp_reset_owner_1"
+    headers["x-codex-turn-state"] = first_headers["x-codex-turn-state"]
+
+    replacement_id = await _import_account(async_client, "acc_reset_replacement", "reset-replacement@example.com")
+    replacement = await _get_account(replacement_id)
+    # This continuation has no verified full-resend proof. The existing
+    # retirement path must use the real reset horizon, not bypass the
+    # account-neutral full-resend proof gate.
+    failed = await async_client.post(path, json={**body, "input": "continue"}, headers=headers)
+    assert failed.status_code == 502
+    assert failed.json()["error"]["code"] == "stream_incomplete"
+    limited = await _get_account(owner_id)
+    assert limited.status == AccountStatus.RATE_LIMITED
+    assert limited.reset_at == reset_at
+
+    explicit = await async_client.post(
+        path,
+        json={**body, "input": "continue", "previous_response_id": "resp_reset_owner_1"},
+        headers=headers,
+    )
+    assert explicit.status_code == 502
+    assert explicit.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert replacement_upstream.sent_text == []
+
+    resumed = await _collect_sse_events(async_client, path, json_body={**body, "input": "continue"}, headers=headers)
+    assert resumed[-1]["response"]["id"] == "resp_reset_replacement_1"
+    assert connected_accounts[-1] == replacement.chatgpt_account_id
+    assert len(owner_upstream.sent_text) == 2
+    assert json.loads(replacement_upstream.sent_text[0])["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+    ]
+    assert "previous_response_id" not in json.loads(replacement_upstream.sent_text[0])
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(HttpBridgeSessionRecord))).scalars().all()
+    assert any(row.account_id == replacement_id for row in rows)
+    assert all(row.account_id != owner_id for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_over_stale_local_lane(
     async_client,
     app_instance,

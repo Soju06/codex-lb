@@ -1194,6 +1194,7 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
                     "error": {
                         "code": "rate_limit_exceeded",
                         "message": "slow down",
+                        "resets_at": 1_700_003_600,
                     },
                 },
             }
@@ -1211,6 +1212,7 @@ async def test_stream_rate_limit_on_last_attempt_returns_actual_error(async_clie
     last_event = events[-1] if events else {}
     error = last_event.get("response", {}).get("error", {})
     assert error.get("code") != "no_accounts", "Client received generic no_accounts instead of actual error"
+    assert error.get("resets_at") == 1_700_003_600
 
 
 @pytest.mark.asyncio

@@ -13863,6 +13863,93 @@ async def test_v1_responses_http_bridge_preserves_rate_limit_metadata_in_429(asy
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_preserves_rate_limit_after_failed_precreated_retry(
+    async_client,
+    monkeypatch,
+):
+    """A failed native retry must not turn the original upstream 429 into 502."""
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True).model_copy(
+            update={"http_responses_session_bridge_request_budget_seconds": 1.0}
+        ),
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    first_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_failed_retry_rate_limit",
+        "http-bridge-failed-retry-rate-limit@example.com",
+    )
+    second_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_failed_retry_replacement",
+        "http-bridge-failed-retry-replacement@example.com",
+    )
+    first_account = await _get_account(first_account_id)
+    connect_calls: list[str | None] = []
+    first_upstream = _RateLimitErrorUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        account = second_account if first_account.id in excluded else first_account
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connect_calls.append(account_id_header)
+        if len(connect_calls) == 1:
+            return first_upstream
+        raise proxy_module.ProxyResponseError(
+            503,
+            proxy_module.openai_error(
+                "replacement_unavailable",
+                "Selected replacement connection failed",
+                error_type="server_error",
+            ),
+        )
+
+    second_account = await _get_account(second_account_id)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-4o",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "http-bridge-failed-retry-rate-limit-key",
+            "stream": True,
+        },
+    )
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["error"] == {
+        "message": "Rate limit reached for gpt-4o on tokens per day",
+        "type": "rate_limit_error",
+        "code": "rate_limit_exceeded",
+        "plan_type": "team",
+        "resets_at": 1700000000,
+        "resets_in_seconds": 3600,
+    }
+    assert len(connect_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_cancellation_releases_queued_slot(async_client, app_instance, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(async_client, "acc_http_bridge_cancel", "http-bridge-cancel@example.com")

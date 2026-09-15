@@ -31,11 +31,11 @@ export function QueueWaitChart({ startDate, endDate, data }: QueueWaitChartProps
   const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    queue: d.medianQueueMs ?? 0,
+    queue: d.medianQueueMs ?? null,
   }));
 
   return (
-    <ReportChartCard title={t("reports.charts.queueWait")} empty={data.length === 0}>
+    <ReportChartCard title={t("reports.charts.queueWait")} empty={!chartData.some((d) => d.queue != null)}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>

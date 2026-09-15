@@ -187,6 +187,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     median_ttft_ms=123.456,
                     median_tps=78.901,
                     median_queue_ms=45.678,
+                    tps_sample_count=2,
                 )
             ]
         ),
@@ -253,6 +254,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].conversations == 1
     assert result.daily[0].median_tps == 78.9
+    assert result.daily[0].tps_sample_count == 2
     assert result.daily[0].median_queue_ms == 45.68
     assert result.daily[0].reasoning_tokens is None
     assert result.by_model[0].model == "gpt-5.1"

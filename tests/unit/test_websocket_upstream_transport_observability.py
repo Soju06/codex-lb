@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import anyio
 import pytest
 
+from app.core.clock import REAL_CLOCK, Clock
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event_payload
 from app.modules.api_keys.service import ApiKeyData
@@ -24,10 +25,12 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy._service.websocket.mixin import _WebSocketMixin
+from tests.simulation.virtual_time import VirtualClock
 
 
 class _DummyWebSocketService(_WebSocketMixin):
     def __init__(self) -> None:
+        self._clock: Clock = REAL_CLOCK
         self.request_log_calls: list[dict[str, object]] = []
         self.remembered_response_ids: list[str] = []
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
@@ -230,6 +233,8 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "requested_service_tier": None,
             "actual_service_tier": None,
             "latency_first_token_ms": None,
+            "latency_first_output_ms": None,
+            "output_delta_count": 0,
             "latency_response_created_ms": None,
             "latency_first_upstream_event_ms": None,
             "latency_response_create_gate_wait_ms": None,
@@ -254,10 +259,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "connection_request_kind": None,
         }
     ]
-    # No reader stamp on this turn: the throughput span ends at finalizer entry,
-    # never after the row's own latency.
-    terminal_ms = cast(int, service.request_log_calls[0]["latency_upstream_terminal_ms"])
-    assert 0 <= terminal_ms <= cast(int, service.request_log_calls[0]["latency_ms"])
+    assert service.request_log_calls[0]["latency_upstream_terminal_ms"] is None
     assert metric_calls == [
         {
             "downstream_transport": "http",
@@ -368,6 +370,8 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "requested_service_tier": None,
             "actual_service_tier": None,
             "latency_first_token_ms": None,
+            "latency_first_output_ms": None,
+            "output_delta_count": 0,
             "latency_response_created_ms": None,
             "latency_first_upstream_event_ms": None,
             "latency_response_create_gate_wait_ms": None,
@@ -446,6 +450,8 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "requested_service_tier": None,
             "actual_service_tier": None,
             "latency_first_token_ms": None,
+            "latency_first_output_ms": None,
+            "output_delta_count": 0,
             "session_id": None,
             "upstream_proxy_route_mode": None,
             "upstream_proxy_pool_id": None,
@@ -594,3 +600,79 @@ async def test_websocket_terminal_frame_counts_reasoning_replay_rejection(
     assert len(service.request_log_calls) == 1
     assert service.request_log_calls[0]["status"] == "error"
     assert service.request_log_calls[0]["error_code"] == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["websocket", "http"])
+@pytest.mark.parametrize("settlement_seconds", [0.0, 2.0])
+async def test_generation_timing_preserves_total_latency_and_owner_clock(monkeypatch, transport, settlement_seconds):
+    service = _DummyWebSocketService()
+    clock = VirtualClock(monotonic_value=101.0)
+    service._clock = clock
+
+    async def settle(*_args, **kwargs):
+        assert kwargs["wait_for_settlement"] is True
+        clock.advance(settlement_seconds)
+        return True
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle)
+    state = _WebSocketRequestState(
+        request_id="timing",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        upstream_terminal_at=101.0,
+        latency_first_token_ms=250,
+        latency_first_output_ms=500,
+        output_delta_count=2,
+        transport=transport,
+    )
+    await service._finalize_websocket_request_state(
+        state,
+        account=cast(Any, object()),
+        account_id_value="timing",
+        event=None,
+        event_type="response.completed",
+        payload={},
+        api_key=None,
+        upstream_control=_WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    row = service.request_log_calls[0]
+    assert row["latency_ms"] == int((1 + settlement_seconds) * 1000)
+    assert row["latency_upstream_terminal_ms"] == 1000
+    assert row["latency_first_token_ms"] == 250
+    assert row["latency_first_output_ms"] == 500
+    assert row["output_delta_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_finalizer_does_not_invent_unobserved_terminal_time():
+    service = _DummyWebSocketService()
+    service._clock = VirtualClock(monotonic_value=101.0)
+    state = _WebSocketRequestState(
+        request_id="timing",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+    )
+    await service._finalize_websocket_request_state(
+        state,
+        account=cast(Any, object()),
+        account_id_value="timing",
+        event=None,
+        event_type="response.completed",
+        payload={},
+        api_key=None,
+        upstream_control=_WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+    )
+    row = service.request_log_calls[0]
+    assert row["latency_ms"] == 1000
+    assert row["latency_upstream_terminal_ms"] is None
+    assert row["latency_first_output_ms"] is None
+    assert row["output_delta_count"] == 0

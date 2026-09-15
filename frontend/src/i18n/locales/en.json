@@ -2004,5 +2004,20 @@
   "auth.login.signInFailed": "That sign-in did not finish. Try again.",
   "auth.pending.subtitleProvider": "Signed in through {{provider}}",
   "auth.pending.bodyProvider": "{{provider}} recognised you, but this dashboard has no account for you yet. Ask an administrator to add you, then try again.",
-  "auth.pending.referenceLabel": "Give your administrator this reference so they can find your sign-in:"
+  "auth.pending.referenceLabel": "Give your administrator this reference so they can find your sign-in:",
+  "dashboard.requestDetails.ttftExplanation": "For subscription requests, TTFT is observed by the gateway at the first text, visible reasoning or tool output. HTTP attempt timing excludes separately recorded queue time; WebSocket and bridge timing may include waits. Custom model sources use upstream-reported timings. This is not client end-to-end latency.",
+  "dashboard.requestDetails.tpsExplanation": "TPS estimates non-reasoning output tokens per second from first non-reasoning output to upstream completion. Samples need at least two output chunks and 100 ms; this is a sample-quality rule, not a speed limit.",
+  "dashboard.requestDetails.firstOutput": "First non-reasoning output",
+  "dashboard.requestDetails.speedSample": "TPS sample quality",
+  "dashboard.requestDetails.legacyEstimate": "Legacy estimate",
+  "dashboard.generationTpsStatus.estimated": "Observed output-speed estimate",
+  "dashboard.generationTpsStatus.legacy_estimate": "Legacy estimate: output chunk evidence is unavailable; excluded from daily TPS medians.",
+  "dashboard.generationTpsStatus.insufficient_sample": "Insufficient sample: no non-reasoning output, fewer than two output chunks, or less than 100 ms of output.",
+  "dashboard.generationTpsStatus.missing_usage": "TPS unavailable: output or reasoning usage is unknown.",
+  "dashboard.generationTpsStatus.missing_timing": "TPS unavailable: output timing is missing.",
+  "dashboard.generationTpsStatus.invalid_sample": "TPS unavailable: timing or usage values are inconsistent.",
+  "dashboard.generationTpsStatus.incomplete": "TPS unavailable: request did not complete successfully.",
+  "reports.charts.tpsSamples": "{{count}} qualified samples · observed output-speed estimates",
+  "reports.charts.noQualifiedSpeedSamples": "No qualified output-speed samples. Legacy, incomplete and insufficient samples are excluded.",
+  "dashboard.requestDetails.upstreamCompletion": "Upstream completion"
 }

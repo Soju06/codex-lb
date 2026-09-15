@@ -2004,5 +2004,20 @@
   "auth.login.signInFailed": "此次登录未能完成。请重试。",
   "auth.pending.subtitleProvider": "已通过 {{provider}} 登录",
   "auth.pending.bodyProvider": "{{provider}} 已识别您的身份，但此仪表盘还没有您的账户。请联系管理员添加您，然后重试。",
-  "auth.pending.referenceLabel": "请把下面的参考码提供给管理员，以便找到您这次登录："
+  "auth.pending.referenceLabel": "请把下面的参考码提供给管理员，以便找到您这次登录：",
+  "dashboard.requestDetails.ttftExplanation": "订阅账号请求的 TTFT 是网关观测到首个文本、可见思考或工具输出的延迟。HTTP 单次尝试不含另行记录的排队时间；WebSocket 和桥接计时可能包含等待。自定义模型源使用上游报告的计时。它不等于客户端端到端延迟。",
+  "dashboard.requestDetails.tpsExplanation": "TPS 估算从首个非思考输出到上游完成期间，每秒输出的非思考 token 数。至少需要 2 个输出块、100 毫秒的采样窗口；这是样本质量要求，不是速度上限。",
+  "dashboard.requestDetails.firstOutput": "首个非思考输出",
+  "dashboard.requestDetails.speedSample": "TPS 样本质量",
+  "dashboard.requestDetails.legacyEstimate": "旧口径估算",
+  "dashboard.generationTpsStatus.estimated": "网关观测的输出速度估算",
+  "dashboard.generationTpsStatus.legacy_estimate": "旧口径估算：缺少输出块证据，不计入每日 TPS 中位数。",
+  "dashboard.generationTpsStatus.insufficient_sample": "样本不足：无非思考输出、输出块少于 2 个，或输出窗口不足 100 毫秒。",
+  "dashboard.generationTpsStatus.missing_usage": "无法估算 TPS：输出或思考 token 数未知。",
+  "dashboard.generationTpsStatus.missing_timing": "无法估算 TPS：缺少输出时间记录。",
+  "dashboard.generationTpsStatus.invalid_sample": "无法估算 TPS：时间或用量记录不一致。",
+  "dashboard.generationTpsStatus.incomplete": "无法估算 TPS：请求未成功完成。",
+  "reports.charts.tpsSamples": "{{count}} 个合格样本 · 网关观测的输出速度估算",
+  "reports.charts.noQualifiedSpeedSamples": "暂无合格的输出速度样本。旧口径估算、未完成请求及采样不足的请求不参与统计。",
+  "dashboard.requestDetails.upstreamCompletion": "上游完成"
 }

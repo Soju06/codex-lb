@@ -13928,6 +13928,184 @@ def _completed_first_turn_upstream_batch(response_id: str) -> list[_FakeUpstream
     ]
 
 
+@pytest.mark.parametrize(
+    "resend_kind",
+    [
+        "complete",
+        "lite",
+        "keyed",
+        "settlement_failure",
+        "missing_reply",
+        "item_reference",
+        "client_anchor",
+        "visible_output",
+        "same_account_capacity",
+        "same_account_close",
+        "stale_anchor",
+    ],
+)
+def test_backend_responses_websocket_quota_replay_projects_verified_full_resend(
+    app_instance,
+    monkeypatch,
+    resend_kind,
+):
+    """Replay only a complete portable transcript after a pre-output quota failure."""
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_rate_limit", AsyncMock())
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error", AsyncMock())
+    reasoning = {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "owner-ciphertext"}
+    assistant = {
+        "type": "message",
+        "id": "msg_prior",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hi"}],
+    }
+    first_turn = _completed_first_turn_upstream_batch("resp_quota_anchor")
+    completed = json.loads(cast(str, first_turn[-1].text))
+    completed["response"]["output"] = [reasoning, assistant]
+    first_turn[-1] = _ws_event(completed)
+    failure = [_ws_event({"type": "error", "error": {"code": "usage_limit_reached", "message": "Quota exhausted"}})]
+    if resend_kind == "visible_output":
+        failure = [
+            _ws_event({"type": "response.created", "response": {"id": "resp_partial", "status": "in_progress"}}),
+            _ws_event({"type": "response.output_text.delta", "response_id": "resp_partial", "delta": "partial"}),
+            *failure,
+        ]
+    elif resend_kind == "same_account_close":
+        failure = [*_accepted_output_free_prelude("resp_accepted"), _FakeUpstreamMessage("close", close_code=1011)]
+    elif resend_kind == "same_account_capacity":
+        failure = [
+            *_accepted_output_free_prelude("resp_accepted"),
+            _ws_event({"type": "error", "error": {"code": "server_is_overloaded", "message": "Overloaded"}}),
+        ]
+    elif resend_kind == "stale_anchor":
+        failure = [
+            _ws_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "previous_response_not_found",
+                        "param": "previous_response_id",
+                        "message": "Previous response not found",
+                    },
+                }
+            )
+        ]
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[first_turn, failure],
+    )
+    recovered_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_quota_recovered"),
+            _completed_first_turn_upstream_batch("resp_next_turn"),
+        ],
+    )
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    if resend_kind in {"same_account_capacity", "same_account_close", "stale_anchor"}:
+        failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].append(recovered_upstream)
+    if resend_kind == "same_account_capacity":
+        monkeypatch.setattr(
+            proxy_module.ProxyService,
+            "_resolve_file_account_for_responses",
+            AsyncMock(return_value=failover.FIRST_ACCOUNT_ID),
+        )
+    failover.install(monkeypatch)
+    settlement_attempts = []
+    if resend_kind in {"keyed", "settlement_failure"}:
+        reservation = proxy_module.ApiKeyUsageReservationData(
+            reservation_id="resv_quota_projection", key_id="key_quota_projection", model="gpt-5.4"
+        )
+        monkeypatch.setattr(
+            proxy_module.ProxyService, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation)
+        )
+
+        async def settle_usage(self, *args, **kwargs):
+            assert failover.stream_errors == []
+            settlement_attempts.append(kwargs.get("wait_for_settlement"))
+            return resend_kind != "settlement_failure"
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_settle_stream_api_key_usage", settle_usage)
+    suffix = [reasoning, assistant, failover.FOLLOW_UP_INPUT]
+    if resend_kind == "missing_reply":
+        suffix.remove(assistant)
+    elif resend_kind == "item_reference":
+        suffix.insert(1, {"type": "item_reference", "id": "msg_elsewhere"})
+    follow_up = failover.response_create([failover.HISTORICAL_INPUT, *suffix])
+    if resend_kind == "client_anchor":
+        follow_up["previous_response_id"] = "resp_quota_anchor"
+    requests = [failover.response_create([failover.HISTORICAL_INPUT]), follow_up]
+    if resend_kind == "lite":
+        for request in requests:
+            request["input"].insert(0, {"type": "additional_tools", "role": "developer", "tools": []})
+    next_suffix = [{**assistant, "id": "msg_recovered"}, {"role": "user", "content": "next turn"}]
+    if resend_kind == "complete":
+        requests.append(failover.response_create([failover.HISTORICAL_INPUT, *suffix, *next_suffix]))
+
+    events, disconnect = failover.run(
+        app_instance,
+        requests=requests,
+        headers={"Authorization": "Bearer external-token"},
+    )
+
+    assert disconnect is None
+    assert len(first_upstream.sent_text) == 2
+    anchored_payload = json.loads(first_upstream.sent_text[1])
+    assert anchored_payload["previous_response_id"] == "resp_quota_anchor"
+    if resend_kind != "client_anchor":
+        assert anchored_payload["input"] == suffix
+    if resend_kind in {"same_account_capacity", "same_account_close", "stale_anchor"}:
+        _assert_ws_single_response_lifecycle_completed(events, disconnect)
+        assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID]
+        replay = json.loads(recovered_upstream.sent_text[0])
+        if resend_kind == "same_account_capacity":
+            assert replay["previous_response_id"] == "resp_quota_anchor"
+            assert replay["input"] == suffix
+            return
+        assert "previous_response_id" not in replay
+        assert replay["input"] == [failover.HISTORICAL_INPUT, *suffix]
+        return
+    if resend_kind not in {"complete", "lite", "keyed", "settlement_failure"}:
+        if resend_kind == "visible_output":
+            assert [event["type"] for event in events] == ["response.created", "response.output_text.delta", "error"]
+            assert events[-1]["error"]["code"] == "usage_limit_reached"
+        else:
+            assert events[-1]["response"]["error"]["code"] == "upstream_unavailable"
+        assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID]
+        assert recovered_upstream.sent_text == []
+        return
+
+    assert _assert_ws_single_response_lifecycle_completed(failover.turn_events[1], None) == "resp_quota_recovered"
+    if resend_kind in {"lite", "keyed", "settlement_failure"}:
+        failover.assert_retried_on_another_account()
+        replay = json.loads(recovered_upstream.sent_text[0])
+        assert "previous_response_id" not in replay
+        assert all(item.get("type") != "reasoning" for item in replay["input"])
+        if resend_kind == "lite":
+            assert replay["reasoning"] == {"context": "all_turns"}
+        else:
+            assert settlement_attempts and all(settlement_attempts)
+            assert failover.stream_errors == (
+                [] if resend_kind == "settlement_failure" else [(failover.FIRST_ACCOUNT_ID, "usage_limit_reached")]
+            )
+        return
+    assert _assert_ws_single_response_lifecycle_completed(events, disconnect) == "resp_next_turn"
+    failover.assert_retried_on_another_account()
+    assert len(recovered_upstream.sent_text) == 2
+    replay = json.loads(recovered_upstream.sent_text[0])
+    assert "previous_response_id" not in replay
+    assert replay["input"] == [
+        failover.HISTORICAL_INPUT,
+        {key: value for key, value in assistant.items() if key != "id"},
+        failover.FOLLOW_UP_INPUT,
+    ]
+    next_payload = json.loads(recovered_upstream.sent_text[1])
+    assert next_payload["previous_response_id"] == "resp_quota_recovered"
+    assert next_payload["input"] == next_suffix
+    assert (failover.FIRST_ACCOUNT_ID, "usage_limit_reached") in failover.stream_errors
+
+
 def _assert_anchored_follow_up_replayed_with_fresh_body(
     failover: _TwoAccountWebSocketFailover,
     *,

@@ -7,6 +7,7 @@ import {
   InviteDescriptionSchema,
   type GuestPasswordSetRequest,
   type LoginRequest,
+  OidcStartResponseSchema,
   type PasswordChangeRequest,
   type PasswordRemoveRequest,
   type PasswordSetupRequest,
@@ -96,6 +97,19 @@ export function disableTotp(payload: unknown) {
 export function stepUp(payload: StepUpRequest) {
   return post(`${AUTH_BASE_PATH}/step-up`, StepUpResponseSchema, {
     body: payload,
+    suppressUnauthorizedHandler: true,
+  });
+}
+
+/**
+ * Begin a step-up at the identity provider, for the account whose only
+ * credential *is* the identity provider (`methods: ["oidc"]`). The body
+ * endpoint above cannot serve that account: it has no password and no
+ * authenticator code to send. The server answers with the authorization URL to
+ * follow; the callback records the step-up and returns to the app.
+ */
+export function startOidcStepUp() {
+  return post(`${AUTH_BASE_PATH}/oidc/step-up/start`, OidcStartResponseSchema, {
     suppressUnauthorizedHandler: true,
   });
 }

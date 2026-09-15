@@ -1,19 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  armedByTestLogin,
   breakGlassDesignations,
+  companyLoginLabel,
+  isConnected,
   hasCompanyLogin,
   isLocalLoginRestricted,
   isOrganisationConfigured,
   isQualifyingBreakGlass,
+  maskEmail,
   moveInOrder,
   normalizeEmailDomain,
+  oidcFieldFromParam,
+  oidcProvider,
   orderRolesForPicker,
   refusedSince,
   REFUSED_WINDOW_DAYS,
   rulesOf,
   suggestedEmailDomain,
   trustedHeaderProvider,
+  validateOidcDraft,
+  type OidcDraft,
 } from "@/features/organisation/rules";
 import {
   createAccessSummary,
@@ -21,12 +29,12 @@ import {
   createDashboardUser,
   createDashboardRole,
   createDefaultAuthProviders,
+  createOidcAuthProvider,
   createDefaultDashboardRoles,
   createDefaultRefusedSignIns,
   createRefusedSignIn,
   createRoleMapping,
-  PRESET_ROLE_IDS,
-} from "@/test/mocks/factories";
+  PRESET_ROLE_IDS, LOCAL_SIGN_IN_PROVIDER } from "@/test/mocks/factories";
 
 describe("isOrganisationConfigured", () => {
   it("stays unconfigured for a password-only install", () => {
@@ -164,5 +172,139 @@ describe("preset ids stay the ones the pickers order by", () => {
   it("keeps admin first", () => {
     const [first] = orderRolesForPicker(createDefaultDashboardRoles(), { customRoles: 0 });
     expect(first.id).toBe(PRESET_ROLE_IDS.admin);
+  });
+});
+
+describe("the company sign-in row", () => {
+  const CALLBACK = "/api/dashboard-auth/oidc/callback";
+  const VALID: OidcDraft = {
+    issuer: "https://login.example.com",
+    discoveryUrl: "",
+    clientId: ["codex", "lb"].join("-"),
+    clientSecret: ["value", "0000"].join("-"),
+    redirectUri: `https://codex.example.com${CALLBACK}`,
+    subjectClaim: "",
+    emailClaim: "",
+    nameClaim: "",
+    groupsClaim: "",
+  };
+
+  it("finds the identity-provider row and ignores the others", () => {
+    expect(oidcProvider(createDefaultAuthProviders())?.kind).toBe("oidc");
+    expect(oidcProvider([createAuthProvider()])).toBeNull();
+    expect(oidcProvider(undefined)).toBeNull();
+  });
+
+  it("treats an empty configuration as nothing to show, not as a history", () => {
+    expect(isConnected(createOidcAuthProvider())).toBe(true);
+    expect(isConnected(createOidcAuthProvider({ config: {} }))).toBe(false);
+    expect(isConnected(null)).toBe(false);
+  });
+
+  it("arms only on a stamp that moved, never on one that was already there", () => {
+    const earlier = "2026-02-01T00:00:00Z";
+    const later = "2026-02-01T00:05:00Z";
+    // The stored proof may be somebody else's; the API will not say whose.
+    expect(armedByTestLogin(earlier, earlier)).toBe(false);
+    expect(armedByTestLogin(later, earlier)).toBe(false);
+    expect(armedByTestLogin(earlier, later)).toBe(true);
+    // A connection write clears the stamp, so a pre-flight starts from nothing.
+    expect(armedByTestLogin(null, later)).toBe(true);
+    expect(armedByTestLogin(null, null)).toBe(false);
+    expect(armedByTestLogin(earlier, null)).toBe(false);
+  });
+
+  it("names the company sign-in only when exactly one is active", () => {
+    const password = LOCAL_SIGN_IN_PROVIDER;
+    const okta = { kind: "oidc", label: "Okta" };
+    expect(companyLoginLabel([password, okta])).toBe("Okta");
+    expect(companyLoginLabel([password])).toBeNull();
+    expect(companyLoginLabel([password, okta, { kind: "trusted_header", label: "Proxy" }])).toBeNull();
+  });
+
+  it("maps the server's field name onto the one the form shows", () => {
+    expect(oidcFieldFromParam("discovery_url")).toBe("discoveryUrl");
+    expect(oidcFieldFromParam("issuer")).toBe("issuer");
+    expect(oidcFieldFromParam("groups_claim")).toBe("groupsClaim");
+    expect(oidcFieldFromParam("config")).toBeNull();
+    expect(oidcFieldFromParam("username")).toBeNull();
+  });
+
+  it("accepts a document the server would accept", () => {
+    expect(validateOidcDraft(VALID, { callbackPath: CALLBACK })).toEqual({});
+    expect(
+      validateOidcDraft({ ...VALID, discoveryUrl: "https://login.example.com/.well-known/openid-configuration" }, {
+        callbackPath: CALLBACK,
+      }),
+    ).toEqual({});
+  });
+
+  it("catches everything that would come back unattributable", () => {
+    expect(validateOidcDraft({ ...VALID, issuer: "" }, { callbackPath: CALLBACK })).toEqual({ issuer: "required" });
+    expect(validateOidcDraft({ ...VALID, issuer: "http://login.example.com" }, { callbackPath: CALLBACK })).toEqual({
+      issuer: "https",
+    });
+    expect(validateOidcDraft({ ...VALID, issuer: "not a url" }, { callbackPath: CALLBACK })).toEqual({
+      issuer: "https",
+    });
+    expect(validateOidcDraft({ ...VALID, clientSecret: "" }, { callbackPath: CALLBACK })).toEqual({
+      clientSecret: "required",
+    });
+    expect(validateOidcDraft({ ...VALID, clientId: "c".repeat(257) }, { callbackPath: CALLBACK })).toEqual({
+      clientId: "tooLong",
+    });
+    expect(
+      validateOidcDraft({ ...VALID, redirectUri: "https://codex.example.com/elsewhere" }, { callbackPath: CALLBACK }),
+    ).toEqual({ redirectUri: "callback" });
+    expect(validateOidcDraft({ ...VALID, groupsClaim: "two words" }, { callbackPath: CALLBACK })).toEqual({
+      groupsClaim: "whitespace",
+    });
+  });
+
+  it("judges the value the request will carry, not the one still in the box", () => {
+    // The wizard trims before it sends, so a field holding nothing but spaces
+    // reaches the server as the empty string its request model refuses with no
+    // `param` — the exact refusal this validator exists to keep off the wire.
+    expect(validateOidcDraft({ ...VALID, clientId: "   " }, { callbackPath: CALLBACK })).toEqual({
+      clientId: "required",
+    });
+    expect(validateOidcDraft({ ...VALID, issuer: " \t " }, { callbackPath: CALLBACK })).toEqual({
+      issuer: "required",
+    });
+    // And the other way: padding the wizard strips on its own is not a refusal,
+    // because the server is never shown it. A blank optional address means
+    // "use the default" whether it was left empty or left a space.
+    expect(
+      validateOidcDraft(
+        {
+          ...VALID,
+          issuer: ` ${VALID.issuer} `,
+          discoveryUrl: "  ",
+          redirectUri: ` ${VALID.redirectUri} `,
+          groupsClaim: " roles ",
+        },
+        { callbackPath: CALLBACK },
+      ),
+    ).toEqual({});
+    // The secret is the one field sent verbatim, so its spaces are its own.
+    expect(validateOidcDraft({ ...VALID, clientSecret: " " }, { callbackPath: CALLBACK })).toEqual({});
+  });
+});
+
+describe("maskEmail", () => {
+  // The rule the server applies in `app/core/utils/masking.py`. The refused
+  // person is handed this projection of their own address as a reference and
+  // the sheet shows it beside the address itself, so the two are the same
+  // string or the reference is unfindable.
+  it("keeps the first character of the local part and the whole domain", () => {
+    expect(maskEmail(["sarah", "example.com"].join("@"))).toBe("s***@example.com");
+    expect(maskEmail(["a", "example.com"].join("@"))).toBe("a***@example.com");
+  });
+
+  it("matches the server on the shapes an identity provider can still assert", () => {
+    expect(maskEmail("@example.com")).toBe("***@example.com");
+    expect(maskEmail(["a", "b", "c.com"].join("@"))).toBe("a***@b@c.com");
+    expect(maskEmail("no-domain")).toBe("n***");
+    expect(maskEmail("")).toBe("***");
   });
 });

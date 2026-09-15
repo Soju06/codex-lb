@@ -24,7 +24,7 @@ The designation (`is_break_glass`) is only half of it. An account **qualifies** 
 - Under `break_glass_only` the local form admits a qualifying account, not merely a designated one — a designation without two-factor would otherwise leave the strictest policy with a password-only admin door.
 - While the policy is not `enabled`, nothing may take the last qualifying account away. Removing its two-factor, resetting it, removing its password, disabling, deleting or demoting the account, or clearing its designation all answer `409 last_break_glass_protected`.
 
-An install upgraded from the shared-password era carries the designation on its `admin` account already but no two-factor, so the usual first step is to enrol two-factor on it. Until it does, that account still signs in normally under `enabled` and `admins_only` — which is where it enrols — and the policy cannot be tightened past it. The login-policy card shows the qualifying state, the account name and the `/login?local=1` URL — **save both in your password manager before tightening the policy**, because that URL is the only place the form appears under `break_glass_only` and the name is never shown to a signed-out browser.
+An install upgraded from the shared-password era carries the designation on the account it bootstrapped (created as `admin`, renameable since) already but no two-factor, so the usual first step is to enrol two-factor on it. Until it does, that account still signs in normally under `enabled` and `admins_only` — which is where it enrols — and the policy cannot be tightened past it. The login-policy card shows the qualifying state, the account name and the `/login?local=1` URL — **save both in your password manager before tightening the policy**, because that URL is the only place the form appears under `break_glass_only` and the name is never shown to a signed-out browser.
 
 ## Behind a reverse proxy, enrol two-factor first
 
@@ -49,19 +49,19 @@ Run them on the host that holds the database. Three forms of the same command, o
 
 ```bash
 # --- Standard image (the image ships a codex-lb shim) ---
-docker exec -it codex-lb codex-lb admin reset-password admin
+docker exec -it codex-lb codex-lb admin reset-password <username>
 docker exec -it codex-lb codex-lb admin local-login enable
 docker exec -it codex-lb codex-lb admin disable-provider <provider-id>
 docker exec -it codex-lb codex-lb admin reset-login-policy --yes
 
 # --- Distroless image (no shell, no shim) ---
-docker exec -it codex-lb python -m app.cli admin reset-password admin
+docker exec -it codex-lb python -m app.cli admin reset-password <username>
 docker exec -it codex-lb python -m app.cli admin local-login enable
 docker exec -it codex-lb python -m app.cli admin disable-provider <provider-id>
 docker exec -it codex-lb python -m app.cli admin reset-login-policy --yes
 
 # --- Kubernetes / Helm ---
-kubectl exec -it deploy/codex-lb -- python -m app.cli admin reset-password admin
+kubectl exec -it deploy/codex-lb -- python -m app.cli admin reset-password <username>
 kubectl exec -it deploy/codex-lb -- python -m app.cli admin local-login enable
 kubectl exec -it deploy/codex-lb -- python -m app.cli admin disable-provider <provider-id>
 kubectl exec -it deploy/codex-lb -- python -m app.cli admin reset-login-policy --yes
@@ -76,6 +76,7 @@ Notes that matter in the middle of an incident:
 
 - `reset-password` prompts twice on the terminal, so it needs an interactive session (`docker exec -it`, `kubectl exec -it`). A password passed on a command line would survive in the shell history, in `ps` and in the host's logs, so there is no flag for it.
 - A running server picks these changes up within about five seconds; there is nothing to restart.
+- A password is a way in only for an *active* account: sign-in refuses every other status before it looks at a hash. `reset-password` still does what you asked and says so in its report ("this account cannot sign in until an administrator re-enables it"); re-enabling is a decision for an administrator, from Settings → Access → People, or by re-running the setup screen when the account is the one the install bootstrapped.
 - On a database that was never migrated the commands say so and stop, instead of a traceback. Run `codex-lb-db upgrade` (or start the server once) first.
 - Every command is safe to repeat.
 
@@ -93,7 +94,7 @@ Notes that matter in the middle of an incident:
 3. **The locked-out account is the only administrator.** A designated account that holds a secret must always present it, so a new password alone will not let it in. Clear the secret with the password in one step:
 
    ```bash
-   docker exec -it codex-lb codex-lb admin reset-password admin --clear-two-factor
+   docker exec -it codex-lb codex-lb admin reset-password <username> --clear-two-factor
    ```
 
    Clearing the secret is also what stops the account *qualifying*, and under `break_glass_only` a designation that no longer qualifies is not admitted — the new password would meet a form that refuses it. So the command asks one question after the write: can anybody still use the local password form? When the answer is no it re-opens local sign-in in the same transaction and says so:

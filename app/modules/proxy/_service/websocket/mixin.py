@@ -457,10 +457,6 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
-from app.modules.proxy._service.websocket.overflow import (
-    bounce_exhausted_websocket_turn,
-    bounce_pinned_or_anchored_websocket_turn,
-)
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
@@ -1883,15 +1879,6 @@ class _WebSocketMixin:
                                             request_state.previous_response_owner_account_id,
                                         ),
                                     )
-                                if await bounce_pinned_or_anchored_websocket_turn(
-                                    proxy,
-                                    websocket,
-                                    client_send_lock=client_send_lock,
-                                    api_key=request_state.api_key or api_key,
-                                    request_state=request_state,
-                                    headers=headers,
-                                ):
-                                    continue
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -4149,15 +4136,6 @@ class _WebSocketMixin:
                 error_code="previous_response_owner_unavailable",
                 error_message=message,
             )
-            return None
-        if error_code == USAGE_LIMIT_REACHED and await bounce_exhausted_websocket_turn(
-            proxy,
-            websocket,
-            client_send_lock=client_send_lock,
-            api_key=api_key,
-            request_state=request_state,
-            headers=headers or {},
-        ):
             return None
         _facade().logger.warning(
             "Websocket account selection failed request_id=%s model=%s preferred_account_id=%s "
@@ -6512,11 +6490,10 @@ class _WebSocketMixin:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             _observe_terminal_stream_error_frame(error_code, error_message)
-            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(
-                request_state,
-                "account_health_error_handled",
-                False,
-            )
+            settlement.account_health_error = _facade()._should_penalize_stream_error(
+                error_code,
+                error_message,
+            ) and not getattr(request_state, "account_health_error_handled", False)
         if (
             request_state.suppressed_duplicate_tool_call
             and error_code == _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE

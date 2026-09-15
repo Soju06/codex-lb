@@ -35,6 +35,11 @@ labels for current usage; for example, a weekly token limit without a model
 filter displays `トークン (週次, すべてのモデル)`. Model identifiers and
 numeric/currency formatting remain unchanged.
 
+Company sign-in uses the established `社内認証` terminology. The OIDC wizard,
+provider confirmation, pending-account screen, and account rename dialog share
+the same Japanese bundle. Provider names, claim names, redirect URLs, and the
+reference an administrator uses to locate a sign-in retain their original values.
+
 ### Example and failure modes
 
 A first-time visitor using `ja-JP` sees the dashboard in Japanese. Choosing
@@ -44,6 +49,12 @@ An unsupported language resolves to English. If browser storage is unavailable,
 the existing language detector can still use the URL or browser language, but
 cannot retain a manual selection across reloads.
 
+Provider recognition does not imply that a dashboard account exists: the
+Japanese pending-account screen asks the user to contact an administrator and
+preserves the sign-in reference. The connection test copy also distinguishes
+successful testing from enabling company sign-in; the test grant is valid for
+ten minutes and is consumed when sign-in is enabled.
+
 ### Verification
 
 Locale tests compare all supported bundles' keys and Japanese interpolation and
@@ -51,6 +62,9 @@ markup against English. Formatter and expiry-picker tests cover Japanese dates,
 relative times, operational units, and date selection. Browser regressions in
 `frontend/screenshots/capture.spec.ts` exercise real routes with fixture APIs,
 desktop/mobile menus, reload persistence, login copy, and validation markup.
+The bundle comparison also catches obsolete keys when main removes a feature.
+After synchronizing main, compare against the merged English bundle and rerun
+the frontend suite so both additions and removals are covered.
 
 ## Progressive disclosure (nav + settings)
 

@@ -4,13 +4,21 @@ import { del, get, patch, post, put } from "@/lib/api-client";
 
 // Wire shapes of `app/modules/auth_providers/schemas.py`,
 // `app/modules/role_mappings/schemas.py` and the filtered read of
-// `app/modules/audit/api.py`. Nothing here carries a secret: the provider
-// `config` map holds the reverse-proxy header NAMES, which are deployment
-// topology, and the audit rows are refusals, not credentials.
+// `app/modules/audit/api.py`.
+//
+// Nothing the server SENDS here carries a secret: the trusted-header row's
+// `config` holds header NAMES, the OIDC row's comes back with its client
+// secret masked (`****last4`), and the audit rows are refusals. The request
+// side is where a secret does travel: `OidcConfigRequest` carries the client
+// secret in clear, because a connection document is written whole and the
+// server will not inherit the old secret behind a repointed issuer. The mask
+// is never sent back, and the secret is never stored anywhere but the form
+// state of the dialog that collected it.
 
 const PROVIDERS_PATH = "/api/auth-providers";
 const MAPPINGS_PATH = "/api/role-mappings";
 const AUDIT_PATH = "/api/audit-logs";
+const OIDC_TEST_LOGIN_START_PATH = "/api/dashboard-auth/oidc/test-login/start";
 
 export const AuthProviderSchema = z.object({
   id: z.string(),
@@ -27,6 +35,10 @@ export const AuthProviderSchema = z.object({
   skipRoleSync: z.boolean(),
   idpMfaEnforced: z.boolean(),
   config: z.record(z.string(), z.string()).default({}),
+  // When an admin last completed a test sign-in against the stored connection.
+  // The API deliberately does not say *whose* proof it is, so this timestamp is
+  // evidence that one exists, never that this browser may spend it.
+  testLoginVerifiedAt: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -73,12 +85,39 @@ export type RoleMapping = z.infer<typeof RoleMappingSchema>;
 export type AssignableRole = z.infer<typeof AssignableRoleSchema>;
 export type AuditEntry = z.infer<typeof AuditEntrySchema>;
 
+/**
+ * The OIDC connection document, as `OidcConfigRequest` wants it. It is written
+ * whole every time — including `clientSecret`, which the server requires in
+ * full rather than inheriting, so a repointed issuer cannot be handed the
+ * credential its predecessor was given. Writing it clears any test-login proof.
+ */
+export type OidcConfigRequest = {
+  issuer: string;
+  discoveryUrl?: string | null;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  subjectClaim?: string | null;
+  emailClaim?: string | null;
+  nameClaim?: string | null;
+  groupsClaim?: string | null;
+};
+
 export type AuthProviderUpdateRequest = {
+  label?: string;
+  enabled?: boolean;
   unknownIdentityRoleId?: string | null;
   noMatchRoleId?: string | null;
   linkByEmail?: boolean;
   skipRoleSync?: boolean;
+  idpMfaEnforced?: boolean;
+  config?: OidcConfigRequest;
 };
+
+/** Where the identity provider sends the browser back; the server validates the suffix. */
+export const OIDC_CALLBACK_PATH = "/api/dashboard-auth/oidc/callback";
+
+export const OidcStartSchema = z.object({ authorizationUrl: z.string() });
 
 export type RoleMappingCreateRequest = {
   provider: string;
@@ -96,6 +135,15 @@ export function listAuthProviders() {
 
 export function updateAuthProvider(providerId: string, payload: AuthProviderUpdateRequest) {
   return patch(`${PROVIDERS_PATH}/${encodeURIComponent(providerId)}`, AuthProviderSchema, { body: payload });
+}
+
+/**
+ * Begin the pre-flight: the admin's own browser makes the round trip against
+ * the connection as stored. The answer is only where to send the window; the
+ * verdict arrives as a stamp on the provider row, never in this response.
+ */
+export function startOidcTestLogin() {
+  return post(OIDC_TEST_LOGIN_START_PATH, OidcStartSchema);
 }
 
 export function listRoleMappings() {

@@ -29,12 +29,19 @@ from app.core.auth.dashboard_access import (
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.providers.registry import ActiveProvider, get_auth_provider_registry
-from app.core.auth.step_up import StepUpMethod, is_step_up_fresh, step_up_expires_at, step_up_methods
+from app.core.auth.step_up import (
+    StepUpMethod,
+    account_step_up_methods,
+    is_step_up_fresh,
+    step_up_expires_at,
+    step_up_methods,
+)
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
-from app.db.models import DashboardUser, DashboardUserStatus
+from app.db.models import AuthProviderKind, DashboardUser, DashboardUserStatus
+from app.modules.dashboard_auth.oidc_flows import OIDC_LOGIN_START_PATH
 from app.modules.dashboard_auth.schemas import (
     DashboardAccessSummary,
     DashboardAuthSessionResponse,
@@ -91,8 +98,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def list_active_local_password_users(self) -> Sequence[DashboardUser]: ...
 
-    async def count_active_users(self) -> int: ...
-
     async def count_user_identities(self, user_id: str) -> int: ...
 
     async def count_live_invites(self) -> int: ...
@@ -108,8 +113,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
     async def count_role_mappings(self) -> int: ...
 
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None: ...
-
-    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
@@ -353,6 +356,22 @@ def session_clock() -> int:
     """The clock sessions and step-ups are minted and checked against (one clock, one truth)."""
 
     return int(time())
+
+
+def is_local_password_session(state: DashboardSessionState) -> bool:
+    """Whether this cookie stands for *a local password*, which is what ``local_login_policy`` governs.
+
+    ``password_verified`` is the flag that admits a cookie at all, so every
+    account session sets it -- including one minted by the identity provider.
+    The local login policy is about the door that does not depend on that
+    provider, so it keys on the method too: without this an OIDC session would
+    count as the local fallback and single sign-on would silently defeat
+    ``admins_only`` and ``break_glass_only``, the two policies that exist to
+    close the local door once single sign-on is on. One function, so the gate
+    and the session response that advertises the fallback cannot disagree.
+    """
+
+    return state.password_verified and state.auth_method == AUTH_METHOD_PASSWORD
 
 
 class StepUpCookieStore:
@@ -639,7 +658,7 @@ class DashboardAuthService:
             authenticated = not totp_pending
             role = DashboardRole.ADMIN
             auth_method = resolved.state.auth_method
-            step_up = step_up_state(user, verified_at=resolved.state.step_up_verified_at)
+            step_up = await step_up_state(user, verified_at=resolved.state.step_up_verified_at)
         elif not password_required:
             authenticated = True
             role = DashboardRole.ADMIN
@@ -691,7 +710,10 @@ class DashboardAuthService:
                     kind=cast(LoginProviderKind, item.row.kind),
                     provider_key=item.row.provider_key,
                     label=item.row.label,
-                    login_url=None,
+                    # A redirect-style provider names where its sign-in starts;
+                    # the others have no URL of their own. The client that does
+                    # not know the kind simply ignores the entry.
+                    login_url=OIDC_LOGIN_START_PATH if item.row.kind == AuthProviderKind.OIDC.value else None,
                 )
                 for item in await self._active_providers()
             ],
@@ -875,7 +897,19 @@ class DashboardAuthService:
         actor_ip: str | None = None,
         auth_method: str | None = None,
     ) -> None:
-        """Solo-install only: drop the user's credentials so the install is passwordless again."""
+        """Solo-install only: drop the user's credentials so the install is passwordless again.
+
+        "Solo" is every account the install holds, in any status -- not just
+        the active ones. A disabled account is still an account: it keeps its
+        role, its owned keys and (if it ever had one) its password hash, and
+        only an account with ``users:manage`` can bring it back. Removing the
+        last *active* password while one exists would hand the install to the
+        implicit local admin, which holds no account and therefore cannot
+        manage users at all, stranding the disabled row with no way to enable,
+        delete or sign in as it -- while the install-wide TOTP requirements
+        this write also clears were only ever justified by "this account *is*
+        the install". Deleting the other accounts first is the way through.
+        """
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
@@ -885,13 +919,15 @@ class DashboardAuthService:
         # invite would otherwise turn a passwordless install into one where
         # authentication is mandatory again but no admin holds a password.
         await self._repository.acquire_write_intent()
-        active_users = await self._repository.count_active_users()
+        counts = await self._repository.get_user_counts()
+        solo_install = counts.total == 1 and counts.active == 1
         identities = await self._repository.count_user_identities(user.id)
-        if active_users != 1 or identities or await self._repository.count_live_invites():
+        if not solo_install or identities or await self._repository.count_live_invites():
             raise OtherUsersExistError(
-                "Other users exist or invites are pending; log out everywhere or revoke pending invites instead"
+                "Other accounts exist or invites are pending; delete the other accounts "
+                "or revoke pending invites instead"
             )
-        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=active_users == 1)
+        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=solo_install)
         # Dropping the password is one more way to lose the last qualifying
         # emergency account: a restricted policy would survive the removal, and
         # the re-bootstrapped ``admin`` is designated but never qualifying, so
@@ -1056,7 +1092,19 @@ class DashboardAuthService:
         # long ago (and whoever holds the cookie could have enrolled the secret
         # themselves), so that path keeps whatever step-up the session already
         # carried and leaves /step-up to ask for the password.
-        completing_fresh_login = is_step_up_fresh(existing_state.issued_at, now=now)
+        #
+        # "A sign-in that just happened" means a *local password* sign-in. A
+        # session minted by the identity provider is fresh too, and its
+        # ``password_verified`` flag is set because that is the flag the gate
+        # reads — but no password was presented to obtain it. Without the
+        # method test, an account holding a password could sign in through
+        # single sign-on, enrol a TOTP secret, verify a code and hold a step-up
+        # covering every security mutation, having proven one of the two
+        # factors it is required to present. The OIDC step-up flow is the path
+        # for that account, and it refuses an account that holds a local factor.
+        completing_fresh_login = is_local_password_session(existing_state) and is_step_up_fresh(
+            existing_state.issued_at, now=now
+        )
         step_up_verified_at = now if completing_fresh_login else existing_state.step_up_verified_at
         new_session_id = self._session_store.create_user_session(
             user.id,
@@ -1195,14 +1243,20 @@ class DashboardAuthService:
         self._session_store.delete(session_id)
 
 
-def step_up_state(user: DashboardUser, *, verified_at: int | None) -> DashboardStepUpState:
-    """The session response's ``step_up`` block: a still-fresh verification and the account's methods."""
+async def step_up_state(user: DashboardUser, *, verified_at: int | None) -> DashboardStepUpState:
+    """The session response's ``step_up`` block: a still-fresh verification and the account's methods.
+
+    Async because the methods come from :func:`account_step_up_methods`: what
+    the dashboard shows and what the gate accepts have to be the same list, and
+    for an account whose only factor is its identity provider that list is not
+    a property of the row alone.
+    """
 
     fresh = verified_at if is_step_up_fresh(verified_at, now=session_clock()) else None
     return DashboardStepUpState(
         verified_at=fresh,
         expires_at=step_up_expires_at(fresh) if fresh is not None else None,
-        methods=step_up_methods(user),
+        methods=await account_step_up_methods(user),
     )
 
 
@@ -1240,6 +1294,15 @@ _guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_second
 #: Bounds the anonymous ``login_failed`` rows a client can append from refusals
 #: that by design spend no password budget (``username_required``).
 _login_failed_audit_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="login_failed_audit")
+#: The ceiling on the two public OIDC routes, per client address. One sign-in
+#: is two requests (start, callback), so 30/60 s is generous for a person and
+#: bounded for a client replaying a captured callback URL. It is deliberately
+#: never cleared on success: it is the endpoints' only ceiling.
+_oidc_address_rate_limiter = DatabaseRateLimiter(max_attempts=30, window_seconds=60, type="oidc_address")
+#: The per-``state`` budget on the callback, keyed on the hash so the table
+#: never holds a live state value. Same shape as ``invite_accept_token``: a
+#: legitimate flow spends one, a replay of one URL spends the rest.
+_oidc_state_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_seconds=60, type="oidc_callback_state")
 _invite_lookup_rate_limiter = DatabaseRateLimiter(max_attempts=30, window_seconds=60, type="invite_lookup")
 _invite_accept_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="invite_accept")
 _invite_accept_token_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_seconds=60, type="invite_accept_token")
@@ -1271,6 +1334,14 @@ def get_guest_password_rate_limiter() -> DatabaseRateLimiter:
 
 def get_login_failed_audit_rate_limiter() -> DatabaseRateLimiter:
     return _login_failed_audit_rate_limiter
+
+
+def get_oidc_address_rate_limiter() -> DatabaseRateLimiter:
+    return _oidc_address_rate_limiter
+
+
+def get_oidc_state_rate_limiter() -> DatabaseRateLimiter:
+    return _oidc_state_rate_limiter
 
 
 def get_invite_lookup_rate_limiter() -> DatabaseRateLimiter:

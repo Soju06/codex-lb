@@ -2574,9 +2574,9 @@ Dashboard feature surfaces SHALL render user-visible copy through the active
 i18n locale, including page headings, section headings, empty states, table
 headings, filter labels, button labels, accessible labels, dialog titles,
 dialog descriptions, validation messages, and client-side toast fallback copy.
-This requirement applies to Accounts, Dashboard, API Keys, APIs, Reports,
-Automations, Firewall, Model Sources, Quota Planner, Sticky Sessions, Settings
-subsections, and shared dashboard components.
+This requirement applies to Auth, Access, Organisation, Accounts, Dashboard,
+API Keys, APIs, Reports, Automations, Firewall, Model Sources, Quota Planner,
+Sticky Sessions, Settings subsections, and shared dashboard components.
 
 The dashboard MAY keep protocol names, product names, model/API terminology,
 quota window abbreviations, and compact operational abbreviations in English
@@ -2622,6 +2622,13 @@ when the English form is the clearest operator-facing label.
 - **AND** nonempty model identifiers, compact amounts, currency amounts, and `5h`/`7d` windows retain their existing representation
 - **WHEN** the selected language changes while the dialog is open
 - **THEN** the current-usage labels update to that language
+
+#### Scenario: Japanese company sign-in and account management
+
+- **WHEN** a user selects `ja` and opens the company sign-in connection wizard, a provider sign-in result, or an account rename dialog
+- **THEN** headings, field labels, help text, validation messages, and actions render in Japanese
+- **AND** provider confirmation and pending-account explanations render in Japanese while preserving provider names and administrator reference values
+- **AND** account rename copy explains that subsequent local sign-ins use the new username
 
 ### Requirement: Japanese locale formats dashboard dates and calendar controls
 

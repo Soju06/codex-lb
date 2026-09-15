@@ -48,21 +48,14 @@ def test_build_data_retention_scheduler_uses_hourly_interval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prune_once_runs_the_pin_purge_when_retention_is_disabled(monkeypatch) -> None:
-    """The tick runs the leader-gated pass even with both retention windows off.
-
-    Model-source pins carry their own ``purge_at`` (design §8.8), so their
-    purge is not opt-in; the request-log and usage-history pruning inside the
-    pass stay gated by their windows.
-    """
+async def test_prune_once_runs_the_pass_with_both_windows_off(monkeypatch) -> None:
+    """The tick runs the leader-gated pass even with both retention windows off; the pruning stays gated."""
     leader = _GateLeader(leader=True)
     monkeypatch.setattr(retention_scheduler, "_get_leader_election", lambda: leader)
     _set_effective_retention(monkeypatch, request_log=0, usage_history=0)
-    prune_pins = AsyncMock(return_value=3)
     prune_request_logs = AsyncMock(return_value=0)
     prune_usage_history = AsyncMock(return_value=0)
     prune_additional = AsyncMock(return_value=0)
-    monkeypatch.setattr(retention_job, "prune_model_source_pins", prune_pins)
     monkeypatch.setattr(retention_job, "_prune_request_logs", prune_request_logs)
     monkeypatch.setattr(retention_job, "_prune_usage_history", prune_usage_history)
     monkeypatch.setattr(retention_job, "_prune_additional_usage_history", prune_additional)
@@ -70,7 +63,6 @@ async def test_prune_once_runs_the_pin_purge_when_retention_is_disabled(monkeypa
     await DataRetentionScheduler(interval_seconds=1)._prune_once()
 
     assert leader.run_if_leader_calls == 1
-    prune_pins.assert_awaited_once()
     prune_request_logs.assert_not_called()
     prune_usage_history.assert_not_called()
     prune_additional.assert_not_called()
@@ -134,19 +126,20 @@ async def test_prune_once_survives_a_failing_pass_on_consecutive_ticks(monkeypat
         raise RuntimeError("db down")
 
     monkeypatch.setattr(retention_job, "get_effective_retention", _boom)
-    prune_pins = AsyncMock(return_value=0)
-    monkeypatch.setattr(retention_job, "prune_model_source_pins", prune_pins)
+    prune_request_logs = AsyncMock(return_value=0)
+    monkeypatch.setattr(retention_job, "_prune_request_logs", prune_request_logs)
 
     scheduler = DataRetentionScheduler(interval_seconds=1)
     await scheduler._prune_once()
     await scheduler._prune_once()
 
     assert leader.run_if_leader_calls == 2
-    prune_pins.assert_not_called()  # the pass failed before reaching the purge, and the loop is still alive
+    # The pass failed before reaching any pruning, and the loop is still alive.
+    prune_request_logs.assert_not_called()
 
 
-def test_scheduler_does_not_gate_the_tick_on_the_retention_windows() -> None:
-    """Mutant guard: re-introducing an ``enabled`` short-circuit would skip the pin purge."""
+def test_scheduler_does_not_resolve_the_retention_windows_itself() -> None:
+    """The windows are resolved inside the pass, never by the scheduler."""
     assert not hasattr(retention_scheduler, "get_effective_retention")
 
 

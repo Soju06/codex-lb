@@ -2,6 +2,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import type { ReportsResponse, ThreadIdentityFacet, ThreadIdentityResponse } from "../src/features/reports/schemas";
+import en from "../src/i18n/locales/en.json" with { type: "json" };
+import ja from "../src/i18n/locales/ja.json" with { type: "json" };
 
 import {
   accounts,
@@ -28,6 +30,7 @@ import {
   createDashboardAuthSession,
   createDefaultDashboardRoles,
   createDefaultDashboardUsers,
+  createOidcAuthProvider,
   createPendingInvite,
   createPermissionDescriptors,
   createSessionUser,
@@ -76,6 +79,11 @@ async function interceptApi(
     if (p === "/api/dashboard-users/invites") return fulfill(route, [createPendingInvite()]);
     if (p === "/api/dashboard-roles") return fulfill(route, createDefaultDashboardRoles());
     if (p === "/api/dashboard-roles/permissions") return fulfill(route, createPermissionDescriptors());
+    if (p === "/api/auth-providers") {
+      return fulfill(route, [createOidcAuthProvider({ label: "Single sign-on", config: {} })]);
+    }
+    if (p === "/api/role-mappings/assignable-roles") return fulfill(route, createDefaultDashboardRoles());
+    if (p === "/api/role-mappings") return fulfill(route, []);
     if (p === "/api/dashboard/overview") return fulfill(route, overview);
     if (p === "/api/request-logs/options") return fulfill(route, filterOptions);
     if (p === "/api/request-logs") {
@@ -550,6 +558,205 @@ test.describe("Japanese locale review regressions", () => {
     await dialog.screenshot({ path: testInfo.outputPath("api-key-edit.jpg"), type: "jpeg", quality: 85, animations: "disabled" });
     await expect(dialog.getByText("トークン (週次, すべてのモデル)", { exact: true })).toBeVisible();
     await expect(dialog.getByText("コスト (月次, すべてのモデル)", { exact: true })).toBeVisible();
+  });
+});
+
+test.describe("Japanese locale main parity", () => {
+  test.use({ locale: "en-US", timezoneId: "Asia/Tokyo", viewport: { width: 1440, height: 1000 } });
+
+  type Language = "en" | "ja";
+
+  const messages: Record<Language, Record<string, string>> = {
+    en: en as Record<string, string>,
+    ja: ja as Record<string, string>,
+  };
+  const companyProvider = {
+    kind: "oidc",
+    providerKey: "default",
+    label: "Okta",
+    loginUrl: "/api/dashboard-auth/oidc/login/start",
+  } as const;
+  const localProvider = {
+    kind: "password",
+    providerKey: "default",
+    label: "Password",
+    loginUrl: null,
+  } as const;
+  const adminSession = createDashboardAuthSession({
+    user: createSessionUser(),
+    authMethod: "password",
+    localPasswordConfigured: true,
+    passwordSessionActive: true,
+    accessSummary: createAccessSummary({
+      usersTotal: 3,
+      usersActive: 2,
+      usersInvited: 1,
+      pendingInvites: 1,
+      nonAdminUsers: 2,
+    }),
+    assignableRoleIds: ASSIGNABLE_ROLE_IDS,
+  });
+  const companyLoginSession = createDashboardAuthSession({
+    authenticated: false,
+    passwordRequired: true,
+    localPasswordConfigured: true,
+    totpConfigured: false,
+    role: "guest",
+    permissions: [],
+    login: {
+      usernameField: "shown",
+      providers: [localProvider, companyProvider],
+      localLogin: "admins_only",
+      pendingIdentity: false,
+      pendingArrival: null,
+    },
+  });
+  const pendingApprovalSession = createDashboardAuthSession({
+    authenticated: false,
+    passwordRequired: true,
+    localPasswordConfigured: false,
+    totpConfigured: false,
+    role: "guest",
+    permissions: [],
+    login: {
+      usernameField: "shown",
+      providers: [companyProvider],
+      localLogin: "break_glass_only",
+      pendingIdentity: true,
+      pendingArrival: { provider: "Okta", reference: "s***@example.com" },
+    },
+  });
+
+  const text = (language: Language, key: string, values: Record<string, string | number> = {}) => {
+    const template = messages[language][key];
+    if (template === undefined) {
+      throw new Error(`Missing ${language} screenshot message: ${key}`);
+    }
+    return Object.entries(values).reduce(
+      (message, [name, value]) => message.replaceAll(`{{${name}}}`, String(value)),
+      template,
+    );
+  };
+  const artifactPrefix = (language: Language) => (language === "en" ? "before" : "after");
+
+  test.beforeEach(async ({ page }) => {
+    await applyTheme(page, "light");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+  });
+
+  test("captures the new company sign-in connection wizard", async ({ page }, testInfo) => {
+    await interceptApi(page, adminSession);
+
+    for (const language of ["en", "ja"] as const) {
+      await page.goto(`${BASE_URL}/settings?lang=${language}#oidc`, { waitUntil: "networkidle" });
+      await expect(page.locator("html")).toHaveAttribute("lang", language);
+      await page.getByRole("button", { name: text(language, "organisation.oidc.actions.connect"), exact: true }).click();
+
+      const dialog = page.getByRole("dialog", {
+        name: text(language, "organisation.oidc.dialog.title"),
+        exact: true,
+      });
+      await expect(dialog).toContainText(
+        text(language, "organisation.oidc.dialog.stepOf", {
+          current: 1,
+          total: 3,
+          name: text(language, "organisation.oidc.steps.connection"),
+        }),
+      );
+      await expect(dialog.getByLabel(text(language, "organisation.oidc.fields.issuer"), { exact: true })).toBeVisible();
+      await expect(dialog.getByLabel(text(language, "organisation.oidc.fields.clientSecret"), { exact: true })).toBeVisible();
+      await dialog.screenshot({
+        path: testInfo.outputPath(`${artifactPrefix(language)}-oidc-connection.jpg`),
+        type: "jpeg",
+        quality: 85,
+        animations: "disabled",
+      });
+
+      await dialog.getByRole("button", { name: text(language, "organisation.oidc.actions.next"), exact: true }).click();
+      await expect(dialog).toContainText(
+        text(language, "organisation.oidc.dialog.stepOf", {
+          current: 2,
+          total: 3,
+          name: text(language, "organisation.oidc.steps.claims"),
+        }),
+      );
+      await expect(dialog.getByLabel(text(language, "organisation.oidc.fields.groupsClaim"), { exact: false })).toBeVisible();
+      await dialog.screenshot({
+        path: testInfo.outputPath(`${artifactPrefix(language)}-oidc-claims.jpg`),
+        type: "jpeg",
+        quality: 85,
+        animations: "disabled",
+      });
+    }
+  });
+
+  test("captures company sign-in and its neutral failure message", async ({ page }, testInfo) => {
+    await interceptApi(page, companyLoginSession);
+
+    for (const language of ["en", "ja"] as const) {
+      await page.goto(`${BASE_URL}/login?sso=failed&lang=${language}`, { waitUntil: "networkidle" });
+      await expect(page.locator("html")).toHaveAttribute("lang", language);
+      await expect(page.getByText(text(language, "auth.login.signInFailed"), { exact: true })).toBeVisible();
+      await expect(
+        page.getByRole("link", {
+          name: text(language, "auth.login.continueWith", { provider: companyProvider.label }),
+          exact: true,
+        }),
+      ).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath(`${artifactPrefix(language)}-company-sign-in.jpg`),
+        type: "jpeg",
+        quality: 85,
+        animations: "disabled",
+      });
+    }
+  });
+
+  test("captures company sign-in pending approval", async ({ page }, testInfo) => {
+    await interceptApi(page, pendingApprovalSession);
+
+    for (const language of ["en", "ja"] as const) {
+      await page.goto(`${BASE_URL}/auth/pending?lang=${language}`, { waitUntil: "networkidle" });
+      await expect(page.locator("html")).toHaveAttribute("lang", language);
+      await expect(page.getByRole("heading", { name: text(language, "auth.pending.title"), exact: true })).toBeVisible();
+      await expect(page.getByText(text(language, "auth.pending.subtitleProvider", { provider: "Okta" }), { exact: true })).toBeVisible();
+      await expect(page.getByText(text(language, "auth.pending.referenceLabel"), { exact: true })).toBeVisible();
+      await expect(page.getByTestId("pending-reference")).toHaveText("s***@example.com");
+      await page.screenshot({
+        path: testInfo.outputPath(`${artifactPrefix(language)}-pending-approval.jpg`),
+        type: "jpeg",
+        quality: 85,
+        animations: "disabled",
+      });
+    }
+  });
+
+  test("captures the account rename dialog", async ({ page }, testInfo) => {
+    await interceptApi(page, adminSession);
+
+    for (const language of ["en", "ja"] as const) {
+      await page.goto(`${BASE_URL}/settings?lang=${language}`, { waitUntil: "networkidle" });
+      await expect(page.locator("html")).toHaveAttribute("lang", language);
+      const row = page.getByTestId("people-row-ops");
+      await expect(row).toContainText("Sarah Kim");
+      await row.getByRole("button").click();
+      await page.getByRole("menuitem", { name: text(language, "access.people.actions.rename"), exact: true }).click();
+
+      const dialog = page.getByRole("dialog", {
+        name: text(language, "access.people.rename.title"),
+        exact: true,
+      });
+      await expect(dialog).toContainText(
+        text(language, "access.people.rename.description", { name: "Sarah Kim" }),
+      );
+      await expect(dialog.getByRole("textbox", { name: text(language, "access.people.rename.label"), exact: true })).toHaveValue("ops");
+      await dialog.screenshot({
+        path: testInfo.outputPath(`${artifactPrefix(language)}-account-rename.jpg`),
+        type: "jpeg",
+        quality: 85,
+        animations: "disabled",
+      });
+    }
   });
 });
 

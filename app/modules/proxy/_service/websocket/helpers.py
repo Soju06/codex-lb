@@ -349,6 +349,7 @@ from app.modules.proxy.helpers import (
     _is_account_model_unsupported_error,
     _normalize_error_code,
     _parse_openai_error,
+    _upstream_error_from_openai,
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
@@ -661,10 +662,10 @@ async def _record_or_defer_websocket_accepted_replay_health(
     request_state: "_WebSocketRequestState",
     *,
     account: Account,
-    error_message: str | None,
+    error: UpstreamError,
     error_code: str,
 ) -> None:
-    """Penalize the account an accepted replay leaves, now or after settlement.
+    """Record the original attempt's account penalty, now or after settlement.
 
     The accepted request keeps its API-key reservation open across the
     re-send, and account health must not be written while a reservation is
@@ -677,7 +678,6 @@ async def _record_or_defer_websocket_accepted_replay_health(
     terminal is never finalized on this surface, so a later terminal belongs to
     the replacement attempt and earns its own penalty.
     """
-    error: UpstreamError = {"message": error_message or "Upstream error"}
     if request_state.api_key_reservation is not None:
         request_state.deferred_keyed_stream_health.append(
             _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=error_code)
@@ -953,6 +953,7 @@ def _websocket_event_error_param(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
 ) -> OpenAIErrorParam | None:
+    """Extract typed parameters from the upstream frame's error payload."""
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
@@ -960,6 +961,7 @@ def _websocket_event_error_param(
 
 
 def _websocket_event_error_message(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
+    """Return a nonempty, stripped error message when the frame supplies one."""
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
@@ -970,6 +972,14 @@ def _websocket_event_error_message(event_type: str | None, payload: dict[str, Js
     return stripped or None
 
 
+def _websocket_event_upstream_error(event_type: str | None, payload: dict[str, JsonValue] | None) -> UpstreamError:
+    """Preserve reset evidence when a retry records the upstream account's health."""
+    error = _websocket_event_error_payload(event_type, payload)
+    upstream_error = _upstream_error_from_openai(_parse_openai_error({"error": error}))
+    upstream_error["message"] = _websocket_event_error_message(event_type, payload) or "Upstream error"
+    return upstream_error
+
+
 def _websocket_precreated_retry_error_code(
     request_state: _WebSocketRequestState | None,
     *,
@@ -977,6 +987,11 @@ def _websocket_precreated_retry_error_code(
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
 ) -> str | None:
+    """Classify errors for retries that have not exposed downstream output.
+
+    Accepted responses delegate to the output-free capacity retry policy;
+    pre-created responses must pass visibility and replay-budget guards.
+    """
     if request_state is None:
         return None
     if request_state.response_id is not None and not request_state.awaiting_response_created:

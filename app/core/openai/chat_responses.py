@@ -703,6 +703,8 @@ def _normalize_error_payload(payload: Mapping[str, JsonValue]) -> dict[str, Json
 
 
 def _coerce_number(value: JsonValue) -> int | float | None:
+    if isinstance(value, bool):
+        return None
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, str):

@@ -6,6 +6,7 @@ from typing import Any, Mapping, NoReturn, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy
+from app.core.balancer.types import UpstreamError
 from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
     UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
@@ -269,6 +270,10 @@ def _websocket_event_error_param(*args: Any, **kwargs: Any) -> Any:
 
 def _websocket_event_error_message(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_event_error_message")(*args, **kwargs)
+
+
+def _websocket_event_upstream_error(event_type: str | None, payload: dict[str, JsonValue] | None) -> UpstreamError:
+    return cast(UpstreamError, _service_global("_websocket_event_upstream_error")(event_type, payload))
 
 
 def _build_rewritten_stream_response_failed_event(*args: Any, **kwargs: Any) -> Any:

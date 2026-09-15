@@ -716,7 +716,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         failure_metadata = _RequestLogFailureMetadata(
                             failure_phase="upstream", failure_detail="upstream_eof_before_terminal_event"
                         )
-                    settlement.account_health_error = _facade()._should_penalize_stream_error(code)
+                    settlement.account_health_error = _facade()._should_penalize_stream_error(code, raw_error_message)
                     if allow_retry and code == "stream_idle_timeout":
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                     if allow_retry and _facade()._is_security_work_authorization_required_error(code, error_message):
@@ -725,7 +725,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             _facade()._SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE,
                             upstream_error,
                         )
-                    if allow_retry and _facade()._should_retry_stream_error(code):
+                    if allow_retry and _facade()._should_retry_stream_error(code, raw_error_message):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
                 terminal_stream_error = _TerminalStreamError(
                     error_code or code,
@@ -889,9 +889,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                             if preserve_raw_sse_line and error is None:
                                 settlement.account_health_error = not saw_text_delta
                             else:
-                                settlement.account_health_error = (
-                                    _facade()._should_penalize_stream_error(error_code) and not saw_text_delta
-                                )
+                                penalize = _facade()._should_penalize_stream_error(error_code, raw_error_message)
+                                settlement.account_health_error = penalize and not saw_text_delta
                 elif preserve_raw_sse_line:
                     _, raw_error_message, _, raw_error_code = _raw_error_fields(
                         event_type,
@@ -985,7 +984,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             )
             error_message = error.message if error else None
             settlement.record_success = False
-            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code)
+            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code, error_message)
             raise
         except UpstreamProxyRouteError as exc:
             route_fail_closed_reason = exc.reason

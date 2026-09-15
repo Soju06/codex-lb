@@ -91,7 +91,7 @@ class _DecisionHarness(ws_mixin._WebSocketMixin):
 
     async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         self.penalty_calls.append((account.id, exc))
-        return cast(ClassifiedFailure, {"failure_class": "retryable_transient"})
+        return cast(ClassifiedFailure, {"failure_class": "retryable_transient", "excludes_account": True})
 
 
 def _request_state() -> Any:

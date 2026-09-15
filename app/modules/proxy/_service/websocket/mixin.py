@@ -6512,7 +6512,9 @@ class _WebSocketMixin:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             _observe_terminal_stream_error_frame(error_code, error_message)
-            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(
+            settlement.account_health_error = _facade()._should_penalize_stream_error(
+                error_code, error_message
+            ) and not getattr(
                 request_state,
                 "account_health_error_handled",
                 False,
@@ -6994,7 +6996,7 @@ class _WebSocketMixin:
                 ):
                     continue
                 if request_error_code in _facade()._TRANSIENT_RETRY_CODES or _facade()._should_penalize_stream_error(
-                    request_error_code
+                    request_error_code, request_error_message
                 ):
                     penalty_code = request_error_code
                     penalty_message = request_error_message

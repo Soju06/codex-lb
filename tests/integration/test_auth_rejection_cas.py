@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 import app.modules.proxy.service as proxy_module
 from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
@@ -16,6 +19,10 @@ from app.db.snapshot import clone_row
 from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy import account_cache
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_session_account_active
+
+if TYPE_CHECKING:
+    from app.modules.proxy._service.http_bridge.helpers import _HTTPBridgeSession
 
 pytestmark = pytest.mark.integration
 
@@ -141,7 +148,7 @@ async def test_rejection_atomic_retry_preserves_health_write_after_each_read(asy
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mutation",
-    ["access_repair", "refresh_repair", "corrupt_access", "corrupt_refresh", "paused", "deactivated", "deleted"],
+    ["access_repair", "corrupt_access", "paused", "deactivated", "deleted"],
 )
 @pytest.mark.parametrize("after_retry_read", [False, True])
 async def test_rejection_retry_preserves_concurrent_repair_or_operator_state(
@@ -158,12 +165,8 @@ async def test_rejection_retry_preserves_concurrent_repair_or_operator_state(
             assert row is not None
             if mutation == "access_repair":
                 row.access_token_encrypted = TokenEncryptor().encrypt("repaired-access")
-            elif mutation == "refresh_repair":
-                row.refresh_token_encrypted = TokenEncryptor().encrypt("repaired-refresh")
             elif mutation == "corrupt_access":
                 row.access_token_encrypted = b"invalid-access-ciphertext"
-            elif mutation == "corrupt_refresh":
-                row.refresh_token_encrypted = b"invalid-refresh-ciphertext"
             elif mutation == "deleted":
                 row.delete_requested_at = utcnow()
             else:
@@ -200,14 +203,126 @@ async def test_rejection_retry_preserves_concurrent_repair_or_operator_state(
         assert row.deactivation_reason != _REJECTED_REASON
         if mutation == "access_repair":
             assert TokenEncryptor().decrypt(row.access_token_encrypted) == "repaired-access"
-        elif mutation == "refresh_repair":
-            assert TokenEncryptor().decrypt(row.refresh_token_encrypted) == "repaired-refresh"
         elif mutation == "corrupt_access":
             assert row.access_token_encrypted == b"invalid-access-ciphertext"
-        elif mutation == "corrupt_refresh":
-            assert row.refresh_token_encrypted == b"invalid-refresh-ciphertext"
         elif mutation == "deleted":
             assert row.delete_requested_at is not None
         else:
             assert row.status == (AccountStatus.PAUSED if mutation == "paused" else AccountStatus.DEACTIVATED)
             assert row.deactivation_reason == "operator decision"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reencrypt_access", [False, True])
+@pytest.mark.parametrize("after_retry_read", [False, True])
+async def test_refresh_only_rotation_does_not_suppress_access_rejection(
+    async_client, monkeypatch, reencrypt_access, after_retry_read
+):
+    stale = await _create_account()
+    encryptor = TokenEncryptor()
+    cache = account_cache.get_routing_availability_cache()
+    await cache.refresh_from_db()
+    original_update = AccountsRepository.update_status_if_current
+    original_read = AccountsRepository.get_by_id_fresh
+    rotated = False
+
+    async def rotate_refresh():
+        nonlocal rotated
+        async with SessionLocal() as session:
+            assert await AccountsRepository(session).rotate_tokens(
+                stale.id,
+                encryptor.encrypt("rejected-access") if reencrypt_access else stale.access_token_encrypted,
+                encryptor.encrypt("new-refresh"),
+                encryptor.encrypt("new-id"),
+                utcnow(),
+                expected_refresh_token_encrypted=stale.refresh_token_encrypted,
+                encryptor=encryptor,
+            )
+        rotated = True
+
+    async def update_with_rotation(self, account_id, *args, **kwargs):
+        if after_retry_read:
+            async with SessionLocal() as session:
+                await AccountsRepository(session).update_status(account_id, AccountStatus.RATE_LIMITED)
+        else:
+            await rotate_refresh()
+        return await original_update(self, account_id, *args, **kwargs)
+
+    async def read_with_rotation(self, account_id):
+        current = await original_read(self, account_id)
+        assert current is not None
+        snapshot = clone_row(current)
+        if not rotated:
+            await rotate_refresh()
+        return snapshot
+
+    monkeypatch.setattr(AccountsRepository, "update_status_if_current", update_with_rotation)
+    if after_retry_read:
+        monkeypatch.setattr(AccountsRepository, "get_by_id_fresh", read_with_rotation)
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    assert await balancer.mark_permanent_failure(clone_row(stale), "account_auth_invalidated")
+    bridge = cast("_HTTPBridgeSession", SimpleNamespace(account=clone_row(stale), access_token_expires_at=None))
+    assert not _http_bridge_session_account_active(bridge)
+    async with SessionLocal() as session:
+        row = await session.get(Account, stale.id)
+        assert row is not None
+        assert row.status == AccountStatus.REAUTH_REQUIRED
+        assert row.deactivation_reason == _REJECTED_REASON
+        assert encryptor.decrypt(row.refresh_token_encrypted) == "new-refresh"
+        assert encryptor.decrypt(row.access_token_encrypted) == "rejected-access"
+    await cache.refresh_from_db()
+    assert not _http_bridge_session_account_active(bridge)
+    assert (await balancer.select_account()).account is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("health", ["rate_limit", "quota_exceeded"])
+@pytest.mark.parametrize("repair_before_expiry", [False, True])
+async def test_late_health_write_preserves_rejection_through_reset_and_repair(
+    async_client, monkeypatch, health, repair_before_expiry
+):
+    stale = await _create_account()
+    balancer = get_proxy_service_for_app(async_client._transport.app)._load_balancer
+    assert await balancer.mark_permanent_failure(clone_row(stale), "account_auth_invalidated")
+    now = int(time.time())
+    reset_at = now + 600
+    method = balancer.mark_rate_limit if health == "rate_limit" else balancer.mark_quota_exceeded
+    await method(stale, UpstreamError(resets_at=reset_at))
+    assert stale.status == AccountStatus.REAUTH_REQUIRED
+    assert stale.deactivation_reason == _REJECTED_REASON
+    async with SessionLocal() as session:
+        row = await session.get(Account, stale.id)
+        assert row is not None
+        assert row.status == AccountStatus.REAUTH_REQUIRED
+        assert row.deactivation_reason == _REJECTED_REASON
+        assert row.reset_at == reset_at
+        assert row.blocked_at is not None
+    cache = account_cache.get_routing_availability_cache()
+    await cache.refresh_from_db()
+    bridge = cast("_HTTPBridgeSession", SimpleNamespace(account=clone_row(stale), access_token_expires_at=None))
+    assert not _http_bridge_session_account_active(bridge)
+    peer_cache = account_cache.RoutingAvailabilityCache(SessionLocal)
+    await peer_cache.refresh_from_db()
+    assert peer_cache.is_unavailable(stale.id)
+    if not repair_before_expiry:
+        monkeypatch.setattr(time, "time", lambda: reset_at + 1)
+        assert (await balancer.select_account()).account is None
+        await balancer.record_success(stale)
+        assert (await balancer.select_account()).account is None
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        assert await repo.rotate_tokens(
+            stale.id,
+            encryptor.encrypt("repaired-access"),
+            encryptor.encrypt("repaired-refresh"),
+            encryptor.encrypt("repaired-id"),
+            utcnow(),
+            expected_refresh_token_encrypted=stale.refresh_token_encrypted,
+            encryptor=encryptor,
+        )
+        row = await repo.get_by_id_fresh(stale.id)
+        assert row is not None
+        assert row.status == (AccountStatus.RATE_LIMITED if repair_before_expiry else AccountStatus.ACTIVE)
+        assert row.deactivation_reason is None
+        assert row.reset_at == (reset_at if repair_before_expiry else None)

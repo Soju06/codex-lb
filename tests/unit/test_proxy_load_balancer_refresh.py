@@ -95,6 +95,9 @@ class StubAccountsRepository(AccountsRepository):
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._find_account(account_id)
 
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        return self._find_account(account_id)
+
     async def persist_access_rejection(
         self, rejected: Account, *, encryptor: TokenEncryptor | None = None
     ) -> Account | None:

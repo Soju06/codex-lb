@@ -1731,12 +1731,9 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status.
+        """Downgrade current credentials, preserving repairs and refresh-only routability.
 
-        Returns whether the downgrade applied or was already in effect. Concurrent
-        credential repairs are preserved. Deactivation and proven access rejection
-        block routing; refresh-only warnings may keep using unexpired access tokens.
-        """
+        Returns whether the downgrade applied or was already in effect."""
         lock = await self._get_account_lock(account.id)
         async with lock:
             state = self._state_for(account)
@@ -2040,10 +2037,13 @@ class LoadBalancer:
                 reset_at_int,
                 blocked_at=blocked_at_int,
             )
-            account.status = state.status
-            account.deactivation_reason = state.deactivation_reason
-            account.reset_at = reset_at_int
-            account.blocked_at = blocked_at_int
+            stored = await accounts_repo.get_by_id_fresh(account.id)
+            if stored is not None:
+                account.status, account.deactivation_reason = stored.status, stored.deactivation_reason
+                account.reset_at, account.blocked_at = stored.reset_at, stored.blocked_at
+                state.status, state.deactivation_reason = stored.status, stored.deactivation_reason
+                state.reset_at, state.blocked_at = stored.reset_at, stored.blocked_at
+                self._sync_runtime_state(account, state)
 
     async def _persist_state_if_current(
         self,

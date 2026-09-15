@@ -151,7 +151,7 @@ async def test_postgresql_upstream_identity_lock_failure_rolls_back_and_propagat
 @pytest.mark.asyncio
 async def test_account_update_status_uses_sqlite_writer_section(monkeypatch):
     session = MagicMock()
-    session.execute = AsyncMock(return_value=_make_result("acc"))
+    session.execute = AsyncMock(return_value=_make_result(AccountStatus.RATE_LIMITED))
     session.scalar = AsyncMock(return_value=AccountStatus.ACTIVE)
     session.commit = AsyncMock()
     repo = AccountsRepository(session)
@@ -166,7 +166,7 @@ async def test_account_update_status_uses_sqlite_writer_section(monkeypatch):
     async def execute_with_order(*args, **kwargs):
         del args, kwargs
         order.append("execute")
-        return _make_result("acc")
+        return _make_result(AccountStatus.RATE_LIMITED)
 
     async def scalar_with_order(*args, **kwargs):
         del args, kwargs

@@ -740,6 +740,16 @@ class AccountsRepository:
                 "deactivation_reason": deactivation_reason,
                 "reset_at": reset_at,
             }
+            if status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED):
+                # Health settlement cannot repair rejected access credentials.
+                rejected_access = and_(
+                    Account.status == AccountStatus.REAUTH_REQUIRED,
+                    Account.deactivation_reason == PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                )
+                values["status"] = case((rejected_access, Account.status), else_=status)
+                values["deactivation_reason"] = case(
+                    (rejected_access, Account.deactivation_reason), else_=deactivation_reason
+                )
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
             result = await self._session.execute(
@@ -753,16 +763,16 @@ class AccountsRepository:
                 # (which clears the marker) may resurrect the row.
                 .where(Account.delete_requested_at.is_(None))
                 .values(**values)
-                .returning(Account.id)
+                .returning(Account.status)
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+            stored_status = result.scalar_one_or_none()
+            if stored_status is not None and self._hard_sticky_outage_started(previous_status, stored_status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status == AccountStatus.DEACTIVATED:
+            if stored_status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return updated_id is not None
+            return stored_status is not None
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
@@ -847,7 +857,6 @@ class AccountsRepository:
     ) -> Account | None:
         """Persist proven rejection without competing with unrelated health writes."""
         access = rejected.access_token_encrypted
-        refresh = rejected.refresh_token_encrypted
         for _ in range(3):
             current = await self.get_by_id_fresh(rejected.id)
             if (
@@ -857,20 +866,16 @@ class AccountsRepository:
             ):
                 return None
             try:
-                for current_token, rejected_token in (
-                    (current.access_token_encrypted, access),
-                    (current.refresh_token_encrypted, refresh),
-                ):
-                    if current_token != rejected_token:
-                        if encryptor is None:
-                            encryptor = TokenEncryptor()
-                        if encryptor.decrypt(current_token) != encryptor.decrypt(rejected_token):
-                            return None
+                if current.access_token_encrypted != access:
+                    if encryptor is None:
+                        encryptor = TokenEncryptor()
+                    if encryptor.decrypt(current.access_token_encrypted) != encryptor.decrypt(access):
+                        return None
             except (InvalidToken, UnicodeDecodeError):
                 return None
             async with sqlite_writer_section():
                 # Status, reason and cooldown may change independently of the rejected tokens.
-                # Only credential changes and operator terminal states may veto this write.
+                # Refresh ciphertext fences the write but does not prove access repair.
                 result = await self._session.execute(
                     update(Account)
                     .where(
@@ -1389,8 +1394,10 @@ class AccountsRepository:
             if rotated is None:
                 return False
             status, reason = rotated
-            if status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED) and not (
-                status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason)
+            if (
+                access_material_changed
+                and status not in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED)
+                and not (status == AccountStatus.REAUTH_REQUIRED and reauth_reason_blocks_routing(reason))
             ):
                 clear_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()

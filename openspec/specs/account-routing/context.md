@@ -236,3 +236,15 @@ reset-based cooldown. For example, if rate limiting stores a reset ten minutes
 away before access rejection, replacing the rejected token restores rate-limited
 selection until that deadline. This uses the persisted deadline rather than
 inventing another stored status; unchanged token material never restores eligibility.
+
+Rejection staleness is determined by access-token material only. For example,
+rotating a refresh token while retaining the same rejected access token does not
+repair access, even when both ciphertexts change. The latest ciphertexts still
+fence the rejection write atomically. Such a rotation does not advance the local
+repair marker. A later rate/quota settlement retains the stored rejection while
+recording its cooldown, so expiry cannot revive rejected credentials. The balancer
+adopts the persisted state rather than the originally requested health status.
+
+Fleet refresh uses the same access-eligibility gate before counting attempted
+accounts. A usable refresh-only warning is counted and reaches the normal usage
+freshness policy; rejected or known-expired access is neither counted nor fetched.

@@ -79,6 +79,19 @@ async def test_firewall_middleware_blocks_backend_api_when_ip_not_allowed(async_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/ps/plugins/list", "/plugins/featured"])
+async def test_firewall_middleware_blocks_plugin_catalog_when_ip_not_allowed(async_client, path):
+    # The catalog passthrough spends pool credentials upstream, so it is a
+    # proxy surface: the allowlist must gate it like /backend-api/codex.
+    add_response = await async_client.post("/api/firewall/ips", json={"ipAddress": "203.0.113.7"})
+    assert add_response.status_code == 200
+
+    response = await async_client.get(path)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ip_forbidden"
+
+
+@pytest.mark.asyncio
 async def test_firewall_middleware_does_not_restrict_dashboard_routes(async_client):
     add_response = await async_client.post("/api/firewall/ips", json={"ipAddress": "203.0.113.7"})
     assert add_response.status_code == 200

@@ -3,6 +3,8 @@
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
+# Optional: make /status report the pool's limits instead of one local account.
+# chatgpt_base_url = "http://127.0.0.1:2455"
 
 [model_providers.codex-lb]
 name = "openai"

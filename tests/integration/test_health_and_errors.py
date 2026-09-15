@@ -84,6 +84,9 @@ async def test_api_not_found_returns_dashboard_payload(async_client):
         pytest.param("/backend-api", id="backend-api-root"),
         pytest.param("/backend-api/", id="backend-api-trailing-slash"),
         pytest.param("/backend-api/does-not-exist", id="backend-api-child"),
+        # Codex plugin-catalog namespace: an API miss, never the dashboard HTML.
+        pytest.param("/ps/does-not-exist", id="ps-child"),
+        pytest.param("/plugins/does-not-exist", id="plugins-child"),
     ],
 )
 async def test_exact_openai_root_error_envelope_matches_equivalent_paths(async_client, path):

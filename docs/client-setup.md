@@ -31,6 +31,29 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Pool-wide limits in `/status`
+
+Codex reads the limits it shows in `/status` and the footer from
+`chatgpt_base_url`, which defaults to `https://chatgpt.com/backend-api` — so it
+reports the single account in your local `auth.json`, not the pool codex-lb is
+rotating through. Point it at codex-lb's origin (top level, before any
+`[section]` header):
+
+```toml
+chatgpt_base_url = "http://127.0.0.1:2455"
+```
+
+Codex then calls `GET /api/codex/usage`, which answers with the
+capacity-weighted usage of every active account, so the 5h and weekly bars
+describe the pool. The plugin catalog Codex fetches from the same base
+(`/ps/plugins/*`, `/plugins/featured`) is forwarded upstream with pool
+credentials, so browsing and installing from the remote marketplace keeps
+working. The `Account:` line still shows the local `auth.json` identity, and
+the usage-limit-reset hint is not surfaced through this path.
+
+Spec:
+[codex-plugin-catalog-passthrough](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/codex-plugin-catalog-passthrough).
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token

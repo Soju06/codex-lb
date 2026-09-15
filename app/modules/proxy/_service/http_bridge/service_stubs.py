@@ -273,6 +273,7 @@ def _websocket_event_error_message(*args: Any, **kwargs: Any) -> Any:
 
 
 def _websocket_event_upstream_error(event_type: str | None, payload: dict[str, JsonValue] | None) -> UpstreamError:
+    """Resolve the shared error converter through the proxy service facade."""
     return cast(UpstreamError, _service_global("_websocket_event_upstream_error")(event_type, payload))
 
 

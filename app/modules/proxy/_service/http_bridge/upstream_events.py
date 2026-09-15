@@ -2649,6 +2649,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         scheduler: Scheduler,
         clock: Clock,
     ) -> None:
+        """Dispatch a parsed upstream frame to its pending HTTP bridge request.
+
+        Match request ownership before retry or terminal handling. Retry health
+        retains the upstream error evidence, including reset fields, through
+        the existing deferred settlement path for API-key reservations.
+        """
         original_text = text
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (

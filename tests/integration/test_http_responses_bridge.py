@@ -8967,6 +8967,11 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
 async def test_http_bridge_usage_limit_preserves_reset_and_retires_unavailable_owner(
     async_client, app_instance, monkeypatch, path, reset_field
 ):
+    """Persist a long quota reset so an eligible follow-up can change owners.
+
+    The explicit client anchor must still fail closed before the unanchored
+    follow-up uses the existing retirement path and a healthy replacement.
+    """
     _install_bridge_settings(monkeypatch, enabled=True)
     now = 2_000_000_000.0
     reset_at = 2_000_432_000
@@ -8976,6 +8981,7 @@ async def test_http_bridge_usage_limit_preserves_reset_and_retires_unavailable_o
 
     class LimitedOwnerWebSocket(_FakeBridgeUpstreamWebSocket):
         async def send_text(self, text: str) -> None:
+            """Complete the first turn, then reject its owner with a long reset."""
             if not self.sent_text:
                 await super().send_text(text)
                 return
@@ -9002,9 +9008,11 @@ async def test_http_bridge_usage_limit_preserves_reset_and_retires_unavailable_o
     connected_accounts: list[str] = []
 
     async def fresh_account(self, target, *, force=False, timeout_seconds):
+        """Keep fixture accounts usable without invoking an external refresh."""
         return target
 
     async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        """Record account selection and return that account's upstream socket."""
         connected_accounts.append(account_id_header)
         return owner_upstream if account_id_header == owner.chatgpt_account_id else replacement_upstream
 

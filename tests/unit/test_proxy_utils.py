@@ -31715,6 +31715,7 @@ def test_websocket_event_upstream_error_preserves_metadata_across_error_shapes(
     payload: dict[str, JsonValue] | None,
     expected: UpstreamError,
 ) -> None:
+    """Keep valid reset fields while tolerating absent or malformed error data."""
     from app.modules.proxy._service.websocket.helpers import _websocket_event_upstream_error
 
     assert _websocket_event_upstream_error("error", payload) == expected
@@ -31724,6 +31725,7 @@ def test_websocket_event_upstream_error_preserves_metadata_across_error_shapes(
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_failure(
     monkeypatch,
 ):
+    """Preserve reset evidence when a response.failed frame stages a retry."""
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -32120,6 +32122,7 @@ async def test_process_upstream_websocket_text_does_not_retry_after_exposed_sequ
 async def test_process_upstream_websocket_text_transparently_retries_precreated_usage_limit_error_event(
     monkeypatch,
 ):
+    """Preserve reset evidence when an error frame stages a pre-created retry."""
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -32375,6 +32378,7 @@ async def test_process_upstream_websocket_text_does_not_fresh_retry_injected_too
 async def test_process_upstream_websocket_text_maps_previous_response_usage_limit_to_upstream_unavailable(
     monkeypatch,
 ):
+    """Keep a client anchor owner-bound while recording the owner's real reset."""
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     finalize_request_state = AsyncMock()
@@ -33142,6 +33146,7 @@ async def test_retry_http_bridge_precreated_request_refuses_explicit_retry_with_
 async def test_process_upstream_websocket_text_keeps_file_backed_verified_anchor_owner_bound(
     monkeypatch,
 ):
+    """A verified replay must retain its file owner and the quota reset evidence."""
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     finalize_request_state = AsyncMock()
     handle_stream_error = AsyncMock()
@@ -54989,6 +54994,7 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     async def handle_stream_error(
         account: Account, error: UpstreamError, code: str, http_status: int | None = None, **_kwargs
     ) -> None:
+        """Capture reset evidence and health-write order relative to settlement."""
         del http_status
         calls.append(f"health:{account.id}:{code}")
         health_errors.append(error)

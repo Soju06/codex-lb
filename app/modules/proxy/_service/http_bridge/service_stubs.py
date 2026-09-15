@@ -265,10 +265,12 @@ def _websocket_event_error_type(*args: Any, **kwargs: Any) -> Any:
 
 
 def _websocket_event_error_param(*args: Any, **kwargs: Any) -> Any:
+    """Resolve error-parameter extraction through the proxy service facade."""
     return _service_global("_websocket_event_error_param")(*args, **kwargs)
 
 
 def _websocket_event_error_message(*args: Any, **kwargs: Any) -> Any:
+    """Resolve upstream error-message extraction through the proxy service facade."""
     return _service_global("_websocket_event_error_message")(*args, **kwargs)
 
 
@@ -278,10 +280,12 @@ def _websocket_event_upstream_error(event_type: str | None, payload: dict[str, J
 
 
 def _build_rewritten_stream_response_failed_event(*args: Any, **kwargs: Any) -> Any:
+    """Resolve terminal-failure event rewriting through the proxy service facade."""
     return _service_global("_build_rewritten_stream_response_failed_event")(*args, **kwargs)
 
 
 def _openai_error_envelope_from_response_failed_payload(*args: Any, **kwargs: Any) -> Any:
+    """Resolve response.failed error conversion through the proxy service facade."""
     return _service_global("_openai_error_envelope_from_response_failed_payload")(*args, **kwargs)
 
 

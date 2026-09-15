@@ -665,7 +665,7 @@ async def _record_or_defer_websocket_accepted_replay_health(
     error: UpstreamError,
     error_code: str,
 ) -> None:
-    """Penalize the account an accepted replay leaves, now or after settlement.
+    """Record the original attempt's account penalty, now or after settlement.
 
     The accepted request keeps its API-key reservation open across the
     re-send, and account health must not be written while a reservation is
@@ -953,6 +953,7 @@ def _websocket_event_error_param(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
 ) -> OpenAIErrorParam | None:
+    """Extract typed parameters from the upstream frame's error payload."""
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
@@ -960,6 +961,7 @@ def _websocket_event_error_param(
 
 
 def _websocket_event_error_message(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
+    """Return a nonempty, stripped error message when the frame supplies one."""
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
@@ -985,6 +987,11 @@ def _websocket_precreated_retry_error_code(
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
 ) -> str | None:
+    """Classify errors for retries that have not exposed downstream output.
+
+    Accepted responses delegate to the output-free capacity retry policy;
+    pre-created responses must pass visibility and replay-budget guards.
+    """
     if request_state is None:
         return None
     if request_state.response_id is not None and not request_state.awaiting_response_created:

@@ -448,6 +448,12 @@ wham_router = APIRouter(
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
 )
+# Codex CLI resolves its plugin catalog relative to ``chatgpt_base_url`` with no
+# ``/backend-api`` segment, so these routes live at the origin root.
+plugin_catalog_router = APIRouter(
+    tags=["proxy"],
+    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
 v1_router = APIRouter(
     prefix="/v1",
     tags=["proxy"],
@@ -1117,6 +1123,32 @@ async def wham_agent_identities_jwks(
         api_key,
         enforce_required_capability_transport=False,
     )
+
+
+# Codex CLI reads its plugin catalog relative to ``chatgpt_base_url``. When that
+# points at codex-lb's origin (so ``/api/codex/usage`` can serve pooled limits),
+# the catalog reads land here as well; forward them upstream like the other
+# control requests so the remote marketplace keeps working. GET only: every
+# catalog call Codex 0.154 makes -- list, installed, search, suggested,
+# workspace/*, featured, and the per-plugin detail read before an install --
+# is a GET.
+@plugin_catalog_router.get("/plugins/featured")
+async def codex_plugin_catalog_featured(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, "plugins/featured", context, api_key)
+
+
+@plugin_catalog_router.get("/ps/plugins/{plugin_path:path}")
+async def codex_plugin_catalog(
+    request: Request,
+    plugin_path: str,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _codex_control_proxy(request, f"ps/plugins/{plugin_path}", context, api_key)
 
 
 @router.post(

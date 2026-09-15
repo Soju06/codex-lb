@@ -2800,13 +2800,21 @@ class _StreamingRetryMixin:
                                 error_code,
                             )
                             transient_http_status = tex.status_code if isinstance(tex, ProxyResponseError) else None
-                            await _handle_or_defer_keyed_stream_health(
-                                account,
-                                error_payload,
-                                error_code,
+                            classified = classify_upstream_failure(
+                                error_code=error_code,
+                                error=error_payload,
                                 http_status=transient_http_status,
-                                transient_retry_count=transient_retries,
+                                phase="first_event",
                             )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                await _handle_or_defer_keyed_stream_health(
+                                    account,
+                                    error_payload,
+                                    error_code,
+                                    http_status=transient_http_status,
+                                    transient_retry_count=transient_retries,
+                                )
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
@@ -2829,14 +2837,7 @@ class _StreamingRetryMixin:
                             # reaches this exhaustion tail without passing the
                             # pre-visible classification above, so it is the one
                             # place the decision has to be made again.
-                            if not keeps_account_in_the_walk(
-                                classify_upstream_failure(
-                                    error_code=error_code,
-                                    error=error_payload,
-                                    http_status=transient_http_status,
-                                    phase="first_event",
-                                )
-                            ):
+                            if not keep_account_in_walk:
                                 excluded_account_ids.add(account.id)
                             break  # outer loop: select different account
                         finally:

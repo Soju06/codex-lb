@@ -1950,14 +1950,6 @@ class _CompactMixin:
                                 account.id,
                                 transient_retries,
                             )
-                            if api_key is not None and api_key_reservation is not None:
-                                deferred_http_500_health.append((account, exc, transient_retries - 1))
-                            else:
-                                await proxy._handle_proxy_error(account, exc)
-                                # Record remaining errors so total equals transient_retries,
-                                # meeting the load balancer backoff threshold (error_count >= 3).
-                                await proxy._load_balancer.record_errors(account, transient_retries - 1)
-                            last_exc = exc
                             # A 500 takes this branch instead of the failover
                             # decision below, so the account-selection answer is
                             # taken here: a rejection that describes the
@@ -1965,15 +1957,23 @@ class _CompactMixin:
                             # the account in the walk, or the next selection is
                             # pushed onto a sibling that cannot serve the model
                             # either.
-                            if not keeps_account_in_the_walk(
-                                classify_upstream_failure(
-                                    error_code=code,
-                                    error=_upstream_error_from_openai(error),
-                                    http_status=exc.status_code,
-                                    phase="first_event",
-                                )
-                            ):
+                            classified = classify_upstream_failure(
+                                error_code=code,
+                                error=_upstream_error_from_openai(error),
+                                http_status=exc.status_code,
+                                phase="first_event",
+                            )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                if api_key is not None and api_key_reservation is not None:
+                                    deferred_http_500_health.append((account, exc, transient_retries - 1))
+                                else:
+                                    await proxy._handle_proxy_error(account, exc)
+                                    # Record remaining errors so total equals transient_retries,
+                                    # meeting the load balancer backoff threshold (error_count >= 3).
+                                    await proxy._load_balancer.record_errors(account, transient_retries - 1)
                                 excluded_account_ids.add(account.id)
+                            last_exc = exc
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
                         error_message = error.message if error else None

@@ -601,11 +601,23 @@ cd clients/macos-menubar
 make install   # build, bundle, and register as a login LaunchAgent (starts now + at every login)
 ```
 
-`make install` is the supported way to run it: it registers the app in the
-GUI launchd domain, which makes startup automatic at login. (Launching the
-bundle with `open` from an SSH session silently fails to register the menu
-bar item on macOS 26 — use the LaunchAgent.) `make uninstall` removes it;
-`make test` runs the unit suite.
+`make install` is the supported way to run it: it copies the bundle to
+`~/Applications/AgentLB.app` (internal disk, and the folder Raycast and
+Spotlight index, so "AgentLB" opens from either) and registers that copy in
+the GUI launchd domain, which makes startup automatic at login. The
+LaunchAgent waits for ControlCenter before starting the app: launched too
+early at login, or with `open` from an SSH session, the process runs but the
+menu bar item never registers on macOS 26. As a second guard the app checks
+for its own status item 15 s and 45 s after launch and exits 3 when it is
+missing, and launchd (`KeepAlive` on non-zero exit) relaunches it; a counter
+in `~/Library/Application Support/AgentLB/` caps this at five consecutive
+relaunches. If the icon ever vanishes:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.aneyman.agentlb.menubar
+```
+
+`make uninstall` removes the agent; `make test` runs the unit suite.
 
 **Remote machines (Tailscale):** copy `AgentLB.app` anywhere (e.g.
 `~/Applications`), point it at the service host, and register the agent for

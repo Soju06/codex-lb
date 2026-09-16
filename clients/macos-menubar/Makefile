@@ -19,12 +19,14 @@
 APP      := AgentLB.app
 BIN      := .build/release/AgentLB
 BUNDLE_ID:= com.aneyman.agentlb.menubar
-# Override on machines where the bundle was copied elsewhere, e.g.
-#   make install-agent APP_PATH=$$HOME/Applications/AgentLB.app
-APP_PATH := $(abspath $(APP))
+# The LaunchAgent runs the copy in ~/Applications (internal disk): launchd
+# cannot reliably exec from /Volumes/StudioExt at login (TCC), and Raycast /
+# Spotlight only index ~/Applications and /Applications.  Override with
+#   make install-agent APP_PATH=/some/other/AgentLB.app
+APP_PATH := $(HOME)/Applications/AgentLB.app
 PLIST    := $(HOME)/Library/LaunchAgents/$(BUNDLE_ID).plist
 
-.PHONY: build bundle run test clean install install-agent uninstall
+.PHONY: build bundle run test clean install deploy install-agent uninstall
 
 build:
 	swift build -c release
@@ -42,10 +44,23 @@ run: bundle
 test:
 	swift test
 
-# Build, then register + start the app as a login LaunchAgent (GUI domain).
-install: bundle install-agent
+# Build, copy the bundle to ~/Applications, then register + start the app as
+# a login LaunchAgent (GUI domain).
+install: bundle deploy install-agent
+
+# Copy the freshly assembled bundle to $(APP_PATH).
+deploy:
+	mkdir -p $(dir $(APP_PATH))
+	rm -rf $(APP_PATH)
+	ditto $(APP) $(APP_PATH)
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f $(APP_PATH)
 
 # Write the LaunchAgent plist for $(APP_PATH) and (re)start the app.
+# The /bin/sh wrapper waits for ControlCenter (the status-item host) before
+# exec'ing the app: launched too early at login, the status item never
+# registers and the process sits idle with no menu bar icon.  KeepAlive on
+# non-zero exit pairs with StatusItemWatch, which exits 3 when the item is
+# still missing after launch so launchd relaunches into a ready session.
 install-agent:
 	mkdir -p $(HOME)/Library/LaunchAgents
 	printf '%s\n' \
@@ -54,9 +69,14 @@ install-agent:
 	  '<plist version="1.0"><dict>' \
 	  '  <key>Label</key><string>$(BUNDLE_ID)</string>' \
 	  '  <key>ProgramArguments</key><array>' \
+	  '    <string>/bin/sh</string>' \
+	  '    <string>-c</string>' \
+	  '    <string>i=0; until pgrep -xq ControlCenter || [ $$i -ge 90 ]; do sleep 1; i=$$((i+1)); done; sleep 3; exec "$$0"</string>' \
 	  '    <string>$(APP_PATH)/Contents/MacOS/AgentLB</string>' \
 	  '  </array>' \
 	  '  <key>RunAtLoad</key><true/>' \
+	  '  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>' \
+	  '  <key>ThrottleInterval</key><integer>10</integer>' \
 	  '  <key>ProcessType</key><string>Interactive</string>' \
 	  '</dict></plist>' > $(PLIST)
 	-launchctl bootout gui/$$(id -u)/$(BUNDLE_ID) 2>/dev/null

@@ -443,7 +443,7 @@ def test_regular_cc_preserves_explicit_model_and_adds_configured_effort(monkeypa
     ]
 
 
-def test_regular_launcher_defaults_to_opus_5_1m_high(monkeypatch) -> None:
+def test_regular_launcher_defaults_to_fable_5_1_1m_high(monkeypatch) -> None:
     launcher = load_launcher_module()
     launcher.CCGPT_MODE = False
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
@@ -454,7 +454,7 @@ def test_regular_launcher_defaults_to_opus_5_1m_high(monkeypatch) -> None:
     assert command == [
         "claude",
         "--model",
-        "claude-opus-5[1m]",
+        "claude-fable-5-1[1m]",
         "--effort",
         "high",
         "-p",

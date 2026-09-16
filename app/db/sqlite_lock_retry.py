@@ -1,4 +1,4 @@
-"""Bounded retry for the startup writes that race SQLite's single writer slot.
+"""The single place SQLite write-lock contention is classified and reported.
 
 Startup stamps two insert-if-absent sentinels into ``runtime_sentinels``
 (the encryption-key fingerprint and the hard-sticky outage-grace marker).
@@ -17,6 +17,16 @@ upgraded) returns immediately and a retry on a fresh transaction fixes it;
 another writer held the slot that long and the retry budget is irrelevant.
 Logging the name plus the elapsed time makes the next occurrence
 self-classifying.
+
+Every site that classifies a SQLite lock failure routes through
+:func:`is_sqlite_lock_error` here, so one message set describes "transient
+write-lock contention" process-wide instead of each module carrying its own
+drifting substring list. Sites that keep their own hand-rolled retry budget
+(the API-key usage-reservation writes and the refresh-claim upsert) call
+:func:`should_retry_after_sqlite_lock` for the predicate, the diagnostic and
+the backoff while keeping their own attempt count and their own re-raise;
+sites that deliberately fail fast and let their next tick retry (leader
+election's best-effort shutdown lease writes) call the predicate directly.
 """
 
 from __future__ import annotations
@@ -39,20 +49,98 @@ T = TypeVar("T")
 SQLITE_LOCK_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2)
 
 
-def is_sqlite_lock_error(exc: OperationalError) -> bool:
-    """Return True for a transient SQLite ``database is locked``/``busy``."""
-    message = str(exc.orig if exc.orig is not None else exc).lower()
-    return "database is locked" in message or "database is busy" in message
+# Every message SQLite emits for write-lock contention, matched
+# case-insensitively. ``database is locked`` / ``database is busy`` are
+# SQLITE_BUSY (and SQLITE_BUSY_SNAPSHOT, which reuses the same prose);
+# ``database table is locked`` / ``database schema is locked`` are
+# SQLITE_LOCKED, the same contention reported against a table or the schema
+# cookie rather than the file; ``busy_snapshot`` catches a driver or wrapper
+# that surfaces the extended result-code name instead of the prose. All of
+# them mean "another writer holds the slot, try again", so every site treats
+# the whole set alike rather than each keeping its own subset.
+_SQLITE_LOCK_MESSAGE_FRAGMENTS = (
+    "database is locked",
+    "database is busy",
+    "database table is locked",
+    "database schema is locked",
+    "busy_snapshot",
+)
 
 
-def sqlite_error_name(exc: OperationalError) -> str | None:
+def is_sqlite_lock_error(exc: BaseException) -> bool:
+    """Return True for a transient SQLite write-lock failure.
+
+    Only an ``OperationalError`` qualifies, and only the DRIVER exception's
+    message is inspected — ``str(OperationalError)`` also renders the failing
+    statement and its bound parameters, so matching on it would classify an
+    unrelated failure as transient whenever the SQL or a parameter value
+    happened to contain the lock text. A wrapper with no ``orig`` carries no
+    driver evidence at all, so it is not contention either: SQLAlchemy raises
+    those itself, and every lock failure we retry comes from the driver.
+    """
+    if not isinstance(exc, OperationalError) or exc.orig is None:
+        return False
+    message = str(exc.orig).lower()
+    return any(fragment in message for fragment in _SQLITE_LOCK_MESSAGE_FRAGMENTS)
+
+
+def sqlite_error_name(exc: BaseException) -> str | None:
     """Return the driver's extended result code name, when the driver set one.
 
     ``sqlite3`` populates ``sqlite_errorname`` only on exceptions it raises
     itself, so a constructed ``OperationalError`` has no such attribute:
     read it defensively rather than with ``hasattr``-guarded access.
     """
-    return getattr(exc.orig, "sqlite_errorname", None)
+    driver_exc = exc.orig if isinstance(exc, OperationalError) else exc
+    return getattr(driver_exc, "sqlite_errorname", None)
+
+
+def _report_lock_attempt(exc: BaseException, *, what: str, giving_up: bool, **extra: object) -> None:
+    """Emit the one report format both retry helpers share.
+
+    Each helper reports the same two facts — which write contended and which
+    mechanism the driver named — and differs only in the attempt/timing fields
+    it can supply, which are appended as trailing ``key=value`` pairs. Emitting
+    from here gives that format a single owner, so a field added for one helper
+    cannot silently drift from the other's. The helpers keep their own budgets;
+    only the report is shared.
+    """
+    trailer = "".join(f" {name}={value}" for name, value in extra.items())
+    logger.log(
+        logging.WARNING if giving_up else logging.DEBUG,
+        "%s what=%s sqlite_errorname=%s%s",
+        "sqlite lock retry budget exhausted" if giving_up else "retrying sqlite lock failure",
+        what,
+        sqlite_error_name(exc),
+        trailer,
+    )
+
+
+async def should_retry_after_sqlite_lock(
+    exc: BaseException,
+    *,
+    what: str,
+    attempt: int,
+    max_attempts: int,
+    base_delay_seconds: float,
+) -> bool:
+    """Classify one failed attempt of a caller-owned SQLite lock retry loop.
+
+    Returns ``True`` — after awaiting the attempt's exponential backoff — when
+    the caller should try again, and ``False`` when it must re-raise, either
+    because the failure is not transient write-lock contention or because the
+    caller's budget is spent. The caller keeps its own attempt count and its
+    own ``raise``; only the predicate, the diagnostic and the backoff shape
+    are shared, so no call site's outcome changes.
+    """
+    if not is_sqlite_lock_error(exc):
+        return False
+    if attempt >= max_attempts - 1:
+        _report_lock_attempt(exc, what=what, giving_up=True, attempts=max_attempts)
+        return False
+    _report_lock_attempt(exc, what=what, giving_up=False, attempt=attempt)
+    await asyncio.sleep(base_delay_seconds * (2**attempt))
+    return True
 
 
 async def retry_on_sqlite_lock(
@@ -80,23 +168,21 @@ async def retry_on_sqlite_lock(
             attempt_seconds = time.monotonic() - attempt_started_at
             total_seconds = time.monotonic() - started_at
             if delay_seconds is None:
-                logger.warning(
-                    "sqlite lock retry budget exhausted what=%s sqlite_errorname=%s "
-                    "attempt_seconds=%.3f total_seconds=%.3f",
-                    what,
-                    sqlite_error_name(exc),
-                    attempt_seconds,
-                    total_seconds,
+                _report_lock_attempt(
+                    exc,
+                    what=what,
+                    giving_up=True,
+                    attempt_seconds=f"{attempt_seconds:.3f}",
+                    total_seconds=f"{total_seconds:.3f}",
                 )
                 raise
-            logger.debug(
-                "retrying sqlite lock failure what=%s sqlite_errorname=%s "
-                "attempt_seconds=%.3f total_seconds=%.3f next_delay_seconds=%.3f",
-                what,
-                sqlite_error_name(exc),
-                attempt_seconds,
-                total_seconds,
-                delay_seconds,
+            _report_lock_attempt(
+                exc,
+                what=what,
+                giving_up=False,
+                attempt_seconds=f"{attempt_seconds:.3f}",
+                total_seconds=f"{total_seconds:.3f}",
+                next_delay_seconds=f"{delay_seconds:.3f}",
             )
             if before_retry is not None:
                 await before_retry()

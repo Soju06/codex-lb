@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { usePrivacyStore } from "@/hooks/use-privacy";
 import { ADMIN_PERMISSIONS, OPERATOR_PERMISSIONS } from "@/test/mocks/factories";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import {
@@ -1581,5 +1582,40 @@ describe("RecentRequestsTable", () => {
     expect(textEl.tagName).toBe("P");
     expect(textEl).toHaveClass("truncate");
     expect(textEl).toHaveAttribute("title", longId);
+  });
+});
+
+describe("RecentRequestsTable account cell", () => {
+  beforeEach(() => {
+    useAuthStore.setState({ role: "admin", permissions: ["read", "write"], canWrite: true });
+  });
+
+  it("keeps the privacy blur on email account labels", () => {
+    usePrivacyStore.setState({ blurred: true });
+    try {
+      render(
+        <RecentRequestsTable
+          {...PAGINATION_PROPS}
+          accounts={[{ accountId: "acc-layout", email: "layout@example.com" } as never]}
+          requests={[LAYOUT_REQUEST]}
+        />,
+      );
+
+      expect(screen.getByText("layout@example.com")).toHaveClass("privacy-blur");
+    } finally {
+      usePrivacyStore.setState({ blurred: false });
+    }
+  });
+
+  it("shows Unassigned for an accountless row", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[{ ...LAYOUT_REQUEST, accountId: null, source: "limit_warmup" }]}
+      />,
+    );
+
+    expect(screen.getByText("Unassigned")).toBeInTheDocument();
   });
 });

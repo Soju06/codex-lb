@@ -17,6 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
 from app.core.clients.codex_version_snapshot import CODEX_VERSION
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+    normalize_thread_cache_identity_mode,
+)
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
@@ -123,6 +127,13 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     # three non-default ambiguous-continuation recovery modes were deleted and
     # the shipped ``fail_closed`` behaviour is now the only one.
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE",
+    # constantize-token-refresh-interval (first release after v1.25.0-beta.7):
+    # the proactive refresh window is the fixed eight-day
+    # ``TOKEN_REFRESH_INTERVAL_DAYS`` in ``app/core/auth/refresh.py``. Its only
+    # live consumer, the traffic-parity canary, now suppresses proactive
+    # refresh by stamping its isolated ``auth.json`` inside the window instead
+    # of widening the window for the whole process.
+    "CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS",
 )
 
 
@@ -327,7 +338,6 @@ class Settings(BaseSettings):
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
-    token_refresh_interval_days: int = 8
     # T1 (topology). Path to a JSON registry of additional usage quota keys
     # that replaces the bundled ``config/additional_quota_registry.json``.
     # Unset (or blank) keeps the bundled registry. The Alembic backfill
@@ -484,6 +494,12 @@ class Settings(BaseSettings):
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
 
+    # Thread cache identity mode: "shared" (default) or "isolated".
+    # T3 -> dashboard: the same-name nullable ``dashboard_settings`` column
+    # wins when it is non-NULL; this field is the environment fallback only.
+    # ``shared`` is byte-for-byte the pre-existing outbound request.
+    thread_cache_identity_mode: str = THREAD_CACHE_IDENTITY_MODE_DEFAULT
+
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
@@ -566,6 +582,29 @@ class Settings(BaseSettings):
                 return _default_home_dir()
             return Path(stripped).expanduser()
         raise TypeError("data_dir must be a path")
+
+    @field_validator("thread_cache_identity_mode", mode="before")
+    @classmethod
+    def _normalize_thread_cache_identity_mode(cls, value: object) -> str:
+        """Coerce an unrecognised value to ``shared`` instead of letting it escape.
+
+        The settings API constrains this field to ``shared``/``isolated``, so a
+        typo in the environment variable would otherwise reach the response
+        model and fail ``GET /api/settings`` for every setting at once. A
+        behaviour toggle is also the wrong thing to make a boot failure, so the
+        unrecognised value degrades to the safe default and says so.
+        """
+        if value is None:
+            return THREAD_CACHE_IDENTITY_MODE_DEFAULT
+        normalized = normalize_thread_cache_identity_mode(value)
+        if normalized is not None:
+            return normalized
+        logger.warning(
+            "CODEX_LB_THREAD_CACHE_IDENTITY_MODE=%r is not a known mode; using %r",
+            value,
+            THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+        )
+        return THREAD_CACHE_IDENTITY_MODE_DEFAULT
 
     @field_validator("database_url")
     @classmethod

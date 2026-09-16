@@ -150,3 +150,16 @@ The context ownership revision SHALL retain its original parent `20260830_000000
 - **WHEN** the target session is unbound or belongs to that key and the source accounts remain in scope
 - **THEN** Responses forwards the native result and binds the target independently
 - **AND** a target owned by another key is rejected before dispatch even after a cache miss
+
+
+### Requirement: Preserve deployed migration identities during topology validation
+The topology guard SHALL permit only the exact deployed context/authentication merge timestamp collision with the upstream terminal-append revision, with their original parents unchanged. It MUST reject additional colliding revisions. A context branch merged into one connected acyclic head containing all upstream heads SHALL not be reported as an unrepaired fork. Missing upstream heads or multiple heads MUST still fail validation.
+
+#### Scenario: Previously deployed timestamp collision reaches one merged head
+- **WHEN** the preserved context/authentication merge and terminal-append revisions retain their exact identities and parents
+- **AND** an explicit merge joins context and current upstream history into one connected acyclic head
+- **THEN** topology validation accepts the preserved identities without rewriting deployed version rows
+
+#### Scenario: A new migration reuses the preserved timestamp slot
+- **WHEN** another revision is authored with the preserved timestamp prefix
+- **THEN** topology validation rejects that collision

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   DashboardSettingsSchema,
   SettingsUpdateRequestSchema,
-  SubscriptionOverflowPreflightSchema,
   TelemetryConsentSchema,
   TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
@@ -644,8 +643,8 @@ describe("retention fields", () => {
   });
 });
 
-describe("subscription overflow fields", () => {
-  it("defaults the designation and drain deadline to null for older backends", () => {
+describe("local login policy", () => {
+  it("falls an unknown policy back to the open default when reading a response", () => {
     const parsed = DashboardSettingsSchema.parse({
       stickyThreadsEnabled: true,
       upstreamStreamTransport: "auto",
@@ -657,83 +656,21 @@ describe("subscription overflow fields", () => {
       totpRequiredOnLogin: false,
       totpConfigured: false,
       apiKeyAuthEnabled: false,
+      localLoginPolicy: "a_policy_this_build_does_not_know",
     });
 
-    expect(parsed.subscriptionOverflowSourceId).toBeNull();
-    expect(parsed.subscriptionOverflowDrainUntil).toBeNull();
-    expect(parsed.subscriptionOverflowPinsExpireBy).toBeNull();
+    expect(parsed.localLoginPolicy).toBe("enabled");
   });
 
-  it("round-trips a designation, an ISO drain deadline and the derived pin expiry", () => {
-    const parsed = DashboardSettingsSchema.parse({
-      stickyThreadsEnabled: true,
-      upstreamStreamTransport: "auto",
-      preferEarlierResetAccounts: false,
-      routingStrategy: "round_robin",
-      openaiCacheAffinityMaxAgeSeconds: 300,
-      dashboardSessionTtlSeconds: 43200,
-      importWithoutOverwrite: true,
-      totpRequiredOnLogin: false,
-      totpConfigured: false,
-      apiKeyAuthEnabled: false,
-      subscriptionOverflowSourceId: "src_1",
-      subscriptionOverflowDrainUntil: "2026-10-07T12:34:56.123456Z",
-      subscriptionOverflowPinsExpireBy: "2026-09-15T12:34:56.123456Z",
-    });
-
-    expect(parsed.subscriptionOverflowSourceId).toBe("src_1");
-    expect(parsed.subscriptionOverflowDrainUntil).toBe("2026-10-07T12:34:56.123456Z");
-    expect(parsed.subscriptionOverflowPinsExpireBy).toBe("2026-09-15T12:34:56.123456Z");
-  });
-
-  it("accepts the tri-state designation on update requests and rejects the read-only deadlines", () => {
-    expect(SettingsUpdateRequestSchema.parse({ subscriptionOverflowSourceId: "src_1" }).subscriptionOverflowSourceId).toBe(
-      "src_1",
+  it("rejects an unknown policy on an update request instead of relaxing it", () => {
+    // `updateSettings` takes `unknown`, so this schema is the only thing
+    // between a bad value and the wire. A fallback here would turn a typo into
+    // "everyone may sign in with a password" and the backend would accept it.
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "a_policy_this_build_does_not_know" })).toThrow();
+    expect(() => SettingsUpdateRequestSchema.parse({ localLoginPolicy: "" })).toThrow();
+    expect(SettingsUpdateRequestSchema.parse({ localLoginPolicy: "break_glass_only" }).localLoginPolicy).toBe(
+      "break_glass_only",
     );
-    expect(SettingsUpdateRequestSchema.parse({ subscriptionOverflowSourceId: null }).subscriptionOverflowSourceId).toBeNull();
-    expect(SettingsUpdateRequestSchema.parse({}).subscriptionOverflowSourceId).toBeUndefined();
-    expect(
-      "subscriptionOverflowDrainUntil" in SettingsUpdateRequestSchema.parse({ subscriptionOverflowDrainUntil: "x" }),
-    ).toBe(false);
-    expect(
-      "subscriptionOverflowPinsExpireBy" in
-        SettingsUpdateRequestSchema.parse({ subscriptionOverflowPinsExpireBy: "x" }),
-    ).toBe(false);
-  });
-
-  it("parses the preflight report", () => {
-    const preflight = SubscriptionOverflowPreflightSchema.parse({
-      sourceId: "src_1",
-      sourceName: "vLLM",
-      sourceEnabled: true,
-      eligible: false,
-      blockers: ["source_responses_unsupported"],
-      drainUntil: null,
-      servedModels: [
-        {
-          slug: "gpt-5.4",
-          enabled: true,
-          neverOverflows: false,
-          undeclaredToolTypes: ["shell"],
-          supportsVision: false,
-          supportsStreaming: true,
-          priced: false,
-          contextWindowMismatch: { registry: 272000, source: null, maxOutputTokens: null },
-          warnings: ["undeclared_tool_types", "context_window_missing"],
-        },
-      ],
-      missingModels: [],
-      scopedApiKeyCount: 0,
-      livePinCount: 0,
-      tombstoneCount: 0,
-    });
-
-    expect(preflight.eligible).toBe(false);
-    expect(preflight.servedModels[0].neverOverflowsReason).toBeNull();
-    expect(preflight.servedModels[0].contextWindowMismatch).toEqual({
-      registry: 272000,
-      source: null,
-      maxOutputTokens: null,
-    });
+    expect(SettingsUpdateRequestSchema.parse({}).localLoginPolicy).toBeUndefined();
   });
 });

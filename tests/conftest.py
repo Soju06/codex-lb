@@ -77,6 +77,7 @@ BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
     "build_account_usage_rollup_scheduler",
     "build_data_retention_scheduler",
     "build_telemetry_scheduler",
+    "build_account_deletion_scheduler",
 )
 
 
@@ -538,6 +539,15 @@ def _reset_global_state() -> None:
         from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 
         get_api_key_last_used_coalescer().clear()
+    except Exception:
+        pass
+    try:
+        # Thread anchors are process-global by design (one live thread keeps
+        # one derived prompt_cache_key), so a body reused by the next test
+        # would otherwise resolve to the previous test's key and account.
+        from app.modules.proxy.thread_anchors import reset_thread_anchor_index
+
+        reset_thread_anchor_index()
     except Exception:
         pass
     try:

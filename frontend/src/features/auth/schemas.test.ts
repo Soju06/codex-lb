@@ -1,3 +1,4 @@
+import { LOCAL_SIGN_IN_PROVIDER } from "@/test/mocks/factories";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -43,12 +44,53 @@ describe("AuthSessionSchema", () => {
         providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
         localLogin: "enabled",
         pendingIdentity: false,
+        pendingArrival: null,
       },
       accessSummary: null,
       assignableRoleIds: [],
       localPasswordConfigured: false,
       stepUp: null,
+      breakGlassSession: false,
     });
+  });
+
+  it("falls back to the open policy rather than failing the whole session on an unknown value", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      login: { usernameField: "shown", providers: [], localLogin: "something_new", pendingIdentity: false },
+      accessSummary: {
+        usersTotal: 1,
+        usersActive: 1,
+        usersInvited: 0,
+        usersDisabled: 0,
+        pendingInvites: 0,
+        nonAdminUsers: 0,
+        customRoles: 0,
+        providersEnabled: ["password"],
+        roleMappings: 0,
+        scimTokens: 0,
+        auditSinks: 0,
+        localLoginPolicy: "something_new",
+      },
+    });
+
+    expect(parsed.login.localLogin).toBe("enabled");
+    expect(parsed.accessSummary?.localLoginPolicy).toBe("enabled");
+  });
+
+  it("reports a break-glass session when the server marks one", () => {
+    const parsed = AuthSessionSchema.parse({
+      authenticated: true,
+      passwordRequired: true,
+      totpRequiredOnLogin: false,
+      totpConfigured: true,
+      breakGlassSession: true,
+    });
+
+    expect(parsed.breakGlassSession).toBe(true);
   });
 
   it("defaults the account fields for payloads that predate them", () => {
@@ -79,7 +121,7 @@ describe("AuthSessionSchema", () => {
       permissions: ["read", "write", "users:manage:all"],
       user: { id: "u1", username: "admin", displayName: null, role: { id: "r1", slug: "admin", name: "Admin", kind: "preset" } },
       authMethod: "password",
-      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password" }], localLogin: "enabled" },
+      login: { usernameField: "shown", providers: [LOCAL_SIGN_IN_PROVIDER], localLogin: "enabled" },
       accessSummary: {
         usersTotal: 2,
         usersActive: 2,

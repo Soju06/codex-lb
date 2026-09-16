@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import contextlib
+import logging
+import sqlite3
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Dialect
+from sqlalchemy.exc import OperationalError
 
 from app.core.auth.refresh import TOKEN_REFRESH_TIMEOUT_SECONDS
 from app.modules.accounts import auth_manager as auth_manager_module
+from app.modules.accounts import refresh_claims as refresh_claims_module
 from app.modules.accounts.refresh_claims import (
+    RefreshClaimCoordinator,
     build_refresh_claim_upsert,
     default_refresh_claimant_id,
 )
 from app.modules.proxy.work_admission import ADMISSION_WAIT_TIMEOUT_SECONDS
 
 pytestmark = pytest.mark.unit
+
+
+async def _async_noop(*args: Any, **kwargs: Any) -> None:
+    return None
 
 
 def _compile(dialect_name: str, dialect: Dialect) -> str:
@@ -275,3 +288,97 @@ def test_claim_ttl_covers_admission_wait_plus_twice_the_refresh_timeout(monkeypa
     # healthy claimant exposed to a peer re-exchange mid-work.
     monkeypatch.setattr(auth_manager_module, "ADMISSION_WAIT_TIMEOUT_SECONDS", 40.0)
     assert auth_manager_module._token_refresh_claim_ttl_seconds() == 40.0 + 2.0 * TOKEN_REFRESH_TIMEOUT_SECONDS
+
+
+class _NamedDriverLockError(sqlite3.OperationalError):
+    """The driver-raised shape: ``sqlite3`` sets ``sqlite_errorname`` itself."""
+
+    def __init__(self, error_name: str) -> None:
+        super().__init__("database is locked")
+        self.sqlite_errorname = error_name
+
+
+class _LockingSession:
+    """A session whose first ``execute`` loses SQLite's single writer slot."""
+
+    def __init__(self, failures: int, error_name: str) -> None:
+        self._remaining_failures = failures
+        self._error_name = error_name
+        self.execute_calls = 0
+
+    def get_bind(self) -> Any:
+        return type("_Bind", (), {"dialect": sqlite.dialect()})()
+
+    async def execute(self, statement: Any, params: Any = None) -> Any:
+        self.execute_calls += 1
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            raise OperationalError(
+                "INSERT INTO account_refresh_claims",
+                {},
+                _NamedDriverLockError(self._error_name),
+            )
+        return type("_Result", (), {"scalar_one_or_none": lambda self: "claimed"})()
+
+    async def commit(self) -> None:
+        return None
+
+
+def _install_session(monkeypatch: pytest.MonkeyPatch, session: _LockingSession) -> None:
+    @contextlib.asynccontextmanager
+    async def _fake_background_session() -> AsyncIterator[_LockingSession]:
+        yield session
+
+    monkeypatch.setattr(refresh_claims_module, "get_background_session", _fake_background_session)
+
+
+@pytest.mark.asyncio
+async def test_claim_upsert_retries_a_transient_lock_and_names_the_mechanism(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The claim upsert already retried a transient ``database is locked`` on its
+    # own budget; unifying the predicate must not change that, and the retry
+    # now says whether the slot was lost instantly (SQLITE_BUSY_SNAPSHOT) or
+    # after the full busy timeout (SQLITE_BUSY).
+    session = _LockingSession(failures=1, error_name="SQLITE_BUSY_SNAPSHOT")
+    _install_session(monkeypatch, session)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        claimed = await RefreshClaimCoordinator(claimant_id="node-a").try_acquire(
+            "account-1", ttl_seconds=30.0, owner="fingerprint-1"
+        )
+
+    assert claimed is True
+    assert session.execute_calls == 2
+    assert any(
+        "what=refresh_claim_upsert" in record.getMessage()
+        and "sqlite_errorname=SQLITE_BUSY_SNAPSHOT" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_upsert_still_raises_when_the_lock_outlives_the_budget(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Control flow is unchanged: an exhausted budget still propagates to the
+    # caller, which falls back to the legacy unclaimed refresh path.
+    session = _LockingSession(failures=99, error_name="SQLITE_BUSY")
+    _install_session(monkeypatch, session)
+    monkeypatch.setattr("app.db.sqlite_lock_retry.asyncio.sleep", _async_noop)
+
+    with caplog.at_level(logging.DEBUG, logger="app.db.sqlite_lock_retry"):
+        with pytest.raises(OperationalError):
+            await RefreshClaimCoordinator(claimant_id="node-a").try_acquire(
+                "account-1", ttl_seconds=30.0, owner="fingerprint-1"
+            )
+
+    assert session.execute_calls == 4
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any(
+        "budget exhausted" in message
+        and "what=refresh_claim_upsert" in message
+        and "sqlite_errorname=SQLITE_BUSY" in message
+        for message in warnings
+    )

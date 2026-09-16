@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Eye, Lock, User } from "lucide-react";
+import { Building2, Eye, Lock, User } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -10,11 +10,56 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { readLastUsername } from "@/features/auth/last-username";
-import { LoginRequestSchema } from "@/features/auth/schemas";
+import { externalProviders, type LocalFormDisclosure } from "@/features/auth/local-login";
+import { LoginRequestSchema, type LoginProvider } from "@/features/auth/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
 
-export function LoginForm() {
+/**
+ * The sign-in methods that are not the local password. A provider with a
+ * `loginUrl` gets a button; one without (the reverse proxy, which authenticates
+ * before the request ever arrives) gets a sentence, because drawing a button
+ * that goes nowhere would be a control the backend does not honour.
+ */
+function ProviderBlock({ providers }: { providers: readonly LoginProvider[] }) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-2" data-testid="login-providers">
+      {providers.map((provider) =>
+        provider.loginUrl ? (
+          <Button key={`${provider.kind}:${provider.providerKey}`} asChild className="press-scale w-full">
+            <a href={provider.loginUrl}>{t("auth.login.continueWith", { provider: provider.label })}</a>
+          </Button>
+        ) : (
+          <p
+            key={`${provider.kind}:${provider.providerKey}`}
+            className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground"
+          >
+            <Building2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+            {t("auth.login.providerNoUrl", { provider: provider.label })}
+          </p>
+        ),
+      )}
+    </div>
+  );
+}
+
+export type LoginFormProps = {
+  /**
+   * How much of the local password form to draw (`local_login_policy`).
+   * A prop, not a URL read, so the form still renders without a router.
+   */
+  localForm?: LocalFormDisclosure;
+  /**
+   * A company sign-in came back unfinished. A prop for the same reason, and a
+   * bare fact for a different one: the server collapses every cause into one
+   * marker so an unauthenticated caller cannot tell them apart, and there is
+   * nothing here to enrich it with.
+   */
+  signInFailed?: boolean;
+};
+
+export function LoginForm({ localForm = "shown", signInFailed = false }: LoginFormProps = {}) {
   const { t } = useTranslation();
   const login = useAuthStore((state) => state.login);
   const loginGuest = useAuthStore((state) => state.loginGuest);
@@ -25,15 +70,29 @@ export function LoginForm() {
   const usernameField = useAuthStore((state) => state.loginHint.usernameField);
   const guestAccessEnabled = useAuthStore((state) => state.guestAccessEnabled);
   const guestPasswordRequired = useAuthStore((state) => state.guestPasswordRequired);
+  const providers = useAuthStore((state) => state.loginHint.providers);
+  const external = externalProviders(providers);
 
-  // A remembered non-default username keeps the field visible even when the
-  // server says `hidden` (anti-flapping after the second account is removed
-  // again, PLAN §4.4); the "different account" link and a `username_required`
-  // answer reveal it too.
+  // `collapsed` keeps the form one click away; `hidden` means this screen is
+  // not a door at all and never hints at the one that is.
+  const [localRevealed, setLocalRevealed] = useState(false);
+  const showLocalForm = passwordRequired && (localForm === "shown" || (localForm === "collapsed" && localRevealed));
+  const showLocalLink = passwordRequired && localForm === "collapsed" && !localRevealed;
+  // A closed door and nothing else to offer: say so plainly rather than
+  // rendering an empty card. It names neither the account nor the way in.
+  const showRestrictedNote = !showLocalForm && !showLocalLink && external.length === 0 && !guestAccessEnabled;
+
+  // A remembered username keeps the field visible even when the server says
+  // `hidden` (anti-flapping after the second account is removed again, PLAN
+  // §4.4). It is never compared against a particular name: the account the
+  // install bootstrapped can be renamed, so "is this the default `admin`?" is
+  // not a question the client can ask. The store forgets the remembered name
+  // after a sign-in that comes back `hidden`, so a one-account install shows
+  // the field at most once more and is password-only from the next visit (P5).
+  // The "different account" link and a `username_required` answer reveal it too.
   const [lastUsername] = useState(readLastUsername);
   const [usernameRevealed, setUsernameRevealed] = useState(false);
-  const showUsername =
-    usernameField === "shown" || (lastUsername !== "" && lastUsername !== "admin") || usernameRevealed;
+  const showUsername = usernameField === "shown" || lastUsername !== "" || usernameRevealed;
 
   const form = useForm({
     resolver: zodResolver(LoginRequestSchema),
@@ -71,7 +130,29 @@ export function LoginForm() {
 
   return (
     <div className="rounded-2xl border bg-card p-6 shadow-[var(--shadow-md)]">
-      {passwordRequired ? (
+      {signInFailed ? (
+        <AlertMessage variant="warning" className="mb-5">
+          {t("auth.login.signInFailed")}
+        </AlertMessage>
+      ) : null}
+
+      {external.length > 0 ? (
+        <div className={showLocalForm || showLocalLink ? "mb-5 border-b pb-5" : ""}>
+          <ProviderBlock providers={external} />
+        </div>
+      ) : null}
+
+      {showLocalLink ? (
+        <button
+          type="button"
+          className="w-full text-center text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          onClick={() => setLocalRevealed(true)}
+        >
+          {t("auth.login.useLocalPassword")}
+        </button>
+      ) : null}
+
+      {showLocalForm ? (
         <Form {...form}>
           <form onSubmit={form.handleSubmit(handleSubmit)}>
             <div className="space-y-1.5">
@@ -156,13 +237,17 @@ export function LoginForm() {
         </Form>
       ) : null}
 
+      {showRestrictedNote ? (
+        <p className="text-center text-sm text-muted-foreground">{t("auth.login.localRestricted")}</p>
+      ) : null}
+
       {error ? <AlertMessage variant="error" className="mt-4">{error}</AlertMessage> : null}
 
       {guestAccessEnabled ? (
         <Form {...guestForm}>
           <form
             onSubmit={guestForm.handleSubmit(handleGuestSubmit)}
-            className={passwordRequired ? "mt-5 border-t pt-5" : ""}
+            className={showLocalForm || showLocalLink || external.length > 0 ? "mt-5 border-t pt-5" : ""}
           >
             <div className="space-y-1.5">
               <h3 className="text-sm font-semibold tracking-tight">{t("auth.guest.heading")}</h3>

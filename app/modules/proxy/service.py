@@ -444,6 +444,11 @@ from app.modules.proxy._service.response_create import (
     _inline_top_level_input_image_urls as _inline_top_level_input_image_urls,
 )
 from app.modules.proxy._service.response_create import (
+    _input_image_request_requires_http_upstream,  # noqa: F401
+    _responses_request_contains_input_image,  # noqa: F401
+    _responses_request_uses_image_generation,  # noqa: F401
+)
+from app.modules.proxy._service.response_create import (
     _input_part_is_image as _input_part_is_image,
 )
 from app.modules.proxy._service.response_create import (
@@ -478,12 +483,6 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _response_output_item_done_tool_call as _response_output_item_done_tool_call,
-)
-from app.modules.proxy._service.response_create import (
-    _responses_request_contains_input_image as _responses_request_contains_input_image,
-)
-from app.modules.proxy._service.response_create import (
-    _responses_request_uses_image_generation as _responses_request_uses_image_generation,
 )
 from app.modules.proxy._service.response_create import (
     _safe_dump_slug as _safe_dump_slug,

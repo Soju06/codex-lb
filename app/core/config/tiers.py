@@ -57,7 +57,6 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "oauth_callback_host": "T1",
     "auth_guardian_enabled": "T3",
     "transcription_request_budget_seconds": "T3",
-    "token_refresh_interval_days": "T3",
     # path to a replacement quota-key registry; deployment artefact, not behaviour
     "additional_quota_registry_file": "T1",
     "rate_limit_reset_credits_refresh_enabled": "T3",
@@ -118,6 +117,7 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "circuit_breaker_enabled": "T3",
     "soft_drain_enabled": "T3",
     "deterministic_failover_enabled": "T3",
+    "thread_cache_identity_mode": "T3",
     "backpressure_max_concurrent_requests": "T1",
     "bulkhead_proxy_limit": "T1",
     "bulkhead_dashboard_limit": "T1",
@@ -151,11 +151,16 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
 # T3 fields that still live only in env. Value = target dashboard home or
 # "backlog" while none has been designed. Remove the entry in the PR that adds
 # the ``dashboard_settings`` column (the checker warns once it is redundant).
-MIGRATING: Final[dict[str, str]] = {
-    "token_refresh_interval_days": "backlog",
-    # K2 bridge: http_responses_session_bridge_enabled is a T4 kill switch, not
-    # a tunable, so it has no MIGRATING row.
-}
+#
+# Empty since ``constantize-token-refresh-interval``: every T3 field now has a
+# dashboard home (a same-name ``dashboard_settings`` column or a
+# ``DASHBOARD_HOMES`` mapping), and the last backlog entry
+# (``token_refresh_interval_days``) became the fixed
+# ``app/core/auth/refresh.TOKEN_REFRESH_INTERVAL_DAYS`` instead of getting a
+# card nobody would flip. An empty registry is the intended terminal state and
+# is not an error; the registry stays as the declared landing spot for a T3
+# field that must ship one release ahead of its column.
+MIGRATING: Final[dict[str, str]] = {}
 
 # T3 fields whose database home already exists under a different column name
 # (or in another configuration table). Value = ``table.column``; the checker

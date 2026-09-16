@@ -31,6 +31,7 @@ from app.core.clients.usage import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.openai.host_models import resolve_default_host_model
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.upstream_proxy.cache import get_upstream_route_cache
@@ -82,7 +83,6 @@ logger = logging.getLogger(__name__)
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
-DEFAULT_PROBE_MODEL = "gpt-5.5"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # Codex rejects probe completions below this output-token floor (1 → 400, 16 → 200).
@@ -711,7 +711,7 @@ class AccountsService:
             probe_account = await self._auth_manager.ensure_fresh(account, force=False)
 
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
-        probe_model = model or DEFAULT_PROBE_MODEL
+        probe_model = model or resolve_default_host_model()
         probe_status = await self._send_probe_request(
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,

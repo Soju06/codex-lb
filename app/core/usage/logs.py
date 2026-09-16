@@ -15,8 +15,9 @@ from app.core.usage.pricing import (
 # client-side terminal (written when the downstream client disconnects before
 # the final event lands — routing health already treats it as non-penalizing),
 # so only statuses outside this tuple count as errors.
+SUCCESS_STATUS = "success"
 CANCELLED_STATUS = "cancelled"
-NON_ERROR_STATUSES: tuple[str, ...] = ("success", CANCELLED_STATUS)
+NON_ERROR_STATUSES: tuple[str, ...] = (SUCCESS_STATUS, CANCELLED_STATUS)
 # The error code cancelled rows carry; excluded read-side from historical
 # error-satellite rollup rows that were folded under the legacy
 # `status != 'success'` filter.

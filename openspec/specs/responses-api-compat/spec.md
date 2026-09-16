@@ -3078,20 +3078,25 @@ account-owner requests whose upstream resource is bound to the selected account.
 The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
 `/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
 request contains any `input_image` part in top-level input items, nested
-message content, or tool output content, and send the request over the raw HTTP
-Responses stream path. This bypass MUST happen after rejecting unsupported
-uploaded-image references and MUST be limited to the current request; subsequent
-text-only requests MAY continue using the HTTP responses bridge.
+message content, or tool output content, and send the request over the raw
+(non-bridge) Responses stream path. This bypass MUST happen after rejecting
+unsupported uploaded-image references and MUST be limited to the current
+request; subsequent text-only requests MAY continue using the HTTP responses
+bridge.
 
-The raw HTTP path is the source of truth for image validation and upstream image
-error semantics. The bridge MUST NOT hold image requests waiting for
-`response.created` when upstream rejects an invalid inline image payload.
+The raw (non-bridge) path is the source of truth for image validation and
+upstream image error semantics. The bridge MUST NOT hold image requests waiting
+for `response.created` when upstream rejects an invalid inline image payload.
+
+This bridge bypass MUST NOT by itself pin the upstream stream transport. The
+upstream transport for a bypassed image request MUST be resolved by the ordinary
+upstream-transport precedence.
 
 #### Scenario: Nested input_image bypasses bridge
 
 - **GIVEN** the HTTP responses bridge is enabled
 - **WHEN** a Responses request contains a nested content part with `type = "input_image"`
-- **THEN** the request is sent through the raw HTTP stream path
+- **THEN** the request is sent through the raw (non-bridge) stream path
 - **AND** the HTTP responses bridge is not used for that request
 
 #### Scenario: Image bypass does not disable future text bridge use
@@ -3100,6 +3105,15 @@ error semantics. The bridge MUST NOT hold image requests waiting for
 - **WHEN** an image-bearing request bypasses the bridge
 - **THEN** the bypass applies only to that request
 - **AND** a later text-only request can still use the HTTP responses bridge
+
+#### Scenario: Image bypass does not pin the upstream transport
+
+- **GIVEN** the HTTP responses bridge is enabled
+- **AND** `upstream_stream_transport` is `"auto"`
+- **WHEN** a Responses request carrying an inline `data:` image below the
+  WebSocket frame budget bypasses the bridge
+- **THEN** the request MUST NOT be forced onto upstream HTTP
+- **AND** the configured transport policy MUST decide its upstream transport
 
 ### Requirement: Security-work authorization errors can route to authorized accounts
 
@@ -4559,8 +4573,19 @@ Precedence (highest first), evaluated before the policy:
 
 1. Outside the existing recent upstream WS failure cooldown, an explicit
    `upstream_stream_transport` override of `"http"` or `"websocket"` wins.
-2. Oversized-payload bypass and image / image-generation bypass force
-   upstream HTTP.
+2. Oversized-payload bypass and the `image_generation` bypass force upstream
+   HTTP. A request carrying `input_image` parts forces upstream HTTP only when
+   its serialized payload exceeds the WebSocket frame budget, or when the
+   payload still carries an external `http(s)` image URL that the proxy may be
+   unable to inline; an inline `data:` image alone MUST NOT force upstream HTTP.
+   These two residual `input_image` pins are deliberately evaluated ahead of an
+   explicit `"websocket"` override wherever the request passes through the HTTP
+   bridge routing decision — every `/v1/responses` and
+   `/backend-api/codex/responses` request does — because that override
+   short-circuits the size gate and an oversized image payload would otherwise
+   fail locally with `400 payload_too_large`. A request that never reaches that
+   decision, such as a `/v1/chat/completions` request whose bridge admission has
+   already declined the bridge, follows item 1 instead.
 3. The effective policy (per-API-key `transport_policy_override` when
    set, otherwise the global `http_downstream_transport_policy`) decides.
 
@@ -4668,10 +4693,21 @@ through to the global `http_downstream_transport_policy`.
 
 - **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
 - **AND** no recent upstream WS failure marker is active
-- **WHEN** a single-shot downstream HTTP request with no sticky signals
-  resolves the upstream transport under any policy
+- **WHEN** a single-shot downstream HTTP request with no sticky signals, and
+  which trips none of the precedence item 2 bypasses, resolves the upstream
+  transport under any policy
 - **THEN** the explicit override MUST win and the request MUST use
   upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP under an explicit websocket override
+
+- **GIVEN** `upstream_stream_transport` is explicitly `"websocket"`
+- **AND** a request passing through the HTTP bridge routing decision carries an
+  `input_image` part whose `image_url` is an external `http(s)` URL
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`, because the
+  override would otherwise short-circuit the residual pin and hand the upstream
+  WebSocket a URL it does not accept
 
 #### Scenario: oversized payload bypass still forces HTTP under always_websocket
 
@@ -4681,6 +4717,23 @@ through to the global `http_downstream_transport_policy`.
 - **WHEN** the proxy resolves the upstream transport
 - **THEN** the request MUST be sent over upstream HTTP `POST`, because the
   oversized-payload bypass has higher precedence than the policy
+
+#### Scenario: inline image alone does not force HTTP under always_websocket
+
+- **GIVEN** `http_downstream_transport_policy` is `"always_websocket"`
+- **AND** a request carries an inline `data:` image below the WebSocket
+  frame budget
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST keep upstream WebSocket
+
+#### Scenario: external image URL still forces HTTP
+
+- **GIVEN** `upstream_stream_transport` is `"auto"`
+- **AND** a request carries an `input_image` part whose `image_url` is an
+  external `http(s)` URL, anywhere in the input — including inside a
+  tool-output array, which the image inliner never rewrites
+- **WHEN** the proxy resolves the upstream transport
+- **THEN** the request MUST be sent over upstream HTTP `POST`
 
 #### Scenario: native WebSocket clients are unaffected by the policy
 
@@ -9955,14 +10008,15 @@ rewritten payload.
 
 ### Requirement: Per-request detached-session retire sweep bounds its lock wait
 
-The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST bound how long it waits for any single detached session's `pending_lock`. When the bound elapses the sweep MUST skip that session for the current pass, emit a warning, leave the session tracked and its lock state untouched, and continue. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative.
+The fail-safe sweep that reconsiders detached HTTP-bridge generations on every bridge request MUST use one five-second monotonic deadline for its aggregate detached-session lock waits. Each retirement attempt MUST receive only the remaining time. Once the deadline expires, the sweep MUST stop starting attempts and emit one warning naming the number of unattempted sessions, if any. Timed-out and unattempted sessions MUST remain tracked with their lock state untouched for later sweeps and lifecycle cleanup. Session lifecycle owners (drain, close, cooldown-suppression retirement) MUST keep waiting for the lock without a bound so retirement decisions stay authoritative. Request cancellation MUST NOT bypass the shielded finalization sweep or transfer resource cleanup ownership.
 
 #### Scenario: Busy detached lock does not park the request path
 
 - **GIVEN** a detached session flagged `retire_after_drain` whose `pending_lock` is held by another task for longer than the bound
 - **WHEN** a request runs the fail-safe sweep
 - **THEN** the sweep returns after the bound without closing the session
-- **AND** a warning names the skipped session
+- **AND** if sessions remain unattempted when the deadline expires, one warning reports their count
+- **AND** the timed-out session remains tracked for later sweeps and lifecycle cleanup
 - **AND** the lock remains owned by its holder with no stranded waiter
 
 #### Scenario: Free detached lock still retires
@@ -9976,6 +10030,19 @@ The fail-safe sweep that reconsiders detached HTTP-bridge generations on every b
 - **GIVEN** a drain or close path calls the retire check without a bound while another task briefly holds the lock
 - **WHEN** the holder releases
 - **THEN** the retire check proceeds and retires the session
+
+#### Scenario: Several busy sessions share one deadline
+
+- **GIVEN** three detached sessions and a five-second sweep budget
+- **WHEN** the first retirement attempt consumes three seconds and the second consumes its remaining two seconds
+- **THEN** no third attempt starts and aggregate lock waiting is five seconds
+- **AND** the deferred sessions remain tracked and a later sweep can retire them
+
+#### Scenario: Cancelled request finalization uses the same deadline
+
+- **WHEN** a bridge request is cancelled while several detached sessions have busy locks
+- **THEN** shielded finalization uses one aggregate lock-wait deadline before cancellation propagates
+- **AND** deferred sessions retain their existing cleanup owners
 
 ### Requirement: Cancelled streamed responses do not re-cancel deferred startup work every loop iteration
 
@@ -10711,6 +10778,44 @@ Metrics SHALL NOT label raw request, conversation, session, account or API-key i
 - **WHEN** a request remains HTTP because it is single-turn, policy-pinned, bridge-disabled, oversized, image-capable, or affected by a recent WS outage
 - **THEN** its routing diagnostics distinguish that reason
 - **AND** admission counters MUST NOT be represented as successful WS connections
+
+### Requirement: Observed HTTP response IDs publish same-process ownership before delivery
+
+When an HTTP Responses attempt extracts a valid response ID from an actual upstream lifecycle event, it MUST publish that ID to the existing bounded process owner cache with the selected account and existing API-key/session scope before delivering the event that exposes the ID downstream. An immediate same-process follow-up referencing that ID MUST be able to resolve its known owner without waiting for the originating request-log write or originating stream completion. This readiness MUST apply from the first observed lifecycle event carrying the ID, including `response.created`, `response.queued`, and `response.in_progress`, whether delivered as SSE or adapted from a canonical background JSON acknowledgement; it MUST NOT promise that an unfinished response is already usable by the upstream provider.
+
+The service MUST NOT publish a locally generated request/synthetic-error ID or a client-supplied anchor as new upstream ownership evidence. Cache misses MUST retain the existing durable request-log lookup and genuinely unknown-owner fail-closed behavior. Request-log persistence MUST remain under its existing detached task owner; this requirement MUST NOT introduce synchronous log barriers, a new registry or a cross-replica readiness guarantee.
+
+Provenance for locally generated terminals MUST remain internal to the SSE carrier, preserve the exact serialized event bytes and existing retry markers, and survive reattachment of the parsed payload.
+
+When normalization of an actual upstream error supplies a local response ID, that ID MUST remain ineligible for early ownership publication. The event MUST retain its upstream origin for timing observations.
+
+#### Scenario: Follow-up starts after response-created delivery
+- **GIVEN** two eligible accounts and an HTTP stream that has exposed its upstream response ID in `response.created` but has not completed
+- **WHEN** a same-process HTTP follow-up references that ID
+- **THEN** the known selected account is resolved before upstream dispatch
+- **AND** ownership resolution does not wait for the first stream's terminal event or request-log write
+
+#### Scenario: Terminal follow-up races detached persistence
+- **GIVEN** a successful HTTP response whose request-log persistence is still pending
+- **WHEN** the client submits an anchored follow-up immediately after terminal delivery or EOF
+- **THEN** the existing process cache resolves the response owner in the existing caller scope
+- **AND** the request is not rejected as unknown-owner solely because that write is pending
+
+#### Scenario: Unobserved and out-of-scope IDs do not gain ownership
+- **WHEN** a request references an ID not authoritatively observed for its allowed owner scope, including a local synthetic ID
+- **THEN** no new cache entry is inferred from that request
+- **AND** existing durable lookup, authorization and unknown-owner fail-closed rules apply
+
+#### Scenario: Background acknowledgement precedes its log
+- **GIVEN** two eligible accounts and a canonical HTTP background JSON acknowledgement with status `queued` or `in_progress`
+- **WHEN** the same caller submits a continuation after receiving the acknowledgement while its log is pending
+- **THEN** the known owner MUST resolve and receive that continuation without waiting for the originating log
+- **AND** the acknowledgement MUST preserve its upstream ID and status
+
+#### Scenario: In-progress lifecycle follows token delivery
+- **GIVEN** an HTTP stream has delivered a text delta and first exposes its authoritative response ID in `response.in_progress`
+- **WHEN** the event reaches the caller before stream completion
+- **THEN** a same-process continuation MUST resolve the known owner before upstream dispatch
 
 ### Requirement: Repeated zero-event idle failures poison dead anchors at the circuit threshold
 

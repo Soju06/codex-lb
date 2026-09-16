@@ -74,6 +74,15 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # ``parse_forwarded_request``.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
+# Response header (owner -> origin) carrying ``ProxyResponseError``
+# provenance back across the forward hop. The owner's error body is an
+# ordinary OpenAI envelope, so a refusal the owner raised before it sent any
+# upstream frame is indistinguishable by code from a transport failure it
+# observed: both end as ``stream_incomplete``. Without this marker the origin
+# rebuilds the error without the provenance and its own native Codex
+# transport-failure lifecycle aborts the committed body, moving issue #2364's
+# empty 200 from the owner onto the origin.
+HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER = "x-codex-bridge-local-pre-dispatch-refusal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +225,15 @@ class HTTPBridgeOwnerClient:
                             failure_phase="owner_forward_status",
                             failure_detail="owner_forward_non_200",
                             upstream_status_code=response.status,
+                            # Rebuilding the error from the owner's body alone
+                            # would drop the provenance the owner attached, so
+                            # carry it over the hop: a non-200 by itself does
+                            # not prove the owner sent no upstream frame, and
+                            # only the owner knows which of its failures was a
+                            # local pre-dispatch refusal (issue #2364).
+                            local_pre_dispatch_refusal=_bool_header(
+                                response.headers.get(HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER)
+                            ),
                         )
                     if on_response_ready is not None:
                         on_response_ready()

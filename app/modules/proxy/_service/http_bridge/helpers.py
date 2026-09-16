@@ -121,6 +121,9 @@ from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
 from app.modules.proxy._service.observability import (
+    _record_continuity_replay_rejected as _record_continuity_replay_rejected,
+)
+from app.modules.proxy._service.observability import (
     _summarize_input as _summarize_input,
 )
 from app.modules.proxy._service.observability import (
@@ -2837,12 +2840,18 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
         # sweep runs. Reconsider every detached generation so marker ordering
         # cannot leave a fully drained predecessor owning a socket and cap slot.
         detached_sessions = tuple(service._http_bridge_detached_sessions.values())
-    for session in detached_sessions:
-        # Bounded: this sweep is on every request's path, so one detached
-        # session whose lock stays busy (or wedged) must not stall the fleet.
+    deadline = clock_for(service).monotonic() + _HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS
+    for index, session in enumerate(detached_sessions):
+        remaining = deadline - clock_for(service).monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Detached HTTP bridge retire sweep deadline exhausted: skipped_sessions=%d",
+                len(detached_sessions) - index,
+            )
+            break
         await service._retire_http_bridge_after_drain_if_ready(
             session,
-            lock_wait_timeout_seconds=_HTTP_BRIDGE_DETACHED_RETIRE_LOCK_WAIT_SECONDS,
+            lock_wait_timeout_seconds=remaining,
         )
 
 
@@ -3831,6 +3840,7 @@ def _log_http_bridge_event(
         "capacity_exhausted_active_sessions",
         "owner_mismatch",
         "owner_forward_fail",
+        "owner_unavailable_replay_rejected",
         "missing_response_created_timeout",
         "prompt_cache_locality_miss",
         "reallocation_orphan",

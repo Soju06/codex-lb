@@ -28,7 +28,12 @@ from app.core.auth.dashboard_access import (
 from app.core.auth.dashboard_mode import DashboardAuthMode, DashboardRequestAuth, get_dashboard_request_auth
 from app.core.auth.dashboard_users_cache import DashboardUsersCache, get_dashboard_users_cache
 from app.core.auth.external_identity import resolve_trusted_header_request
-from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, is_step_up_fresh, step_up_methods
+from app.core.auth.step_up import (
+    STEP_UP_COOKIE,
+    STEP_UP_UNAVAILABLE_MESSAGE,
+    account_step_up_methods,
+    is_step_up_fresh,
+)
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -49,9 +54,11 @@ from app.modules.dashboard_auth.service import (
     DashboardSessionState,
     get_dashboard_session_store,
     get_step_up_cookie_store,
+    is_local_password_session,
     session_clock,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.break_glass import break_glass_second_factor_required, local_login_admits
 
 logger = logging.getLogger(__name__)
 
@@ -223,11 +230,14 @@ def _user_session_principal(
     settings: DashboardSettings,
 ) -> DashboardPrincipal:
     grants = resolve_role_grants(user.role)
+    # An emergency account that holds a secret always presents it, whatever
+    # the two toggles say: the account a tightened policy relies on must never
+    # be reachable on a password alone.
     totp_required = totp_policy_applies(
         required_on_login=settings.totp_required_on_login,
         required_for_admin_role=settings.totp_required_for_admin_role,
         grants=grants,
-    )
+    ) or break_glass_second_factor_required(user)
     totp_configured = user.totp_secret_encrypted is not None
     if totp_required and totp_configured and not state.totp_verified:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
@@ -262,15 +272,24 @@ def _user_session_principal(
 
 
 async def _password_fallback_principal(request: Request) -> DashboardPrincipal | None:
-    """A password-verified cookie for an active account, so the break-glass admin
-    stays reachable while the proxy asserts an identity the resolver refuses."""
+    """A password-verified cookie the local login policy admits, so an emergency
+    account stays reachable while the proxy asserts an identity the resolver refuses.
+
+    ``local_login_policy`` decides which cookie counts: ``enabled`` (the
+    default) admits every active account, which is what shipped before this
+    change; ``admins_only`` admits the admin preset; ``break_glass_only``
+    admits only a designated emergency account. One function, so the gate and
+    the session response that advertises the fallback cannot disagree.
+    """
 
     users_cache = get_dashboard_users_cache()
     state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     session_user = await _resolve_session_user(state, users_cache)
-    if state is None or session_user is None or not state.password_verified:
+    if state is None or session_user is None or not is_local_password_session(state):
         return None
     settings = await get_settings_cache().get()
+    if not local_login_admits(session_user, settings.local_login_policy):
+        return None
     return _user_session_principal(request, session_user, state, settings=settings)
 
 
@@ -345,8 +364,16 @@ async def validate_dashboard_session(request: Request) -> DashboardPrincipal:
     state = get_dashboard_session_store().get(session_id)
     session_user = await _resolve_session_user(state, users_cache)
 
-    has_admin_fallback_session = state is not None and session_user is not None and state.password_verified
-    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_admin_fallback_session:
+    # Behind a reverse proxy a header-less request only gets in on a password
+    # cookie the local login policy still admits (the same decision
+    # ``_password_fallback_principal`` makes for a refused identity).
+    has_password_fallback_session = (
+        state is not None
+        and session_user is not None
+        and is_local_password_session(state)
+        and local_login_admits(session_user, settings.local_login_policy)
+    )
+    if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not has_password_fallback_session:
         raise DashboardAuthError("Reverse proxy authentication is required", code="proxy_auth_required")
     # A guest cookie is only ever minted under the current guest generation, so
     # a matching generation proves it passed whatever guest credential applied.
@@ -467,7 +494,8 @@ async def ensure_step_up(request: Request, principal: DashboardPrincipal, permis
     admin, the disabled-auth principal) have no credential to re-verify and are
     exempt; every account is held to it, whatever provider signed it in. A
     stale or missing step-up answers ``403 step_up_required`` naming the
-    factors the account can present; an account with no factor at all answers
+    factors the account can present — including its identity provider when
+    that is the only thing it has; an account with no factor at all answers
     ``403 step_up_unavailable``.
     """
 
@@ -482,7 +510,7 @@ async def ensure_step_up(request: Request, principal: DashboardPrincipal, permis
         recorded += [value for value in (recorded_step_up(request, user),) if value is not None]
     if recorded and is_step_up_fresh(max(recorded), now=session_clock()):
         return
-    methods = step_up_methods(user) if user is not None else []
+    methods = await account_step_up_methods(user) if user is not None else []
     if not methods:
         raise DashboardPermissionError(STEP_UP_UNAVAILABLE_MESSAGE, code="step_up_unavailable", param=permission.value)
     raise DashboardPermissionError(

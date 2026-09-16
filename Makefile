@@ -2,6 +2,8 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_affinity_invite_migration.py \
+	tests/integration/test_affinity_identity_migration.py \
 	tests/integration/test_codex_context_pool.py \
 	tests/integration/test_codex_context_dispatch_cost.py \
 	tests/integration/test_codex_context_fork.py \
@@ -46,6 +48,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
 	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_account_pending_deletion_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_bridge_continuity_abandonment_migration_upgrade_and_downgrade \
+	tests/integration/test_repositories.py::test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \
@@ -59,6 +63,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
 SHELL := bash
 
@@ -67,7 +72,7 @@ help:
 	@printf '%s\n' \
 	  'Common targets:' \
 	  '  make lint                    ruff check + format check + architecture checks' \
-	  '  make architecture-check      proxy architecture fitness ratchets' \
+	  '  make architecture-check      proxy, settings, and migration-graph fitness ratchets' \
 	  '  make typecheck               ty check' \
 	  '  make rust-check              fmt + clippy + tests + release build' \
 	  '  make rust-audit              cargo-deny dependency policy' \
@@ -116,6 +121,7 @@ architecture-check:
 	uv run python scripts/check_cancellation_safety.py
 	uv run python scripts/check_proxy_timing_seams.py
 	uv run python scripts/check_settings_tiers.py
+	uv run python scripts/check_migration_topology.py
 
 typecheck:
 	uv sync --dev --frozen

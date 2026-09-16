@@ -44,3 +44,10 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Remove the unused private-context control adapter while preserving Realtime handling.
 - [x] Run focused HTTP regressions, affected context/replay/Realtime tests and static/spec validation.
 - [x] Integrate upstream `789a2dd3`, retain the archived eventless-response requirement and validate the affected source-routing paths.
+
+## September 16 upstream refresh
+- [ ] Integrate upstream `d1fd2f21`, preserving early HTTP response ownership, affinity observations and the existing context contract.
+- [ ] Join the deployed context head with the OIDC migration head without rewriting applied revisions.
+- [ ] Verify old context and fresh upstream upgrade paths, including the intentional removal of the legacy dashboard credential mirror.
+- [ ] Run affected context, replay, bridge, migration and dashboard checks with current upstream.
+- [ ] Verify native notes/history and fork recovery using the updated Codex client in an isolated candidate.

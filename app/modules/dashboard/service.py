@@ -162,6 +162,7 @@ class DashboardService:
             ),
         )
 
+        dashboard_settings = await self._repo.get_settings()
         summary = build_dashboard_overview_summary(
             accounts=accounts,
             primary_rows=primary_rows,
@@ -189,7 +190,6 @@ class DashboardService:
             ),
         )
 
-        dashboard_settings = await self._repo.get_settings()
         _, secondary_history = await _load_projection_histories(
             self._repo,
             primary_usage,

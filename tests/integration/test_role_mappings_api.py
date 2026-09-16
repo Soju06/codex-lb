@@ -247,10 +247,12 @@ async def test_the_rule_list_refuses_duplicates_unknown_claims_and_unknown_provi
     )
     assert unknown_claim.status_code == 422 and _error(unknown_claim) == "unknown_claim"
 
+    # A kind with no row at all. ``oidc`` is no longer one: its row is seeded
+    # (disabled) so an operator can write the group rules before connecting.
     unknown_provider = await async_client.post(
         MAPPINGS,
         json={
-            "provider": "oidc",
+            "provider": "saml",
             "providerKey": "default",
             "claimName": "groups",
             "claimValue": "platform",
@@ -607,6 +609,9 @@ async def test_role_mappings_migration_upgrades_and_downgrades(tmp_path) -> None
             tables = {row[0] for row in await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
         assert "dashboard_role_mappings" not in tables
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        # A final walk to head proves the single-head graph. Deliberately not
+        # asserted equal to ``_TARGET_REVISION``: this revision is no longer the
+        # newest one, and pinning that would break on every later migration.
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT COUNT(*) FROM dashboard_role_mappings")) == 0

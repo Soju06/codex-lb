@@ -72,7 +72,9 @@ describe("InviteDialog", () => {
     const { onIssued, onOpenChange } = renderDialog();
     const dialog = await openDialog();
 
-    await user.type(within(dialog).getByLabelText("Username"), "admin");
+    // A name another account genuinely holds. Not `admin`: the service reserves
+    // that one outright, so it answers `422 validation_error`, never this code.
+    await user.type(within(dialog).getByLabelText("Username"), "ops");
     await user.click(within(dialog).getByRole("button", { name: "Create invite link" }));
     expect(await within(dialog).findByText("That username is already taken.")).toBeInTheDocument();
 

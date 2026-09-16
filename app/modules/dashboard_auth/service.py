@@ -29,12 +29,19 @@ from app.core.auth.dashboard_access import (
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.providers.registry import ActiveProvider, get_auth_provider_registry
-from app.core.auth.step_up import StepUpMethod, is_step_up_fresh, step_up_expires_at, step_up_methods
+from app.core.auth.step_up import (
+    StepUpMethod,
+    account_step_up_methods,
+    is_step_up_fresh,
+    step_up_expires_at,
+    step_up_methods,
+)
 from app.core.auth.totp import build_otpauth_uri, generate_totp_secret, verify_totp_code
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
-from app.db.models import DashboardUser, DashboardUserStatus
+from app.db.models import AuthProviderKind, DashboardUser, DashboardUserStatus
+from app.modules.dashboard_auth.oidc_flows import OIDC_LOGIN_START_PATH
 from app.modules.dashboard_auth.schemas import (
     DashboardAccessSummary,
     DashboardAuthSessionResponse,
@@ -44,10 +51,16 @@ from app.modules.dashboard_auth.schemas import (
     DashboardSessionUser,
     DashboardStepUpState,
     DashboardUserRoleSummary,
+    LocalLoginPolicyValue,
     LoginProviderKind,
     TotpSetupStartResponse,
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
+from app.modules.dashboard_users.break_glass import (
+    assert_break_glass_remains,
+    break_glass_second_factor_required,
+    local_login_admits,
+)
 from app.modules.dashboard_users.credentials import assert_credential_remains
 from app.modules.dashboard_users.repository import (
     DashboardUserCounts,
@@ -71,6 +84,7 @@ class DashboardAuthSettingsProtocol(Protocol):
     guest_session_generation: int
     totp_required_on_login: bool
     totp_required_for_admin_role: bool
+    local_login_policy: str
 
 
 class DashboardAuthRepositoryProtocol(Protocol):
@@ -84,8 +98,6 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def list_active_local_password_users(self) -> Sequence[DashboardUser]: ...
 
-    async def count_active_users(self) -> int: ...
-
     async def count_user_identities(self, user_id: str) -> int: ...
 
     async def count_live_invites(self) -> int: ...
@@ -94,13 +106,13 @@ class DashboardAuthRepositoryProtocol(Protocol):
 
     async def get_user_counts(self) -> DashboardUserCounts: ...
 
+    async def count_qualifying_break_glass(self, *, exclude_user_id: str | None = None) -> int: ...
+
     async def count_custom_roles(self) -> int: ...
 
     async def count_role_mappings(self) -> int: ...
 
     async def create_first_admin(self, password_hash: str) -> DashboardUser | None: ...
-
-    async def set_user_password_hash(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
     async def rotate_user_password(self, user_id: str, password_hash: str) -> DashboardUser: ...
 
@@ -196,7 +208,9 @@ class DashboardSessionState:
     the cookie when the account is gone, disabled, or has revoked its sessions.
     ``kind == "guest"`` carries only the guest generation. ``step_up_verified_at``
     (``su``) is when the account last re-verified a credential for a sensitive
-    change; absent until it does.
+    change; absent until it does. ``break_glass`` (``bg``) marks an emergency
+    session so the dashboard can say so; it is optional and its absence means
+    false, which is why the payload version does not change for it.
     """
 
     expires_at: int
@@ -209,6 +223,7 @@ class DashboardSessionState:
     auth_method: str | None = None
     guest_session_generation: int | None = None
     step_up_verified_at: int | None = None
+    break_glass: bool = False
 
     @property
     def is_user(self) -> bool:
@@ -254,6 +269,7 @@ class DashboardSessionStore:
         ttl_seconds: int,
         auth_method: str = AUTH_METHOD_PASSWORD,
         step_up_verified_at: int | None = None,
+        break_glass: bool = False,
     ) -> str:
         now = int(time())
         payload: dict[str, object] = {
@@ -268,6 +284,8 @@ class DashboardSessionStore:
         }
         if step_up_verified_at is not None:
             payload["su"] = step_up_verified_at
+        if break_glass:
+            payload["bg"] = True
         return self._seal(payload)
 
     def create_guest_session(self, *, ttl_seconds: int, guest_session_generation: int) -> str:
@@ -326,6 +344,7 @@ class DashboardSessionStore:
             totp_verified=tp,
             auth_method=am,
             step_up_verified_at=_as_int(data.get("su")),
+            break_glass=data.get("bg") is True,
         )
 
     def delete(self, session_id: str | None) -> None:
@@ -337,6 +356,22 @@ def session_clock() -> int:
     """The clock sessions and step-ups are minted and checked against (one clock, one truth)."""
 
     return int(time())
+
+
+def is_local_password_session(state: DashboardSessionState) -> bool:
+    """Whether this cookie stands for *a local password*, which is what ``local_login_policy`` governs.
+
+    ``password_verified`` is the flag that admits a cookie at all, so every
+    account session sets it -- including one minted by the identity provider.
+    The local login policy is about the door that does not depend on that
+    provider, so it keys on the method too: without this an OIDC session would
+    count as the local fallback and single sign-on would silently defeat
+    ``admins_only`` and ``break_glass_only``, the two policies that exist to
+    close the local door once single sign-on is on. One function, so the gate
+    and the session response that advertises the fallback cannot disagree.
+    """
+
+    return state.password_verified and state.auth_method == AUTH_METHOD_PASSWORD
 
 
 class StepUpCookieStore:
@@ -546,14 +581,18 @@ class DashboardAuthService:
         return resolved
 
     async def _totp_required_for(self, user: DashboardUser) -> bool:
-        """The TOTP policy as it binds ``user``: the global toggle, or the admin-role toggle for admin-level roles."""
+        """The TOTP policy as it binds ``user``.
+
+        The global toggle, the admin-role toggle for admin-level roles, and --
+        whatever either says -- an emergency account that holds a secret.
+        """
 
         settings = await self._repository.get_settings()
         return totp_policy_applies(
             required_on_login=settings.totp_required_on_login,
             required_for_admin_role=settings.totp_required_for_admin_role,
             grants=resolve_role_grants(user.role),
-        )
+        ) or break_glass_second_factor_required(user)
 
     async def _require_totp_verified_session(self, session_id: str | None) -> ResolvedUserSession:
         resolved = await self.require_password_session(session_id)
@@ -612,14 +651,14 @@ class DashboardAuthService:
                 required_on_login=settings.totp_required_on_login,
                 required_for_admin_role=settings.totp_required_for_admin_role,
                 grants=grants,
-            )
+            ) or break_glass_second_factor_required(user)
             totp_configured = user.totp_secret_encrypted is not None
             totp_pending = totp_policy and totp_configured and not resolved.state.totp_verified
             totp_enrollment_required = totp_policy and not totp_configured
             authenticated = not totp_pending
             role = DashboardRole.ADMIN
             auth_method = resolved.state.auth_method
-            step_up = step_up_state(user, verified_at=resolved.state.step_up_verified_at)
+            step_up = await step_up_state(user, verified_at=resolved.state.step_up_verified_at)
         elif not password_required:
             authenticated = True
             role = DashboardRole.ADMIN
@@ -652,14 +691,17 @@ class DashboardAuthService:
             auth_method=auth_method,
             must_change_password=bool(user is not None and user.must_change_password),
             totp_enrollment_required=totp_enrollment_required,
-            login=await self.login_hint(auth_state),
+            login=await self.login_hint(auth_state, settings.local_login_policy),
             access_summary=await self.access_summary() if manages_users else None,
             assignable_role_ids=assignable_role_ids() if manages_users else [],
             step_up=step_up,
+            break_glass_session=bool(resolved is not None and resolved.state.break_glass and user is not None),
         )
         return SessionDescription(response=response, resolved=resolved)
 
-    async def login_hint(self, auth_state: LocalAuthState) -> DashboardLoginHint:
+    async def login_hint(self, auth_state: LocalAuthState, policy: str) -> DashboardLoginHint:
+        """The login screen's facts, served to unauthenticated clients too — never a username."""
+
         return DashboardLoginHint(
             username_field="hidden" if auth_state.active_local_password_users == 1 else "shown",
             providers=[
@@ -668,11 +710,14 @@ class DashboardAuthService:
                     kind=cast(LoginProviderKind, item.row.kind),
                     provider_key=item.row.provider_key,
                     label=item.row.label,
-                    login_url=None,
+                    # A redirect-style provider names where its sign-in starts;
+                    # the others have no URL of their own. The client that does
+                    # not know the kind simply ignores the entry.
+                    login_url=OIDC_LOGIN_START_PATH if item.row.kind == AuthProviderKind.OIDC.value else None,
                 )
                 for item in await self._active_providers()
             ],
-            local_login="enabled",
+            local_login=cast(LocalLoginPolicyValue, policy),
         )
 
     async def access_summary(self) -> DashboardAccessSummary:
@@ -689,7 +734,7 @@ class DashboardAuthService:
             role_mappings=await self._repository.count_role_mappings(),
             scim_tokens=0,
             audit_sinks=0,
-            local_login_policy="enabled",
+            local_login_policy=cast(LocalLoginPolicyValue, (await self._repository.get_settings()).local_login_policy),
         )
 
     async def me(self, session_id: str | None) -> DashboardMeResponse:
@@ -722,16 +767,20 @@ class DashboardAuthService:
         (``UsernameRequiredError``); that refusal must not spend any rate-limit
         budget, and the route decides whether to audit it. Why a username did
         not resolve is kept on the target for the audit row only; the client
-        never learns it.
+        never learns it -- including when ``local_login_policy`` is what
+        refused the account.
         """
 
         auth_state = await self._repository.get_local_auth_state()
         if auth_state.active_local_password_users == 0:
             raise PasswordNotConfiguredError("Password is not configured")
+        policy = (await self._repository.get_settings()).local_login_policy
         if username is None:
             if auth_state.sole_local_password_user_id is None:
                 raise UsernameRequiredError("Username is required")
             user = await self._repository.get_user_by_id(auth_state.sole_local_password_user_id)
+            if user is not None and not local_login_admits(user, policy):
+                return LoginTarget(username=user.username, user=None, refusal_reason="login_policy")
             return LoginTarget(username=user.username if user is not None else None, user=user)
         normalized = normalize_username(username)
         if not is_valid_username(normalized):
@@ -741,6 +790,11 @@ class DashboardAuthService:
             return LoginTarget(username=normalized, user=None, refusal_reason="unknown_identity")
         if not _user_is_active(user):
             return LoginTarget(username=normalized, user=None, refusal_reason="disabled_user")
+        # A policy refusal drops the account exactly like an unknown username
+        # does: ``verify_user_password`` still runs its one hash comparison, so
+        # the answer, its body and its timing are the same.
+        if not local_login_admits(user, policy):
+            return LoginTarget(username=normalized, user=None, refusal_reason="login_policy")
         return LoginTarget(username=normalized, user=user)
 
     async def verify_user_password(
@@ -843,7 +897,19 @@ class DashboardAuthService:
         actor_ip: str | None = None,
         auth_method: str | None = None,
     ) -> None:
-        """Solo-install only: drop the user's credentials so the install is passwordless again."""
+        """Solo-install only: drop the user's credentials so the install is passwordless again.
+
+        "Solo" is every account the install holds, in any status -- not just
+        the active ones. A disabled account is still an account: it keeps its
+        role, its owned keys and (if it ever had one) its password hash, and
+        only an account with ``users:manage`` can bring it back. Removing the
+        last *active* password while one exists would hand the install to the
+        implicit local admin, which holds no account and therefore cannot
+        manage users at all, stranding the disabled row with no way to enable,
+        delete or sign in as it -- while the install-wide TOTP requirements
+        this write also clears were only ever justified by "this account *is*
+        the install". Deleting the other accounts first is the way through.
+        """
 
         if user.password_hash is None:
             raise PasswordNotConfiguredError("Password is not configured")
@@ -853,13 +919,21 @@ class DashboardAuthService:
         # invite would otherwise turn a passwordless install into one where
         # authentication is mandatory again but no admin holds a password.
         await self._repository.acquire_write_intent()
-        active_users = await self._repository.count_active_users()
+        counts = await self._repository.get_user_counts()
+        solo_install = counts.total == 1 and counts.active == 1
         identities = await self._repository.count_user_identities(user.id)
-        if active_users != 1 or identities or await self._repository.count_live_invites():
+        if not solo_install or identities or await self._repository.count_live_invites():
             raise OtherUsersExistError(
-                "Other users exist or invites are pending; log out everywhere or revoke pending invites instead"
+                "Other accounts exist or invites are pending; delete the other accounts "
+                "or revoke pending invites instead"
             )
-        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=active_users == 1)
+        assert_credential_remains(password_hash=None, identity_count=identities, solo_install=solo_install)
+        # Dropping the password is one more way to lose the last qualifying
+        # emergency account: a restricted policy would survive the removal, and
+        # the re-bootstrapped ``admin`` is designated but never qualifying, so
+        # the next sign-in would meet a door nothing can open. Same guard, same
+        # refusal, still under the write intent taken above.
+        await self._assert_break_glass_remains(user, has_password=False, has_totp=False)
         await self._repository.clear_user_credentials(user.id)
         AuditService.log_async(
             "password_removed",
@@ -991,6 +1065,18 @@ class DashboardAuthService:
             actor=actor,
             target=target,
         )
+        if user.is_break_glass:
+            # The emergency door was used. This is the first (and, with the CLI,
+            # one of two) critical-severity events the product writes: an
+            # operator reading the audit log must never have to infer it.
+            AuditService.log_async(
+                "break_glass_login",
+                actor_ip=actor_ip,
+                details={"method": "totp", "username": username},
+                actor=actor,
+                target=target,
+                severity=AuditSeverity.CRITICAL,
+            )
         # Honor the existing password-session expiry so that a TTL change
         # mid-flow (between password login and TOTP submission) cannot extend
         # an already-issued session, while still applying the TTL cap resolved
@@ -1006,7 +1092,19 @@ class DashboardAuthService:
         # long ago (and whoever holds the cookie could have enrolled the secret
         # themselves), so that path keeps whatever step-up the session already
         # carried and leaves /step-up to ask for the password.
-        completing_fresh_login = is_step_up_fresh(existing_state.issued_at, now=now)
+        #
+        # "A sign-in that just happened" means a *local password* sign-in. A
+        # session minted by the identity provider is fresh too, and its
+        # ``password_verified`` flag is set because that is the flag the gate
+        # reads — but no password was presented to obtain it. Without the
+        # method test, an account holding a password could sign in through
+        # single sign-on, enrol a TOTP secret, verify a code and hold a step-up
+        # covering every security mutation, having proven one of the two
+        # factors it is required to present. The OIDC step-up flow is the path
+        # for that account, and it refuses an account that holds a local factor.
+        completing_fresh_login = is_local_password_session(existing_state) and is_step_up_fresh(
+            existing_state.issued_at, now=now
+        )
         step_up_verified_at = now if completing_fresh_login else existing_state.step_up_verified_at
         new_session_id = self._session_store.create_user_session(
             user.id,
@@ -1016,6 +1114,7 @@ class DashboardAuthService:
             ttl_seconds=applied_ttl,
             auth_method=existing_state.auth_method or AUTH_METHOD_PASSWORD,
             step_up_verified_at=step_up_verified_at,
+            break_glass=user.is_break_glass,
         )
         return new_session_id, applied_ttl
 
@@ -1048,7 +1147,14 @@ class DashboardAuthService:
 
         resolved = resolved if resolved is not None else await self._require_totp_verified_session(session_id)
         user = resolved.user
+        # The code is consumed *first* because advancing the replay counter
+        # commits, and a commit between the guard's count and the secret write
+        # would drop the write-intent lock the guard took -- two concurrent
+        # disables would then both pass the count and clear both secrets. The
+        # cost is that a refused removal still spends the code the caller
+        # typed; the guard is what must not be racy.
         await self._consume_totp_code(user, code)
+        await self._assert_break_glass_remains(user, has_totp=False)
         await self._repository.set_user_totp_secret(user.id, None)
         AuditService.log_async(
             "totp_disabled",
@@ -1058,6 +1164,36 @@ class DashboardAuthService:
             target=_user_target(user),
         )
         return user
+
+    async def _assert_break_glass_remains(
+        self, user: DashboardUser, *, has_totp: bool | None = None, has_password: bool | None = None
+    ) -> None:
+        """The shared break-glass guard, reached from the self-service side.
+
+        Same function, same refusal as the management paths: an account that
+        is the install's only qualifying emergency account cannot remove its
+        own second factor (or its own password) while local sign-in is
+        restricted.
+
+        The caller must not commit between this call and its write: the write
+        intent taken here is what keeps two simultaneous removals from both
+        passing the count, and a commit releases it.
+        """
+
+        # Serialised with the management paths *before the policy is read*: the
+        # secret write has no conditional form, so the lock is what keeps two
+        # simultaneous removals from both passing the count -- and a policy read
+        # that happens outside it can be a tightening older than the guard, which
+        # would let this removal take the last qualifying account away.
+        await self._repository.acquire_write_intent()
+        settings = await self._repository.get_settings()
+        await assert_break_glass_remains(
+            user,
+            policy=settings.local_login_policy,
+            count_other_qualifying=lambda: self._repository.count_qualifying_break_glass(exclude_user_id=user.id),
+            has_totp=has_totp,
+            has_password=has_password,
+        )
 
     # --- step-up (per user) ---
 
@@ -1107,14 +1243,20 @@ class DashboardAuthService:
         self._session_store.delete(session_id)
 
 
-def step_up_state(user: DashboardUser, *, verified_at: int | None) -> DashboardStepUpState:
-    """The session response's ``step_up`` block: a still-fresh verification and the account's methods."""
+async def step_up_state(user: DashboardUser, *, verified_at: int | None) -> DashboardStepUpState:
+    """The session response's ``step_up`` block: a still-fresh verification and the account's methods.
+
+    Async because the methods come from :func:`account_step_up_methods`: what
+    the dashboard shows and what the gate accepts have to be the same list, and
+    for an account whose only factor is its identity provider that list is not
+    a property of the row alone.
+    """
 
     fresh = verified_at if is_step_up_fresh(verified_at, now=session_clock()) else None
     return DashboardStepUpState(
         verified_at=fresh,
         expires_at=step_up_expires_at(fresh) if fresh is not None else None,
-        methods=step_up_methods(user),
+        methods=await account_step_up_methods(user),
     )
 
 
@@ -1134,10 +1276,33 @@ _dashboard_session_store = DashboardSessionStore()
 _step_up_cookie_store = StepUpCookieStore()
 _totp_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="totp")
 _password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+#: The ceiling on failed password logins from one address, whatever usernames
+#: they name. The per-(address, username) bucket above keeps one account's
+#: failures from barring another, which also means one address can mint a fresh
+#: bucket per username it invents; without a coarse address bucket the endpoint
+#: has no ceiling at all and every attempt costs a blocking password-hash
+#: comparison on the event loop that serves the proxy.
+#:
+#: 60/60 s is seven and a half times the per-account allowance: a NATed office
+#: whose people are all mistyping at once never reaches it (one sign-in form
+#: submission is one request), while a sprayer behind one address is held to a
+#: bounded number of hash comparisons per minute. It is deliberately *not* the
+#: per-account limit, so the 8/60 s semantics and the tests that pin them are
+#: untouched.
+_password_address_rate_limiter = DatabaseRateLimiter(max_attempts=60, window_seconds=60, type="password_address")
 _guest_password_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="guest_password")
 #: Bounds the anonymous ``login_failed`` rows a client can append from refusals
 #: that by design spend no password budget (``username_required``).
 _login_failed_audit_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="login_failed_audit")
+#: The ceiling on the two public OIDC routes, per client address. One sign-in
+#: is two requests (start, callback), so 30/60 s is generous for a person and
+#: bounded for a client replaying a captured callback URL. It is deliberately
+#: never cleared on success: it is the endpoints' only ceiling.
+_oidc_address_rate_limiter = DatabaseRateLimiter(max_attempts=30, window_seconds=60, type="oidc_address")
+#: The per-``state`` budget on the callback, keyed on the hash so the table
+#: never holds a live state value. Same shape as ``invite_accept_token``: a
+#: legitimate flow spends one, a replay of one URL spends the rest.
+_oidc_state_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_seconds=60, type="oidc_callback_state")
 _invite_lookup_rate_limiter = DatabaseRateLimiter(max_attempts=30, window_seconds=60, type="invite_lookup")
 _invite_accept_rate_limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="invite_accept")
 _invite_accept_token_rate_limiter = DatabaseRateLimiter(max_attempts=5, window_seconds=60, type="invite_accept_token")
@@ -1159,12 +1324,24 @@ def get_password_rate_limiter() -> DatabaseRateLimiter:
     return _password_rate_limiter
 
 
+def get_password_address_rate_limiter() -> DatabaseRateLimiter:
+    return _password_address_rate_limiter
+
+
 def get_guest_password_rate_limiter() -> DatabaseRateLimiter:
     return _guest_password_rate_limiter
 
 
 def get_login_failed_audit_rate_limiter() -> DatabaseRateLimiter:
     return _login_failed_audit_rate_limiter
+
+
+def get_oidc_address_rate_limiter() -> DatabaseRateLimiter:
+    return _oidc_address_rate_limiter
+
+
+def get_oidc_state_rate_limiter() -> DatabaseRateLimiter:
+    return _oidc_state_rate_limiter
 
 
 def get_invite_lookup_rate_limiter() -> DatabaseRateLimiter:

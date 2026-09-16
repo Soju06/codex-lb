@@ -48,6 +48,11 @@ DASHBOARD_AUTH_GATED: dict[tuple[str, str], PermissionRequirement] = {
     ("POST", "/api/dashboard-auth/guest/password"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("DELETE", "/api/dashboard-auth/guest/password"): PermissionRequirement(Permission.SECURITY_WRITE),
     ("POST", "/api/dashboard-auth/guest/logout-all"): PermissionRequirement(Permission.SECURITY_WRITE),
+    # The OIDC pre-flight: a signed-in admin proving a connection before
+    # enabling it. ``/oidc/step-up/start`` is deliberately absent — it enforces
+    # its own account principal in the handler and requires no permission,
+    # because it exists for the account that cannot satisfy one yet.
+    ("POST", "/api/dashboard-auth/oidc/test-login/start"): PermissionRequirement(Permission.SECURITY_WRITE),
 }
 
 #: Routes whose permission requirement is part of the security contract.
@@ -75,6 +80,10 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/settings/upstream-proxy"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/settings/runtime/connect-address"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/sticky-sessions"): PermissionRequirement(Permission.OPS_WRITE),
+    # The cache isolation probe spends real account quota, so both its cost
+    # preview and its run sit on the operational write gate.
+    ("GET", "/api/diagnostics/cache-isolation-probe"): PermissionRequirement(Permission.OPS_WRITE),
+    ("POST", "/api/diagnostics/cache-isolation-probe/run"): PermissionRequirement(Permission.OPS_WRITE),
     ("GET", "/api/oauth/status"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
     # Pure account mutations (PR-2a): accounts:write suffices, the coarse alias is not required.
     ("POST", "/api/oauth/start"): PermissionRequirement(Permission.ACCOUNTS_WRITE),
@@ -143,6 +152,7 @@ STEP_UP_GATED: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/dashboard-users/{user_id}/revoke-sessions"),
         ("POST", "/api/dashboard-users/{user_id}/reactivate-keys"),
         ("PATCH", "/api/auth-providers/{provider_id}"),
+        ("POST", "/api/dashboard-auth/oidc/test-login/start"),
         ("POST", "/api/role-mappings"),
         ("PUT", "/api/role-mappings/order"),
         ("PATCH", "/api/role-mappings/{mapping_id}"),

@@ -29,3 +29,6 @@ Codex assigns a new root session UUID when it copies a conversation. The copied 
 
 ## Upgrade from the deployed fork
 The initial context revision was deployed on the August 30 migration head. Reparenting that same revision makes Alembic skip newly claimed ancestors on existing installations. Preserve the original parent and join the independent context branch and current upstream head with a merge revision. This supports both fresh upstream databases and the deployed fork without rewriting version rows.
+
+## September 16 integration
+The no-op migration `20260916_000000_merge_context_oidc_heads` joins the deployed context/authentication head with upstream's OIDC head. Earlier context ancestry is unchanged. Upstream deliberately retires the legacy credential mirror in `dashboard_settings`; the authoritative credentials in `dashboard_users`, context ownership, participants and encryption key must survive the upgrade. Stop older processes before migrating because they still map the removed mirror columns.

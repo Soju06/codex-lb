@@ -9,7 +9,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
@@ -1066,7 +1066,6 @@ async def test_dashboard_projections_ewma_tail_cap_matches_uncapped_history(asyn
     equivalent to the uncapped fetch: exact for the floor-covered weekly
     pace values, within floating-point noise for the EWMA-derived fields."""
     from app.db.models import UsageHistory
-    from app.db.session import engine
     from app.modules.dashboard import service as dashboard_service
     from app.modules.dashboard.repository import DashboardRepository
 

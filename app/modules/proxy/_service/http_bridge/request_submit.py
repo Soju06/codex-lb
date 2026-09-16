@@ -45,7 +45,14 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_SHARED,
+    ThreadCacheIdentity,
+    apply_thread_cache_identity,
+    thread_cache_identity_from,
+)
 from app.core.clock import REAL_CLOCK, Clock, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.errors import openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
@@ -218,6 +225,7 @@ from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.context_dispatch import context_dispatch_identity, record_context_dispatch
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
@@ -363,6 +371,52 @@ async def _rollback_http_bridge_recovery_turn_state_registration(
     return await _await_task_deferring_cancellation(rollback_task)
 
 
+def _bridge_thread_cache_identity(session: Any) -> ThreadCacheIdentity | None:
+    """The mode this bridge session sends under, or ``None`` for a pure no-op.
+
+    The bridge dispatches ``response.create`` itself rather than going through
+    ``_stream_responses_with_session``, so without this a thread served partly
+    by the bridge and partly by the per-turn bypass would alternate between a
+    scoped and an unscoped identity turn by turn — the worst possible outcome,
+    because upstream would see two names for one thread on one account.
+
+    The fleet value is read off the overlaid settings (dashboard over
+    environment over default). The per-API-key override is deliberately not
+    consulted here: this path holds only the key's id, not the row, and a
+    request that reaches the bridge has already had the override applied at
+    ingress when it was dispatched through the ordinary transport. Resolving it
+    a second time from a different source could disagree with that decision.
+    """
+
+    mode = getattr(with_dashboard_overrides(_service_get_settings()), "thread_cache_identity_mode", None)
+    identity = thread_cache_identity_from(mode, getattr(getattr(session, "account", None), "id", None))
+    return identity
+
+
+def _text_with_thread_cache_identity(text_data: str, identity: ThreadCacheIdentity | None) -> str:
+    """Scope the frame's thread identity for egress only.
+
+    Send-only, exactly like ``_text_with_operation_id``: the result is never
+    written back to ``request_state.request_text`` or
+    ``fresh_upstream_request_text``, because
+    ``_http_bridge_operation_fingerprint`` must keep hashing account-neutral
+    text. If a scoped value entered the durable fingerprint, every account swap
+    would change the operation identity and the spool lookup would miss
+    mid-recovery.
+    """
+
+    if identity is None or identity.mode == THREAD_CACHE_IDENTITY_MODE_SHARED:
+        return text_data
+    try:
+        frame = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(frame, dict):
+        return text_data
+    apply_thread_cache_identity(frame, identity)
+    return json.dumps(frame, ensure_ascii=True, separators=(",", ":"))
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
@@ -372,6 +426,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     clock: Clock = REAL_CLOCK,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
+    text_data = _text_with_thread_cache_identity(text_data, _bridge_thread_cache_identity(session))
     # Operation metadata is added after the initial payload sizing pass. Check
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
@@ -1545,7 +1600,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 operation, "rebound_from_parent_response_id", None
             )
             request_state.operation_persisted_response_id = getattr(operation, "response_id", None)
-            request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (
@@ -2068,12 +2122,20 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=request_state.session_id,
                             upstream_error_code="previous_response_not_found",
                         )
+                        # The fence sits above the pending-request enqueue and
+                        # the upstream send, so this refusal is proven to be
+                        # ours rather than an upstream transport failure. Say
+                        # so on the exception: without the flag the native
+                        # Codex lifecycle aborts the committed body with no
+                        # terminal event and the client sees an empty 200
+                        # (issue #2364).
                         raise ProxyResponseError(
                             502,
                             openai_error(
                                 "stream_incomplete",
                                 "The previous response anchor was rejected upstream; retry the request.",
                             ),
+                            local_pre_dispatch_refusal=True,
                         )
                     if (
                         request_state.verified_stale_anchor_replay
@@ -4247,6 +4309,7 @@ class _HTTPBridgeRequestSubmitMixin:
         previous_response_event_count = request_state.response_event_count
         previous_upstream_model_output_seen = request_state.upstream_model_output_seen
         previous_affinity_policy = request_state.affinity_policy
+        previous_affinity_observation = request_state.affinity_observation
         previous_session_affinity = session.affinity
         previous_session_codex_session = session.codex_session
         previous_session_upstream_turn_state = session.upstream_turn_state
@@ -4264,6 +4327,10 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=None,
             reallocate_sticky=True,
         )
+        if previous_affinity_observation is not None:
+            request_state.affinity_observation = AffinityObservation.retaining_source(
+                previous_affinity_observation.source, request_state.affinity_policy
+            )
         replacement_session_affinity = replace(
             session.affinity,
             key=None,
@@ -4454,6 +4521,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.upstream_model_output_seen = previous_upstream_model_output_seen
                 request_state.deferred_reasoning_downstream_texts = []
                 request_state.affinity_policy = previous_affinity_policy
+                request_state.affinity_observation = previous_affinity_observation
                 session.affinity = previous_session_affinity
                 session.codex_session = previous_session_codex_session
                 session.upstream_turn_state = previous_session_upstream_turn_state

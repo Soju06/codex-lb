@@ -87,7 +87,6 @@ export function RequestFilters({
           options={statusOptions}
           onChange={onStatusChange}
         />
-
         {filters.conversationId ? (
           <Badge variant="outline" className="h-8 gap-1.5 px-3 text-xs font-normal">
             <span className="max-w-[200px] truncate" title={filters.conversationId}>

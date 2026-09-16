@@ -4388,6 +4388,66 @@ def test_error_backoff_does_not_reset_when_still_active():
     assert state.error_count == 5
 
 
+def test_hard_owner_pool_admits_sole_backed_off_owner():
+    """A hard continuity owner has no sibling to fail over to.
+
+    Both existing fallback clauses ask whether the pool is empty for a reason
+    other than the backoff, and both answer by inspecting the *other*
+    accounts. A pool narrowed to the resolved owner has none, so without
+    ``hard_owner_pool`` the owner's own transient backoff fails the turn.
+    """
+    now = 1_700_000_000.0
+    owner = AccountState(
+        "owner",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+
+    result = select_account([owner], now=now, hard_owner_pool=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "owner"
+    # The backoff is honoured rather than cleared: the owner is admitted
+    # because it is the only candidate, and its counters survive for the next
+    # selection.
+    assert owner.error_count == 5
+    assert owner.last_error_at == now - 60
+
+
+def test_hard_owner_pool_still_fails_closed_on_persisted_unavailability():
+    now = 1_700_000_000.0
+    owner = AccountState(
+        "owner",
+        AccountStatus.PAUSED,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+
+    result = select_account([owner], now=now, hard_owner_pool=True)
+
+    assert result.account is None
+
+
+def test_hard_owner_pool_does_not_change_multi_account_selection():
+    now = 1_700_000_000.0
+    backed_off = AccountState(
+        "backed_off",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+    healthy = AccountState("healthy", AccountStatus.ACTIVE, used_percent=50.0)
+
+    result = select_account([backed_off, healthy], now=now, hard_owner_pool=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
+
+
 def test_error_backoff_expired_account_does_not_immediately_relock():
     now = 1_700_000_000.0
     state = AccountState(

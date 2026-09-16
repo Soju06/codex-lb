@@ -915,6 +915,7 @@ export function createDashboardSettings(
 		autoRedeemResetCreditsBeforeExpiry: false,
 		showResetCreditExpiryBadge: true,
 		routingStrategy: "usage_weighted",
+		subagentAccountPreference: "off",
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,

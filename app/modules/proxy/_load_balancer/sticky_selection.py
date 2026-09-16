@@ -873,6 +873,12 @@ async def run_sticky_selection_path(
                 routing_costs_by_account_id=effective_routing_costs,
                 allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                 usage_exhaustion_states=states,
+                # The pool is exactly the resolved owner, so a transient
+                # backoff on it leaves nothing to fail over to. Persisted
+                # unavailability (paused, deactivated, rate limited, quota
+                # exceeded, expired reauth) filters the owner out earlier and
+                # still fails closed here.
+                hard_owner_pool=True,
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
@@ -2248,6 +2254,7 @@ def _select_account_preferring_budget_safe(
     secondary_budget_threshold_pct: float = 100.0,
     apply_secondary_budget_threshold: bool = False,
     allow_backoff_fallback: bool = True,
+    hard_owner_pool: bool = False,
     deterministic_probe: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
@@ -2274,6 +2281,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
+            hard_owner_pool=hard_owner_pool,
             deterministic_probe=deterministic_probe,
             recovery_probe_only=True,
             relative_availability_power=relative_availability_power,
@@ -2308,6 +2316,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
+            hard_owner_pool=hard_owner_pool,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
@@ -2354,6 +2363,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
+            hard_owner_pool=hard_owner_pool,
             deterministic_probe=deterministic_probe,
             relative_availability_power=relative_availability_power,
             relative_availability_top_k=relative_availability_top_k,
@@ -2375,6 +2385,7 @@ def _select_account_preferring_budget_safe(
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
             allow_backoff_fallback=allow_backoff_fallback,
+            hard_owner_pool=hard_owner_pool,
             deterministic_probe=deterministic_probe,
             usage_weighted_order="primary_first",
             traffic_class=traffic_class,
@@ -2390,6 +2401,7 @@ def _select_account_preferring_budget_safe(
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,
         allow_backoff_fallback=allow_backoff_fallback,
+        hard_owner_pool=hard_owner_pool,
         deterministic_probe=deterministic_probe,
         relative_availability_power=relative_availability_power,
         relative_availability_top_k=relative_availability_top_k,

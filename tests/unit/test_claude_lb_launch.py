@@ -559,8 +559,8 @@ def test_interactive_launcher_uses_ready_probe_without_eager_claim(monkeypatch) 
     monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
     monkeypatch.setattr(
         launcher,
-        "_probe_health_at",
-        lambda url, retries, timeout, gap: (True, "", False),
+        "_probe_interactive_ready",
+        lambda url, timeout, retries, gap: ("ready", ""),
     )
     monkeypatch.setattr(
         launcher,
@@ -599,7 +599,6 @@ def test_interactive_launcher_waits_for_loaded_local_lb(monkeypatch, capsys) -> 
     probes = iter(
         [
             (False, "connection refused", True),
-            (False, "connection refused", True),
             (True, "", False),
         ]
     )
@@ -607,6 +606,11 @@ def test_interactive_launcher_waits_for_loaded_local_lb(monkeypatch, capsys) -> 
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("CLAUDE_LB_STARTUP_GRACE_SECONDS", "3")
     monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
+    monkeypatch.setattr(
+        launcher,
+        "_probe_interactive_ready",
+        lambda *args, **kwargs: ("unreachable", "connection refused"),
+    )
     monkeypatch.setattr(launcher, "_probe_health_at", lambda *args, **kwargs: next(probes))
     monkeypatch.setattr(launcher, "_local_launchd_job_loaded", lambda: True)
     monkeypatch.setattr(launcher.time, "monotonic", lambda: now[0])
@@ -626,8 +630,8 @@ def test_interactive_launcher_zero_grace_skips_launchd_check(monkeypatch) -> Non
     monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
     monkeypatch.setattr(
         launcher,
-        "_probe_health_at",
-        lambda *args, **kwargs: (False, "connection refused", True),
+        "_probe_interactive_ready",
+        lambda *args, **kwargs: ("unreachable", "connection refused"),
     )
     monkeypatch.setattr(
         launcher,
@@ -643,8 +647,8 @@ def test_interactive_launcher_never_applies_startup_grace_to_remote(monkeypatch)
     monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("remote", "https://studio.example:2455")])
     monkeypatch.setattr(
         launcher,
-        "_probe_health_at",
-        lambda *args, **kwargs: (False, "network unreachable", True),
+        "_probe_interactive_ready",
+        lambda *args, **kwargs: ("unreachable", "network unreachable"),
     )
     monkeypatch.setattr(
         launcher,
@@ -653,6 +657,160 @@ def test_interactive_launcher_never_applies_startup_grace_to_remote(monkeypatch)
     )
 
     assert launcher.prepare_interactive_endpoint() is False
+
+
+class _BlackHoleServer:
+    """Accepts TCP connections and never answers: an LB whose event loop is stalled."""
+
+    def __enter__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        return self
+
+    def __exit__(self, *exc):
+        self.sock.close()
+
+
+def _refused_url() -> str:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return f"http://127.0.0.1:{port}"
+
+
+def test_interactive_probe_reports_busy_on_timeout_without_retrying() -> None:
+    launcher = load_launcher_module()
+    with _BlackHoleServer() as lb:
+        started = time.monotonic()
+        state, error = launcher._probe_interactive_ready(lb.url, timeout=0.2, retries=3, gap=1.0)
+        elapsed = time.monotonic() - started
+    assert state == "busy"
+    assert error
+    assert elapsed < 1.0, f"a timed-out probe must not be retried (took {elapsed:.2f}s)"
+
+
+def test_interactive_probe_reports_unreachable_instantly() -> None:
+    launcher = load_launcher_module()
+    started = time.monotonic()
+    state, _ = launcher._probe_interactive_ready(_refused_url(), timeout=1.0, retries=3, gap=1.0)
+    elapsed = time.monotonic() - started
+    assert state == "unreachable"
+    assert elapsed < 0.5, f"refused must not sleep between retries (took {elapsed:.2f}s)"
+
+
+def test_interactive_probe_retries_error_responses(monkeypatch) -> None:
+    launcher = load_launcher_module()
+    import io
+    import urllib.error
+
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def not_ready(path, **kwargs):
+        attempts.append(1)
+        raise urllib.error.HTTPError(path, 503, "not ready", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(launcher, "lb_json", not_ready)
+    monkeypatch.setattr(launcher.time, "sleep", sleeps.append)
+
+    assert launcher._probe_interactive_ready("http://127.0.0.1:2455", timeout=1.0, retries=3, gap=0.5)[0] == "down"
+    assert len(attempts) == 3
+    assert sleeps == [0.5, 0.5]
+
+
+def test_interactive_launcher_routes_through_busy_lb(monkeypatch, capsys) -> None:
+    launcher = load_launcher_module()
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("CLAUDE_LB_STRICT_READY", raising=False)
+    monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
+    monkeypatch.setattr(launcher, "_probe_interactive_ready", lambda *args, **kwargs: ("busy", "timed out"))
+    monkeypatch.setattr(
+        launcher,
+        "_wait_for_local_startup",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("busy is not unreachable")),
+    )
+
+    assert launcher.prepare_interactive_endpoint() is True
+    assert launcher.AGENT_LB_BASE_URL == "http://127.0.0.1:2455"
+    assert "LB busy, routing anyway" in capsys.readouterr().err
+
+
+def test_interactive_launcher_strict_mode_treats_busy_as_down(monkeypatch) -> None:
+    launcher = load_launcher_module()
+    monkeypatch.setenv("CLAUDE_LB_STRICT_READY", "1")
+    monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
+    monkeypatch.setattr(launcher, "_probe_interactive_ready", lambda *args, **kwargs: ("busy", "timed out"))
+
+    assert launcher.prepare_interactive_endpoint() is False
+
+
+def test_headless_claim_defers_on_timeout_instead_of_failing() -> None:
+    launcher = load_launcher_module()
+    with _BlackHoleServer() as lb:
+        started = time.monotonic()
+        claim, error, retry_at = launcher.claim_session_route("s", "claude-fable-5-1", "k", lb.url, timeout=0.1)
+        elapsed = time.monotonic() - started
+    assert claim is launcher.DEFERRED_CLAIM
+    assert (error, retry_at) == ("", None)
+    # one retry with a doubled budget, then defer: ~0.1s + ~0.2s
+    assert 0.25 <= elapsed < 1.0, elapsed
+
+
+def test_headless_claim_still_fails_when_unreachable() -> None:
+    launcher = load_launcher_module()
+    claim, error, retry_at = launcher.claim_session_route("s", "claude-fable-5-1", "k", _refused_url(), timeout=0.5)
+    assert claim is None
+    assert error
+    assert retry_at is None
+
+
+def test_headless_banner_routes_through_deferred_claim(monkeypatch, capsys) -> None:
+    launcher = load_launcher_module()
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(launcher, "_lb_candidates", lambda: [("local", "http://127.0.0.1:2455")])
+    monkeypatch.setattr(
+        launcher,
+        "_claim_at_endpoint",
+        lambda url, session_id, model, quota_key, deadline, request_timeout=None: (launcher.DEFERRED_CLAIM, ""),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "lb_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("deferred claim must skip banner enrichment")),
+    )
+
+    assert launcher.print_lb_banner([], "session-1") is True
+    assert launcher.AGENT_LB_BASE_URL == "http://127.0.0.1:2455"
+    assert "LB busy, sticky account selected on first message" in capsys.readouterr().err
+
+
+def test_prune_stale_shim_files_only_touches_old_launcher_files(tmp_path) -> None:
+    launcher = load_launcher_module()
+    now = 1_700_000_000.0
+    old = now - launcher.SHIM_READY_FILE_MAX_AGE_SECONDS - 60
+    fresh = now - 60
+    for name, mtime in (
+        ("cc-1-1.proxy", old),
+        ("cc-2-2.proxy", fresh),
+        ("desktop.proxy", old),
+        ("other.proxy", old),
+        ("cc-3-3.proxy.tmp", old),
+    ):
+        path = tmp_path / name
+        path.write_text("1\n")
+        os.utime(path, (mtime, mtime))
+
+    assert launcher._prune_stale_shim_files(tmp_path, now=now) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "cc-2-2.proxy",
+        "cc-3-3.proxy.tmp",
+        "desktop.proxy",
+        "other.proxy",
+    ]
+    assert launcher._prune_stale_shim_files(tmp_path / "missing", now=now) == 0
 
 
 def test_local_launchd_check_uses_configured_label_and_timeout(monkeypatch) -> None:

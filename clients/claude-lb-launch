@@ -26,6 +26,14 @@
 #   CLAUDE_LB_LAUNCHD_LABEL  local launchd job label (default com.aneyman.agent-lb)
 #   CLAUDE_LB_STARTUP_GRACE_SECONDS  wait for a loaded local LB to become ready
 #                                    after connection refusal (default 90; 0 disables)
+#   CLAUDE_LB_LOCAL_READY_TIMEOUT    interactive readiness probe budget for the local
+#                                    LB (default 1.0s); CLAUDE_LB_REMOTE_READY_TIMEOUT
+#                                    for the remote one (default 3.0s). A probe that
+#                                    connects but times out means the LB is up but
+#                                    busy: the session routes through it anyway and the
+#                                    per-request shim retries absorb the stall.
+#   CLAUDE_LB_STRICT_READY=1  treat a busy (timed-out) LB as unavailable at startup,
+#                             restoring the pre-2026-09 retry-then-fallback behavior
 #   CC_EFFORT_LEVEL      passed through as --effort
 #   CC_PERMISSION_MODE   passed through as --permission-mode
 #   NO_COLOR             disable the colored banner
@@ -64,7 +72,7 @@ from pathlib import Path
 AGENT_LB_BASE_URL = os.environ.get("CLAUDE_LB_BASE_URL", "http://127.0.0.1:2455").rstrip("/")
 CCGPT_MODE = os.environ.get("CLAUDE_LB_CODEX_MODE") == "1"
 CCGPT_MODEL = "gpt-5.6-sol"
-DEFAULT_CLAUDE_MODEL = "claude-opus-5[1m]"
+DEFAULT_CLAUDE_MODEL = "claude-fable-5-1[1m]"
 DEFAULT_CLAUDE_EFFORT = "high"
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -769,8 +777,36 @@ def _proxy_port_ready(port: int, timeout: float = 0.4) -> bool:
         return False
 
 
+SHIM_READY_FILE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def _prune_stale_shim_files(shim_dir: Path, *, now: float | None = None) -> int:
+    """Drop per-session ready files older than a day. Each launch leaves a
+    `cc-<pid>-<epoch>.proxy` behind when the shim dies with its parent before
+    unlinking (observed 516 files after two months). Best-effort and bounded
+    to launcher-owned names; the shared desktop shim's file is never touched."""
+    cutoff = (time.time() if now is None else now) - SHIM_READY_FILE_MAX_AGE_SECONDS
+    removed = 0
+    try:
+        entries = list(os.scandir(shim_dir))
+    except OSError:
+        return 0
+    for entry in entries:
+        name = entry.name
+        if not (name.startswith("cc-") and name.endswith(".proxy")):
+            continue
+        try:
+            if entry.is_file(follow_symlinks=False) and entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                os.unlink(entry.path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def start_lb_proxy(session_id: str) -> str:
     ready = proxy_ready_path(session_id)
+    _prune_stale_shim_files(ready.parent)
     try:
         ready.unlink()
     except OSError:
@@ -953,6 +989,52 @@ def _is_unreachable_health_error(error: BaseException) -> bool:
         errno.ENETDOWN,
         errno.ENETUNREACH,
     }
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    """True when the endpoint accepted the connection but produced no response in
+    time: the LB process is alive but its event loop is stalled (or the front
+    proxy is holding the connection through a restart). Distinct from
+    unreachable, which means nothing is listening."""
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    return isinstance(reason, OSError) and reason.errno in {errno.ETIMEDOUT, errno.EAGAIN}
+
+
+def _probe_interactive_ready(base_url: str, *, timeout: float, retries: int, gap: float) -> tuple[str, str]:
+    """Bounded readiness probe for interactive startup.
+
+    Returns (state, error) with state one of:
+      ready        /health/ready answered 200
+      busy         the endpoint accepted the connection but did not answer within
+                   `timeout` — the LB is up but stalled; safe to route through
+      unreachable  nothing listening (refused / host or net unreachable)
+      down         answered with an error (e.g. 503 while booting) `retries` times
+
+    Only the `down` state pays for retries: a 503 comes back in milliseconds and
+    clears within a second or two of boot. A timeout is never retried, because
+    each retry against a stalled loop just burns the whole budget again
+    (observed 2026-09-16: 3 x 3s probes + gaps = 11s of dead startup while the
+    LB was alive and serving), and an unreachable endpoint fails instantly, so
+    the caller's launchd grace / next-candidate logic takes over at once.
+    """
+    last_error = "no response"
+    for attempt in range(max(1, retries)):
+        try:
+            lb_json("/health/ready", timeout=timeout, base_url=base_url)
+            return "ready", ""
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            last_error = str(error) or error.__class__.__name__
+            if _is_timeout_error(error):
+                return "busy", last_error
+            if _is_unreachable_health_error(error):
+                return "unreachable", last_error
+            if attempt + 1 < retries:
+                time.sleep(gap)
+    return "down", last_error
 
 
 def _probe_health_at(base_url: str, *, retries: int, timeout: float, gap: float) -> tuple[bool, str, bool]:
@@ -1317,23 +1399,44 @@ def wait_until_reset(retry_at: int, reason: str) -> None:
         time.sleep(min(remaining, 30.0))
 
 
+# Claim placeholder returned when the LB accepted the connection but could not
+# answer the claim in time. The session id still rides every proxied request,
+# so the LB performs the identical sticky selection on the first message; only
+# the pre-flight banner detail and eager reset-waiting are deferred, and
+# run_headless_with_resume() still waits out a limit that surfaces mid-run.
+DEFERRED_CLAIM: dict = {"deferred": True}
+
+
 def claim_session_route(
     session_id: str, model: str, quota_key: str, base_url: str, *, timeout: float | None = None
 ) -> tuple[dict | None, str, int | None]:
-    """Claim a sticky route at base_url. Returns (claim, error_message, retry_at_epoch)."""
-    try:
-        claim = lb_post_json(
-            "/api/anthropic/session-route",
-            {"sessionId": session_id, "model": model, "quotaKey": quota_key},
-            timeout=timeout if timeout is not None else _env_float("CLAUDE_LB_CLAIM_TIMEOUT", 5.0),
-            base_url=base_url,
-        )
-        return claim, "", None
-    except urllib.error.HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        return None, format_lb_pick_error(body), retry_at_from_error_body(body)
-    except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        return None, str(error), None
+    """Claim a sticky route at base_url. Returns (claim, error_message, retry_at_epoch).
+
+    A claim that times out (LB alive but stalled) is retried once with double
+    the budget, then reported as DEFERRED_CLAIM rather than as a failure, so a
+    stalled loop never silently pushes a headless run onto plain claude and
+    the local account.
+    """
+    budget = timeout if timeout is not None else _env_float("CLAUDE_LB_CLAIM_TIMEOUT", 5.0)
+    for attempt in range(2):
+        try:
+            claim = lb_post_json(
+                "/api/anthropic/session-route",
+                {"sessionId": session_id, "model": model, "quotaKey": quota_key},
+                timeout=budget * (attempt + 1),
+                base_url=base_url,
+            )
+            return claim, "", None
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            return None, format_lb_pick_error(body), retry_at_from_error_body(body)
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            if _is_timeout_error(error) and attempt == 0:
+                continue
+            if _is_timeout_error(error):
+                return DEFERRED_CLAIM, "", None
+            return None, str(error), None
+    return None, "claim retries exhausted", None
 
 
 def _claim_at_endpoint(
@@ -1418,6 +1521,14 @@ def print_lb_banner(argv: list[str], session_id: str) -> bool:
     if selected_label == "local":
         endpoint_note += " (local)"
 
+    if claim is DEFERRED_CLAIM:
+        print(
+            f"cc: {_c('Claude LB', '1;36')} · {model_label}/{quota_label} · LB busy, sticky account "
+            f"selected on first message {_c(endpoint_note, '2')}",
+            file=sys.stderr,
+        )
+        return True
+
     selected_account_id = str(claim.get("accountId") or "")
 
     try:
@@ -1477,37 +1588,39 @@ def prepare_interactive_endpoint() -> bool:
     """
     global AGENT_LB_BASE_URL
     failures: list[str] = []
-    # 3.0s (was 1.5s, was 0.35s): the front proxy holds and retries refused
-    # upstream connects every 500ms during short LB stalls, and on a heavily
-    # loaded host (observed 2026-07-17: load avg 260, /health/ready spiking to
-    # ~1.7s) every 1.5s attempt in the retry cycle timed out even though the LB
-    # was alive. The healthy path still returns in tens of ms; only an
-    # up-but-slow server pays this budget, which is exactly when waiting beats
-    # falling back to plain claude.
-    local_timeout = _env_float("CLAUDE_LB_LOCAL_READY_TIMEOUT", 3.0)
+    # The probe budget is the most an interactive launch waits on the LB. The
+    # healthy path answers in tens of ms. An LB that is up but stalled (event
+    # loop lag under heavy streaming load, observed 0.7-7s on 2026-09-16; the
+    # front proxy holding connections through a restart) times out and is
+    # routed through anyway: the session id carries the sticky selection to the
+    # first message, and the shim's per-request connect retries (~2 min budget)
+    # outlast a watchdog-driven LB recovery. Waiting longer here only delayed
+    # the prompt; falling back to plain claude was the outcome to avoid.
+    local_timeout = _env_float("CLAUDE_LB_LOCAL_READY_TIMEOUT", 1.0)
     remote_timeout = _env_float("CLAUDE_LB_REMOTE_READY_TIMEOUT", 3.0)
+    strict = os.environ.get("CLAUDE_LB_STRICT_READY") == "1"
     for label, url in _lb_candidates():
-        # 3 attempts spaced 1s apart: the LB event loop stalls in short bursts
-        # under heavy streaming load, and a single 0.35s probe landing inside
-        # one burst used to force the whole session onto plain-claude fallback
-        # (2026-07-16). The healthy path still returns on the first probe.
-        ready, error, unreachable = _probe_health_at(
+        state, error = _probe_interactive_ready(
             url,
-            retries=3,
             timeout=local_timeout if label == "local" else remote_timeout,
+            retries=3,
             gap=1.0,
         )
-        if label == "local" and not ready and unreachable:
-            ready = _wait_for_local_startup(url, probe_timeout=local_timeout)
-        if not ready:
+        if label == "local" and state == "unreachable":
+            if _wait_for_local_startup(url, probe_timeout=local_timeout):
+                state = "ready"
+        if state == "busy" and strict:
+            state = "down"
+        if state not in {"ready", "busy"}:
             failures.append(f"{label} ({url}): {error}")
             continue
         AGENT_LB_BASE_URL = url
         endpoint = urllib.parse.urlsplit(url).netloc or url
         suffix = " (local)" if label == "local" else ""
+        note = " · LB busy, routing anyway" if state == "busy" else ""
         print(
             f"cc: {_c('Claude LB', '1;36')} · sticky account selected on first message "
-            f"{_c(f'via {endpoint}{suffix}', '2')}",
+            f"{_c(f'via {endpoint}{suffix}{note}', '2')}",
             file=sys.stderr,
         )
         return True

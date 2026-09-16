@@ -3,7 +3,9 @@
   punctuation-insensitively. In `classify_upstream_failure`, raise an envelope
   whose message asserts the usage limit from `retryable_transient` to
   `rate_limit` ONLY when its normalized code is the `upstream_error` a missing
-  code normalizes to, or `invalid_request_error`. A code that already carries
+  code normalizes to. `invalid_request_error` is how upstream rejects a request
+  and a rejection often quotes the request back, so reading the phrase out of
+  client-supplied content would bench a healthy account. A code that already carries
   its own classification decision — rate-limit, quota, `overloaded_error`, any
   other transient code — keeps it, or this override silently reverses two
   existing requirements the delta never declares MODIFIED.

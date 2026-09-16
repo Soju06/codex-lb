@@ -4,7 +4,9 @@
 
 ### Requirement: Usage-limit messages classify as account rate limits
 
-When an upstream error envelope carries a message asserting that the account's usage limit has been reached, and its normalized error code is either the `upstream_error` value a missing code normalizes to or `invalid_request_error`, the proxy MUST classify the failure `rate_limit`. The override is deliberately limited to those two codes: a code that already carries its own classification decision — a rate-limit or quota code, `overloaded_error`, or any other transient code — keeps it, so this requirement cannot silently reverse "Model-capacity messages are retryable transient failures" or the rule that `overloaded_error` stays retryable regardless of status. Such a failure MUST NOT be classified `retryable_transient`, MUST NOT be treated as a burst rejection, and MUST NOT be answered with same-account backoff: the account is out of quota, so waiting on it cannot succeed.
+When an upstream error envelope carries a message asserting that the account's usage limit has been reached, and its normalized error code is the `upstream_error` value a missing code normalizes to, the proxy MUST classify the failure `rate_limit`. The override is deliberately limited to that one code.
+
+A code that already carries its own classification decision — a rate-limit or quota code, `overloaded_error`, or any other transient code — keeps it, so this requirement cannot silently reverse "Model-capacity messages are retryable transient failures" or the rule that `overloaded_error` stays retryable regardless of status. `invalid_request_error` is excluded for a different reason and it is the sharper one: that envelope is how upstream rejects a request, and a rejection frequently quotes the request back. A message reading the phrase out of content the client supplied would bench an account that is perfectly healthy, and benching is the expensive direction — the account leaves the pool until its reset deadline. An envelope that carries no code at all cannot be quoting anything. Such a failure MUST NOT be classified `retryable_transient`, MUST NOT be treated as a burst rejection, and MUST NOT be answered with same-account backoff: the account is out of quota, so waiting on it cannot succeed.
 
 This requirement does not change the classification of an envelope that already carries a quota or rate-limit code; that case keeps the stronger classification it has today.
 
@@ -19,11 +21,11 @@ Message matching MUST be punctuation-insensitive and MUST NOT depend on the HTTP
 - **AND** the failure is not a burst rejection
 - **AND** an unbound request excludes the account and continues the pool walk instead of waiting 1 s / 2 s / 4 s on it
 
-#### Scenario: Usage-limit message under a non-rate-limit code still rotates
+#### Scenario: A request rejection is never read from its message
 
-- **WHEN** upstream returns an envelope whose normalized error code is `invalid_request_error` and whose message asserts the usage limit has been reached
-- **THEN** `classify_upstream_failure` returns `failure_class = "rate_limit"`
-- **AND** the account's rate-limit health penalty is recorded as for any other rate-limit rejection
+- **WHEN** upstream returns an envelope whose normalized error code is `invalid_request_error`, whose message asserts the usage limit has been reached
+- **THEN** the classification is exactly what it is today
+- **AND** the account is not benched on the strength of a phrase that may have come from the request it is rejecting
 
 #### Scenario: A coded rate-limit envelope is unaffected
 

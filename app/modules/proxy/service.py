@@ -1446,17 +1446,81 @@ class ProxyService(
         if isinstance(affinity_policy, _AffinityPolicy):
             # Expand once at the compatibility edge so transport callers cannot drift.
             kwargs.update(affinity_policy.selection_kwargs())
+        parent_selection_key = kwargs.pop("subagent_parent_selection_key", None)
+        parent_response_marker_key = kwargs.pop("subagent_parent_response_marker_key", None)
+        response_bound_marker_key = kwargs.pop("response_bound_thread_marker_key", None)
+        parent_preference_applied = False
+        original_excluded = set(cast(Collection[str], kwargs.get("exclude_account_ids") or ()))
+        settings = await get_settings_cache().get()
+        preference_mode = getattr(settings, "subagent_account_preference", "off")
+        if (
+            isinstance(affinity_policy, _AffinityPolicy)
+            and preference_mode in {"parent_bound_only", "always"}
+            and kwargs.get("request_stage", "first_turn") == "first_turn"
+            and kwargs.get("preferred_account_id") is None
+            and isinstance(parent_selection_key, str)
+            and isinstance(parent_response_marker_key, str)
+            and affinity_policy.selection_key is not None
+            and affinity_policy.kind is not None
+        ):
+            async with self._repo_factory() as repos:
+                child_owner_id = await repos.sticky_sessions.get_account_id(
+                    affinity_policy.selection_key,
+                    kind=affinity_policy.kind,
+                    max_age_seconds=affinity_policy.max_age_seconds,
+                )
+                parent_owner_id: str | None = None
+                if child_owner_id is None:
+                    if preference_mode == "parent_bound_only":
+                        parent_owner_id = await repos.sticky_sessions.get_account_id(
+                            parent_response_marker_key,
+                            kind=StickySessionKind.CODEX_SESSION,
+                        )
+                    else:
+                        parent_owner_id = await repos.sticky_sessions.get_account_id(
+                            parent_selection_key,
+                            kind=StickySessionKind.PROMPT_CACHE,
+                            max_age_seconds=affinity_policy.max_age_seconds,
+                        )
+                        if parent_owner_id is None:
+                            parent_owner_id = await repos.sticky_sessions.get_account_id(
+                                parent_response_marker_key,
+                                kind=StickySessionKind.CODEX_SESSION,
+                            )
+                if parent_owner_id is not None and parent_owner_id not in original_excluded:
+                    kwargs["exclude_account_ids"] = {*original_excluded, parent_owner_id}
+                    parent_preference_applied = True
         required_capability_kwargs = {}
         if kwargs.get("require_security_work_authorized") is True:
             required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
                 "require_security_work_authorized"
             )
-        return await _call_with_supported_optional_kwargs(
+        selection = await _call_with_supported_optional_kwargs(
             self._select_account_with_budget,
             deadline,
             optional_kwargs=kwargs,
             **required_capability_kwargs,
         )
+        if selection.account is None and parent_preference_applied:
+            kwargs["exclude_account_ids"] = original_excluded
+            selection = await _call_with_supported_optional_kwargs(
+                self._select_account_with_budget,
+                deadline,
+                optional_kwargs=kwargs,
+                **required_capability_kwargs,
+            )
+        if (
+            selection.account is not None
+            and isinstance(response_bound_marker_key, str)
+            and kwargs.get("preferred_account_is_continuity_owner") is True
+        ):
+            async with self._repo_factory() as repos:
+                await repos.sticky_sessions.upsert(
+                    response_bound_marker_key,
+                    selection.account.id,
+                    kind=StickySessionKind.CODEX_SESSION,
+                )
+        return selection
 
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
@@ -1738,6 +1802,9 @@ class ProxyService(
         abandon_unavailable_legacy_owner: bool = False,
         require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
+        subagent_parent_selection_key: str | None = None,
+        subagent_parent_response_marker_key: str | None = None,
+        response_bound_thread_marker_key: str | None = None,
         prefer_earlier_reset_accounts: bool = False,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
@@ -1755,6 +1822,7 @@ class ProxyService(
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         redact_sensitive_details: bool = False,
     ) -> AccountSelection:
+        del subagent_parent_selection_key, subagent_parent_response_marker_key, response_bound_thread_marker_key
         remaining_budget = self._remaining_budget_seconds(deadline)
         if remaining_budget <= 0:
             logger.warning(

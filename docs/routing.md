@@ -17,6 +17,16 @@ For low-volume, policy-compliant personal use, start with **Capacity weighted** 
 
 Change the strategy live in the dashboard under **Settings → Routing** — no restart required.
 
+### Subagent account preference
+
+**Settings → Routing → Subagent account preference** can keep a fresh Codex subagent from initially consuming the same account as its parent:
+
+- **Off** preserves normal routing (the default after upgrade).
+- **Only when parent uses previous response IDs** activates the preference only after codex-lb has positively observed that exact parent thread route through account-owned `previous_response_id` continuity. A shared process session or parent header alone is not enough.
+- **Always for fresh subagents** applies whenever the exact parent account can be resolved.
+
+This is a first-placement preference, not per-request alternation. Once the child selects an account, its exact thread remains independently sticky. If no other account satisfies the normal model, API-key, security, quota, health, and concurrency gates, selection falls back to the parent's account. Child requests carrying their own response, conversation, turn-state, file, bridge, or source ownership are never moved by this setting.
+
 ## Inspect affinity decisions
 
 Request logs record `sticky_key_source`, `sticky_kind`, and `sticky_key_hash` for Responses and compact traffic without enabling trace logs. Callers with `conversations:read` permission can read them as `stickyKeySource`, `stickyKind`, and `stickyKeyHash` through `GET /api/request-logs`. Responses without that permission hide these fields.

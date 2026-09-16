@@ -152,6 +152,14 @@ The context ownership revision SHALL retain its original parent `20260830_000000
 - **AND** a target owned by another key is rejected before dispatch even after a cache miss
 
 
+
+#### Scenario: Recover a lost ledger after the context and OIDC merge
+- **GIVEN** the merged revision recorded its durable recovery marker and the Alembic ledger is lost or rewound
+- **WHEN** the installation upgrades again
+- **THEN** migration recovery SHALL restore the proven merged revision without recreating context tables or changing owners, participants or dashboard credentials
+- **AND** downgrading that merge SHALL remove its recovery marker
+- **AND** context tables alone MUST NOT authorize ledger recovery or table adoption
+
 ### Requirement: Preserve deployed migration identities during topology validation
 The topology guard SHALL permit only the exact deployed context/authentication merge timestamp collision with the upstream terminal-append revision, with their original parents unchanged. It MUST reject additional colliding revisions. A context branch merged into one connected acyclic head containing all upstream heads SHALL not be reported as an unrepaired fork. Missing upstream heads or multiple heads MUST still fail validation.
 

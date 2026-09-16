@@ -1,3 +1,16 @@
+# Current-main integration verification, September 16 (UTC)
+
+Integrated upstream `d1fd2f21fa0e0f3b5fcad3af5fada19693cd1fc1`, preserving early HTTP response ownership and affinity observations. Published context migration identities remain unchanged. A new merge joins the deployed context branch with upstream OIDC migrations. Its durable marker extends upstream ledger recovery so a lost or rewound ledger cannot replay the context ownership creation; downgrading the merge removes the marker. Tables without the marker still cannot be adopted.
+
+- Context, replay and transport suites: 973 passed. Separate deployment-only WebSocket fallback patch: 62 passed.
+- Dedicated PostgreSQL context/fork/ownership migration selection: 59 passed, 57 deselected.
+- Migration topology and affected access/migration suites: 38 passed. Credential ledger, context upgrade paths and HTTP/WebSocket affinity regressions after the recovery correction: 101 passed. Five additional recovery cases cover missing/truncated/rewound ledgers, rejection without proof, and downgrade/re-upgrade of the marker.
+- Frontend request-log schema suite: 43 passed; frontend lint, typecheck and image build passed. Python lint, architecture checks and full Ty passed.
+- A consistent production copy upgraded to the candidate with all pre-existing rows and retained columns hash-matching across the checked tables; SQLite integrity, foreign keys and schema drift passed. The only removed columns are the three upstream-retired dashboard credential mirrors. Account credentials and the encryption key remain preserved.
+- Codex CLI 0.154.0 completed native parent/fork notes turns. After restarting the isolated candidate, the updated app-bundled client recovered both notes and queried both histories in fresh client processes. Captured notes/history requests returned HTTP 200; parent and fork notes remained independent.
+
+These checks overlap and are not additive totals. No forced upstream outage, quota exhaustion or cross-replica recovery was exercised. Current-head GitHub checks and maintainer review remain separate publication gates. The WebSocket fallback patch stays outside this context PR.
+
 # Review corrections verification, September 11 (UTC)
 
 Integrated upstream `789a2dd3d658b9a9382d88338dd71684e6bd5c59` after correction commit `61a8140f`. The two new commits fix source-turn anchoring and archive landed OpenSpec changes. The sole conflict was the appended eventless-response requirement; it is retained alongside the context requirements. The source-pin and source-dispatch files match upstream exactly, and no migration was added. The affected source-pin, source-dispatch, subscription-overflow, context replay, pool and fork suites passed 330 tests after integration. Lint, full Ty and all 66 strict specs passed again. These tests overlap the broader correction suite below and are not additive totals.

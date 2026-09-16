@@ -1753,7 +1753,13 @@ async def _select_with_stickiness(
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
-                    allow_backoff_fallback=False,
+                    # Retaining a *soft* pinned owner is a locality preference
+                    # that may be declined so a sibling serves the turn. When
+                    # the owner is a hard continuity owner there is no sibling
+                    # to decline to, so its own transient backoff would fail
+                    # the turn outright.
+                    allow_backoff_fallback=hard_owner_pool,
+                    hard_owner_pool=hard_owner_pool,
                     relative_availability_power=relative_availability_power,
                     relative_availability_top_k=relative_availability_top_k,
                     traffic_class=traffic_class,
@@ -1809,7 +1815,8 @@ async def _select_with_stickiness(
                             prefer_earlier_reset=prefer_earlier_reset_accounts,
                             prefer_earlier_reset_window=prefer_earlier_reset_window,
                             routing_strategy=routing_strategy,
-                            allow_backoff_fallback=False,
+                            allow_backoff_fallback=hard_owner_pool,
+                            hard_owner_pool=hard_owner_pool,
                             relative_availability_power=relative_availability_power,
                             relative_availability_top_k=relative_availability_top_k,
                             traffic_class=traffic_class,

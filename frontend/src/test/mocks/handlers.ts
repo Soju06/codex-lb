@@ -234,6 +234,7 @@ const SettingsPayloadSchema = z.looseObject({
       "single_account",
     ])
     .optional(),
+  subagentAccountPreference: z.enum(["off", "parent_bound_only", "always"]).optional(),
   relativeAvailabilityPower: z.number().positive().optional(),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
   singleAccountId: z.string().nullable().optional(),

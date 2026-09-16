@@ -150,3 +150,25 @@ async def test_runtime_version_refetches_failed_lookup_after_failure_ttl() -> No
 
     assert recovered.latest_version == "1.20.0"
     assert recovered.update_available is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_version_treats_missing_release_as_settled_not_failure(caplog) -> None:
+    """A 404 from the releases API means the repo publishes no releases: no
+    warning traceback, and the answer is cached for the normal TTL."""
+    import logging
+
+    service = RuntimeVersionService(current_version="1.19.0", ttl_seconds=60, failure_ttl_seconds=0)
+    session = _mock_session(_mock_response(status=404, json_data={"message": "Not Found"}))
+
+    with patch("app.modules.runtime.service.aiohttp.ClientSession", return_value=session) as factory:
+        with caplog.at_level(logging.INFO, logger="app.modules.runtime.service"):
+            status = await service.get_version_status()
+            again = await service.get_version_status()
+
+    assert status.update_available is False
+    assert status.latest_version is None
+    assert again.checked_at == status.checked_at, "a 404 must be cached for the normal TTL"
+    assert factory.call_count == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("No published agent-lb release" in r.getMessage() for r in caplog.records)

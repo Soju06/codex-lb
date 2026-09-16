@@ -24,6 +24,10 @@ _VERSION_RE = re.compile(
 )
 
 
+class _NoPublishedRelease(Exception):
+    """GitHub answered 404 for the latest release: the repo has none."""
+
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeVersionSnapshot:
     current_version: str
@@ -74,6 +78,18 @@ class RuntimeVersionService:
         checked_at = utcnow()
         try:
             latest_version = await self._fetch_latest_release_version()
+        except _NoPublishedRelease:
+            # Expected for a fork or a repo without releases: nothing to compare
+            # against, so this is a settled answer (normal TTL), not a failure
+            # worth a traceback every failure_ttl.
+            logger.info("No published agent-lb release on GitHub; update checks report current only")
+            return _RuntimeVersionSnapshot(
+                current_version=self._current_version,
+                latest_version=None,
+                update_available=False,
+                checked_at=checked_at,
+                source="github",
+            )
         except Exception:
             logger.warning("Failed to fetch latest agent-lb release from GitHub", exc_info=True)
             return _RuntimeVersionSnapshot(
@@ -104,6 +120,8 @@ class RuntimeVersionService:
             headers["Authorization"] = f"Bearer {github_token}"
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(_GITHUB_LATEST_RELEASE_URL, headers=headers) as response:
+                if response.status == 404:
+                    raise _NoPublishedRelease()
                 if response.status != 200:
                     raise RuntimeError(f"GitHub releases API returned HTTP {response.status}")
                 data = await response.json()

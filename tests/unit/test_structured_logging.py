@@ -290,3 +290,59 @@ def test_build_log_config_exposes_app_loggers_via_root_handler(monkeypatch):
     assert root_logger.get("handlers") == ["default"]
     assert root_logger.get("level") == "INFO"
     get_settings.cache_clear()
+
+
+def test_build_log_config_queues_stream_handlers(monkeypatch):
+    from typing import cast
+
+    monkeypatch.setenv("AGENT_LB_LOG_FORMAT", "text")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    config = build_log_config()
+    handlers = cast(dict, config["handlers"])
+    for name in ("default", "access"):
+        queued = cast(dict, handlers[name])
+        assert queued["class"] == "logging.handlers.QueueHandler"
+        assert queued["handlers"] == [f"{name}_stream"]
+        stream = cast(dict, handlers[f"{name}_stream"])
+        assert stream["class"] == "logging.StreamHandler"
+    get_settings.cache_clear()
+
+
+def test_configure_runtime_logging_emits_through_listener(monkeypatch, capsys):
+    """A record logged on the caller's thread reaches stderr via the listener
+    thread, formatted by the stream handler (asctime + level + message)."""
+    import logging as _logging
+    import time as _time
+
+    from app.core.runtime_logging import configure_runtime_logging, start_log_listeners
+
+    monkeypatch.setenv("AGENT_LB_LOG_FORMAT", "text")
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+    root = _logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+    try:
+        configure_runtime_logging()
+        queue_handler = _logging.getHandlerByName("default")
+        assert queue_handler.__class__.__name__ == "QueueHandler"
+        listeners = start_log_listeners()  # idempotent: already started
+        assert listeners and all(getattr(item, "_thread", None) is not None for item in listeners)
+        _logging.getLogger("app.test.queued").info("queued-hello %s", 42)
+        deadline = _time.monotonic() + 5
+        while _time.monotonic() < deadline:
+            err = capsys.readouterr().err
+            if "queued-hello 42" in err:
+                break
+            _time.sleep(0.02)
+        else:
+            raise AssertionError("listener never flushed the record")
+        assert "app.test.queued" in err
+    finally:
+        for listener in start_log_listeners():
+            listener.stop()
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+        get_settings.cache_clear()

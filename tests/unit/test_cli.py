@@ -15,6 +15,13 @@ from app.core.runtime_logging import UtcDefaultFormatter
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _stub_runtime_logging(monkeypatch):
+    """cli.main() configures process-wide logging; keep that out of the test
+    process unless a test replaces the stub itself."""
+    monkeypatch.setattr(cli, "_configure_logging", lambda: {})
+
+
 def test_main_passes_timestamped_log_config(monkeypatch):
     captured: dict[str, Any] = {}
 
@@ -24,14 +31,26 @@ def test_main_passes_timestamped_log_config(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["agent-lb"])
     monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+    from app.core.runtime_logging import build_log_config
+
+    applied: list[dict[str, Any]] = []
+
+    def fake_configure_logging() -> dict[str, Any]:
+        config = build_log_config()
+        applied.append(config)
+        return config
+
+    monkeypatch.setattr(cli, "_configure_logging", fake_configure_logging)
 
     cli.main()
 
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
-    log_config = kwargs["log_config"]
-    assert isinstance(log_config, dict)
-    formatters = log_config["formatters"]
+    # The CLI applies the config itself (its queue listeners must be started
+    # in-process); uvicorn must not re-apply one.
+    assert kwargs["log_config"] is None
+    assert len(applied) == 1
+    formatters = applied[0]["formatters"]
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200

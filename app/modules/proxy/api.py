@@ -762,13 +762,22 @@ async def v1_messages(
             alias_effort=alias_effort,
             locked_model=locked_model,
         )
+    resolved_request = await context.service.resolve_message_request(payload)
+    payload = resolved_request.payload
     validate_model_access(api_key, payload.model)
     try:
+        # Only API-key traffic is reservation-limited; OAuth sessions skip the
+        # estimate entirely. The raw body is already buffered by Starlette, so
+        # sizing it is O(1) instead of re-serializing a multi-MB 1M-context
+        # request on the event loop (sampled mid-stall 2026-09-16).
+        request_usage_budget = (
+            _estimate_anthropic_request_usage(payload, raw_body=await request.body()) if api_key is not None else None
+        )
         reservation = await _enforce_request_limits(
             api_key,
             request_model=payload.model,
             request_service_tier=None,
-            request_usage_budget=_estimate_anthropic_request_usage(payload),
+            request_usage_budget=request_usage_budget,
         )
     except ProxyRateLimitError as exc:
         return _anthropic_error_response(429, "rate_limit_error", str(exc))
@@ -3525,14 +3534,30 @@ async def _opportunistic_admission_denial(
     )
 
 
-def _estimate_anthropic_request_usage(payload: AnthropicMessageRequest) -> ApiKeyRequestUsageBudget:
-    data = payload.model_dump(mode="json", exclude_none=True)
-    data.pop("model", None)
-    data.pop("max_tokens", None)
-    data.pop("stream", None)
-    serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
+def _estimate_anthropic_request_usage(
+    payload: AnthropicMessageRequest, *, raw_body: bytes | None = None
+) -> ApiKeyRequestUsageBudget:
+    """Bounded input budget for API-key reservation admission.
+
+    The budget is the serialized request size capped at
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET (8k), so any body past the cap
+    resolves to the cap. With ``raw_body`` the size comes from the bytes the
+    client sent (a few bytes above the old model/max_tokens/stream-stripped
+    serialization, still a conservative reservation) without re-serializing
+    the payload; the re-serialization stays only as the fallback for callers
+    that have no raw body.
+    """
+    if raw_body is not None:
+        size = len(raw_body)
+    else:
+        data = payload.model_dump(mode="json", exclude_none=True)
+        data.pop("model", None)
+        data.pop("max_tokens", None)
+        data.pop("stream", None)
+        serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
+        size = len(serialized.encode("utf-8"))
     return ApiKeyRequestUsageBudget(
-        input_tokens=min(len(serialized.encode("utf-8")), API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET),
+        input_tokens=min(size, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET),
         output_tokens=payload.max_tokens,
     )
 

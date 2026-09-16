@@ -85,10 +85,18 @@ class QuotaPlannerScheduler:
                 runtime={},
             )
             now = datetime.now(timezone.utc)
-            demand_bins = await planner_repo.aggregate_demand_bins()
-            forecast = build_demand_forecast(settings=settings, bins=demand_bins, now=now)
-            base_simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast, now=now)
-            actions = plan_shadow_actions(settings=settings, states=states, demand_forecast=forecast, now=now)
+            demand_bins = await planner_repo.aggregate_demand_slots()
+            # Pure CPU work over thousands of rows and a 36h slot grid; keep
+            # it off the event loop so /health/ready and streaming stay
+            # responsive during the tick (5-7s loop stalls sampled here on
+            # 2026-09-16 under host load).
+            forecast = await asyncio.to_thread(build_demand_forecast, settings=settings, bins=demand_bins, now=now)
+            base_simulation = await asyncio.to_thread(
+                simulate_pool, settings=settings, states=states, demand_forecast=forecast, now=now
+            )
+            actions = await asyncio.to_thread(
+                plan_shadow_actions, settings=settings, states=states, demand_forecast=forecast, now=now
+            )
             if not actions:
                 target_peak_at = forecast.peak_slot_start.isoformat() if forecast.peak_slot_start else None
                 await planner_repo.log_decision(
@@ -115,7 +123,8 @@ class QuotaPlannerScheduler:
                     ),
                 )
                 return
-            scenario = simulate_pool(
+            scenario = await asyncio.to_thread(
+                simulate_pool,
                 settings=settings,
                 states=states,
                 demand_forecast=forecast,

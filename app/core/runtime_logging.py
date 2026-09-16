@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import copy
 import json
 import logging
+import logging.config
+import logging.handlers
 import re
 import time
 from collections.abc import Callable
@@ -183,7 +186,72 @@ def build_log_config() -> LogConfig:
         "handlers": ["default"],
         "level": "INFO",
     }
+    _queue_stream_handlers(handlers)
     return cast(LogConfig, config)
+
+
+# Names of the stream handlers uvicorn's config defines; both write to a
+# launchd-redirected file in production.
+_QUEUED_HANDLER_NAMES = ("default", "access")
+_STREAM_SUFFIX = "_stream"
+
+
+def _queue_stream_handlers(handlers: dict[str, object]) -> None:
+    """Put every stream handler behind a QueueHandler/QueueListener pair.
+
+    ``StreamHandler.emit`` is a blocking ``write`` to stderr/stdout, and under
+    launchd those are files on a disk the whole host is contending for. A
+    single slow write parks the event loop with every stream in flight
+    (sampled mid-stall at ``logging.emit`` on 2026-09-10, 2026-09-12). The
+    QueueHandler makes emit a ``queue.put_nowait``; the listener thread does
+    the write. ``configure_runtime_logging()`` starts the listeners.
+    """
+    for name in _QUEUED_HANDLER_NAMES:
+        stream = handlers.get(name)
+        if not isinstance(stream, dict) or stream.get("class") == "logging.handlers.QueueHandler":
+            continue
+        stream_name = f"{name}{_STREAM_SUFFIX}"
+        handlers[stream_name] = stream
+        handlers[name] = {
+            "class": "logging.handlers.QueueHandler",
+            "handlers": [stream_name],
+            "respect_handler_level": True,
+        }
+
+
+def start_log_listeners() -> list[logging.handlers.QueueListener]:
+    """Start the QueueListener behind each queued handler (idempotent)."""
+    started: list[logging.handlers.QueueListener] = []
+    for name in _QUEUED_HANDLER_NAMES:
+        handler = logging.getHandlerByName(name)
+        listener = getattr(handler, "listener", None)
+        if listener is None:
+            continue
+        if getattr(listener, "_thread", None) is None:
+            listener.start()
+            atexit.register(_stop_listener, listener)
+        started.append(listener)
+    return started
+
+
+def _stop_listener(listener: logging.handlers.QueueListener) -> None:
+    try:
+        if getattr(listener, "_thread", None) is not None:
+            listener.stop()
+    except Exception:  # noqa: BLE001 - shutdown must never raise
+        pass
+
+
+def configure_runtime_logging() -> LogConfig:
+    """Apply build_log_config() to the process and start its listeners.
+
+    The CLI calls this before uvicorn.run() and passes ``log_config=None`` so
+    uvicorn does not re-apply a config whose listeners nobody started.
+    """
+    config = build_log_config()
+    logging.config.dictConfig(cast(dict[str, object], config))
+    start_log_listeners()
+    return config
 
 
 def log_error_response(

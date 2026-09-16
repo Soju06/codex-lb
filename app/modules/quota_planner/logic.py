@@ -54,10 +54,12 @@ class PlannerAction:
 
 
 class DemandBinLike(Protocol):
+    """What build_demand_forecast() reads from a demand row. Per-account,
+    per-key and per-model dimensions are deliberately absent: the forecast
+    only sums units per time slot, so the repository can aggregate to
+    (slot, request_kind) and hand the loop ~6x fewer rows."""
+
     slot_epoch: int
-    api_key_id: str | None
-    model: str
-    reasoning_effort: str | None
     request_kind: str
     input_tokens: int
     cached_input_tokens: int

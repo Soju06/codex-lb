@@ -37,6 +37,20 @@ class DemandBin:
     request_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class DemandSlot:
+    """Demand aggregated to one (time slot, request_kind) cell — the only
+    granularity build_demand_forecast() consumes."""
+
+    slot_epoch: int
+    request_kind: str
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    request_count: int
+
+
 class QuotaPlannerRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -230,6 +244,60 @@ class QuotaPlannerRepository:
             await self._session.commit()
             await self._session.refresh(row)
         return row
+
+    async def aggregate_demand_slots(
+        self,
+        *,
+        since: datetime | None = None,
+        bucket_seconds: int = 900,
+    ) -> list[DemandSlot]:
+        """Demand per (slot, request_kind) for the forecast.
+
+        aggregate_demand_bins() also splits by account, key, model, effort and
+        status, which the forecast then re-sums per slot in Python on the
+        event loop: 13.9k rows for 28 days on 2026-09-16 versus 2.3k here.
+        Both the 5-minute scheduler tick and the /forecast endpoint use this.
+        """
+        since = since or (utcnow() - timedelta(days=28))
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+        else:
+            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_col = bucket_expr.label("slot_epoch")
+        request_kind = func.coalesce(RequestLog.request_kind, literal("real")).label("request_kind")
+        stmt = (
+            select(
+                bucket_col,
+                request_kind,
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    0,
+                ).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.count(RequestLog.id).label("request_count"),
+            )
+            .where(and_(RequestLog.requested_at >= since, RequestLog.deleted_at.is_(None)))
+            .group_by(bucket_col, request_kind)
+            .order_by(bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            DemandSlot(
+                slot_epoch=int(row.slot_epoch),
+                request_kind=row.request_kind,
+                input_tokens=int(row.input_tokens or 0),
+                cached_input_tokens=int(row.cached_input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cost_usd=float(row.cost_usd or 0.0),
+                request_count=int(row.request_count or 0),
+            )
+            for row in result.all()
+        ]
 
     async def aggregate_demand_bins(
         self,

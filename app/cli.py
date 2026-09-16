@@ -101,6 +101,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     timeout_graceful_shutdown = _parse_server_timeout_graceful_shutdown(args.timeout_graceful_shutdown)
     os.environ["PORT"] = str(port)
 
+    _configure_logging()
     _load_uvicorn().run(
         "app.main:app",
         host=args.host,
@@ -124,7 +125,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         # whole proxy (sampled mid-stall 2026-07-11). Clients are on
         # localhost/tailnet, so the bandwidth saving is worthless here.
         ws_per_message_deflate=False,
-        log_config=_build_log_config(),
+        # Logging is configured (and its queue listeners started) before
+        # uvicorn runs; None keeps uvicorn from re-applying a config whose
+        # listeners nobody would start.
+        log_config=None,
     )
 
 
@@ -134,10 +138,10 @@ def _load_uvicorn():
     return uvicorn
 
 
-def _build_log_config() -> "LogConfig":
-    from app.core.runtime_logging import build_log_config
+def _configure_logging() -> "LogConfig":
+    from app.core.runtime_logging import configure_runtime_logging
 
-    return build_log_config()
+    return configure_runtime_logging()
 
 
 def _parse_server_port(raw_port: str) -> int:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Body, Depends, Query, Request
@@ -202,8 +203,10 @@ async def get_quota_planner_forecast(
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
 ) -> QuotaPlannerForecastResponse:
     settings = await context.repository.get_settings()
-    demand_bins = await context.repository.aggregate_demand_bins()
-    forecast = build_demand_forecast(settings=settings, bins=demand_bins, horizon_hours=horizon_hours)
+    demand_bins = await context.repository.aggregate_demand_slots()
+    forecast = await asyncio.to_thread(
+        build_demand_forecast, settings=settings, bins=demand_bins, horizon_hours=horizon_hours
+    )
     accounts = await AccountsRepository(context.session).list_accounts()
     usage_repo = UsageRepository(context.session)
     latest_primary = await usage_repo.latest_by_account()
@@ -216,7 +219,7 @@ async def get_quota_planner_forecast(
         latest_monthly=latest_monthly,
         runtime={},
     )
-    simulation = simulate_pool(settings=settings, states=states, demand_forecast=forecast)
+    simulation = await asyncio.to_thread(simulate_pool, settings=settings, states=states, demand_forecast=forecast)
     return _forecast_response(forecast, simulation)
 
 

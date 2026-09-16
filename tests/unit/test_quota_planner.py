@@ -435,3 +435,53 @@ def test_build_demand_forecast_uses_current_proxy_history_rows() -> None:
     peak_slot = next(slot for slot in forecast.slots if slot.slot_start.hour == 10)
 
     assert peak_slot.demand_units == pytest.approx(60.6)
+
+
+def test_forecast_accepts_lean_demand_slots() -> None:
+    """The repository's (slot, request_kind) aggregation satisfies the forecast
+    protocol and yields the same units as the wide per-account bins."""
+    from app.modules.quota_planner.repository import DemandSlot
+
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        max_warmups_per_day=1,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    history_slot = int(datetime(2026, 5, 11, 10, 0, tzinfo=timezone.utc).timestamp())
+    wide = [
+        DemandBin(
+            slot_epoch=history_slot,
+            account_id=account,
+            api_key_id="key",
+            model="gpt-5.4",
+            reasoning_effort=None,
+            request_kind="real",
+            status="ok",
+            input_tokens=10_000,
+            cached_input_tokens=0,
+            output_tokens=1_000,
+            cost_usd=0.0,
+            request_count=2,
+        )
+        for account in ("acc-a", "acc-b")
+    ]
+    lean = [
+        DemandSlot(
+            slot_epoch=history_slot,
+            request_kind="real",
+            input_tokens=20_000,
+            cached_input_tokens=0,
+            output_tokens=2_000,
+            cost_usd=0.0,
+            request_count=4,
+        )
+    ]
+    from_wide = build_demand_forecast(settings=settings, bins=wide, now=now)
+    from_lean = build_demand_forecast(settings=settings, bins=lean, now=now)
+    assert from_lean.total_demand_units == from_wide.total_demand_units
+    assert from_lean.peak_slot_start == from_wide.peak_slot_start

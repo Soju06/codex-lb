@@ -93,3 +93,33 @@ def test_estimate_api_key_request_usage_uses_conservative_input_for_file_referen
     budget = estimate_api_key_request_usage(payload)
 
     assert budget.input_tokens is None
+
+
+def test_anthropic_estimate_uses_raw_body_size_without_reserializing() -> None:
+    from app.core.anthropic.models import AnthropicMessageRequest
+    from app.modules.proxy.api import _estimate_anthropic_request_usage
+
+    payload = AnthropicMessageRequest.model_validate(
+        {"model": "claude-fable-5-1", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
+    )
+    calls: list[str] = []
+    payload.model_dump = lambda *a, **k: calls.append("dump") or {}  # type: ignore[method-assign]
+
+    small = _estimate_anthropic_request_usage(payload, raw_body=b"x" * 100)
+    assert small.input_tokens == 100
+    assert small.output_tokens == 64
+
+    huge = _estimate_anthropic_request_usage(payload, raw_body=b"x" * (4 * 1024 * 1024))
+    assert huge.input_tokens == API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
+    assert calls == [], "raw-body sizing must not re-serialize the payload"
+
+
+def test_anthropic_estimate_falls_back_to_serialization_without_raw_body() -> None:
+    from app.core.anthropic.models import AnthropicMessageRequest
+    from app.modules.proxy.api import _estimate_anthropic_request_usage
+
+    payload = AnthropicMessageRequest.model_validate(
+        {"model": "claude-fable-5-1", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}
+    )
+    budget = _estimate_anthropic_request_usage(payload)
+    assert 0 < budget.input_tokens < API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET

@@ -34,12 +34,8 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.thread_cache_identity import ThreadCacheIdentity
 from app.core.clock import clock_for, scheduler_for
-from app.core.errors import (
-    PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
-)
-from app.core.errors import (
-    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
-)
+from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE
+from app.core.errors import PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
 from app.core.errors import synthetic_stream_failure_event as response_failed_event
 from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
 from app.core.openai.requests import ResponsesRequest
@@ -55,15 +51,9 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
-from app.modules.proxy._service.compact import (
-    _service_tier_from_compact_payload as _service_tier_from_compact_payload,
-)
-from app.modules.proxy._service.compact import (
-    _sticky_key_for_compact_request as _sticky_key_for_compact_request,
-)
-from app.modules.proxy._service.compact import (
-    _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
-)
+from app.modules.proxy._service.compact import _service_tier_from_compact_payload as _service_tier_from_compact_payload
+from app.modules.proxy._service.compact import _sticky_key_for_compact_request as _sticky_key_for_compact_request
+from app.modules.proxy._service.compact import _sticky_key_from_compact_payload as _sticky_key_from_compact_payload
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
@@ -109,9 +99,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_has_durable_recovery_anchor as _http_bridge_has_durable_recovery_anchor,
 )
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_input_item_type as _http_bridge_input_item_type,
-)
+from app.modules.proxy._service.http_bridge.helpers import _http_bridge_input_item_type as _http_bridge_input_item_type
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_context_overflow_error as _http_bridge_is_context_overflow_error,
 )
@@ -397,6 +385,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,  # noqa: F401
 )
 from app.modules.proxy.affinity_observation import AffinityObservation
+from app.modules.proxy.context_dispatch import record_context_dispatch
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -582,6 +571,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             }
             if upstream_stream_transport is not None:
                 stream_optional_kwargs["upstream_stream_transport_override"] = upstream_stream_transport
+            await record_context_dispatch(payload, api_key, account.id, record_participant=False)
             stream = _facade()._call_stream_with_supported_optional_kwargs(
                 _facade().core_stream_responses,
                 payload,
@@ -633,6 +623,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
             event_type = classify_event_type(first_payload)
+            context_participant_recorded = event_type is not None
+            if context_participant_recorded:
+                await record_context_dispatch(payload, api_key, account.id)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -782,7 +775,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
-                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                if context_participant_recorded and (
+                    verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas)
+                ):
                     await _touch_api_key_reservation()
                     if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         saw_text_delta = settlement.downstream_text_visible = True
@@ -791,6 +786,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                     continue
                 event_payload = parse_sse_data_json(line)
                 event_type = classify_event_type(event_payload)
+                if not context_participant_recorded and event_type is not None:
+                    await record_context_dispatch(payload, api_key, account.id)
+                    context_participant_recorded = True
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"

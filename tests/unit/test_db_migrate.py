@@ -1624,6 +1624,9 @@ def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).begin() as connection:
+        # The simulated historical revision predates the context tables.
+        connection.execute(text("DROP TABLE codex_context_participants"))
+        connection.execute(text("DROP TABLE codex_context_sessions"))
         connection.execute(
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "013_add_dashboard_settings_routing_strategy"},
@@ -1642,6 +1645,9 @@ def test_run_upgrade_auto_remaps_legacy_routing_security_merge_head(tmp_path: Pa
 
     sync_url = to_sync_database_url(url)
     with create_engine(sync_url, future=True).begin() as connection:
+        # The simulated historical revision predates the context tables.
+        connection.execute(text("DROP TABLE codex_context_participants"))
+        connection.execute(text("DROP TABLE codex_context_sessions"))
         connection.execute(
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "20260525_000000_merge_routing_settings_security_heads"},
@@ -3012,3 +3018,49 @@ def test_a_multi_head_ledger_does_not_break_the_drain_check(tmp_path: Path, capl
     with caplog.at_level("WARNING", logger="app.db.migrate"):
         check_legacy_credential_drop(config, forked, "head", has_existing_schema=True)
     assert len(_drain_warnings(caplog)) == 1
+
+
+@pytest.mark.parametrize("ledger_state", ["dropped", "truncated", "rewound", "unproven"])
+def test_context_merge_recovery_preserves_ownership(tmp_path: Path, ledger_state: str) -> None:
+    database = tmp_path / "context-ledger.db"
+    url = _db_url(database)
+    run_upgrade(url, "head", bootstrap_legacy=False)
+    owner = ("00000000-0000-4000-8000-000000000011", "key", "owner")
+    with sqlite3.connect(database) as db:
+        db.execute("INSERT INTO codex_context_sessions VALUES (?, ?, ?)", owner)
+        db.execute("INSERT INTO codex_context_participants VALUES (?, ?)", (owner[0], owner[2]))
+        if ledger_state in {"dropped", "unproven"}:
+            db.execute("DROP TABLE alembic_version")
+        elif ledger_state == "truncated":
+            db.execute("DELETE FROM alembic_version")
+        else:
+            db.execute("UPDATE alembic_version SET version_num = ?", (CREDENTIAL_DROP_REVISION,))
+        if ledger_state == "unproven":
+            db.execute("DELETE FROM runtime_sentinels WHERE name = 'codex_context_oidc_merge_applied'")
+
+    if ledger_state == "unproven":
+        with pytest.raises(RuntimeError, match="Refusing to adopt pre-existing context tables"):
+            run_upgrade(url, "head", bootstrap_legacy=True)
+    else:
+        result = run_upgrade(url, "head", bootstrap_legacy=True)
+        assert result.current_revision == migrate_module.CONTEXT_OIDC_MERGE_REVISION
+        assert check_schema_drift(url) == ()
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT * FROM codex_context_sessions").fetchall() == [owner]
+        assert db.execute("SELECT * FROM codex_context_participants").fetchall() == [(owner[0], owner[2])]
+
+
+def test_context_merge_downgrade_removes_recovery_marker(tmp_path: Path) -> None:
+    database = tmp_path / "context-marker.db"
+    url = _db_url(database)
+    run_upgrade(url, "head", bootstrap_legacy=False)
+    command.downgrade(_build_alembic_config(url), "20260913_000000_add_oidc_provider_flow")
+    with sqlite3.connect(database) as db:
+        assert not db.execute(
+            "SELECT value FROM runtime_sentinels WHERE name = 'codex_context_oidc_merge_applied'"
+        ).fetchall()
+    run_upgrade(url, "head", bootstrap_legacy=False)
+    with sqlite3.connect(database) as db:
+        assert db.execute(
+            "SELECT value FROM runtime_sentinels WHERE name = 'codex_context_oidc_merge_applied'"
+        ).fetchall() == [(migrate_module.CONTEXT_OIDC_MERGE_REVISION,)]

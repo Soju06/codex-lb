@@ -4,6 +4,11 @@ INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_affinity_invite_migration.py \
 	tests/integration/test_affinity_identity_migration.py \
+	tests/integration/test_codex_context_pool.py \
+	tests/integration/test_codex_context_dispatch_cost.py \
+	tests/integration/test_codex_context_fork.py \
+	tests/integration/test_migrations.py::test_codex_context_migration_preserves_rows_and_round_trips \
+	tests/integration/test_migrations.py::test_codex_context_migration_rejects_unowned_tables_without_changes \
 	tests/integration/test_cost_backfill.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
 	tests/integration/test_report_rollup.py \

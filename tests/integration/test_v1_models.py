@@ -24,6 +24,8 @@ BOOTSTRAP_MODEL_SLUGS = {
     "codex-auto-review",
 }
 
+IMAGE_MODEL_SLUGS = {"gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"}
+
 EXPECTED_CORE_MODEL_PLANS = {
     "plus",
     "pro",
@@ -1352,8 +1354,92 @@ async def test_model_sets_are_consistent_across_api_endpoints(async_client):
     assert "gpt-hidden" not in dashboard_ids
     assert "gpt-hidden" not in v1_ids
     assert "gpt-hidden" not in codex_slugs
-    assert dashboard_ids == v1_ids
-    assert dashboard_ids.issubset(codex_slugs)
+    assert dashboard_ids == v1_ids | IMAGE_MODEL_SLUGS
+    assert v1_ids.issubset(codex_slugs)
+    assert IMAGE_MODEL_SLUGS.isdisjoint(v1_ids | codex_slugs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog_state", ["bootstrap", "refreshed", "empty"])
+async def test_dashboard_models_includes_images_independently_of_registry(async_client, monkeypatch, catalog_state):
+    registry = get_model_registry()
+    if catalog_state == "bootstrap":
+        registry._snapshot = None
+    elif catalog_state == "refreshed":
+        await registry.update({"plus": [_make_upstream_model("gpt-5.2")]})
+    else:
+        monkeypatch.setattr(registry, "get_models_with_fallback", lambda: {})
+
+    response = await async_client.get("/api/models")
+
+    assert response.status_code == 200
+    models = response.json()["models"]
+    ids = [entry["id"] for entry in models]
+    assert IMAGE_MODEL_SLUGS.issubset(ids)
+    for model_id in IMAGE_MODEL_SLUGS:
+        assert ids.count(model_id) == 1
+        assert next(entry for entry in models if entry["id"] == model_id) == {
+            "id": model_id,
+            "name": model_id,
+            "sourceOnly": False,
+            "imageOnly": True,
+            "supportedReasoningEfforts": [],
+            "defaultReasoningEffort": None,
+        }
+    if catalog_state == "bootstrap":
+        assert "gpt-5.6-sol" in ids
+    elif catalog_state == "refreshed":
+        assert "gpt-5.2" in ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supported_in_api", [True, False])
+async def test_dashboard_image_models_deduplicate_registry_and_sources(async_client, supported_in_api):
+    registry = get_model_registry()
+    model = replace(
+        _make_upstream_model("gpt-image-2", supported_in_api=supported_in_api),
+        display_name="Catalog image model",
+    )
+    await registry.update({"plus": [model]})
+    await _create_model_source(async_client, name="duplicate-image-source", model="gpt-image-2")
+    await _create_model_source(async_client, name="adapter-image-source", model="gpt-image-1")
+    await _create_model_source(async_client, name="other-source", model="custom-source-model")
+
+    response = await async_client.get("/api/models")
+
+    assert response.status_code == 200
+    models = response.json()["models"]
+    ids = [entry["id"] for entry in models]
+    assert len(ids) == len(set(ids))
+    assert IMAGE_MODEL_SLUGS.issubset(ids)
+    image_model = next(entry for entry in models if entry["id"] == "gpt-image-2")
+    assert image_model["sourceOnly"] is False
+    assert image_model.get("imageOnly", False) is not supported_in_api
+    assert image_model["name"] == ("Catalog image model" if supported_in_api else "gpt-image-2")
+    assert image_model["supportedReasoningEfforts"] == (["medium"] if supported_in_api else [])
+    assert image_model["defaultReasoningEffort"] == ("medium" if supported_in_api else None)
+    assert next(entry for entry in models if entry["id"] == "gpt-image-1")["sourceOnly"] is False
+    assert next(entry for entry in models if entry["id"] == "custom-source-model")["sourceOnly"] is True
+
+
+@pytest.mark.asyncio
+async def test_dashboard_image_model_allowlist_persists_on_create_and_edit(async_client):
+    models = await async_client.get("/api/models")
+    assert models.status_code == 200
+    assert IMAGE_MODEL_SLUGS.issubset(entry["id"] for entry in models.json()["models"])
+
+    created = await async_client.post("/api/api-keys/", json={"name": "Images only", "allowedModels": ["gpt-image-2"]})
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    assert created.json()["allowedModels"] == ["gpt-image-2"]
+
+    updated = await async_client.patch(f"/api/api-keys/{key_id}", json={"allowedModels": ["gpt-image-1-mini"]})
+    assert updated.status_code == 200
+    assert updated.json()["allowedModels"] == ["gpt-image-1-mini"]
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    key = next(entry for entry in listed.json() if entry["id"] == key_id)
+    assert key["allowedModels"] == ["gpt-image-1-mini"]
 
 
 @pytest.mark.asyncio

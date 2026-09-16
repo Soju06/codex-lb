@@ -48,6 +48,9 @@ _GPT_IMAGE_2_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-2"})
 #: (only on edits).
 _LEGACY_GPT_IMAGE_MODELS: Final[frozenset[str]] = frozenset({"gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"})
 
+#: Shared by Images request validation and the dashboard API-key model picker.
+SUPPORTED_IMAGE_MODELS: Final[frozenset[str]] = _GPT_IMAGE_2_MODELS | _LEGACY_GPT_IMAGE_MODELS
+
 _GPT_IMAGE_2_QUALITY: Final[frozenset[str]] = frozenset({"low", "medium", "high", "auto"})
 # ``standard`` / ``hd`` are DALL-E-only quality values and are NOT valid for
 # any ``gpt-image-*`` model. Allowing them here would let invalid requests
@@ -91,9 +94,7 @@ def _images_invalid(
 
 
 def is_supported_image_model(model: str) -> bool:
-    return model.startswith(GPT_IMAGE_MODEL_PREFIX) and (
-        model in _GPT_IMAGE_2_MODELS or model in _LEGACY_GPT_IMAGE_MODELS
-    )
+    return model in SUPPORTED_IMAGE_MODELS
 
 
 def validate_image_size(model: str, size: str) -> None:
@@ -397,6 +398,7 @@ class V1ImageResponse(BaseModel):
 
 __all__ = [
     "GPT_IMAGE_MODEL_PREFIX",
+    "SUPPORTED_IMAGE_MODELS",
     "V1ImageData",
     "V1ImageResponse",
     "V1ImageUsage",

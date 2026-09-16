@@ -146,6 +146,7 @@ export const ModelItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   sourceOnly: z.boolean().default(false),
+  imageOnly: z.boolean().optional(),
   supportedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).default([]),
   defaultReasoningEffort: z.enum(REASONING_EFFORTS).nullable().optional(),
 });

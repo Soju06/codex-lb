@@ -1,8 +1,10 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import App from "@/App";
+import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 function getParentRow(cell: HTMLElement): HTMLElement {
@@ -95,6 +97,113 @@ describe("api keys flow integration", () => {
 
     expect(await screen.findByRole("button", { name: "1 account selected" })).toBeInTheDocument();
   });
+
+  it("creates and updates an api key restricted to image models", async () => {
+    server.use(
+      http.get("/api/models", () =>
+        HttpResponse.json({
+          models: [
+            { id: "gpt-5.1", name: "GPT 5.1" },
+            {
+              id: "gpt-image-2",
+              name: "gpt-image-2",
+              sourceOnly: false,
+              imageOnly: true,
+              supportedReasoningEfforts: [],
+              defaultReasoningEffort: null,
+            },
+            {
+              id: "gpt-image-1.5",
+              name: "gpt-image-1.5",
+              sourceOnly: false,
+              imageOnly: true,
+              supportedReasoningEfforts: [],
+              defaultReasoningEffort: null,
+            },
+            {
+              id: "gpt-image-1",
+              name: "gpt-image-1",
+              sourceOnly: false,
+              imageOnly: true,
+              supportedReasoningEfforts: [],
+              defaultReasoningEffort: null,
+            },
+            {
+              id: "gpt-image-1-mini",
+              name: "gpt-image-1-mini",
+              sourceOnly: false,
+              imageOnly: true,
+              supportedReasoningEfforts: [],
+              defaultReasoningEffort: null,
+            },
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup({ delay: null });
+    const keyName = "Image API Key";
+
+    window.history.pushState({}, "", "/settings");
+    renderWithProviders(<App />);
+
+    const createButton = await screen.findByRole("button", { name: "Create key" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
+    const createDialog = (await screen.findByText("Create API key")).closest("[role='dialog']");
+    expect(createDialog).not.toBeNull();
+    if (!createDialog) throw new Error("Expected create API key dialog");
+    const createDialogElement = createDialog as HTMLElement;
+    await user.type(within(createDialogElement).getByLabelText("Name"), keyName);
+    await user.click(within(createDialogElement).getByRole("button", { name: "All models" }));
+    const createModelMenu = await screen.findByRole("menu");
+    await user.type(within(createModelMenu).getByPlaceholderText("Search"), "gpt-image");
+    expect(within(createModelMenu).getByText("gpt-image-2")).toBeInTheDocument();
+    expect(within(createModelMenu).getByText("gpt-image-1.5")).toBeInTheDocument();
+    expect(within(createModelMenu).getByText("gpt-image-1")).toBeInTheDocument();
+    expect(within(createModelMenu).getByText("gpt-image-1-mini")).toBeInTheDocument();
+    await user.click(
+      within(createModelMenu).getByRole("menuitemcheckbox", { name: "gpt-image-2" }),
+    );
+    await user.keyboard("{Escape}");
+    await user.click(within(createDialogElement).getByRole("button", { name: "Create" }));
+
+    const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
+    const closeButton = within(createdDialog)
+      .getAllByRole("button", { name: "Close" })
+      .find((element) => element.getAttribute("data-slot") === "button");
+    expect(closeButton).toBeDefined();
+    if (!closeButton) throw new Error("Expected created API key close button");
+    await user.click(closeButton);
+
+    const createdRow = getParentRow(await screen.findByText(keyName));
+    expect(within(createdRow).getByText("gpt-image-2")).toBeInTheDocument();
+    await openRowActions(user, createdRow);
+    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
+
+    const firstEditDialog = await screen.findByRole("dialog", { name: "Edit API key" });
+    expect(within(firstEditDialog).getByText("gpt-image-2")).toBeInTheDocument();
+    await user.click(within(firstEditDialog).getByRole("button", { name: "1 model selected" }));
+    const editModelMenu = await screen.findByRole("menu");
+    await user.type(within(editModelMenu).getByPlaceholderText("Search"), "gpt-image");
+    await user.click(
+      within(editModelMenu).getByRole("menuitemcheckbox", { name: "gpt-image-2" }),
+    );
+    await user.click(
+      within(editModelMenu).getByRole("menuitemcheckbox", { name: "gpt-image-1-mini" }),
+    );
+    await user.keyboard("{Escape}");
+    await user.click(within(firstEditDialog).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(within(createdRow).getByText("gpt-image-1-mini")).toBeInTheDocument();
+    });
+    await openRowActions(user, createdRow);
+    await user.click(await screen.findByRole("menuitem", { name: /Edit/ }));
+
+    const secondEditDialog = await screen.findByRole("dialog", { name: "Edit API key" });
+    expect(within(secondEditDialog).getByText("gpt-image-1-mini")).toBeInTheDocument();
+    expect(within(secondEditDialog).queryByText("gpt-image-2")).not.toBeInTheDocument();
+  }, 30_000);
 
   it("displays the current api key list on settings", async () => {
     window.history.pushState({}, "", "/settings");

@@ -223,7 +223,7 @@ export function AutomationsPage() {
     return index;
   }, [accountsQuery.data]);
   const automationModels = useMemo(
-    () => models.filter((entry) => !entry.sourceOnly),
+    () => models.filter((entry) => !entry.sourceOnly && !entry.imageOnly),
     [models],
   );
 

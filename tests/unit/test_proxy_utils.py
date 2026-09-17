@@ -16600,6 +16600,177 @@ async def test_stream_with_retry_replays_fresh_in_band_overload_on_sibling(
     assert handle_stream_error.await_args.args[2] == error_code
 
 
+@pytest.mark.asyncio
+async def test_stream_with_retry_keeps_overload_replay_off_the_account_model_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Account/model routing gets exactly one selected replacement.
+
+    A rejects the model, B is recorded as the one permitted replacement, and B
+    then accepts the turn and fails it output-free with an overload. The
+    sibling replay must not turn that into a third account: B's failure is
+    terminal and C stays unselected.
+    """
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_overload_model_rejected")
+    replacement = _make_account("acc_overload_model_replacement")
+    third_account = _make_account("acc_overload_model_third")
+    selected_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = cast(set[str], kwargs["exclude_account_ids"])
+        if rejected.id not in excluded:
+            selected = rejected
+        elif replacement.id not in excluded:
+            selected = replacement
+        else:
+            selected = third_account
+        selected_account_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None)
+
+    async def fake_stream(
+        _payload: ResponsesRequest,
+        _headers: Mapping[str, str],
+        _access_token: str,
+        account_id: str | None,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        if account_id == rejected.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                proxy_module.openai_error(
+                    "invalid_request_error",
+                    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                    error_type="invalid_request_error",
+                ),
+            )
+        if account_id == replacement.chatgpt_account_id:
+            yield 'data: {"type":"response.created","response":{"id":"resp_replacement","status":"in_progress"}}\n\n'
+            yield (
+                'data: {"type":"error","error":{"type":"server_error",'
+                '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+            )
+            return
+        yield 'data: {"type":"response.created","response":{"id":"resp_third","status":"in_progress"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_third","status":"completed","output":[]}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"prompt_cache_key": "overload-model-replacement"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [item["type"] for item in event_payloads if item is not None] == ["response.created", "error"]
+    assert '"id":"resp_replacement"' in chunks[0]
+    assert selected_account_ids == [rejected.id, replacement.id]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_does_not_replay_overload_for_a_legacy_hard_owner(monkeypatch: pytest.MonkeyPatch):
+    """A thread-scoped native request also consults the raw legacy
+    ``CODEX_SESSION`` row for its process session; a hit there is hard
+    ownership in sticky selection even though ``affinity.kind`` stays
+    ``PROMPT_CACHE`` and no request-state pin records the owner. Excluding
+    that owner would leave every re-selection at ``hard_affinity_saturated``
+    and replace the created lifecycle with a synthetic failure, so the buffer
+    must stay disarmed and the original terminal must reach the client."""
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    settings.sticky_threads_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_overload_legacy_owner")
+    alternate = _make_account("acc_overload_legacy_alternate")
+    selection_kwargs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        account = owner if len(selection_kwargs) == 1 else alternate
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield 'data: {"type":"response.created","response":{"id":"resp_legacy_owner","status":"in_progress"}}\n\n'
+        yield (
+            'data: {"type":"error","error":{"type":"server_error",'
+            '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=owner))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "classify",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "process-shared-legacy-owner", "thread-id": "thread-legacy-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    affinity = cast(proxy_service._AffinityPolicy, selection_kwargs[0]["affinity_policy"])
+    assert affinity.kind == StickySessionKind.PROMPT_CACHE
+    assert affinity.legacy_selection_key == "process-shared-legacy-owner"
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [item["type"] for item in event_payloads if item is not None] == ["response.created", "error"]
+    assert len(selection_kwargs) == 1
+
+
 def test_output_free_overload_prelude_buffer_releases_duplicate_lifecycle() -> None:
     buffer = streaming_helpers_module._OutputFreeOverloadReplayBuffer(enabled=True)
     settlement = proxy_service._StreamSettlement()
@@ -16608,6 +16779,18 @@ def test_output_free_overload_prelude_buffer_releases_duplicate_lifecycle() -> N
     assert buffer.relay("response.created", created, settlement) == []
     assert buffer.relay("response.created", created, settlement) == [created, created]
     assert settlement.downstream_visible is True
+
+
+def test_output_free_overload_prelude_buffer_stays_open_after_output() -> None:
+    """A lifecycle frame after the first token is delivered, not re-buffered."""
+    buffer = streaming_helpers_module._OutputFreeOverloadReplayBuffer(enabled=True)
+    settlement = proxy_service._StreamSettlement()
+    delta = 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    in_progress = 'data: {"type":"response.in_progress"}\n\n'
+
+    assert buffer.relay("response.output_text.delta", delta, settlement) == [delta]
+    assert buffer.relay("response.in_progress", in_progress, settlement) == [in_progress]
+    assert buffer.flush(settlement) == []
 
 
 @pytest.mark.asyncio
@@ -17162,7 +17345,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
-            assert _kwargs["allow_transient_retry"] is False
+            assert _kwargs["allow_fresh_sibling_replay"] is False
             settlement.record_success = False
             raise proxy_module.ProxyResponseError(
                 429,
@@ -17249,7 +17432,7 @@ async def test_stream_with_retry_post_refresh_model_capacity_retries_same_accoun
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
-            assert kwargs["allow_transient_retry"] is False
+            assert kwargs["allow_fresh_sibling_replay"] is False
             raise proxy_module.ProxyResponseError(
                 400,
                 proxy_module.openai_error(

@@ -20,8 +20,11 @@ backoff changes later selection.
   back to the existing bounded account-exclusion path while deterministic
   failover is enabled.
 - Keep this exception unavailable to a request with a previous-response,
-  turn-state, file, single-account, dispatched-payload, or other hard owner;
-  and unavailable after content, tool output, or terminal output evidence.
+  turn-state, file, single-account, dispatched-payload, or other hard owner
+  (including a raw legacy `CODEX_SESSION` row sticky selection may resolve for
+  a thread-scoped request), to the single replacement selected after an
+  account/model rejection, and after content, tool output, or terminal output
+  evidence.
 - Reuse the existing account exclusion, lease release, health settlement, and
   `overload_backoff` paths.  Disabling deterministic failover remains
   fail-closed.  No caller retry loop, timeout, or model routing is changed.
@@ -30,5 +33,6 @@ backoff changes later selection.
 
 - Code: `app/modules/proxy/_service/streaming/mixin.py` and its existing retry
   owner in `app/modules/proxy/_service/streaming/retry.py`.
-- Tests: `tests/unit/test_proxy_utils.py`.
+- Tests: `tests/unit/test_proxy_utils.py` and the public route regression in
+  `tests/integration/test_proxy_transient_retry.py`.
 - No schema, setting, deployment, or upstream protocol change.

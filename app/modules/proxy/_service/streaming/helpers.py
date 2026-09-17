@@ -579,6 +579,7 @@ class _OutputFreeOverloadReplayBuffer:
         if (
             self.enabled
             and not terminal
+            and not settlement.downstream_visible
             and event_type in self._PRELUDE_EVENT_TYPES
             and event_type not in self._buffered_prelude_types
         ):

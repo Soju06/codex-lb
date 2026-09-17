@@ -12,9 +12,13 @@ existing health and overload-backoff handling MUST still run. The client MUST
 observe only the replacement account's response lifecycle.
 
 The recovery MUST NOT cross accounts when deterministic failover is disabled;
-after content, a tool call, or terminal output evidence; or when the request
-has a required previous-response, turn-state, durable Codex-session, file,
-single-account, or dispatched-payload owner.
+after content, a tool call, or terminal output evidence; when the request
+has a required previous-response, turn-state, file, single-account, or
+dispatched-payload owner; when the request's affinity may resolve to a hard
+sticky owner the request does not carry (a durable Codex session or a raw
+legacy `CODEX_SESSION` row consulted for a thread-scoped request); or when the
+serving account is the single replacement selected after an account/model
+rejection, whose own failure is terminal.
 
 #### Scenario: Fresh HTTP first turn moves off an overloaded account
 
@@ -60,3 +64,34 @@ single-account, or dispatched-payload owner.
 - **WHEN** A returns an output-free `server_is_overloaded` rejection
 - **THEN** the request does not select account B
 - **AND** the terminal remains visible
+
+#### Scenario: Account/model replacement keeps its single-replacement budget
+
+- **GIVEN** account A rejected the requested model and account B was selected
+  as the one permitted replacement
+- **AND** account C is eligible and deterministic failover is enabled
+- **WHEN** B returns `response.created` followed by an output-free
+  `server_is_overloaded` rejection
+- **THEN** the request does not select account C
+- **AND** the client observes B's `response.created` and its terminal
+
+#### Scenario: Legacy hard owner remains fail closed
+
+- **GIVEN** a thread-scoped HTTP Responses stream whose affinity also consults
+  a raw legacy `CODEX_SESSION` row, so sticky selection may bind it to a hard
+  owner the request state does not carry
+- **AND** deterministic failover is enabled
+- **WHEN** the selected account returns `response.created` followed by an
+  output-free `server_is_overloaded` rejection
+- **THEN** the request does not select another account
+- **AND** the original lifecycle and terminal remain visible
+
+#### Scenario: Public route observes only the sibling lifecycle
+
+- **GIVEN** two eligible accounts and a fresh `POST /v1/responses` or
+  `POST /backend-api/codex/responses` stream
+- **WHEN** the first account returns `response.created` followed by an
+  output-free overload rejection and the second completes the turn
+- **THEN** the client receives exactly one `response.created`, carrying the
+  second account's response id, followed by `response.completed`
+- **AND** no error frame from the first account

@@ -236,6 +236,57 @@ async def test_stream_overload_alias_surfaces_without_replay(async_client, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("error_code", ["overloaded_error", "server_is_overloaded"])
+async def test_stream_output_free_overload_after_created_replays_on_sibling(
+    async_client, monkeypatch, path, error_code
+):
+    """An accepted-but-output-free overload moves to the sibling account.
+
+    Upstream accepts the fresh turn (``response.created``) and then refuses to
+    run it. The lifecycle prelude is held back until output, so the client sees
+    exactly one ``response.created`` -- the sibling's -- and no error frame.
+    """
+    rejected = f"acc_overload_after_created_{error_code}_{path.rsplit('/', 2)[-2]}"
+    sibling = f"acc_overload_sibling_{error_code}_{path.rsplit('/', 2)[-2]}"
+    await _import_account(async_client, rejected, f"{rejected}@example.com")
+    await _import_account(async_client, sibling, f"{sibling}@example.com")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        if account_id == rejected:
+            yield _sse_event({"type": "response.created", "response": {"id": "resp_overload_rejected"}})
+            yield _sse_event(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "server_error",
+                        "code": error_code,
+                        "message": "Our servers are currently overloaded. Please try again later.",
+                    },
+                }
+            )
+            return
+        yield _sse_event({"type": "response.created", "response": {"id": "resp_overload_sibling"}})
+        yield _success_sse_event("resp_overload_sibling")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", path, json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [event for event in _extract_events(lines) if event.get("type") != "codex.keepalive"]
+    assert [event.get("type") for event in events] == ["response.created", "response.completed"]
+    assert events[0]["response"]["id"] == "resp_overload_sibling"
+    assert "resp_overload_rejected" not in "\n".join(lines)
+    assert seen_account_ids == [rejected, sibling]
+
+
+@pytest.mark.asyncio
 async def test_stream_timeout_surfaces_without_replay(async_client, monkeypatch):
     """An upstream terminal timeout is not proven pre-dispatch work."""
     await _import_account(async_client, "acc_trans_timeout", "timeout@example.com")

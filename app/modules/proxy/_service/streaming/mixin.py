@@ -471,7 +471,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         *,
         affinity_observation: AffinityObservation | None = None,
         request_started_at: float,
-        allow_transient_retry: bool = False,
+        allow_fresh_sibling_replay: bool = False,
         api_key: ApiKeyData | None,
         api_key_reservation: ApiKeyUsageReservationData | None,
         settlement: _StreamSettlement,
@@ -510,7 +510,8 @@ class _StreamingMixin(_StreamingRetryMixin):
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = terminal_event_seen = suppressed_duplicate_tool_call = False
-        overload_replay = _OutputFreeOverloadReplayBuffer(enabled=allow_transient_retry)
+        # Armed only for a fresh, unanchored stream; owner recovery never buffers.
+        overload_replay = _OutputFreeOverloadReplayBuffer(enabled=allow_fresh_sibling_replay)
         latency_first_token_ms: int | None = None
         ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:

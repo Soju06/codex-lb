@@ -1,7 +1,7 @@
 """Add the dashboard subagent account preference.
 
 Revision ID: 20260916_000000_add_subagent_account_preference
-Revises: 20260912_010000_drop_legacy_dashboard_credentials
+Revises: 20260913_000000_add_oidc_provider_flow
 Create Date: 2026-09-16
 
 The non-null ``off`` default preserves routing behavior for existing rows and
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260916_000000_add_subagent_account_preference"
-down_revision = "20260912_010000_drop_legacy_dashboard_credentials"
+down_revision = "20260913_000000_add_oidc_provider_flow"
 branch_labels = None
 depends_on = None
 

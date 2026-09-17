@@ -199,6 +199,15 @@ def _owner_forward_failure_allows_local_recovery(exc: ProxyResponseError) -> boo
     }
 
 
+def _owner_forward_failure_was_pre_dispatch(exc: ProxyResponseError) -> bool:
+    """Return whether the owner failed before accepting the request upstream."""
+
+    return isinstance(exc, _OwnerForwardRequestError) and exc.outcome in {
+        _OwnerForwardOutcome.NOT_DISPATCHED,
+        _OwnerForwardOutcome.RECEIVER_REJECTED,
+    }
+
+
 def _durable_recovery_supersedes_local_session(
     durable_lookup: DurableBridgeLookup | None,
     session: _HTTPBridgeSession,

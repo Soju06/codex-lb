@@ -16347,6 +16347,816 @@ async def test_stream_with_retry_reprobes_alternate_after_capacity_wait(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_fresh_overload_respects_disabled_deterministic_failover(monkeypatch):
+    """A disabled policy remains fail-closed; the live incident has it enabled."""
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = False
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_fresh_overload_rejected")
+    replacement = _make_account("acc_fresh_overload_replacement")
+    selected_account_ids: list[str] = []
+    selection_exclusions: list[set[str]] = []
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        account = replacement if rejected.id in excluded else rejected
+        selected_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        if account.id == rejected.id:
+            raise proxy_module.ProxyResponseError(
+                503,
+                proxy_module.openai_error(
+                    "server_is_overloaded",
+                    "Our servers are currently overloaded. Please try again later.",
+                    error_type="service_unavailable_error",
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_fresh_overload_replacement"}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-luna", "instructions": "classify", "input": [], "stream": True}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "fresh-overload-prompt-cache", "prompt_cache_key": "fresh-overload"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["response"]["error"]["code"] == "server_is_overloaded"
+    assert selected_account_ids == [rejected.id]
+    assert selection_exclusions == [set()]
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is rejected
+    assert handle_stream_error.await_args.args[2] == "server_is_overloaded"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_previous_response_overload_does_not_cross_owner_when_generic_failover_is_disabled(
+    monkeypatch,
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = False
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_fresh_overload_previous_owner")
+    alternate = _make_account("acc_fresh_overload_previous_alternate")
+    selected_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=owner.id))
+
+    async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
+        account = owner if not selected_account_ids else alternate
+        selected_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        raise proxy_module.ProxyResponseError(
+            503,
+            proxy_module.openai_error(
+                "server_is_overloaded",
+                "Our servers are currently overloaded. Please try again later.",
+                error_type="service_unavailable_error",
+            ),
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "continue",
+            "input": [],
+            "previous_response_id": "resp_fresh_overload_owner",
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "fresh-overload-previous-owner"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    failed = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert failed["response"]["error"]["code"] == "server_is_overloaded"
+    assert selected_account_ids == [owner.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created_first", [False, True], ids=["error_first", "created_then_error"])
+@pytest.mark.parametrize("error_code", ["server_is_overloaded", "overloaded_error"])
+@pytest.mark.parametrize("include_keepalive", [False, True], ids=["direct", "comment_keepalive"])
+async def test_stream_with_retry_replays_fresh_in_band_overload_on_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+    created_first: bool,
+    error_code: str,
+    include_keepalive: bool,
+):
+    """The Reemxy classifier uses an unowned HTTP stream with failover enabled.
+
+    Upstream may reject that fresh turn as the first SSE event, or may accept
+    the lifecycle and then fail it before any output.  Neither shape may pin
+    the soft prompt-cache affinity to the rejected account.
+    """
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    assert settings.deterministic_failover_enabled is True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_in_band_overload_rejected")
+    replacement = _make_account("acc_in_band_overload_replacement")
+    selected_account_ids: list[str] = []
+    selection_exclusions: list[set[str]] = []
+    handle_stream_error = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        account = replacement if rejected.id in excluded else rejected
+        selected_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(
+        _payload: ResponsesRequest,
+        _headers: Mapping[str, str],
+        _access_token: str,
+        account_id: str | None,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        if account_id == rejected.chatgpt_account_id:
+            if created_first:
+                yield ('data: {"type":"response.created","response":{"id":"resp_rejected","status":"in_progress"}}\n\n')
+            if include_keepalive:
+                yield ": upstream keepalive\n\n"
+            yield (
+                'data: {"type":"error","error":{"type":"server_error",'
+                f'"code":"{error_code}","message":'
+                '"Our servers are currently overloaded. Please try again later."}}\n\n'
+            )
+            return
+        yield ('data: {"type":"response.created","response":{"id":"resp_replacement","status":"in_progress"}}\n\n')
+        yield (
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_replacement","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "Return the classifier schema.",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+            "store": False,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"prompt_cache_key": "reemxy-classifier"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [item["type"] for item in event_payloads if item is not None] == [
+        "response.created",
+        "response.completed",
+    ]
+    assert all("resp_rejected" not in chunk for chunk in chunks)
+    assert selected_account_ids == [rejected.id, replacement.id]
+    assert selection_exclusions == [set(), {rejected.id}]
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[0] is rejected
+    assert handle_stream_error.await_args.args[2] == error_code
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keeps_overload_replay_off_the_account_model_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Account/model routing gets exactly one selected replacement.
+
+    A rejects the model, B is recorded as the one permitted replacement, and B
+    then accepts the turn and fails it output-free with an overload. The
+    sibling replay must not turn that into a third account: B's failure is
+    terminal and C stays unselected.
+    """
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    rejected = _make_account("acc_overload_model_rejected")
+    replacement = _make_account("acc_overload_model_replacement")
+    third_account = _make_account("acc_overload_model_third")
+    selected_account_ids: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = cast(set[str], kwargs["exclude_account_ids"])
+        if rejected.id not in excluded:
+            selected = rejected
+        elif replacement.id not in excluded:
+            selected = replacement
+        else:
+            selected = third_account
+        selected_account_ids.append(selected.id)
+        return AccountSelection(account=selected, error_message=None)
+
+    async def fake_stream(
+        _payload: ResponsesRequest,
+        _headers: Mapping[str, str],
+        _access_token: str,
+        account_id: str | None,
+        **_kwargs: object,
+    ) -> AsyncIterator[str]:
+        if account_id == rejected.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                400,
+                proxy_module.openai_error(
+                    "invalid_request_error",
+                    "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+                    error_type="invalid_request_error",
+                ),
+            )
+        if account_id == replacement.chatgpt_account_id:
+            yield 'data: {"type":"response.created","response":{"id":"resp_replacement","status":"in_progress"}}\n\n'
+            yield (
+                'data: {"type":"error","error":{"type":"server_error",'
+                '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+            )
+            return
+        yield 'data: {"type":"response.created","response":{"id":"resp_third","status":"in_progress"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_third","status":"completed","output":[]}}\n\n'
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"prompt_cache_key": "overload-model-replacement"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [item["type"] for item in event_payloads if item is not None] == ["response.created", "error"]
+    assert '"id":"resp_replacement"' in chunks[0]
+    assert selected_account_ids == [rejected.id, replacement.id]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_does_not_replay_overload_for_a_legacy_hard_owner(monkeypatch: pytest.MonkeyPatch):
+    """A thread-scoped native request also consults the raw legacy
+    ``CODEX_SESSION`` row for its process session; a hit there is hard
+    ownership in sticky selection even though ``affinity.kind`` stays
+    ``PROMPT_CACHE`` and no request-state pin records the owner. Excluding
+    that owner would leave every re-selection at ``hard_affinity_saturated``
+    and replace the created lifecycle with a synthetic failure, so the buffer
+    must stay disarmed and the original terminal must reach the client."""
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    settings.sticky_threads_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_overload_legacy_owner")
+    alternate = _make_account("acc_overload_legacy_alternate")
+    selection_kwargs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        account = owner if len(selection_kwargs) == 1 else alternate
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield 'data: {"type":"response.created","response":{"id":"resp_legacy_owner","status":"in_progress"}}\n\n'
+        yield (
+            'data: {"type":"error","error":{"type":"server_error",'
+            '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=owner))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "classify",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "process-shared-legacy-owner", "thread-id": "thread-legacy-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    affinity = cast(proxy_service._AffinityPolicy, selection_kwargs[0]["affinity_policy"])
+    assert affinity.kind == StickySessionKind.PROMPT_CACHE
+    assert affinity.legacy_selection_key == "process-shared-legacy-owner"
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [item["type"] for item in event_payloads if item is not None] == ["response.created", "error"]
+    assert len(selection_kwargs) == 1
+
+
+def test_output_free_overload_prelude_buffer_releases_duplicate_lifecycle() -> None:
+    buffer = streaming_helpers_module._OutputFreeOverloadReplayBuffer(enabled=True)
+    settlement = proxy_service._StreamSettlement()
+    created = 'data: {"type":"response.created"}\n\n'
+
+    assert buffer.relay("response.created", created, settlement) == []
+    assert buffer.relay("response.created", created, settlement) == [created, created]
+    assert settlement.downstream_visible is True
+
+
+def test_output_free_overload_prelude_buffer_stays_open_after_output() -> None:
+    """A lifecycle frame after the first token is delivered, not re-buffered."""
+    buffer = streaming_helpers_module._OutputFreeOverloadReplayBuffer(enabled=True)
+    settlement = proxy_service._StreamSettlement()
+    delta = 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    in_progress = 'data: {"type":"response.in_progress"}\n\n'
+
+    assert buffer.relay("response.output_text.delta", delta, settlement) == [delta]
+    assert buffer.relay("response.in_progress", in_progress, settlement) == [in_progress]
+    assert buffer.flush(settlement) == []
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_flushes_terminal_background_ack_after_replay_prelude(monkeypatch: pytest.MonkeyPatch):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_background_ack")
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield proxy_service.format_sse_event(
+            {
+                "type": "response.in_progress",
+                "response": {"id": "resp_background_ack", "object": "response", "status": "in_progress", "output": []},
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-luna", "instructions": "background", "input": [], "stream": False}
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert [parse_sse_data_json(chunk) for chunk in chunks] == [
+        {
+            "type": "response.in_progress",
+            "response": {"id": "resp_background_ack", "object": "response", "status": "in_progress", "output": []},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_bound", [False, True], ids=["failover_disabled", "previous_response_owner"])
+async def test_stream_with_retry_post_refresh_overload_surfaces_without_replay_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_bound: bool,
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = owner_bound
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_overload")
+    stream_attempts = 0
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        nonlocal stream_attempts
+        stream_attempts += 1
+        if stream_attempts == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        yield 'data: {"type":"response.created","response":{"id":"resp_post_refresh","status":"in_progress"}}\n\n'
+        yield (
+            'data: {"type":"error","error":{"type":"server_error",'
+            '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    if owner_bound:
+        monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=account.id))
+
+    payload_data: dict[str, object] = {
+        "model": "gpt-5.6-luna",
+        "instructions": "retry after refresh",
+        "input": [],
+        "stream": True,
+    }
+    if owner_bound:
+        payload_data["previous_response_id"] = "resp_owner"
+    payload = ResponsesRequest.model_validate(payload_data)
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    event_payloads = [parse_sse_data_json(chunk) for chunk in chunks]
+    assert [event_payload["type"] for event_payload in event_payloads if event_payload is not None] == [
+        "response.created",
+        "error",
+    ]
+    assert stream_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_does_not_replay_in_band_overload_for_previous_response_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_in_band_overload_owner")
+    alternate = _make_account("acc_in_band_overload_owner_alternate")
+    selected_account_ids: list[str] = []
+
+    async def select_account(_deadline: float, **_kwargs: object) -> AccountSelection:
+        account = owner if not selected_account_ids else alternate
+        selected_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield ('data: {"type":"response.created","response":{"id":"resp_owned","status":"in_progress"}}\n\n')
+        yield (
+            'data: {"type":"error","error":{"type":"server_error",'
+            '"code":"server_is_overloaded","message":"overloaded"}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=owner.id))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=owner))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "continue",
+            "input": [{"role": "user", "content": "next"}],
+            "previous_response_id": "resp_owned",
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    event_types = []
+    for chunk in chunks:
+        parsed = parse_sse_data_json(chunk)
+        assert parsed is not None
+        event_types.append(parsed["type"])
+
+    assert event_types == ["response.created", "error"]
+    assert selected_account_ids == [owner.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_response",
+    [
+        pytest.param(
+            {"output": [{"type": "message", "id": "msg_terminal"}]},
+            id="terminal_output",
+        ),
+        pytest.param(
+            {"output": [], "usage": {"output_tokens": 1}},
+            id="terminal_billed_output",
+        ),
+    ],
+)
+async def test_stream_with_retry_does_not_replay_overload_with_terminal_output_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_response: dict[str, JsonValue],
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_in_band_overload_terminal_output")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield ('data: {"type":"response.created","response":{"id":"resp_terminal_output","status":"in_progress"}}\n\n')
+        response = {
+            "id": "resp_terminal_output",
+            "status": "failed",
+            "error": {"type": "server_error", "code": "server_is_overloaded", "message": "overloaded"},
+            **terminal_response,
+        }
+        yield proxy_service.format_sse_event({"type": "response.failed", "response": response})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "classify",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"prompt_cache_key": "reemxy-classifier"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert select_account.await_count == 1
+    event_types = []
+    for chunk in chunks:
+        parsed = parse_sse_data_json(chunk)
+        assert parsed is not None
+        event_types.append(parsed["type"])
+
+    assert event_types == ["response.created", "response.failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "visible_event",
+    [
+        pytest.param(
+            {
+                "type": "response.output_text.delta",
+                "response_id": "resp_visible",
+                "item_id": "msg_visible",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "partial",
+            },
+            id="text_output",
+        ),
+        pytest.param(
+            {
+                "type": "response.output_item.added",
+                "response_id": "resp_visible",
+                "output_index": 0,
+                "item": {
+                    "id": "call_visible",
+                    "type": "function_call",
+                    "call_id": "call_visible",
+                    "name": "lookup",
+                    "arguments": "",
+                    "status": "in_progress",
+                },
+            },
+            id="tool_output",
+        ),
+    ],
+)
+async def test_stream_with_retry_does_not_replay_overload_after_output(
+    monkeypatch: pytest.MonkeyPatch,
+    visible_event: dict[str, JsonValue],
+):
+    settings = _make_proxy_settings()
+    settings.deterministic_failover_enabled = True
+    assert settings.deterministic_failover_enabled is True
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_in_band_overload_visible")
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+
+    async def fake_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        yield ('data: {"type":"response.created","response":{"id":"resp_visible","status":"in_progress"}}\n\n')
+        yield proxy_service.format_sse_event(visible_event)
+        yield (
+            'data: {"type":"error","error":{"type":"server_error",'
+            '"code":"server_is_overloaded","message":'
+            '"Our servers are currently overloaded. Please try again later."}}\n\n'
+        )
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-luna",
+            "instructions": "Return the classifier schema.",
+            "input": [{"role": "user", "content": "classify"}],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"prompt_cache_key": "reemxy-classifier"},
+            codex_session_affinity=False,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert select_account.await_count == 1
+    event_types = []
+    for chunk in chunks:
+        parsed = parse_sse_data_json(chunk)
+        assert parsed is not None
+        event_types.append(parsed["type"])
+
+    assert visible_event["type"] in event_types
+    assert "error" in event_types
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_propagation_prefers_other_account_before_response_create_cap_raise(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -16535,7 +17345,7 @@ async def test_stream_with_retry_post_refresh_response_create_cap_waits_with_str
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
-            assert _kwargs["allow_transient_retry"] is True
+            assert _kwargs["allow_fresh_sibling_replay"] is False
             settlement.record_success = False
             raise proxy_module.ProxyResponseError(
                 429,
@@ -16622,7 +17432,7 @@ async def test_stream_with_retry_post_refresh_model_capacity_retries_same_accoun
                 proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
             )
         if stream_once_calls == 2:
-            assert kwargs["allow_transient_retry"] is True
+            assert kwargs["allow_fresh_sibling_replay"] is False
             raise proxy_module.ProxyResponseError(
                 400,
                 proxy_module.openai_error(

@@ -1880,6 +1880,10 @@ async def test_http_previous_response_owner_is_ready_before_persistence(
                 # The supported no-created stream exposes its ID in a later terminal event.
                 event = {"type": "response.output_text.delta", "delta": "hello"}
             await response.write(("data: " + json.dumps(event) + "\n\n").encode())
+            if delivery_point == "created":
+                # A fresh replay-eligible stream holds its lifecycle prelude until
+                # the first output token, so the ID reaches the caller with it.
+                await response.write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
             if delivery_point in {"created", "in_progress"}:
                 await finish_origin.wait()
         await response.write(

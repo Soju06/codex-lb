@@ -72,6 +72,7 @@ from app.modules.proxy._service.support import (
     _LOCAL_ACCOUNT_CAP_ERROR_CODES,
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds,
+    _affinity_may_resolve_hard_owner,
     _request_log_client_fields,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
@@ -971,7 +972,10 @@ class _StreamingRetryMixin:
                     False,
                     request_started_at=start,
                     affinity_observation=affinity_observation,
-                    allow_transient_retry=True,
+                    # Forced refresh has its own bounded same-account recovery
+                    # and ordered settlement path. The fresh-request sibling
+                    # replay buffer must not escape that lifecycle.
+                    allow_fresh_sibling_replay=False,
                     api_key=api_key,
                     api_key_reservation=api_key_reservation,
                     settlement=settlement,
@@ -2279,9 +2283,27 @@ class _StreamingRetryMixin:
                                 allow_retry_flag,
                                 request_started_at=start,
                                 affinity_observation=affinity_observation,
-                                allow_transient_retry=(
-                                    transient_retries < _facade()._MAX_TRANSIENT_SAME_ACCOUNT_RETRIES - 1
-                                    or allow_retry_flag
+                                # An output-free overload after ``response.created``
+                                # may move to a sibling only while the stream can
+                                # still leave this account at all: deterministic
+                                # failover on, a sibling attempt left, no
+                                # continuity anchor, not the single account/model
+                                # replacement (that budget is one replacement, and
+                                # its own failure is terminal), no affinity that
+                                # sticky selection may resolve to a hard owner the
+                                # state does not carry (turn state, raw legacy
+                                # ``CODEX_SESSION`` row), no dispatched/file/turn
+                                # owner, and a body that is account-neutral.
+                                allow_fresh_sibling_replay=(
+                                    resilience.deterministic_failover_enabled
+                                    and allow_retry_flag
+                                    and payload.previous_response_id is None
+                                    and account.id != account_model_replacement_account_id
+                                    and not _affinity_may_resolve_hard_owner(affinity)
+                                    and not _stream_owner_bound_to(account)
+                                    and responses_payload_is_account_neutral_fresh_replay(
+                                        payload.to_replay_safety_payload()
+                                    )
                                 ),
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

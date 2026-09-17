@@ -117,9 +117,8 @@ A client that receives the canonical pool rejection MUST NOT be left without ret
 
 When upstream answers a stream dispatch for a selected account with HTTP 429 whose error body carries no error code or type (normalized to `upstream_error`, classified `retryable_transient`), the proxy MUST, at the point where account health is written for that failure, record a replica-local per-account **burst cooldown** on the account's runtime state in addition to the existing transient error penalty. The cooldown deadline MUST be `now + clamp(retry_after, 5 s, 30 s)`, where `retry_after` is the upstream `Retry-After` value and a missing value applies 5 s; a rejection that arrives while a cooldown is already active MUST extend the deadline and MUST NOT shorten it. While the cooldown is active the account MUST be treated exactly as an account in overload soft backoff wherever a NEW account is chosen for a request — fresh (unbound) selection and the sticky path's fresh binding, reallocation, or fallback pick: it MUST be dropped from a candidate pool only while at least one other candidate remains, and when the configured strategy and budget gates select none of the remaining candidates, selection MUST run again over the full pool exactly as before. The cooldown MUST NOT engage the overload isolation stage, MUST NOT feed the overload rejection window, MUST NOT move an established sticky owner, a continuity owner, or a hard-affinity owner, MUST NOT write `RuntimeState.cooldown_until`, the persisted account status, `reset_at`, or `blocked_at`, MUST NOT change the per-account failure classification or the per-account health write, and MUST NOT be exposed as a new setting.
 
-For an **owner-bound** request the cooldown MUST NOT change the status and body returned to the client: the original rejection is surfaced after the bounded same-account backoff. For a request that is **not** owner-bound the rejection MUST NOT be surfaced from this account at all while other candidates remain; the account is excluded and the walk continues, and the client-visible status and body are decided by "Pool-walk termination consults the exhaustion probe".
+For an **owner-bound** request the cooldown MUST NOT change the status and body returned to the client: the original rejection is surfaced after the bounded same-account backoff. For a request that is **not** owner-bound the rejection MUST NOT be surfaced from this account at all while other candidates remain; the account is excluded and the walk continues, and the client-visible status and body are decided by "Pool-walk termination consults the exhaustion probe". A 429 whose rejection is a rate-limit or quota one MUST keep the existing rate-limit handling and MUST NOT engage the burst cooldown; that covers both a 429 carrying `rate_limit_exceeded`, `usage_limit_reached`, or a quota code, and a code-less 429 whose message proves the account's usage limit is spent, since an account with nothing left to give cannot be waited out on itself. The proxy MUST log a warning when the cooldown engages, naming the account under the configured redaction policy, the applied cooldown seconds, and the upstream `Retry-After` value.
 
-A 429 that carries a rate-limit or quota code (`rate_limit_exceeded`, `usage_limit_reached`) MUST keep the existing rate-limit handling and MUST NOT engage the burst cooldown. A code-less 429 whose message asserts the usage limit is classified `rate_limit` by "Usage-limit messages classify as account rate limits", and therefore also MUST NOT engage the burst cooldown. The proxy MUST log a warning when the cooldown engages, naming the account under the configured redaction policy, the applied cooldown seconds, and the upstream `Retry-After` value.
 
 #### Scenario: Cooldown steers unbound selection while a sibling exists
 
@@ -177,6 +176,13 @@ A 429 that carries a rate-limit or quota code (`rate_limit_exceeded`, `usage_lim
 - **WHEN** the rejection is observed
 - **THEN** the burst cooldown for account A is engaged immediately, before the replacement dispatch or backoff wait
 - **AND** the deferred transient penalty, written after settlement, does not extend the cooldown deadline
+
+#### Scenario: A code-less 429 proving the usage limit is not a burst
+
+- **GIVEN** upstream answers a stream dispatch with HTTP 429 carrying no error code whose message asserts the account's usage limit has been reached
+- **WHEN** the proxy classifies and writes account health for it
+- **THEN** it applies the rate-limit handling rather than the burst cooldown
+- **AND** the request is not made to wait out a bounded same-account backoff on an account that is out of quota
 
 #### Scenario: An unbound burst rejection walks instead of surfacing
 

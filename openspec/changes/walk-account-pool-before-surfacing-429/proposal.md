@@ -77,10 +77,13 @@ is exhausted.
 ## Impact
 
 - Affected capabilities: `account-routing` (three ADDED, one MODIFIED),
-  `responses-api-compat` (two ADDED, one MODIFIED), `usage-refresh-policy`
-  (one MODIFIED — the immediate-refresh trigger becomes the classification
-  rather than the literal `usage_limit_reached` code, without widening to
-  throttling or quota codes).
+  `responses-api-compat` (two ADDED, one MODIFIED).
+- **Ordering**: this change's `account-routing` MODIFIED block is written
+  against the text `classify-usage-limit-terminal-frames` leaves behind, and
+  must land after it. That change owns the usage-refresh trigger and the
+  delivery-form half of the burst-cooldown requirement; this one owns the
+  walk-versus-surface half. Two changes MODIFYing one requirement would
+  otherwise archive by clobbering each other.
 - **Clients** that today receive one account's 429 while other accounts are
   usable now receive a served response. A client that receives a 429 now
   receives it because the pool is exhausted, and it carries `error.resets_at`.

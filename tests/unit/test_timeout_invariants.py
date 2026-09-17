@@ -79,7 +79,7 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
             {"http_responses_session_bridge_request_budget_seconds": 600.0},
         ),
         ("account-lease-ttl-covers-proxy-budget", {"proxy_account_lease_ttl_seconds": 599.0}),
-        ("account-lease-ttl-covers-compact-budget", {"proxy_account_lease_ttl_seconds": 7199.0}),
+        ("account-lease-ttl-covers-compact-budget", {"proxy_account_lease_ttl_seconds": 899.0}),
         (
             "model-registry-snapshot-outlives-refresh-interval",
             {"model_registry_snapshot_max_age_seconds": 300.0},

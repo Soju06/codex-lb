@@ -14052,7 +14052,8 @@ async def test_service_compact_default_budget_keeps_long_response_window(monkeyp
     payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
     result = await service.compact_responses(payload, {"session_id": "sid-compact-long-window"})
 
-    assert captured["total_timeout"] == pytest.approx(7170.0)
+    # The 900 s default budget minus the 30 s settlement reserve, not the former 150 s.
+    assert captured["total_timeout"] == pytest.approx(870.0)
     assert result.object == "response.compaction"
 
 

@@ -26,12 +26,14 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clock import RealScheduler
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 from app.modules.proxy._service import observability as proxy_observability_module
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
@@ -802,6 +804,139 @@ async def test_stream_code_less_429_retries_same_account_then_succeeds(async_cli
         assert burst_account.status == AccountStatus.ACTIVE
 
 
+@pytest.mark.asyncio
+async def test_stream_owner_bound_capacity_429_keeps_its_same_account_retry(async_client, monkeypatch):
+    """The capacity carve-out answers where a request may go next, not whether it may retry.
+
+    An owner-bound request has nowhere to go: the dispatched payload binds it to
+    this account. A code-less 429 is still the burst rejection a short backoff
+    on the owner clears, and a capacity sentence in its body must not cost the
+    request that bounded retry and surface the rejection instead.
+    """
+    account_a_id = await _import_account(async_client, "acc_stream_cap_burst_a", "streamcapbursta@example.com")
+    await _import_account(async_client, "acc_stream_cap_burst_b", "streamcapburstb@example.com")
+
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(
+                429,
+                {"error": {"message": "Selected model is at capacity. Please try a different model."}},
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_stream_cap_burst_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"type": "reasoning", "id": "rs_stream_cap_burst", "encrypted_content": "owner-bound"}],
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert seen_account_ids == ["acc_stream_cap_burst_a", "acc_stream_cap_burst_a"]
+    assert 1.0 in slept
+
+    async with SessionLocal() as session:
+        burst_account = await session.get(Account, account_a_id)
+        assert burst_account is not None
+        assert burst_account.status == AccountStatus.ACTIVE
+
+
+_STREAM_CAPACITY_500_ACCOUNTS = ("acc_stream_cap_walk_a", "acc_stream_cap_walk_b")
+_CAPACITY_500_BODY: OpenAIErrorEnvelope = {
+    "error": {"message": "Selected model is at capacity. Please try a different model."}
+}
+_CAPACITY_429_BODY: OpenAIErrorEnvelope = {
+    "error": {"message": "Selected model is at capacity. Please try a different model."}
+}
+_ORDINARY_500_BODY: OpenAIErrorEnvelope = {"error": {"message": "An error occurred while processing your request."}}
+
+
+async def _run_stream_status_pool_walk(
+    async_client, monkeypatch, body: OpenAIErrorEnvelope, status_code: int
+) -> tuple[list[str | None], list[dict]]:
+    """Reject every dispatch until both accounts have been walked, then succeed.
+
+    Whether the seventh dispatch happens at all is the question: it exists only
+    if an account the walk already gave up on stayed selectable.
+    """
+    for slug, email in zip(_STREAM_CAPACITY_500_ACCOUNTS, ("streamcapwalka", "streamcapwalkb"), strict=True):
+        await _import_account(async_client, slug, f"{email}@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) <= 6:
+            raise ProxyResponseError(status_code, body, failure_phase="status")
+        yield _success_sse_event("resp_stream_cap_walk_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        lines = [line async for line in resp.aiter_lines() if line]
+    return seen_account_ids, _extract_events(lines)
+
+
+async def _run_stream_500_pool_walk(
+    async_client, monkeypatch, body: OpenAIErrorEnvelope
+) -> tuple[list[str | None], list[dict]]:
+    return await _run_stream_status_pool_walk(async_client, monkeypatch, body, 500)
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_500_lets_the_walk_come_back_to_an_account(async_client, monkeypatch):
+    """A capacity rejection describes the model, so it must not spend the account.
+
+    Both accounts are at capacity for the requested model, and the pool has nowhere else to go.
+    Because neither rejection took its account out of the walk, the request gets a third attempt
+    on an account it already tried -- and capacity, unlike quota, is the kind of condition a
+    later attempt can find cleared.
+    """
+    seen_account_ids, events = await _run_stream_500_pool_walk(async_client, monkeypatch, _CAPACITY_500_BODY)
+
+    assert len(seen_account_ids) == 7
+    assert set(seen_account_ids) == set(_STREAM_CAPACITY_500_ACCOUNTS)
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_429_lets_the_walk_come_back_to_an_account(async_client, monkeypatch):
+    """The model-capacity carve-out must not depend on whether upstream chose 429 or 500."""
+    seen_account_ids, events = await _run_stream_status_pool_walk(async_client, monkeypatch, _CAPACITY_429_BODY, 429)
+
+    assert len(seen_account_ids) == 3
+    assert seen_account_ids[0] == seen_account_ids[2]
+    assert seen_account_ids[1] != seen_account_ids[0]
+    assert [event for event in events if event.get("type") == "response.completed"] == []
+
+
+@pytest.mark.asyncio
+async def test_stream_ordinary_500_spends_each_account_it_walks(async_client, monkeypatch):
+    """The carve-out is exactly the capacity case.
+
+    The same shape with an ordinary 5xx body: each account leaves the walk as it fails, the pool
+    runs out after two, and the seventh dispatch never happens.
+    """
+    seen_account_ids, events = await _run_stream_500_pool_walk(async_client, monkeypatch, _ORDINARY_500_BODY)
+
+    assert len(seen_account_ids) == 6
+    assert [event for event in events if event.get("type") == "response.completed"] == []
+
+
 def _record_burst_backoff_sleeps(monkeypatch) -> list[float]:
     """Intercept the bounded burst backoff through the scheduler seam it actually uses.
 
@@ -879,6 +1014,44 @@ async def test_native_codex_stream_code_less_429_exhaustion_surfaces_http_429_wi
     assert caplog.text.count("action=retry_same_account") == 3
     assert "failure_class=retryable_transient action=surface" in caplog.text
     assert "action=failover_next" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_message_only_usage_limit_429_still_carries_retry_after(
+    async_client, monkeypatch, caplog
+):
+    """A 429 whose usage limit is proven by its message is not a burst, so it skips the bounded
+    same-account backoff -- but the client still gets told when to come back. The envelope carries
+    no ``resets_at``, so the locally stamped ``Retry-After`` is the only wait guidance left."""
+    await _import_account(async_client, "acc_stream_usage_msg", "streamusagemsg@example.com")
+    seen_account_ids: list[str | None] = []
+    slept = _record_burst_backoff_sleeps(monkeypatch)
+    caplog.set_level("INFO", logger="app.modules.proxy.service")
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise ProxyResponseError(
+            429,
+            {"error": {"message": "The usage limit has been reached"}},
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST", "/backend-api/codex/responses", json=_BURST_OWNER_BOUND_PAYLOAD, headers=_NATIVE_CODEX_HEADERS
+    ) as resp:
+        body = json.loads(await resp.aread())
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "5"
+
+    assert body == {"error": {"message": "The usage limit has been reached"}}
+    # Out of quota: waiting on the same account cannot succeed, so no backoff.
+    assert seen_account_ids == ["acc_stream_usage_msg"]
+    assert slept == []
+    assert "failure_class=rate_limit action=surface" in caplog.text
+    assert "action=retry_same_account" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1449,6 +1622,83 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
     b_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_b"]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
+
+
+async def _create_metered_proxy_key(async_client, name: str) -> str:
+    """A proxy key that reserves usage, which is what defers the error-health write.
+
+    A reserving key's account-health penalties are held until the reservation
+    settles at the end of the request, so nothing benches the account mid-walk
+    and the exclusion set is the only thing deciding where the next attempt may
+    go. That is the shape the compact carve-out exists for.
+    """
+    async with SessionLocal() as session:
+        created = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name=name,
+                allowed_models=None,
+                limits=[LimitRuleInput(limit_type="total_tokens", limit_window="daily", max_value=10_000_000)],
+            )
+        )
+    current = await async_client.get("/api/settings")
+    assert current.status_code == 200
+    settings_payload = current.json()
+    settings_payload["apiKeyAuthEnabled"] = True
+    assert (await async_client.put("/api/settings", json=settings_payload)).status_code == 200
+    return created.key
+
+
+async def _run_compact_500_pool_walk(
+    async_client, monkeypatch, name: str, body: OpenAIErrorEnvelope
+) -> tuple[int, list[str | None]]:
+    account_slug = f"acc_{name}"
+    await _import_account(async_client, account_slug, f"{name}@example.com")
+    key = await _create_metered_proxy_key(async_client, name)
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) <= 3:
+            raise ProxyResponseError(500, body, failure_phase="status")
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    return response.status_code, seen_account_ids
+
+
+@pytest.mark.asyncio
+async def test_compact_capacity_500_keeps_the_only_account_in_the_walk(async_client, monkeypatch):
+    """Compact answers this at the same point in its own loop, and must answer it the same way.
+
+    One account, at capacity for the requested model. Excluding it would leave the walk with no
+    candidate at all and turn a momentary model condition into a failed request; keeping it gives
+    the compact a second pass, which is the one that succeeds.
+    """
+    status_code, seen_account_ids = await _run_compact_500_pool_walk(
+        async_client, monkeypatch, "compactcapwalk", _CAPACITY_500_BODY
+    )
+
+    assert status_code == 200
+    assert len(seen_account_ids) == 4
+
+
+@pytest.mark.asyncio
+async def test_compact_ordinary_500_spends_the_account_it_walks(async_client, monkeypatch):
+    """The same shape with an ordinary 5xx body: the account leaves the walk and the pool is out."""
+    status_code, seen_account_ids = await _run_compact_500_pool_walk(
+        async_client, monkeypatch, "compactplainwalk", _ORDINARY_500_BODY
+    )
+
+    assert status_code == 500
+    assert len(seen_account_ids) == 3
 
 
 @pytest.mark.asyncio

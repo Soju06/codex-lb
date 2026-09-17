@@ -74,6 +74,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     classify_upstream_failure,
+    keeps_account_in_the_walk,
 )
 from app.modules.proxy.load_balancer import (
     AccountConcurrencyCaps,
@@ -1918,6 +1919,11 @@ class _CompactMixin:
                                 break
                             refresh_retry_used = True
                             continue
+                        error = _parse_openai_error(exc.payload)
+                        code = _normalize_error_code(
+                            error.code if error else None,
+                            error.type if error else None,
+                        )
                         if exc.status_code == 500:
                             transient_retries += 1
                             if (
@@ -1944,22 +1950,32 @@ class _CompactMixin:
                                 account.id,
                                 transient_retries,
                             )
-                            if api_key is not None and api_key_reservation is not None:
-                                deferred_http_500_health.append((account, exc, transient_retries - 1))
-                            else:
-                                await proxy._handle_proxy_error(account, exc)
-                                # Record remaining errors so total equals transient_retries,
-                                # meeting the load balancer backoff threshold (error_count >= 3).
-                                await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                            # A 500 takes this branch instead of the failover
+                            # decision below, so the account-selection answer is
+                            # taken here: a rejection that describes the
+                            # requested model rather than the account must leave
+                            # the account in the walk, or the next selection is
+                            # pushed onto a sibling that cannot serve the model
+                            # either.
+                            classified = classify_upstream_failure(
+                                error_code=code,
+                                error=_upstream_error_from_openai(error),
+                                http_status=exc.status_code,
+                                phase="first_event",
+                            )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                if api_key is not None and api_key_reservation is not None:
+                                    deferred_http_500_health.append((account, exc, transient_retries - 1))
+                                else:
+                                    await proxy._handle_proxy_error(account, exc)
+                                    # Record remaining errors so total equals transient_retries,
+                                    # meeting the load balancer backoff threshold (error_count >= 3).
+                                    await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                                excluded_account_ids.add(account.id)
                             last_exc = exc
-                            excluded_account_ids.add(account.id)
                             transient_exhausted = True
                             break  # break inner loop → outer loop tries different account
-                        error = _parse_openai_error(exc.payload)
-                        code = _normalize_error_code(
-                            error.code if error else None,
-                            error.type if error else None,
-                        )
                         error_message = error.message if error else None
                         network_recovery.account_id = account.id
                         recovery_decision = await network_recovery.wait(
@@ -2097,13 +2113,15 @@ class _CompactMixin:
                                 # recovery eligible for the remaining attempts.
                                 owner_quota_failover_eligible = True
                             last_exc = exc
-                            excluded_account_ids.add(account.id)
-                            await record_or_defer_stream_health(
-                                account,
-                                _upstream_error_from_openai(error),
-                                code,
-                                exc.status_code,
-                            )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                excluded_account_ids.add(account.id)
+                                await record_or_defer_stream_health(
+                                    account,
+                                    _upstream_error_from_openai(error),
+                                    code,
+                                    exc.status_code,
+                                )
                             transient_exhausted = True
                             break
                         await settle_compact_usage(

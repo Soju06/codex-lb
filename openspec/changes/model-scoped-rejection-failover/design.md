@@ -33,7 +33,17 @@ behavioral motivation and the delta specs for the contract.
    `model_not_found` uses the same bounded lifecycle. It is cleared when a
    replacement connection starts, so a replacement's own failure is not hidden.
 
-3. Prove the contract at public HTTP and WebSocket routes. Unit checks remain
+3. Decide pre-created replay ownership after the replay body is prepared,
+   mirroring the accepted-replay branch. The anchored follow-up of a Codex
+   session is pinned to the anchor's owner at dispatch, and only the fresh-body
+   prep releases that pin together with the proxy-injected anchor. Evaluating
+   the owner predicate before the prep silently disabled the existing legacy
+   entitlement failover on every continuation turn. The owner that survives
+   the prep is one the connect hard-requires (turn state); re-sending the same
+   model there can only be rejected again, so that owner keeps its original
+   envelope without a replacement connect.
+
+4. Prove the contract at public HTTP and WebSocket routes. Unit checks remain
    supporting evidence; route tests cover temporary refresh preference,
    exhausted failover envelope preservation, and the HTTP 404 response.
 

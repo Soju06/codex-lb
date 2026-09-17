@@ -1267,6 +1267,7 @@ async def test_stream_model_not_found_keeps_account_health_and_valid_neighbour_w
 
     assert any(event.get("type") == "response.completed" for event in _extract_events(valid_lines))
 
+
 @pytest.mark.asyncio
 async def test_stream_genuine_400_failover_still_records_error_control(async_client, monkeypatch):
     """Control for the neutrality regression above: the same route and status

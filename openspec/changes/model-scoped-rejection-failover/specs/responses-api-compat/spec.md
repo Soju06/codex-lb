@@ -7,9 +7,18 @@ when it has not received `response.created`, has no downstream-visible output
 or accepted response identifier, has no other pending request, and receives a
 terminal `error` or `response.failed` event with exact code `model_not_found`.
 The replay MAY select another eligible account only when the request is
-movable. A required previous-response owner, turn-state owner, replay-required
-owner, or file owner MUST retain that owner; a temporary forced-refresh
-preference alone MUST NOT make a request owner-bound. A connect-phase
+movable. Whether the request is movable MUST be decided after the replay body
+has been prepared, against the owner pins that body still carries: an owner
+the proxy is not entitled to release (a client-supplied `previous_response_id`,
+an input-file owner, or a turn-state owner) MUST retain that owner and receive
+the original rejection without any replacement selection, while a
+proxy-injected continuity anchor whose retained fresh body is self-contained
+and account-neutral MUST be released together with its owner pin so the
+replay may move. The legacy entitlement rejection
+(`account_model_unsupported`) and exact `model_not_found` MUST take the same
+replay path, so a continuation turn keeps the failover it has on a first turn.
+A temporary forced-refresh preference alone MUST NOT make a request
+owner-bound. A connect-phase
 `model_not_found` from a required owner MUST surface the original upstream
 status and envelope, and MUST NOT exclude the owner or turn into
 `previous_response_owner_unavailable`. If bounded replacement selection for a
@@ -26,6 +35,26 @@ replay rules remain authoritative.
 - **WHEN** account B is eligible
 - **THEN** the proxy retries once through the existing bounded path on B
 - **AND** it does not emit the rejection from A to the client
+
+#### Scenario: Releasable continuity anchor still moves the follow-up turn
+
+- **GIVEN** a Codex WebSocket session completed its first turn on account A
+- **AND** the follow-up repeats the history, so the proxy anchors it on the
+  completed response and retains the self-contained full resend
+- **WHEN** A emits a pre-created `error` frame with the legacy entitlement
+  message or with code `model_not_found`
+- **THEN** the proxy installs the retained full resend, releases the anchor's
+  owner pin, excludes A and replays once on eligible account B
+- **AND** the client observes only B's response lifecycle
+
+#### Scenario: Turn-state owner keeps its own pre-created model rejection
+
+- **GIVEN** a native turn-state session whose follow-up is owner-bound to
+  account A by the turn state
+- **WHEN** A emits a pre-created `error` frame with the legacy entitlement
+  message or with code `model_not_found`
+- **THEN** the client receives A's original rejection
+- **AND** A is not excluded and no replacement connect is attempted
 
 #### Scenario: Required owner surfaces its own model rejection
 

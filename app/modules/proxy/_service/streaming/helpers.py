@@ -1123,9 +1123,7 @@ def _is_model_scoped_rejection(
     need the exact message shape because their streaming frames normalize to
     ``upstream_error``; other non-400 errors remain account-scoped.
     """
-    if code == "model_not_found":
-        return is_model_scoped_upstream_rejection(message, error_code=code)
-    if http_status is not None and http_status != 400:
+    if code != "model_not_found" and http_status is not None and http_status != 400:
         return False
     return is_model_scoped_upstream_rejection(message, error_code=code)
 

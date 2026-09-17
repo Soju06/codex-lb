@@ -11,6 +11,10 @@
   model rejection instead of excluding it for another account.
 - [x] 1.4 Consolidate the required-owner predicate so temporary forced-refresh
   preference cannot pin a movable model-rejection replay.
+- [x] 1.5 Decide pre-created replay ownership after the fresh-body prep, so a
+  proxy-injected anchor is released with its pin and the legacy
+  `account_model_unsupported` failover keeps working on continuation turns;
+  surface the original rejection for a turn-state owner without a reconnect.
 
 ## 2. WebSocket pre-created retry
 
@@ -30,3 +34,6 @@
   targeted route suites, and strict change validation.
 - [x] 3.3 Add route regressions for temporary refresh preference, exhausted
   WebSocket envelope retention, and HTTP 404 model-rejection exhaustion.
+- [x] 3.4 Add route regressions for the anchored follow-up turn (legacy and
+  `model_not_found`) replaying with the fresh body on another account, and the
+  turn-state owner control that surfaces the original rejection.

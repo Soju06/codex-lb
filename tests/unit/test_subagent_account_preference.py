@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, cast
@@ -10,7 +11,8 @@ from app.core.openai.requests import ResponsesRequest
 from app.db.models import StickySessionKind
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy import subagent_preference
+from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 
 
 def _policy(body: dict[str, Any], *, thread_id: str = "child") -> proxy_affinity._AffinityPolicy:
@@ -90,6 +92,15 @@ def test_affinity_derives_lineage_without_raw_ids_and_rejects_hard_child() -> No
     assert explicit_turn.subagent_parent_selection_key is None
 
 
+def test_lineage_keys_never_reach_the_load_balancer() -> None:
+    accepted = set(inspect.signature(LoadBalancer.select_account).parameters)
+    for policy in (
+        _policy({"model": "gpt-5.6-sol", "input": "work"}),
+        _policy({"model": "gpt-5.6-sol", "input": "continue", "previous_response_id": "resp_owner"}),
+    ):
+        assert set(policy.selection_kwargs()) <= accepted
+
+
 @pytest.mark.asyncio
 async def test_parent_bound_mode_prefers_another_account(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = _policy({"model": "gpt-5.6-sol", "input": "work"})
@@ -105,7 +116,7 @@ async def test_parent_bound_mode_prefers_another_account(monkeypatch: pytest.Mon
         account_id = "account-child" if "account-parent" in excluded else "account-parent"
         return AccountSelection(account=cast(Any, SimpleNamespace(id=account_id)), error_message=None)
 
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache("parent_bound_only"))
+    monkeypatch.setattr(subagent_preference, "get_settings_cache", lambda: _SettingsCache("parent_bound_only"))
     result = await proxy_service.ProxyService._select_account_with_budget_compatible(
         _service(sticky, selector),
         10.0,
@@ -135,7 +146,7 @@ async def test_preference_falls_back_to_parent_and_records_response_binding(
             return AccountSelection(account=None, error_message="no alternate", error_code="no_accounts")
         return AccountSelection(account=cast(Any, SimpleNamespace(id="account-parent")), error_message=None)
 
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache("parent_bound_only"))
+    monkeypatch.setattr(subagent_preference, "get_settings_cache", lambda: _SettingsCache("parent_bound_only"))
     result = await proxy_service.ProxyService._select_account_with_budget_compatible(
         _service(sticky, selector),
         10.0,

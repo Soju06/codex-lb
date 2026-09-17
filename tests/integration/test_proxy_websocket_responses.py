@@ -14331,6 +14331,109 @@ def test_backend_responses_websocket_retries_anchored_accepted_capacity_error_wi
     assert (failover.FIRST_ACCOUNT_ID, "server_is_overloaded") in failover.stream_errors
 
 
+_PRECREATED_MODEL_REJECTIONS = [
+    pytest.param(
+        400,
+        {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.",
+        },
+        id="account_model_unsupported",
+    ),
+    pytest.param(
+        404,
+        {
+            "type": "invalid_request_error",
+            "code": "model_not_found",
+            "message": "The model `gpt-5.4` does not exist or you do not have access to it.",
+        },
+        id="model_not_found",
+    ),
+]
+
+
+@pytest.mark.parametrize(("status", "error"), _PRECREATED_MODEL_REJECTIONS)
+def test_backend_responses_websocket_retries_anchored_precreated_model_rejection_with_the_fresh_body(
+    app_instance,
+    monkeypatch,
+    status,
+    error,
+):
+    """A follow-up turn goes upstream anchored on the proxy-injected
+    ``previous_response_id`` and is therefore pinned to the anchor's owner at
+    dispatch. When that owner rejects the model before ``response.created``,
+    the pre-created replay must still swap in the retained full resend, release
+    the pin with the anchor and land on the other account: the owner decision
+    belongs after the body prep, once the pin is reconciled with the body that
+    is actually sent. Gating on the pre-replay pin surfaced the rejection on
+    every continuation turn, for the legacy entitlement message and for
+    ``model_not_found`` alike."""
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            _completed_first_turn_upstream_batch("resp_ws_anchor_model_turn_1"),
+            [_ws_event({"type": "error", "status": status, "error": error})],
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_anchored_model_recovered")
+    failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_anchored_follow_up(app_instance)
+
+    created_id = _assert_ws_single_response_lifecycle_completed(events, disconnect)
+    assert created_id == "resp_ws_anchored_model_recovered"
+    _assert_anchored_follow_up_replayed_with_fresh_body(
+        failover,
+        first_upstream=first_upstream,
+        recovered_upstream=recovered_upstream,
+        anchor_response_id="resp_ws_anchor_model_turn_1",
+    )
+
+
+@pytest.mark.parametrize(("status", "error"), _PRECREATED_MODEL_REJECTIONS)
+def test_backend_responses_websocket_surfaces_a_turn_state_owner_precreated_model_rejection(
+    app_instance,
+    monkeypatch,
+    status,
+    error,
+):
+    """Negative control: in a native ``x-codex-turn-state`` session the
+    follow-up is owner-bound by the turn state, which the fresh-body prep
+    cannot release. Re-sending the same model to the same owner would only be
+    rejected again, so the original rejection is surfaced as-is: no account is
+    excluded and no replacement connect is attempted."""
+    first_turn_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_completed_first_turn_upstream_batch("resp_ws_turn_state_model_turn_1")],
+    )
+    rejecting_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[_ws_event({"type": "error", "status": status, "error": error})]],
+    )
+    owner_unused_upstream = _recovered_upstream("resp_ws_turn_state_model_owner_unused")
+    other_account_upstream = _recovered_upstream("resp_ws_turn_state_model_other_account")
+    failover = _TwoAccountWebSocketFailover(first_turn_upstream, other_account_upstream)
+    failover.upstreams_by_account[failover.FIRST_ACCOUNT_ID].extend([rejecting_upstream, owner_unused_upstream])
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run_turn_state_follow_up(app_instance)
+
+    assert disconnect is None
+    assert [event["type"] for event in failover.turn_events[0]] == ["response.created", "response.completed"]
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["status"] == status
+    assert events[0]["error"]["code"] == error["code"]
+    assert events[0]["error"]["message"] == error["message"]
+    assert not failover.refused_connects, failover.refused_connects
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.FIRST_ACCOUNT_ID], (
+        failover.connect_accounts
+    )
+    assert owner_unused_upstream.sent_text == []
+    assert other_account_upstream.sent_text == []
+
+
 def test_backend_responses_websocket_replays_a_client_anchored_accepted_capacity_error_on_its_owner(
     app_instance,
     monkeypatch,

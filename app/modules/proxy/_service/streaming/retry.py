@@ -105,8 +105,10 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
     classify_upstream_failure,
+    is_message_derived_usage_limit_rejection,
     is_upstream_burst_rejection,
     is_upstream_model_capacity_error,
+    keeps_account_in_the_walk,
 )
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
@@ -798,11 +800,19 @@ class _StreamingRetryMixin:
             burst_same_account_retries += 1
             return burst_same_account_retries
 
-        def _stamp_surfaced_burst_retry_after(exc: ProxyResponseError) -> None:
-            # A surfaced burst 429 that carried no upstream Retry-After still
-            # tells the client when to come back (api.py emits the header).
+        def _stamp_surfaced_retry_after(exc: ProxyResponseError) -> None:
+            # A surfaced 429 that carried no upstream Retry-After still tells
+            # the client when to come back (api.py emits the header).
             if exc.retry_after_seconds is None:
                 exc.retry_after_seconds = BURST_SURFACE_RETRY_AFTER_SECONDS
+
+        def _surfaced_429_owes_a_retry_hint(classified: ClassifiedFailure, *, burst: bool) -> bool:
+            # A burst rejection and a 429 whose usage limit is proven only by
+            # its message are the same envelope as far as the client is
+            # concerned: no upstream ``Retry-After``, no ``error.resets_at``.
+            # Reading the limit off the message must not cost the client the
+            # only wait guidance the rejection carries.
+            return burst or is_message_derived_usage_limit_rejection(classified)
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
@@ -2705,18 +2715,21 @@ class _StreamingRetryMixin:
                                     # Budget spent during the wait: surface the
                                     # original rejection below (one health write).
                                 if action == "failover_next":
-                                    await _handle_or_defer_keyed_stream_health(
-                                        account,
-                                        _upstream_error_from_openai(error),
-                                        code,
-                                        http_status=tex.status_code,
-                                        retry_after_seconds=tex.retry_after_seconds,
-                                    )
+                                    keep_account_in_walk = keeps_account_in_the_walk(classified)
+                                    if not keep_account_in_walk:
+                                        await _handle_or_defer_keyed_stream_health(
+                                            account,
+                                            _upstream_error_from_openai(error),
+                                            code,
+                                            http_status=tex.status_code,
+                                            retry_after_seconds=tex.retry_after_seconds,
+                                        )
                                     last_transient_exc = tex
                                     transient_failed_account_id = account.id
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
-                                    excluded_account_ids.add(account.id)
+                                    if not keep_account_in_walk:
+                                        excluded_account_ids.add(account.id)
                                     _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
@@ -2730,8 +2743,8 @@ class _StreamingRetryMixin:
                                     **_retry_after_kwargs(tex.retry_after_seconds),
                                 )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
-                                if burst:
-                                    _stamp_surfaced_burst_retry_after(tex)
+                                if _surfaced_429_owes_a_retry_hint(classified, burst=burst):
+                                    _stamp_surfaced_retry_after(tex)
                                 raise
                             error_payload: UpstreamError = (
                                 tex.error
@@ -2784,13 +2797,22 @@ class _StreamingRetryMixin:
                                 transient_retries,
                                 error_code,
                             )
-                            await _handle_or_defer_keyed_stream_health(
-                                account,
-                                error_payload,
-                                error_code,
-                                http_status=(tex.status_code if isinstance(tex, ProxyResponseError) else None),
-                                transient_retry_count=transient_retries,
+                            transient_http_status = tex.status_code if isinstance(tex, ProxyResponseError) else None
+                            classified = classify_upstream_failure(
+                                error_code=error_code,
+                                error=error_payload,
+                                http_status=transient_http_status,
+                                phase="first_event",
                             )
+                            keep_account_in_walk = keeps_account_in_the_walk(classified)
+                            if not keep_account_in_walk:
+                                await _handle_or_defer_keyed_stream_health(
+                                    account,
+                                    error_payload,
+                                    error_code,
+                                    http_status=transient_http_status,
+                                    transient_retry_count=transient_retries,
+                                )
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
@@ -2804,7 +2826,17 @@ class _StreamingRetryMixin:
                                 )
                             await _release_tracked_stream_lease(current_account_lease)
                             current_account_lease = None
-                            excluded_account_ids.add(account.id)
+                            # The lease goes back either way -- this attempt is
+                            # over -- but a rejection that describes the model
+                            # rather than the account must not take the account
+                            # out of the walk: the next selection would then be
+                            # forced onto a sibling that cannot serve the model
+                            # either, and so on through the pool. An HTTP 500
+                            # reaches this exhaustion tail without passing the
+                            # pre-visible classification above, so it is the one
+                            # place the decision has to be made again.
+                            if not keep_account_in_walk:
+                                excluded_account_ids.add(account.id)
                             break  # outer loop: select different account
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
@@ -3395,7 +3427,7 @@ class _StreamingRetryMixin:
                                 # A failed re-selection re-raises this exception:
                                 # stamp Retry-After now (after the delay was
                                 # derived from the upstream value).
-                                _stamp_surfaced_burst_retry_after(retry_exc)
+                                _stamp_surfaced_retry_after(retry_exc)
                                 last_transient_exc = retry_exc
                                 _facade().logger.info(
                                     "Burst 429 on owner-bound stream, retrying same account "
@@ -3426,6 +3458,17 @@ class _StreamingRetryMixin:
                                 # Budget spent during the wait: surface the
                                 # original rejection below (one health write).
                             if action == "failover_next":
+                                # No model-capacity carve-out here: a capacity
+                                # rejection cannot reach this decision. The
+                                # post-refresh dispatch turns one into a
+                                # transient stream error before it leaves the
+                                # attempt (``_iter_stream_once``), so it is
+                                # retried on this same account and, if that is
+                                # exhausted, handled by the transient-exhausted
+                                # branch above. The only capacity rejections
+                                # that do arrive here carry a rate-limit or
+                                # quota code, whose health write benches the
+                                # account regardless.
                                 await _handle_or_defer_keyed_stream_health(
                                     account,
                                     current_error_payload,
@@ -3452,8 +3495,8 @@ class _StreamingRetryMixin:
                                     **_retry_after_kwargs(retry_exc.retry_after_seconds),
                                 )
                                 setattr(retry_exc, _STREAM_HEALTH_RECORDED_ATTR, True)
-                            if burst:
-                                _stamp_surfaced_burst_retry_after(retry_exc)
+                            if _surfaced_429_owes_a_retry_hint(classified, burst=burst):
+                                _stamp_surfaced_retry_after(retry_exc)
                             if propagate_http_errors:
                                 raise
                             error_message = error.message if error else None

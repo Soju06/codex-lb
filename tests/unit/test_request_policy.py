@@ -23,6 +23,8 @@ from app.modules.proxy.request_policy import (
 @pytest.mark.parametrize(
     ("alias", "canonical", "expected_effort", "expected_service_tier"),
     [
+        ("gpt-6-astra-extra-high-fast", "gpt-6-astra", "high", "priority"),
+        ("gpt-6-astra-medium", "gpt-6-astra", "medium", None),
         ("gpt-5-extra", "gpt-5", "high", None),
         ("gpt-5.1-low", "gpt-5.1", "low", None),
         ("gpt-5.2-medium-fast", "gpt-5.2", "medium", "priority"),
@@ -194,14 +196,15 @@ def test_unknown_gpt5_suffix_is_not_rewritten() -> None:
     assert request.service_tier is None
 
 
-def test_gpt56_ultra_suffix_is_not_rewritten() -> None:
+@pytest.mark.parametrize("model", ["gpt-6-astra-ultra", "gpt-5.6-sol-ultra"])
+def test_ultra_suffix_is_not_rewritten(model: str) -> None:
     # The Cursor-style suffix grammar has no ``ultra``/``max`` reasoning
-    # tokens (they are not effort levels every GPT-5-family base supports;
+    # tokens (they are not effort levels every known GPT-family base supports;
     # e.g. gpt-5.6-luna has no ``ultra``), so an ``ultra``-suffixed label is
     # an unknown alias and must pass through unchanged.
     request = ResponsesRequest.model_validate(
         {
-            "model": "gpt-5.6-sol-ultra",
+            "model": model,
             "instructions": "",
             "input": [],
         }
@@ -209,7 +212,7 @@ def test_gpt56_ultra_suffix_is_not_rewritten() -> None:
 
     apply_api_key_enforcement(request, None)
 
-    assert request.model == "gpt-5.6-sol-ultra"
+    assert request.model == model
     assert request.reasoning is None
     assert request.service_tier is None
 

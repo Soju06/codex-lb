@@ -51,12 +51,13 @@ _DEFAULT_REASONING_EFFORT_FALLBACK = "low"
 # API callers so the upstream backend only ever sees wire-safe values.
 _REASONING_EFFORT_WIRE_ALIASES: dict[str, str] = {"ultra": "max"}
 
-# Cursor exposes GPT-5 family model labels with UI suffixes such as "Extra
-# High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-5-family
+# Cursor exposes GPT family model labels with UI suffixes such as "Extra
+# High Fast". The ChatGPT/Codex upstream accepts the canonical GPT-family
 # slug plus request fields, not those synthetic suffixes in the model name.
 # Keep this deliberately narrow: only strip known Cursor-style suffix tokens
-# from known GPT-5 base model slugs, and leave every other model untouched.
+# from known GPT base model slugs, and leave every other model untouched.
 _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",

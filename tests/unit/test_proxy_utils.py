@@ -13841,6 +13841,125 @@ def test_sticky_key_for_compact_request_derives_prompt_cache_before_codex_sessio
     assert payload.prompt_cache_key
 
 
+def test_sticky_key_for_codex_control_request_pins_body_session_in_hard_history_namespace():
+    session_id = "9d4c2b7e-native-process-session"
+
+    policy = proxy_affinity._sticky_key_for_codex_control_request(
+        {"x-codex-turn-state": "turn-state-that-must-not-win", "session_id": "header-that-must-not-win"},
+        codex_session_affinity=True,
+        body_session_id=f"  {session_id}  ",
+    )
+
+    assert policy.codex_session_source == "history_session"
+    assert policy.kind == StickySessionKind.CODEX_SESSION
+    assert policy.key == session_id
+    assert policy.selection_key == proxy_affinity._history_session_selection_key(session_id)
+    # A separate opaque namespace: neither the soft process row nor any legacy
+    # raw row can be mistaken for history ownership, and nothing migrates.
+    assert policy.selection_key != proxy_affinity._codex_session_selection_key(session_id)
+    assert policy.legacy_selection_key is None
+    assert policy.spill_on_account_cap is False
+    # The first call prefers the account the session's Responses run on, but
+    # only as a seed; the history row is then persisted on its own.
+    assert policy.seed_selection_key == proxy_affinity._codex_session_selection_key(session_id)
+    assert policy.seed_selection_kind == StickySessionKind.CODEX_SESSION
+    kwargs = policy.selection_kwargs()
+    assert kwargs["sticky_source"] == "history_session"
+    assert kwargs["legacy_sticky_key"] is None
+    assert kwargs["spill_bare_session_on_account_cap"] is False
+
+
+@pytest.mark.parametrize("body_session_id", (None, "", "   "))
+def test_sticky_key_for_codex_control_request_without_body_session_keeps_header_affinity(body_session_id):
+    headers = {"session_id": "control-header-session"}
+
+    with_body = proxy_affinity._sticky_key_for_codex_control_request(
+        headers,
+        codex_session_affinity=True,
+        body_session_id=body_session_id,
+    )
+    without_body = proxy_affinity._sticky_key_for_codex_control_request(headers, codex_session_affinity=True)
+
+    assert with_body == without_body
+    assert with_body.codex_session_source == "session_header"
+
+
+def test_sticky_key_for_codex_control_request_body_session_respects_disabled_session_affinity():
+    policy = proxy_affinity._sticky_key_for_codex_control_request(
+        {},
+        codex_session_affinity=False,
+        body_session_id="6f0a-native-process-session",
+    )
+
+    assert policy == proxy_affinity._AffinityPolicy()
+
+
+@pytest.mark.parametrize("carrier", ("header", "client_metadata"))
+def test_history_ingest_marker_leaves_responses_and_compact_affinity_unchanged(carrier: str):
+    # Native history ingest is an upstream-side opt-in carried in turn
+    # metadata. It must not reclassify ordinary Responses or compact traffic
+    # into hard account ownership: only the native history/notes routes pin.
+    marker = '{"turn_id":"t-0a1b","history_ingest_requested":true}'
+    base_headers = {"session_id": "e3b0-process-session", "thread-id": "e3b0-child-thread"}
+    marked_headers = dict(base_headers)
+    marked_extra: dict[str, object] = {}
+    if carrier == "header":
+        marked_headers["x-codex-turn-metadata"] = marker
+    else:
+        marked_extra["client_metadata"] = {"x-codex-turn-metadata": marker}
+    request_body = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    compact_body = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+
+    def _shape(policy):
+        return (
+            policy.codex_session_source,
+            policy.kind,
+            policy.selection_key,
+            policy.legacy_selection_key,
+            policy.spill_on_account_cap,
+            policy.seed_selection_key,
+        )
+
+    plain_response = proxy_service._sticky_key_for_responses_request(
+        ResponsesRequest.model_validate(request_body),
+        base_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+    marked_response = proxy_service._sticky_key_for_responses_request(
+        ResponsesRequest.model_validate({**request_body, **marked_extra}),
+        marked_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+    plain_compact = proxy_service._sticky_key_for_compact_request(
+        ResponsesCompactRequest.model_validate(compact_body),
+        base_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+    marked_compact = proxy_service._sticky_key_for_compact_request(
+        ResponsesCompactRequest.model_validate({**compact_body, **marked_extra}),
+        marked_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=True,
+    )
+
+    assert _shape(marked_response) == _shape(plain_response)
+    assert _shape(marked_compact) == _shape(plain_compact)
+    assert plain_response.codex_session_source == "thread_header"
+    assert plain_response.kind == StickySessionKind.PROMPT_CACHE
+    assert "history_session" not in {marked_response.codex_session_source, marked_compact.codex_session_source}
+
+
 def test_sticky_key_for_responses_request_preserves_client_supplied_prompt_cache_key():
     payload = ResponsesRequest.model_validate(
         {

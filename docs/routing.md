@@ -17,7 +17,7 @@ For low-volume, policy-compliant personal use, start with **Capacity weighted** 
 
 Change the strategy live in the dashboard under **Settings → Routing** — no restart required.
 
-### Subagent account preference
+## Subagent account preference
 
 **Settings → Routing → Subagent account preference** can keep a fresh Codex subagent from initially consuming the same account as its parent:
 

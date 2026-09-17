@@ -3458,15 +3458,24 @@ class _StreamingRetryMixin:
                                 # Budget spent during the wait: surface the
                                 # original rejection below (one health write).
                             if action == "failover_next":
-                                keep_account_in_walk = keeps_account_in_the_walk(classified)
-                                if not keep_account_in_walk:
-                                    await _handle_or_defer_keyed_stream_health(
-                                        account,
-                                        current_error_payload,
-                                        current_error_code,
-                                        http_status=retry_exc.status_code,
-                                        retry_after_seconds=retry_exc.retry_after_seconds,
-                                    )
+                                # No model-capacity carve-out here: a capacity
+                                # rejection cannot reach this decision. The
+                                # post-refresh dispatch turns one into a
+                                # transient stream error before it leaves the
+                                # attempt (``_iter_stream_once``), so it is
+                                # retried on this same account and, if that is
+                                # exhausted, handled by the transient-exhausted
+                                # branch above. The only capacity rejections
+                                # that do arrive here carry a rate-limit or
+                                # quota code, whose health write benches the
+                                # account regardless.
+                                await _handle_or_defer_keyed_stream_health(
+                                    account,
+                                    current_error_payload,
+                                    current_error_code,
+                                    http_status=retry_exc.status_code,
+                                    retry_after_seconds=retry_exc.retry_after_seconds,
+                                )
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
@@ -3474,8 +3483,7 @@ class _StreamingRetryMixin:
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",
                                 )
-                                if not keep_account_in_walk:
-                                    excluded_account_ids.add(account.id)
+                                excluded_account_ids.add(account.id)
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                             if health_write_allowed:

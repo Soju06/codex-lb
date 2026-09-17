@@ -937,6 +937,70 @@ async def test_stream_ordinary_500_spends_each_account_it_walks(async_client, mo
     assert [event for event in events if event.get("type") == "response.completed"] == []
 
 
+async def _run_post_refresh_pool_walk(
+    async_client, monkeypatch, name: str, body: OpenAIErrorEnvelope
+) -> tuple[list[str | None], list[dict]]:
+    """Drive the dispatch that follows a forced token refresh.
+
+    A 401 sends the request through the refresh, and the attempt after it is a
+    separate path with its own failure handling. One account, so whether the
+    request survives is exactly the question of whether that path spent it.
+    """
+    await _import_account(async_client, f"acc_{name}", f"{name}@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
+        if len(seen_account_ids) == 2:
+            raise ProxyResponseError(429, body, failure_phase="status")
+        yield _success_sse_event(f"resp_{name}_ok")
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        lines = [line async for line in resp.aiter_lines() if line]
+    return seen_account_ids, _extract_events(lines)
+
+
+@pytest.mark.asyncio
+async def test_post_refresh_capacity_429_is_retried_on_the_same_account(async_client, monkeypatch):
+    """The post-refresh path needs no exclusion carve-out because a capacity rejection never
+    reaches its failover decision: the attempt turns one into a transient stream error and retries
+    the same account, which is what gets the third dispatch -- the one that succeeds. This pins
+    the reason the decision below it can keep excluding unconditionally; if the conversion ever
+    stopped, the only account would be spent here and this request would have nowhere to go.
+    """
+    seen_account_ids, events = await _run_post_refresh_pool_walk(
+        async_client, monkeypatch, "postrefreshcapwalk", _CAPACITY_429_BODY
+    )
+
+    assert len(seen_account_ids) == 3
+    assert len(set(seen_account_ids)) == 1
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_post_refresh_ordinary_429_spends_the_account_it_walks(async_client, monkeypatch):
+    """The contrast: an ordinary code-less 429 is not converted, so it does reach the failover
+    decision after the refresh -- and there the account leaves the walk, as it always has.
+    """
+    seen_account_ids, events = await _run_post_refresh_pool_walk(
+        async_client, monkeypatch, "postrefreshplainwalk", {"error": {"message": "Rate limit exceeded"}}
+    )
+
+    assert len(seen_account_ids) == 2
+    assert [event for event in events if event.get("type") == "response.completed"] == []
+
+
 def _record_burst_backoff_sleeps(monkeypatch) -> list[float]:
     """Intercept the bounded burst backoff through the scheduler seam it actually uses.
 
@@ -1699,6 +1763,69 @@ async def test_compact_ordinary_500_spends_the_account_it_walks(async_client, mo
 
     assert status_code == 500
     assert len(seen_account_ids) == 3
+
+
+async def _run_compact_429_pool_walk(
+    async_client, monkeypatch, name: str, body: OpenAIErrorEnvelope
+) -> tuple[int, list[str | None]]:
+    """The compact failover tail rather than its HTTP 500 branch.
+
+    A 429 skips the same-account transient loop the 500 branch owns and reaches
+    the failover decision at the end of the handler, which is where compact
+    makes its own account-selection answer for everything that is not a 500.
+    """
+    account_slug = f"acc_{name}"
+    await _import_account(async_client, account_slug, f"{name}@example.com")
+    key = await _create_metered_proxy_key(async_client, name)
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise ProxyResponseError(429, body, failure_phase="status")
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    return response.status_code, seen_account_ids
+
+
+@pytest.mark.asyncio
+async def test_compact_capacity_429_keeps_the_only_account_in_the_walk(async_client, monkeypatch):
+    """The compact failover tail owes the same answer its 500 branch gives.
+
+    One account, rejected for the requested model rather than for itself. The tail is reached
+    only by rejections the 500 branch never sees, so the carve-out has to be made a second time
+    here -- and without it the single candidate is spent and the compact fails outright.
+    """
+    status_code, seen_account_ids = await _run_compact_429_pool_walk(
+        async_client, monkeypatch, "compactcap429walk", _CAPACITY_429_BODY
+    )
+
+    assert status_code == 200
+    assert len(seen_account_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_compact_ordinary_429_spends_the_account_it_walks(async_client, monkeypatch):
+    """The carve-out at the tail is exactly the capacity case.
+
+    A code-less 429 with an ordinary body is the burst rejection the walk moves off: the account
+    leaves the walk, the only candidate is gone, and the second dispatch never happens.
+    """
+    status_code, seen_account_ids = await _run_compact_429_pool_walk(
+        async_client, monkeypatch, "compactplain429walk", {"error": {"message": "Rate limit exceeded"}}
+    )
+
+    assert status_code != 200
+    assert len(seen_account_ids) == 1
 
 
 @pytest.mark.asyncio

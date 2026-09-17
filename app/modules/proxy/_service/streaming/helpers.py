@@ -1195,6 +1195,12 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
+        # The refresh is owed to the account whose window is spent, and the
+        # literal code is the one piece of that evidence upstream omits at will:
+        # the serialized terminal frame asserts the same limit in its message
+        # alone. Reading only the code leaves the pool's usage picture stale for
+        # exactly the accounts it most needs to be current about. Plain
+        # throttling still asks for nothing.
         if is_upstream_usage_limit_rejection(error_code=code, message=error.get("message")):
             _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":

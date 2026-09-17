@@ -17,7 +17,7 @@ behavioral motivation and the delta specs for the contract.
 **Non-Goals:**
 
 - Do not alter retry budgets, health accounting, accepted-response replay,
-  routing policy, or the separate overload carrier.
+  routing policy, or the separate overload-backoff carrier.
 - Do not add settings, persistence, or a new retry mechanism.
 
 ## Decisions
@@ -43,7 +43,20 @@ behavioral motivation and the delta specs for the contract.
    model there can only be rejected again, so that owner keeps its original
    envelope without a replacement connect.
 
-4. Prove the contract at public HTTP and WebSocket routes. Unit checks remain
+4. Hold the HTTP lifecycle prelude instead of rewriting it. A fresh,
+   replay-eligible direct HTTP stream keeps `response.created` and
+   `response.in_progress` in a bounded buffer (one frame per type) until the
+   first output token, a terminal event, or EOF; SSE comments pass through.
+   An output-free overload terminal then re-enters the existing
+   `_RetryableStreamError(exclude_account=True)` path, so the client sees
+   exactly one lifecycle, from the account that ran the turn. Emitting
+   `response.created` immediately and rewriting the sibling's response id was
+   rejected: a follow-up anchored on the first id would resolve to an owner
+   that never ran it. The buffer is disarmed once output is downstream-visible
+   and is never armed for an owner-bound request, the single account/model
+   replacement, or a forced-refresh attempt.
+
+5. Prove the contract at public HTTP and WebSocket routes. Unit checks remain
    supporting evidence; route tests cover temporary refresh preference,
    exhausted failover envelope preservation, and the HTTP 404 response.
 
@@ -55,6 +68,9 @@ behavioral motivation and the delta specs for the contract.
   soon as a replacement connection is selected.
 - [A response is replayed after acceptance] -> Keep the existing
   `awaiting_response_created`, response-id, and visible-output gates unchanged.
+- [A client waits on `response.created` before output] -> Only a fresh
+  replay-eligible stream defers it, by at most the upstream's own time to first
+  output; keepalive comments still flow and the owner is published on parse.
 
 ## Migration Plan
 

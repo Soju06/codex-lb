@@ -620,11 +620,9 @@ async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypat
     assert kwargs == {"action": "request_usage_refresh", "request_id": "req_usage_limit_refresh"}
 
 
-@pytest.mark.parametrize("code", ["upstream_error", "invalid_request_error"])
 @pytest.mark.asyncio
 async def test_message_derived_usage_limit_requests_the_same_usage_refresh(
     monkeypatch: pytest.MonkeyPatch,
-    code: str,
 ) -> None:
     """An envelope whose usage limit is proven by its message records the same evidence a coded
     one does: the refresh is gated on what the rejection means, not on the literal error code
@@ -645,7 +643,7 @@ async def test_message_derived_usage_limit_requests_the_same_usage_refresh(
             proxy,
             cast(Account, SimpleNamespace(id="acc-message-usage-limit")),
             {"message": "The usage limit has been reached"},
-            code,
+            "upstream_error",
             429,
         )
     finally:

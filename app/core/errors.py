@@ -176,10 +176,9 @@ def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:
 def is_upstream_usage_limit_message(message: str | None) -> bool:
     """True when the message asserts the account's usage limit is spent.
 
-    Upstream delivers this rejection as an HTTP body, as a serialized
-    ``response.failed`` frame that carries no status, and as a WebSocket
-    handshake error, and any of those forms may omit the error code -- so
-    neither the status nor the code table can be the gate, and every path that
+    Upstream delivers this rejection as an HTTP body and as a serialized
+    ``response.failed`` frame that carries no status and often no error code, so
+    neither the status nor the code table can be the gate and every path that
     needs the answer has to read it from the same place. The words are matched
     after folding each run of non-alphanumeric characters to a single space,
     because the same sentence arrives with a straight apostrophe, a curly one,

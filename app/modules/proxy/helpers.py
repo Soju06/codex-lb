@@ -40,18 +40,26 @@ PLAN_TYPE_PRIORITY = (
 _USAGE_LIMIT_CODE = "usage_limit_reached"
 _RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", _USAGE_LIMIT_CODE})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
+# The one normalized code that carries no classification decision of its own:
+# ``upstream_error`` is what a *missing* code normalizes to, which is exactly
+# the shape a message has to speak for. Every other code -- rate-limit, quota,
+# ``overloaded_error``, any transient code -- already decided what the failure
+# is, and a sentence must not be allowed to reverse that decision.
+#
+# ``invalid_request_error`` is deliberately excluded even though upstream does
+# reuse it for rejections it has no code for. It is also upstream's catch-all
+# for request-shaped 400s, whose message can quote request content back; and the
+# HTTP paths forward their status to the health write as evidence only
+# (``upstream_http_status``), never as the positional ``http_status`` the
+# classifier reads, so a status guard could not tell the two apart here. Reading
+# that code off a message would let an echoed sentence bench a serving account,
+# which is a worse failure than the one this predicate exists to fix.
+_MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
 _MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
 _SAFETY_BLOCK_MESSAGE_PREFIX = "This request was blocked by our safety systems."
-# The only two normalized codes that carry no classification decision of their
-# own: ``upstream_error`` is what a missing code normalizes to, and
-# ``invalid_request_error`` is the generic envelope type upstream reuses for
-# rejections it has no code for. Every other code -- rate-limit, quota,
-# ``overloaded_error``, any transient code -- already decided how the failure
-# is classified, and a message must not reverse that decision.
-_MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error", "invalid_request_error"})
 # The classes whose account-health write benches the account outright: a
 # persisted rate-limited or quota status with a reset deadline. Selection
 # cannot use a benched account again in this request whatever its rejection
@@ -118,26 +126,44 @@ def is_upstream_model_capacity_error(message: str | None) -> bool:
     return any(marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS)
 
 
-def _message_can_classify_usage_limit(*, error_code: str, http_status: int | None) -> bool:
-    if error_code == "invalid_request_error" and http_status not in (None, 429):
-        return False
-    return error_code in _MESSAGE_CLASSIFIED_CODES
-
-
-def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None, http_status: int | None = None) -> bool:
+def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -> bool:
     """True when upstream says this account's usage limit is spent.
 
     Either the code names the limit or the message does. The message-only form
-    is how the code-less HTTP 429 and the serialized ``response.failed`` frame
-    arrive, and it is the same rejection: callers that key on the literal code
-    alone miss the majority of the traffic. Plain ``rate_limit_exceeded``
-    throttling is deliberately not included -- it says the request arrived too
-    fast, not that the subscription window is exhausted.
+    is how the serialized ``response.failed`` frame arrives -- upstream sends
+    that frame with no status and no error code at all -- and it is the same
+    rejection the coded form carries, so a caller that keys on the literal code
+    alone answers "this account is fine" for a form upstream chooses freely.
+
+    Deliberately status-free: the same rejection arrives with a status and
+    without one, so a status could only make the two forms disagree. The
+    message is allowed to decide only where the code decided nothing; a coded
+    envelope keeps what its code said. Plain ``rate_limit_exceeded`` throttling
+    is not included -- it says the request arrived too fast, not that the
+    subscription window is exhausted.
     """
     return error_code == _USAGE_LIMIT_CODE or (
-        _message_can_classify_usage_limit(error_code=error_code, http_status=http_status)
-        and is_upstream_usage_limit_message(message)
+        error_code in _MESSAGE_CLASSIFIED_CODES and is_upstream_usage_limit_message(message)
     )
+
+
+def _excludes_account(*, failure_class: FailureClass, message: str | None) -> bool:
+    """Whether the classified failure lets the request stop using this account.
+
+    A capacity rejection describes the requested model, so moving off the
+    account for it would rotate the pool over a condition no account can serve
+    -- but that only holds while the account is still usable. A rate-limit or
+    quota classification benches it, and telling selection to keep an account
+    the health write just took away is not a carve-out, it is a contradiction.
+    The usage limit is account-scoped and outranks a capacity match on the class
+    that does not bench. ``non_retryable`` never excludes: the walk ends on it
+    rather than rotating the pool.
+    """
+    if failure_class in _BENCHING_FAILURE_CLASSES:
+        return True
+    if failure_class != "retryable_transient":
+        return False
+    return is_upstream_usage_limit_message(message) or not is_upstream_model_capacity_error(message)
 
 
 def classify_upstream_failure(
@@ -147,22 +173,24 @@ def classify_upstream_failure(
     http_status: int | None,
     phase: FailurePhase,
 ) -> ClassifiedFailure:
-    message = error.get("message")
-    usage_limit_message = is_upstream_usage_limit_message(message)
-    model_capacity_message = is_upstream_model_capacity_error(message)
     failure_class: FailureClass
     if error_code in _RATE_LIMIT_CODES:
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
-    elif usage_limit_message and _message_can_classify_usage_limit(error_code=error_code, http_status=http_status):
-        # An account that is out of quota cannot be waited out on itself, so
-        # this must not reach the transient branch that
-        # ``is_upstream_burst_rejection`` reads as a burst and answers with
-        # same-account backoff. Only the two codes that decided nothing are
-        # raised this way; a coded envelope keeps the class its code chose.
+    elif is_upstream_usage_limit_rejection(error_code=error_code, message=error.get("message")):
+        # The same rejection, in the delivery form that carries no code: a
+        # spent account cannot be waited out on itself, so this must not reach
+        # the transient branch below, where an account with nothing left to
+        # give would be treated as momentarily busy. Only the code that decided
+        # nothing is raised this way; a coded envelope keeps the class its code
+        # chose.
         failure_class = "rate_limit"
-    elif error_code in _TRANSIENT_CODES or model_capacity_message or (http_status is not None and http_status >= 500):
+    elif (
+        error_code in _TRANSIENT_CODES
+        or is_upstream_model_capacity_error(error.get("message"))
+        or (http_status is not None and http_status >= 500)
+    ):
         failure_class = "retryable_transient"
     else:
         failure_class = "non_retryable"
@@ -172,18 +200,7 @@ def classify_upstream_failure(
         error_code=error_code,
         error=error,
         http_status=http_status,
-        # A capacity rejection describes the requested model, so moving off the
-        # account for it would rotate the pool over a condition no account can
-        # serve -- but that only holds while the account is still usable. A
-        # coded rate-limit or quota rejection benches it, and telling selection
-        # to keep an account the health write just took away is not a carve-out,
-        # it is a contradiction. The usage limit is account-scoped and outranks
-        # a capacity match on the class that does not bench. ``non_retryable``
-        # never excludes: the walk ends on it rather than rotating the pool.
-        excludes_account=(
-            failure_class in _BENCHING_FAILURE_CLASSES
-            or (failure_class == "retryable_transient" and (usage_limit_message or not model_capacity_message))
-        ),
+        excludes_account=_excludes_account(failure_class=failure_class, message=error.get("message")),
     )
 
 

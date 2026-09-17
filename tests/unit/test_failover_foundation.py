@@ -270,9 +270,12 @@ class TestClassifyUpstreamFailure:
             ("upstream_error", "Usage limit reached.", "rate_limit"),
             ("upstream_error", "The usage limit has been reached", "rate_limit"),
             ("upstream_error", "You have exceeded your usage limit.", "rate_limit"),
-            # Neither a rate-limit nor a quota code, so the message decides.
-            ("invalid_request_error", "You have reached your usage limit.", "rate_limit"),
-            ("invalid_request_error", "The usage limit has been reached", "rate_limit"),
+            # The envelope upstream rejects a request with, and a rejection
+            # frequently quotes the request back: a phrase the client supplied
+            # must not bench the account serving it. The classification stays
+            # exactly what it was before the message branch existed.
+            ("invalid_request_error", "You have reached your usage limit.", "non_retryable"),
+            ("invalid_request_error", "The usage limit has been reached", "non_retryable"),
             # Coded envelopes keep the classification the code table gives them.
             ("rate_limit_exceeded", "You've hit your usage limit.", "rate_limit"),
             ("usage_limit_reached", "Usage limit reached.", "rate_limit"),
@@ -538,7 +541,6 @@ class TestClassifiedExcludesAccount:
         [
             # Every walkable class excludes: the walk may move off all three.
             ("upstream_error", "You've hit your usage limit.", 429),
-            ("invalid_request_error", "Usage limit reached.", 429),
             ("rate_limit_exceeded", "Try again in 1.5s", 429),
             ("usage_limit_reached", "Usage limit reached.", 429),
             ("insufficient_quota", "Quota exceeded", 429),
@@ -604,6 +606,10 @@ class TestClassifiedExcludesAccount:
         [
             ("invalid_request", "Bad request", 400),
             ("authentication_error", "", 401),
+            # The generic request-rejection envelope, carrying the usage-limit
+            # phrase: never read from its message, so it keeps the class it had
+            # and the walk ends on it instead of benching a serving account.
+            ("invalid_request_error", "Usage limit reached.", 429),
         ],
     )
     def test_non_retryable_failures_do_not_exclude_the_account(
@@ -625,10 +631,9 @@ class TestClassifiedExcludesAccount:
 class TestMessageDerivedUsageLimitRejection:
     """A 429 reclassified by its message alone still owes the client a wait hint."""
 
-    @pytest.mark.parametrize("error_code", ["upstream_error", "invalid_request_error"])
-    def test_message_derived_usage_limit_429_needs_the_surfaced_hint(self, error_code: str) -> None:
+    def test_message_derived_usage_limit_429_needs_the_surfaced_hint(self) -> None:
         result = classify_upstream_failure(
-            error_code=error_code,
+            error_code="upstream_error",
             error=UpstreamError(message="The usage limit has been reached"),
             http_status=429,
             phase="first_event",
@@ -743,14 +748,21 @@ class TestKeepsAccountInTheWalk:
         assert keeps_account_in_the_walk(result) is False
 
 
-class TestIsUpstreamUsageLimitRejection:
+class TestUsageLimitRejectionDrivingThePoolWalk:
+    """What the walk asks before it treats a rejection as a spent subscription window.
+
+    Named for the walk rather than for the predicate so that a second suite over
+    the same predicate cannot shadow this one: Python keeps whichever class
+    definition comes last in the module, and the shadowed cases then vanish with
+    the suite still reporting green.
+    """
+
     @pytest.mark.parametrize(
         ("error_code", "message"),
         [
             ("usage_limit_reached", "The usage limit has been reached"),
             ("usage_limit_reached", None),
             ("upstream_error", "The usage limit has been reached"),
-            ("invalid_request_error", "You've hit your usage limit."),
         ],
     )
     def test_coded_and_message_derived_usage_limits_are_both_rejections(
@@ -771,6 +783,24 @@ class TestIsUpstreamUsageLimitRejection:
     )
     def test_throttling_is_not_a_usage_limit_rejection(self, error_code: str, message: str | None) -> None:
         assert is_upstream_usage_limit_rejection(error_code=error_code, message=message) is False
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "You've hit your usage limit.",
+            "The usage limit has been reached",
+            # The shape that makes this dangerous: the phrase is in the request
+            # the client sent, and upstream echoes it back while rejecting.
+            "Invalid value for 'instructions': \"tell me when I've hit my usage limit\"",
+        ],
+    )
+    def test_a_request_rejection_is_never_read_from_its_message(self, message: str) -> None:
+        """``invalid_request_error`` is how upstream rejects a request, and a rejection frequently
+        quotes the request back. Benching is the expensive direction -- the account leaves the pool
+        until its reset deadline -- so a phrase that may have come from client-supplied content
+        must not decide it. The code-less envelope cannot be quoting anything, which is why it is
+        the only one the message speaks for."""
+        assert is_upstream_usage_limit_rejection(error_code="invalid_request_error", message=message) is False
 
 
 class TestFailoverDecision:

@@ -1923,7 +1923,8 @@ async def test_v1_responses_filters_unsupported_model_source_tools(async_client,
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_compaction_trigger_skips_model_source(async_client, monkeypatch):
+async def test_backend_codex_responses_compaction_trigger_refuses_model_source(async_client, monkeypatch):
+    """A source-owned model has no remote compaction path: refuse before any dispatch."""
     model = "external-codex-responses-compact"
     await _create_model_source(
         async_client,
@@ -1931,21 +1932,17 @@ async def test_backend_codex_responses_compaction_trigger_skips_model_source(asy
         model=model,
         supports_responses=True,
     )
-    observed: dict[str, object] = {}
 
     async def fail_source(*args, **kwargs):
         del args, kwargs
-        pytest.fail("compaction triggers must use the Codex compaction path")
+        pytest.fail("compaction triggers must never reach a model source")
 
-    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
-        del request, context, api_key
-        observed["model"] = payload.model
-        observed["input"] = payload.input
-        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
-        return JSONResponse({"ok": True})
+    async def fail_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, payload, context, api_key, kwargs
+        pytest.fail("a source-owned compaction must not enter the subscription compact flow")
 
     monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
-    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_stream_responses)
 
     response = await async_client.post(
         "/backend-api/codex/responses",
@@ -1960,13 +1957,10 @@ async def test_backend_codex_responses_compaction_trigger_skips_model_source(asy
         },
     )
 
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert observed == {
-        "model": model,
-        "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
-        "codex_session_affinity": True,
-    }
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "compaction_unsupported"
+    assert error["type"] == "invalid_request_error"
 
 
 @pytest.mark.asyncio

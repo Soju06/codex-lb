@@ -57,9 +57,6 @@ class _AffinitySelectionKwargs(TypedDict):
     abandon_unavailable_legacy_owner: bool
     require_unambiguous_account: bool
     sticky_max_age_seconds: int | None
-    subagent_parent_selection_key: str | None
-    subagent_parent_response_marker_key: str | None
-    response_bound_thread_marker_key: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +103,8 @@ class _AffinityPolicy:
     # an operator whether unanchored threads are being held or are churning.
     prompt_cache_derivation_outcome: str | None = None
     # Internal, one-way-derived exact-thread keys used only by the optional
-    # fresh-subagent placement preference. They never prove request ownership.
+    # fresh-subagent placement preference. They never prove request ownership
+    # and stay out of selection_kwargs(): the load balancer never sees them.
     subagent_parent_selection_key: str | None = None
     subagent_parent_response_marker_key: str | None = None
     response_bound_thread_marker_key: str | None = None
@@ -150,9 +148,6 @@ class _AffinityPolicy:
             "abandon_unavailable_legacy_owner": self.abandon_unavailable_legacy_owner,
             "require_unambiguous_account": self.require_unambiguous_account,
             "sticky_max_age_seconds": self.max_age_seconds,
-            "subagent_parent_selection_key": self.subagent_parent_selection_key,
-            "subagent_parent_response_marker_key": self.subagent_parent_response_marker_key,
-            "response_bound_thread_marker_key": self.response_bound_thread_marker_key,
         }
 
     @staticmethod

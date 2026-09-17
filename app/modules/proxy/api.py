@@ -790,6 +790,36 @@ async def _capture_raw_compaction_trigger_error(request: Request) -> None:
         request.state.compaction_trigger_error = exc
 
 
+async def _capture_raw_v1_compaction_trigger_error(request: Request) -> None:
+    """Reject a V1 compact input whose trigger is not the last top-level item.
+
+    ``V1ResponsesCompactRequest`` hoists trailing system/developer messages into
+    ``instructions`` and collapses duplicate terminal triggers, so a trigger
+    hidden behind a trailing developer message would otherwise be normalized
+    into a valid terminal one. Duplicate terminal triggers stay accepted.
+    """
+    try:
+        raw_payload = await request.json()
+    except (JSONDecodeError, UnicodeDecodeError, ValueError):
+        return
+    if not is_json_mapping(raw_payload):
+        return
+    input_value = raw_payload.get("input")
+    if not is_json_list(input_value):
+        return
+    trigger_seen = any(is_json_mapping(item) and item.get("type") == "compaction_trigger" for item in input_value)
+    terminal_trigger = bool(
+        input_value and is_json_mapping(input_value[-1]) and input_value[-1].get("type") == "compaction_trigger"
+    )
+    if trigger_seen and not terminal_trigger:
+        request.state.compaction_trigger_error = ClientPayloadError(
+            "compaction_trigger must appear as the final top-level input item",
+            param="input",
+            code="invalid_request_error",
+            error_type="invalid_request_error",
+        )
+
+
 def _raw_compaction_trigger_error(request: Request) -> ClientPayloadError | None:
     error = getattr(request.state, "compaction_trigger_error", None)
     return error if isinstance(error, ClientPayloadError) else None
@@ -6981,12 +7011,16 @@ async def responses_compact(
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
+    _raw_trigger_validation: None = Depends(_capture_raw_v1_compaction_trigger_error),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
+    raw_trigger_error = _raw_compaction_trigger_error(request)
+    if raw_trigger_error is not None:
+        return _logged_error_json_response(request, 400, openai_client_payload_error(raw_trigger_error))
     try:
         compact_payload = payload.to_compact_request()
     except ClientPayloadError as exc:

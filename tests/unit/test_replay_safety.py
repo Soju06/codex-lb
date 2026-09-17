@@ -251,6 +251,22 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
             "internal_chat_message_metadata_passthrough": metadata,
         },
         {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "github"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
             "type": "message",
             "role": "assistant",
             "status": "completed",

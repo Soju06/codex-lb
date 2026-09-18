@@ -213,27 +213,36 @@ async def test_namespace_bump_clears_route_cache_via_lifespan_poller(async_clien
     assert get_upstream_route_cache().get("seeded-account") is None
 
 
-async def test_settings_upstream_field_change_clears_local_cache(async_client, route_cache_ttl) -> None:
+async def test_settings_upstream_field_change_clears_local_and_peer_cache(async_client, route_cache_ttl) -> None:
+    peer_cache = UpstreamRouteCache()
+    peer_poller = CacheInvalidationPoller(SessionLocal)
+    peer_poller.on_invalidation(NAMESPACE_SETTINGS, peer_cache.clear)
+    await peer_poller._poll_once()
+
     settings_response = await async_client.get("/api/settings")
     assert settings_response.status_code == 200
     body = settings_response.json()
     body["upstreamProxyRoutingEnabled"] = True
-    version_before = await _upstream_route_namespace_version()
+    route_version_before = await _upstream_route_namespace_version()
     _seed_dummy_entry()
+    peer_cache.store_route("peer-seeded-account", None, generation=peer_cache.generation)
+    assert peer_cache.get("peer-seeded-account") is not None
 
     response = await async_client.put("/api/settings", json=body)
 
     assert response.status_code == 200
     assert get_upstream_route_cache().get("seeded-account") is None
-    # The settings-namespace bump alone enqueues no retry on write failure, so
-    # the upstream field change must also durably bump ``upstream_route``.
-    assert await _upstream_route_namespace_version() > version_before
+    assert peer_cache.get("peer-seeded-account") is not None
+
+    await peer_poller._poll_once()
+    assert peer_cache.get("peer-seeded-account") is None
+    assert await _upstream_route_namespace_version() == route_version_before
 
 
 async def test_settings_change_clears_route_cache_before_first_post_commit_await(
     async_client, route_cache_ttl, monkeypatch
 ) -> None:
-    # The settings row is committed before the durable bumps are awaited; a
+    # The settings row is committed before its durable bump is awaited; a
     # concurrent request served during those awaits must not resolve from the
     # stale route cache, so the clear must precede the settings-cache
     # invalidation await.

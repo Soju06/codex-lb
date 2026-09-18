@@ -38,6 +38,7 @@ class ApiKeyCreateRequest(DashboardModel):
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
     usage_sections: str | None = None
+    usage_share_percent: int | None = Field(default=None, strict=True, ge=1, le=100)
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
@@ -59,6 +60,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
     usage_sections: str | None = None
+    usage_share_percent: int | None = Field(default=None, strict=True, ge=1, le=100)
     weekly_token_limit: int | None = Field(default=None, ge=1)
     expires_at: datetime | None = None
     is_active: bool | None = None
@@ -89,6 +91,7 @@ class ApiKeyResponse(DashboardModel):
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
+    usage_share_percent: int | None = None
     expires_at: datetime | None
     is_active: bool
     account_assignment_scope_enabled: bool = False

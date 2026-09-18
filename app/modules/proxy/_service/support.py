@@ -1062,6 +1062,10 @@ class _WebSocketRequestState:
     # references pinned to the uploading subscription account. Previous
     # response ownership is recorded separately after continuity lookup.
     source_route_excluded: bool = False
+    # Set after one fresh direct-WebSocket turn clears usage-share admission.
+    # The same request state survives reconnect/replay, so this monotonic bit
+    # prevents a reuse-to-reconnect race from evaluating the policy twice.
+    usage_share_admitted: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0

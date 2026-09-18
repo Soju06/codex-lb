@@ -126,3 +126,7 @@ does not count as evidence that the account is healthy.
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+
+## Usage-share evidence freshness
+
+The estimate requires a fresh, complete canonical long-window row for every account contributing capacity. Monthly-capacity plans use the latest authoritative shape: monthly evidence, or a later weekly-duration quota explicitly reported in the primary slot. An ordinary lingering secondary row never substitutes for monthly evidence. Incomplete evidence fails open and reuses `UsageUpdater.request_refresh`, including its debounce and singleflight behavior. Each request wakes at most one account; the staggered scheduler covers the rest of a large pool.

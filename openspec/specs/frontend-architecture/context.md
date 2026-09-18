@@ -76,3 +76,7 @@ If overview, projections, and request-log options return successfully while the 
 ### Testing notes
 
 The product-boundary regression renders the real `/dashboard` App route with the production query retry policy and MSW handlers. It counts each request family, seeds unique values for a statistic, quota surface, projection metric, and account control, focuses and keyboard-activates native Retry, holds the recovered listing response pending long enough to assert all healthy surfaces remain mounted, and then verifies the recovered row.
+
+## Estimated pool-allocation control
+
+The API-key create/edit dialogs present `Estimated pool allocation (%)` as a standalone optional policy above fixed usage rules. It is not rendered as a counter rule because it has no local current value or reset clock. Table and detail summaries describe only the configured cap and keep the approximation explicit.

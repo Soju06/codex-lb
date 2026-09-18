@@ -24,21 +24,24 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Registered namespaces and their callbacks (wired in `app/main.py`):
   - `api_key` -> `ApiKeyCache.clear` (fallback TTL 60s)
   - `firewall` -> `FirewallIPCache.invalidate_all` (fallback TTL `firewall_ip_cache_ttl_seconds`, default 30s)
-  - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` (snapshot of `accounts.id -> status`; no TTL — the snapshot is authoritative once seeded, degraded local-set semantics when unseeded)
+  - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` and `ApiKeyCache.clear` (the routing snapshot has no TTL once seeded; allocation-policy snapshots fall back to the API-key cache's 60s TTL)
   - `account_selection` -> `AccountSelectionCache.invalidate(propagate=False)` (fallback TTL 5s)
-  - `settings` -> `SettingsCache.invalidate(propagate=False)` (fallback TTL 5s)
-- Two bump flavors: `await bump(namespace)` (durable before the mutation response; used by
-  security-bearing endpoints: settings/dashboard-auth mutations, account pause/reactivate/delete,
-  OAuth re-auth) and sync `request_bump(namespace)` (coalesced into a pending set flushed at the
-  start of each poll cycle; used on hot/scheduler paths). Coalescing bounds writes to <=1 per
-  namespace per poll interval; worst-case cross-replica convergence is flush (<=0.5s) + peer poll
-  (<=0.5s) ~= 1s for coalesced bumps and one poll interval for awaited bumps.
+  - `settings` -> `SettingsCache.invalidate(propagate=False)` and `UpstreamRouteCache.clear` (fallback TTLs 5s and `upstream_route_cache_ttl_seconds` respectively)
+  - `upstream_route` -> `UpstreamRouteCache.clear` (fallback TTL `upstream_route_cache_ttl_seconds`)
+- Two bump flavors share one pending set. `await bump(namespace)` attempts the durable write
+  immediately before the mutation response and retains a failed or interrupted write for a later
+  poll cycle. `request_bump(namespace)` only queues a coalesced write for the next cycle and is used
+  on hot/scheduler paths. An immediate attempt consumes only markers that predate it; a marker added
+  while its write is in flight survives for a later bump. Ordinary convergence is one peer poll after
+  an immediate success, or source flush plus peer poll (about 1s at defaults) after a queued retry.
 - Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff); a
-  final failure logs ERROR and increments
-  `codex_lb_cache_invalidation_bump_failures_total{namespace}` but never fails the mutation —
-  peers then converge via the cache's fallback TTL. Failed coalesced flushes stay pending and
-  retry next cycle. Poll failures escalate to WARNING after 3 and ERROR after 10 consecutive
-  failures and increment `codex_lb_cache_invalidation_poll_failures_total`.
+  final failure logs ERROR, increments
+  `codex_lb_cache_invalidation_bump_failures_total{namespace}`, and leaves the namespace pending
+  without failing the mutation. Failed or interrupted awaited and coalesced bumps retry on later
+  poll cycles until one lands. The cache TTL remains the backstop for out-of-band database edits,
+  process exit before the pending set drains, or a poller that remains unavailable. Poll failures escalate to WARNING
+  after 3 and ERROR after 10 consecutive failures and increment
+  `codex_lb_cache_invalidation_poll_failures_total`.
 - Poller callbacks must be registered with non-propagating variants — a propagating callback
   would re-bump on every observed bump and loop.
 - Routing-unavailable derivation: an account is routing-unavailable when the snapshot says

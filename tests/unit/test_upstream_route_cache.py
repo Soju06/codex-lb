@@ -91,18 +91,14 @@ def test_cached_error_reraises_same_reason(route_cache_ttl) -> None:
         assert excinfo.value is not error
 
 
-async def test_invalidate_falls_back_to_coalesced_bump_on_failure(route_cache_ttl) -> None:
+async def test_invalidate_clears_locally_and_awaits_peer_invalidation(route_cache_ttl) -> None:
     class _FakePoller:
         def __init__(self) -> None:
             self.bumped: list[str] = []
-            self.requested: list[str] = []
 
         async def bump(self, namespace: str) -> bool:
             self.bumped.append(namespace)
             return False
-
-        def request_bump(self, namespace: str) -> None:
-            self.requested.append(namespace)
 
     poller = _FakePoller()
     set_cache_invalidation_poller(cast(CacheInvalidationPoller, poller))
@@ -112,9 +108,6 @@ async def test_invalidate_falls_back_to_coalesced_bump_on_failure(route_cache_tt
         await cache.invalidate()
         assert cache.get("acct-1") is None
         assert poller.bumped == [NAMESPACE_UPSTREAM_ROUTE]
-        # bump() never raises; a failed durable bump must enqueue the coalesced
-        # retry so peers still converge once the write path recovers.
-        assert poller.requested == [NAMESPACE_UPSTREAM_ROUTE]
     finally:
         set_cache_invalidation_poller(None)
 

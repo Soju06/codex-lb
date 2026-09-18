@@ -25,8 +25,6 @@ from app.core.auth import (
     normalize_seat_type,
     resolve_seat_identity,
 )
-from app.core.auth.api_key_cache import get_api_key_cache
-from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.oauth import (
     OAuthError,
     OAuthTokens,
@@ -1069,11 +1067,7 @@ class OauthService:
 
     async def _invalidate_account_routing_caches(self) -> None:
         get_account_selection_cache().invalidate()
-        get_api_key_cache().clear()
         await propagate_account_routing_change()
-        poller = get_cache_invalidation_poller()
-        if poller is not None:
-            await poller.bump(NAMESPACE_API_KEY)
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:

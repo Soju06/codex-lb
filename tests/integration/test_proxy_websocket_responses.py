@@ -4531,57 +4531,19 @@ def test_backend_responses_websocket_echoes_existing_turn_state_header(app_insta
 
 
 def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_instance, monkeypatch):
+    # Release each response batch only after its corresponding client turn is
+    # actually sent upstream. Preloading the first batch and deferring only the
+    # second lets the reader buffer both turns after the first send, which can
+    # make the test observe second-turn events before second-turn admission.
     first_upstream = _SequencedUpstreamWebSocket(
-        [
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {"type": "response.created", "response": {"id": "resp_ws_first", "status": "in_progress"}},
-                    separators=(",", ":"),
-                ),
-            ),
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {
-                        "type": "response.completed",
-                        "response": {
-                            "id": "resp_ws_first",
-                            "status": "completed",
-                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                        },
-                    },
-                    separators=(",", ":"),
-                ),
-            ),
-        ],
+        [],
         deferred_message_batches=[
-            [
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {"type": "response.created", "response": {"id": "resp_ws_second", "status": "in_progress"}},
-                        separators=(",", ":"),
-                    ),
-                ),
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_ws_second",
-                                "status": "completed",
-                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                ),
-            ]
+            _websocket_response_batch("resp_ws_first"),
+            _websocket_response_batch("resp_ws_second"),
         ],
     )
     connect_calls: list[dict[str, object]] = []
+    usage_share_admissions: list[str] = []
     dispatch_owner_snapshots: list[tuple[str | None, str | None]] = []
     original_bind_dispatch_owner = websocket_mixin_module._bind_websocket_request_dispatch_owner
 
@@ -4612,7 +4574,15 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         client_send_lock,
         websocket,
     ):
-        del self, headers, request_state, api_key, client_send_lock, websocket
+        # This test replaces the real connect path; preserve its one-time
+        # admission contract so the first turn and the reused second turn are
+        # both observed.
+        websocket_mixin_module._admit_websocket_usage_share(
+            self,
+            request_state,
+            request_state.api_key or api_key,
+        )
+        del headers, request_state, api_key, client_send_lock, websocket
         connect_calls.append(
             {
                 "sticky_key": sticky_key,
@@ -4640,11 +4610,20 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
+    def record_usage_share_admission(self, api_key, request_id, kind):
+        del self, api_key, kind
+        usage_share_admissions.append(request_id)
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_enforce_api_key_usage_share",
+        record_usage_share_admission,
+    )
     monkeypatch.setattr(
         websocket_mixin_module,
         "_bind_websocket_request_dispatch_owner",
@@ -4678,6 +4657,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
 
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
     assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+    assert len(usage_share_admissions) == 2
     assert len(connect_calls) == 1
     assert connect_calls[0]["sticky_key"] == "thread_a"
     assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE

@@ -115,6 +115,8 @@ class _HTTPBridgeServiceProtocol(Protocol):
         self,
         session: _HTTPBridgeSession,
         turn_state: str,
+        *,
+        synthesized: bool = False,
     ) -> bool: ...
     async def _register_http_bridge_turn_state_core(
         self,
@@ -122,6 +124,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
         turn_state: str,
         *,
         reversible: bool,
+        synthesized: bool,
     ) -> tuple[bool, DurableBridgeAliasRegistrationReceipt | None]: ...
     async def _register_http_bridge_previous_response_id_impl(
         self,

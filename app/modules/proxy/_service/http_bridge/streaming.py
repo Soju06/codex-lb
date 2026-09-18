@@ -1072,6 +1072,27 @@ class _HTTPBridgeStreamingMixin:
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
+            turn_state = _sticky_key_from_turn_state_header(headers)
+            if (
+                turn_state is not None
+                and not forwarded_request
+                and payload.previous_response_id is None
+                and rewritten_file_account_id is None
+                and _http_bridge_payload_looks_like_full_resend(payload)
+                and _http_bridge_payload_is_account_neutral_fresh_replay(payload)
+            ):
+                durable_lookup = await self._durable_bridge.lookup_turn_state_target(
+                    turn_state=turn_state,
+                    api_key_id=api_key.id if api_key is not None else None,
+                )
+                if durable_lookup is not None and _verify_durable_full_resend(payload, durable_lookup) is not None:
+                    owner_account_id = await self._resolve_compact_turn_state_owner(
+                        turn_state=turn_state,
+                        api_key=api_key,
+                    )
+                    if durable_lookup.account_id == owner_account_id:
+                        headers = without_http_bridge_session_affinity_headers(headers)
+                        logger.info("http_fallback_verified_full_resend request_id=%s", request_id)
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
                 payload,

@@ -715,6 +715,106 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "history", ["full", "missing_output", "wrong_prefix", "explicit_anchor", "owned_item", "file_owner"]
+)
+async def test_http_bypass_quota_failover_requires_verified_full_history(async_client, monkeypatch, history):
+    from app.dependencies import get_proxy_service_for_app
+    from app.modules.proxy._service.http_bridge import streaming as bridge_streaming
+
+    owner_id = await _import_account(async_client, "acc_bypass_a", "bypass-a@example.com")
+    await _import_account(async_client, "acc_bypass_b", "bypass-b@example.com")
+    service = get_proxy_service_for_app(async_client._transport.app)
+    monkeypatch.setattr(bridge_streaming, "_ws_transport_payload_budget_bytes", lambda: 1)
+    if history == "file_owner":
+
+        async def resolve_file_owner(*args, **kwargs):
+            del args, kwargs
+            return owner_id
+
+        monkeypatch.setattr(service, "_resolve_forwarded_file_account_for_responses", resolve_file_owner)
+
+    prior_input = [{"role": "user", "content": [{"type": "input_text", "text": "first question"}]}]
+    turn_state = "http_turn_bypass_quota"
+    claimed = await service._durable_bridge.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="bypass-session",
+        api_key_id=None,
+        instance_id="test-instance",
+        owner_process_epoch="test-epoch",
+        lease_ttl_seconds=60.0,
+        account_id=owner_id,
+        model="gpt-5.1",
+        service_tier=None,
+        latest_turn_state=turn_state,
+        latest_response_id="resp_prior",
+        allow_takeover=True,
+    )
+    await service._durable_bridge.renew_live_session(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="test-instance",
+        owner_epoch=claimed.owner_epoch,
+        lease_ttl_seconds=60.0,
+        latest_turn_state=turn_state,
+        latest_response_id="resp_prior",
+        latest_input_item_count=1,
+        latest_input_full_fingerprint=proxy_module._fingerprint_input_items(prior_input),
+    )
+    await service._durable_bridge.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="test-instance",
+        owner_epoch=claimed.owner_epoch,
+        lease_ttl_seconds=60.0,
+        turn_state=turn_state,
+    )
+
+    full_input = [
+        *prior_input,
+        {"role": "assistant", "content": [{"type": "output_text", "text": "first answer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    if history == "missing_output":
+        full_input.pop(1)
+    elif history == "wrong_prefix":
+        full_input[0] = {"role": "user", "content": "different history"}
+    elif history == "owned_item":
+        full_input.append({"type": "item_reference", "id": "msg_owned"})
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": full_input, "stream": True}
+    if history == "explicit_anchor":
+        payload["previous_response_id"] = "resp_prior"
+    calls: list[tuple[str | None, dict[str, str]]] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del payload, access_token, kwargs
+        calls.append((account_id, dict(headers)))
+        if account_id == "acc_bypass_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_bypass_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=payload,
+        headers={"x-codex-turn-state": turn_state},
+    )
+
+    if history == "full":
+        assert "response.completed" in response.text, response.text
+        assert [account for account, _headers in calls] == ["acc_bypass_a", "acc_bypass_b"]
+        for _account, sent_headers in calls:
+            assert "x-codex-turn-state" not in {key.lower() for key in sent_headers}
+    else:
+        assert "response.completed" not in response.text
+        assert not any(account == "acc_bypass_b" for account, _headers in calls)
+
+
+@pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
     account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")

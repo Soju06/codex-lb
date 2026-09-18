@@ -99,6 +99,8 @@ from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.helpers import (
+    _QUOTA_CODES,
+    _RATE_LIMIT_CODES,
     _apply_error_metadata,
     _is_account_model_unsupported_error,
     _normalize_error_code,
@@ -136,6 +138,47 @@ _POST_REFRESH_TRANSIENT_EXHAUSTED_ATTR = "_codex_lb_post_refresh_transient_exhau
 # replica-local burst cooldown, never ``record_error``), but every surfaced
 # pre-visible failure is penalized once by construction.
 _STREAM_HEALTH_RECORDED_ATTR = "_codex_lb_stream_health_recorded"
+_INVALID_ENCRYPTED_CONTENT_CODE = "invalid_encrypted_content"
+
+
+def _failure_is_rate_limit_or_quota_rejection(exc: BaseException) -> bool:
+    """Return whether a pre-visible failure definitively rejected the selected account."""
+    if isinstance(exc, _RetryableStreamError):
+        return exc.code in (_RATE_LIMIT_CODES | _QUOTA_CODES)
+    if not isinstance(exc, ProxyResponseError) or exc.status_code != 429:
+        return False
+    error = _parse_openai_error(exc.payload)
+    code = _normalize_error_code(error.code if error else None, error.type if error else None)
+    return code in (_RATE_LIMIT_CODES | _QUOTA_CODES)
+
+
+def _failure_allows_payload_owner_reselection(exc: BaseException) -> bool:
+    """Return whether a pre-visible rejection proves this account cannot own the payload."""
+    return _failure_is_rate_limit_or_quota_rejection(exc) or (
+        isinstance(exc, ProxyResponseError) and is_confirmed_pre_dispatch_transport_error(exc)
+    )
+
+
+def _responses_payload_has_encrypted_reasoning(payload: ResponsesRequest) -> bool:
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("type") == "reasoning"
+        and isinstance(item.get("encrypted_content"), str)
+        and bool(item["encrypted_content"])
+        for item in input_value
+    )
+
+
+def _stream_failure_code(exc: BaseException) -> str | None:
+    if isinstance(exc, (_RetryableStreamError, _TerminalStreamError)):
+        return exc.code
+    if not isinstance(exc, ProxyResponseError):
+        return None
+    error = _parse_openai_error(exc.payload)
+    return _normalize_error_code(error.code if error else None, error.type if error else None)
 
 
 def _resolve_http_downstream_transport(policy: str, *, payload: ResponsesRequest, headers: Mapping[str, str]) -> str:
@@ -524,6 +567,9 @@ class _StreamingRetryMixin:
         deferred_capacity_lease: AccountLease | None = None
         preferred_account_id: str | None = None
         payload_replay_required_account_id: str | None = None
+        quota_failover_source_account_id: str | None = None
+        quota_failover_rejection_logged = False
+        payload_has_encrypted_reasoning = _responses_payload_has_encrypted_reasoning(payload)
         file_preferred_account_id: str | None = rewritten_file_account_id
         require_preferred_account = False
         last_retryable_stream_error: _RetryableStreamError | None = None
@@ -1204,6 +1250,31 @@ class _StreamingRetryMixin:
                 policy=upstream_transport_policy_label,
                 sticky=upstream_transport_sticky,
                 status=status,
+            )
+
+        def _log_cross_account_encrypted_reasoning_rejection(
+            *,
+            account_id: str,
+            exc: BaseException,
+        ) -> None:
+            nonlocal quota_failover_rejection_logged
+            if (
+                quota_failover_rejection_logged
+                or not payload_has_encrypted_reasoning
+                or quota_failover_source_account_id is None
+                or quota_failover_source_account_id == account_id
+                or _stream_failure_code(exc) != _INVALID_ENCRYPTED_CONTENT_CODE
+            ):
+                return
+            quota_failover_rejection_logged = True
+            _facade().logger.warning(
+                "cross_account_encrypted_reasoning_rejected request_id=%s "
+                "source_account_id=%s target_account_id=%s "
+                "failover_trigger=previsible_rate_limit_or_quota upstream_code=%s",
+                request_id,
+                quota_failover_source_account_id,
+                account_id,
+                _INVALID_ENCRYPTED_CONTENT_CODE,
             )
 
         async def _render_account_model_rejection(
@@ -2323,11 +2394,15 @@ class _StreamingRetryMixin:
                                     if register_payload_owner:
                                         payload_replay_required_account_id = account.id
                                 except BaseException as exc:
-                                    if register_payload_owner and not (
-                                        isinstance(exc, ProxyResponseError)
-                                        and is_confirmed_pre_dispatch_transport_error(exc)
-                                    ):
-                                        payload_replay_required_account_id = account.id
+                                    if register_payload_owner:
+                                        if _failure_is_rate_limit_or_quota_rejection(exc):
+                                            quota_failover_source_account_id = account.id
+                                        elif not _failure_allows_payload_owner_reselection(exc):
+                                            payload_replay_required_account_id = account.id
+                                    _log_cross_account_encrypted_reasoning_rejection(
+                                        account_id=account.id,
+                                        exc=exc,
+                                    )
                                     raise
                             finally:
                                 close_task = scheduler.create_task(

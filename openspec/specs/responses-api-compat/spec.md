@@ -10949,4 +10949,3 @@ calls.
 - **THEN** the account-neutral proof MUST reject the replay even if the async call has no output
 - **AND** WebSocket stale-anchor recovery MUST NOT replay that malformed history to a different account
 - **AND** nonblank async IDs MUST retain the existing unresolved-call replay behavior
-

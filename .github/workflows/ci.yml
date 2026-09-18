@@ -430,7 +430,9 @@ jobs:
   test-integration-core:
     name: Tests (pytest, integration-core-${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A passing shard can take 19 minutes before setup and cleanup. Keep the
+    # per-test deadlines in Makefile while allowing whole-job runtime variation.
+    timeout-minutes: 30
     needs: changes
     strategy:
       fail-fast: false

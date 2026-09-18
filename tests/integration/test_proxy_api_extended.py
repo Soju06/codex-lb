@@ -2930,14 +2930,17 @@ async def test_source_responses_stream_starts_sse_keepalive_before_first_upstrea
 
     assert isinstance(response, StreamingResponse)
     iterator = response.body_iterator.__aiter__()
-    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    # The budgets below only guard against a hung iterator. The keepalive is
+    # due after 10 ms and the tail of the stream settles the usage row through
+    # the database, so a loaded runner needs seconds, not a fifth of one.
+    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=5.0)
     assert first_chunk == SSE_KEEPALIVE_FRAME
     assert keepalives == ["responses_source"]
     release_upstream.set()
     remaining: list[str] = []
     while True:
         try:
-            remaining.append(cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)))
+            remaining.append(cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=5.0)))
         except StopAsyncIteration:
             break
     joined = "".join(remaining)

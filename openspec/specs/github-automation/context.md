@@ -1,8 +1,43 @@
 # Context: github-automation
 
 Normative requirements live in [`spec.md`](./spec.md). This document currently
-covers the Simplicity budgets check and the Release guards workflow; the
-codex-review label-sync machinery is summarized in the spec's Purpose.
+covers contributor attribution, CI runtime limits, the Simplicity budgets
+check, and the Release guards workflow; the codex-review label-sync machinery
+is summarized in the spec's Purpose.
+
+## Contributor account renames
+
+GitHub logins can change while numeric user IDs remain stable. The repository
+and PR commit APIs report current logins, but an existing commit's numeric
+noreply address retains the login used when that commit was authored. Coverage
+therefore resolves those historical IDs from the already-fetched API evidence
+before comparing logins with `.all-contributorsrc`. API authors are combined
+by ID before extracting their logins; the PR commit response takes precedence
+when the repository contributor response retains an older name for that same
+ID. Both live API sources take precedence over a stale PR event. Unknown IDs and older
+login-only addresses remain checked; an API error is not permission to omit
+authors. The recorded contributor is updated in place when their login changes.
+
+For example, the existing `Lotfree618` account became `felixcake618` while
+retaining user ID `91266981`. Merely adding the new login would duplicate the
+same person, while merely changing the registry row would leave the historical
+login falsely missing from local commit coverage.
+
+## Integration-core runtime limits
+
+The three integration-core jobs allow 30 minutes for setup, the full test
+selection, interpreter shutdown, and cache cleanup. The per-test 180-second
+timeout and 300-second diagnostic watchdog remain in `Makefile`, and the
+required aggregate still rejects any failed or cancelled shard.
+
+[CI run 35096552634](https://github.com/Soju06/codex-lb/actions/runs/35096552634/job/104982780065)
+reported 1,021 passing tests in 1,156.30 seconds, but reached its former
+20-minute job deadline during shutdown. The same selected tests passed in
+612.19 seconds in the preceding approved run. The reason for that runtime
+variation was not isolated. The cancelled run also emitted an aiosqlite
+`Event loop is closed` thread warning; changing the job budget does not fix
+that separate warning. Local syntax, partition, and regression checks do not
+replace a successful execution of the updated workflow on GitHub.
 
 ## Simplicity budgets check
 

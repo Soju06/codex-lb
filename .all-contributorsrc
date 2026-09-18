@@ -543,10 +543,10 @@
       ]
     },
     {
-      "login": "Lotfree618",
-      "name": "Lotfree",
+      "login": "felixcake618",
+      "name": "Felix Cake",
       "avatar_url": "https://avatars.githubusercontent.com/u/91266981?v=4",
-      "profile": "https://github.com/Lotfree618",
+      "profile": "https://github.com/felixcake618",
       "contributions": [
         "code",
         "test",
@@ -1492,6 +1492,17 @@
       "name": "Markus Jakl",
       "avatar_url": "https://avatars.githubusercontent.com/u/40384?v=4",
       "profile": "https://github.com/mjakl",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "DongwonTTuna",
+      "name": "DongwonTuna",
+      "avatar_url": "https://avatars.githubusercontent.com/u/38794795?v=4",
+      "profile": "https://github.com/DongwonTTuna",
       "contributions": [
         "code",
         "test",

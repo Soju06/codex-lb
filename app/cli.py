@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.codex_sessions_retag import RetagProgress, RetagResult, default_codex_home, retag_codex_sessions
 from app.core.ingress_limits import MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 
 if TYPE_CHECKING:
@@ -50,6 +52,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Codex data directory. Defaults to CODEX_HOME, /codex-home in Docker, or ~/.codex.",
     )
+    retag.add_argument("--progress-json", action="store_true", help="Emit JSONL phase progress on stderr.")
     retag.add_argument("--dry-run", action="store_true", help="Show what would change without writing files.")
     retag.add_argument(
         "--yes",
@@ -277,7 +280,19 @@ def _parse_server_ws_max_size(raw_ws_max_size: str) -> int:
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
     codex_home = args.codex_home or default_codex_home()
     if not args.dry_run:
-        _confirm_retag_write(args.yes)
+        _confirm_retag_write(args.yes, progress_json=args.progress_json)
+
+    progress_enabled = args.progress_json
+
+    def report_progress(event: RetagProgress) -> None:
+        nonlocal progress_enabled
+        if progress_enabled:
+            try:
+                print(json.dumps(asdict(event)), file=sys.stderr, flush=True)
+            except BrokenPipeError:
+                progress_enabled = False
+                # Python flushes stderr again at shutdown, including a failed buffered write.
+                sys.stderr = open(os.devnull, "w")
 
     try:
         result = retag_codex_sessions(
@@ -286,6 +301,7 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
             target_provider=args.target_provider,
             dry_run=args.dry_run,
             progress_logger=lambda message: print(message, flush=True),
+            progress_callback=report_progress if args.progress_json else None,
         )
     except sqlite3.OperationalError as exc:
         message = str(exc)
@@ -303,12 +319,12 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
     _print_retag_summary(result)
 
 
-def _confirm_retag_write(yes: bool) -> None:
+def _confirm_retag_write(yes: bool, *, progress_json: bool = False) -> None:
     warning = (
         "This command rewrites Codex session metadata, including state_*.sqlite when present.\n"
         "Close Codex/Codex CLI before continuing to avoid SQLite locks or stale writes."
     )
-    print(warning, file=sys.stderr)
+    print(warning, file=sys.stdout if progress_json else sys.stderr)
     if yes:
         return
     if not sys.stdin.isatty():

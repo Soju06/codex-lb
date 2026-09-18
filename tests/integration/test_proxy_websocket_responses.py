@@ -10500,6 +10500,368 @@ def test_backend_responses_websocket_transparent_replay_emits_no_accounts_when_r
     assert first_upstream.closed is True
 
 
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        # No code and no type, which normalizes to ``upstream_error``.
+        {"message": "The usage limit has been reached"},
+        # The same rejection in the second-person wording, still code-less.
+        {"message": "You've hit your usage limit."},
+        # The coded form, which the code table already answered for.
+        {"code": "usage_limit_reached", "message": "The usage limit has been reached"},
+    ],
+)
+def test_backend_responses_websocket_usage_limit_frame_benches_the_account_without_a_code(
+    app_instance,
+    monkeypatch,
+    frame_error,
+):
+    """The transport most of the fleet runs must read the frame the same way the HTTP path does.
+
+    Upstream serializes the usage-limit rejection into a ``response.failed`` frame that carries no
+    status and, at its own discretion, no error code. The account-health write is what retires this
+    socket and lets the turn be replayed elsewhere, so a gate that reads only the code leaves the
+    spent account both unbenched and still connected -- and the next turn is handed straight back
+    to it. Whether the code was attached decides nothing about what the account can serve.
+    """
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_ws_frame_limit",
+                            "status": "failed",
+                            "error": frame_error,
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    connect_models: list[str | None] = []
+    handled_error_codes: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            request_state,
+            api_key,
+        )
+        connect_models.append(model)
+        if len(connect_models) == 1:
+            del client_send_lock, websocket
+            return SimpleNamespace(id="acct_ws_frame_limit_1"), first_upstream
+        async with client_send_lock:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "status": 503,
+                        "error": {"code": "no_accounts", "message": "No active accounts available"},
+                    }
+                )
+            )
+        return None, None
+
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
+        del self, account, error
+        handled_error_codes.append(code)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "retry once"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            event = json.loads(websocket.receive_text())
+
+    assert handled_error_codes == ["usage_limit_reached"]
+    assert event["type"] == "error"
+    assert event["status"] == 503
+    assert connect_models == ["gpt-5.1", "gpt-5.1"]
+    assert first_upstream.closed is True
+
+
+@pytest.mark.parametrize(
+    ("frame_error", "expected_health_code"),
+    [
+        ({"message": "The usage limit has been reached"}, "upstream_error"),
+        ({"code": "usage_limit_reached", "message": "The usage limit has been reached"}, "usage_limit_reached"),
+    ],
+)
+def test_backend_responses_websocket_usage_limit_frame_after_a_visible_event_still_benches_it(
+    app_instance,
+    monkeypatch,
+    frame_error,
+    expected_health_code,
+):
+    """Downstream visibility forbids moving the turn, not recording what upstream said.
+
+    ``response.created`` is already relayed, so the turn is committed to this account and the
+    rejection is surfaced as-is -- replay is off the table and the account-health write is the only
+    remedy left for the next turn. That write must not depend on upstream having attached the code.
+    """
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_frame_visible", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_ws_frame_visible",
+                            "status": "failed",
+                            "error": frame_error,
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    connect_models: list[str | None] = []
+    handled_error_codes: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_models.append(model)
+        return SimpleNamespace(id="acct_ws_frame_visible_1"), first_upstream
+
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
+        del self, account, error
+        handled_error_codes.append(code)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "committed"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            created_event = json.loads(websocket.receive_text())
+            failed_event = json.loads(websocket.receive_text())
+
+    assert created_event["type"] == "response.created"
+    assert failed_event["type"] == "response.failed"
+    assert connect_models == ["gpt-5.1"]
+    # The code the health write is recorded under is whatever upstream sent; that it happens at
+    # all is what the code table got wrong.
+    assert handled_error_codes == [expected_health_code]
+
+
+def test_backend_responses_websocket_unrelated_frame_without_a_code_leaves_the_account_alone(
+    app_instance,
+    monkeypatch,
+):
+    """The predicate is consulted, not bypassed: a code-less frame that says nothing about the
+    account's usage limit is still surfaced on the spot, so no other rejection is widened into a
+    bench-and-reconnect."""
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            "id": "resp_ws_frame_safety",
+                            "status": "failed",
+                            "error": {"message": "Your request was rejected as a result of our safety system."},
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        ]
+    )
+    connect_models: list[str | None] = []
+    handled_error_codes: list[str] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        connect_models.append(model)
+        return SimpleNamespace(id="acct_ws_frame_safety_1"), first_upstream
+
+    async def fake_handle_stream_error(self, account, error, code, **_kwargs):
+        del self, account, error
+        handled_error_codes.append(code)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "no retry"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            event = json.loads(websocket.receive_text())
+
+    assert handled_error_codes == []
+    assert event["type"] == "response.failed"
+    assert connect_models == ["gpt-5.1"]
+
+
 def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monkeypatch):
     request_payload = {
         "type": "response.create",

@@ -350,6 +350,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     is_upstream_model_capacity_error,
+    is_upstream_usage_limit_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -358,6 +359,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 
 def _facade() -> Any:
@@ -1055,9 +1057,7 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return "server_is_overloaded"
-    if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
-        return None
-    return error_code
+    return _websocket_transparent_replay_error_code(error_code, error_message)
 
 
 def _websocket_precreated_replay_fallback_error(
@@ -1223,7 +1223,8 @@ def _websocket_owner_pinned_quota_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
-    if is_upstream_model_capacity_error(_websocket_event_error_message(event_type, payload)):
+    error_message = _websocket_event_error_message(event_type, payload)
+    if is_upstream_model_capacity_error(error_message):
         if error_code in {
             "rate_limit_exceeded",
             "usage_limit_reached",
@@ -1235,9 +1236,26 @@ def _websocket_owner_pinned_quota_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return "server_is_overloaded"
-    if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
-        return None
-    return error_code
+    return _websocket_transparent_replay_error_code(error_code, error_message)
+
+
+def _websocket_transparent_replay_error_code(error_code: str, error_message: str | None) -> str | None:
+    """The code this terminal frame may be replayed under, or ``None`` to surface it.
+
+    The code set cannot answer for the serialized usage-limit rejection, which
+    upstream sends with no error code at all: that frame normalizes to
+    ``upstream_error``, which the set does not contain, so the turn is surfaced
+    on a spent account while the identical coded frame is replayed elsewhere.
+    A frame whose sentence proves the usage limit answers under the usage-limit
+    code, so every later question -- whether an owner-pinned turn may move, what
+    the account's health write records -- gets the same answer for both forms
+    upstream chooses between.
+    """
+    if error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
+        return error_code
+    if is_upstream_usage_limit_rejection(error_code=error_code, message=error_message):
+        return USAGE_LIMIT_REACHED
+    return None
 
 
 async def _pop_replayable_precreated_websocket_request_state(

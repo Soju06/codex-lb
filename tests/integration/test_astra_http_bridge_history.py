@@ -164,8 +164,11 @@ async def test_http_bridge_validates_updates_after_replay_deduplication(
         assert sorted(statuses) == ["finalized", "released"]
 
 
+@pytest.mark.parametrize("anchor_kind", ["previous_response_id", "conversation"])
 @pytest.mark.parametrize("stream", [False, True], ids=["collect", "stream"])
-async def test_astra_full_resend_preserves_bridge_prefix(async_client, monkeypatch, app_instance, stream: bool) -> None:
+async def test_astra_full_resend_preserves_bridge_prefix(
+    async_client, monkeypatch, app_instance, stream: bool, anchor_kind: str
+) -> None:
     # Given a real route, bridge and durable store, with only upstream I/O faked.
     account_id = await _import_account(async_client, "astra-history", "astra-history@example.com")
     account = await _get_account(account_id)
@@ -201,7 +204,9 @@ async def test_astra_full_resend_preserves_bridge_prefix(async_client, monkeypat
     async def post_turn(input_items, response_id, *, previous_response_id=None):
         request_body = {**body, "input": input_items}
         if previous_response_id is not None:
-            request_body["previous_response_id"] = previous_response_id
+            request_body[anchor_kind] = (
+                previous_response_id if anchor_kind == "previous_response_id" else "conv_history"
+            )
         with anyio.fail_after(5):
             response = await async_client.post("/v1/responses", json=request_body, headers=headers)
             assert response.status_code == 200, response.text
@@ -242,7 +247,8 @@ async def test_astra_full_resend_preserves_bridge_prefix(async_client, monkeypat
         assert stored.latest_input_item_count == len(normalized_history)
         assert stored.latest_input_full_fingerprint == proxy_module._fingerprint_input_items(normalized_history)
     reset = {"type": "configuration_update", "reasoning": {"effort": "high"}}
-    assert json.loads(upstream.sent_text[1])["input"] == [reset, *normalized_history[2:]]
+    expected_history = normalized_history[2:] if anchor_kind == "previous_response_id" else normalized_history
+    assert json.loads(upstream.sent_text[1])["input"] == [reset, *expected_history]
 
     # A later unanchored full resend must match and reuse the completed anchor.
     await post_turn([*history, {"role": "user", "content": "Next"}], "resp_bridge_3")

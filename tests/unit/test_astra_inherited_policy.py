@@ -289,6 +289,22 @@ def test_http_bridge_injected_anchor_clears_conversation() -> None:
     assert "conversation" not in wire_payload
 
 
+@pytest.mark.parametrize(("model", "with_key"), [("gpt-5.5", True), ("gpt-6-astra", False)])
+def test_http_bridge_injected_anchor_keeps_non_policy_conversation(model: str, with_key: bool) -> None:
+    payload = {
+        "type": "response.create",
+        "model": model,
+        "conversation": "conv_original",
+        "input": [{"role": "user", "content": "Continue"}],
+    }
+    updated = request_submit_module._text_with_previous_response_id(
+        json.dumps(payload),
+        "resp_injected",
+        api_key=_key(allowed=["high"]) if with_key else None,
+    )
+    assert json.loads(updated) == {**payload, "previous_response_id": "resp_injected"}
+
+
 def test_http_bridge_injected_anchor_preserves_client_prefix_and_updates_budget() -> None:
     text_data = json.dumps(
         {

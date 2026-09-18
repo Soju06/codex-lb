@@ -66,7 +66,7 @@ anchors; repeated preparation SHALL be idempotent.
 
 #### Scenario: An anchored delta retains its client prefix
 
-- **GIVEN** an enforced-effort Astra continuation on the client-facing bridge dispatch path whose input needs no history trimming
+- **GIVEN** an enforced-effort Astra continuation with either a response or conversation anchor on the client-facing bridge dispatch path
 - **WHEN** preparation inserts a policy reset, including before a later operation-ledger anchor advance
 - **THEN** live and durable completion bookkeeping SHALL retain the client input count and fingerprint without the reset
 - **AND** a later client full resend SHALL still match that prefix and reuse the completed response

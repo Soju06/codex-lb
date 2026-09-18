@@ -166,3 +166,14 @@ telemetry stripping, and slot release on payload or reservation errors.
 ## Related
 
 - Split from #2089. Catalog: #2085.
+
+### Conversation-anchor prefix preservation
+
+Both HTTP streaming and collection validate an Astra copy before bridge dispatch.
+A conversation anchor can prepend the same enforced-effort reset as a response
+anchor, so its original client input must remain available for live and durable
+prefix bookkeeping. For example, 4 client items plus an injected reset still
+record a client prefix length of 4; the next full resend can reuse that prefix.
+Only response anchors trim replay history. Conversion from conversation to a
+response anchor remains scoped to keyed Astra policy reconstruction; other
+models and requests without an API key retain the upstream baseline behavior.

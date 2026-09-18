@@ -1,5 +1,5 @@
-- [x] Add `20260914_000000_drop_subscription_overflow_schema` on
-  `20260913_000000_add_oidc_provider_flow`: drop `model_source_pins` (taking
+- [x] Add `20260918_171648_drop_subscription_overflow_schema` on
+  `20260914_000000_add_scim_tokens`: drop `model_source_pins` (taking
   both indexes with it) and the two `dashboard_settings` columns, each step
   guarded on the object being present.
 - [x] Downgrade restores both revisions' work: the two nullable columns, and the

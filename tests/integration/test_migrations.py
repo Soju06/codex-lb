@@ -2277,7 +2277,7 @@ async def test_subscription_overflow_settings_columns_migration_upgrade_and_down
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             # The feature was withdrawn: walking on to head runs
-            # 20260914_000000_drop_subscription_overflow_schema, which takes both
+            # 20260918_171648_drop_subscription_overflow_schema, which takes both
             # columns away again. This revision still has to add them on the way
             # through, because an old install upgrades through it.
             assert await conn.run_sync(_overflow_columns) == {}
@@ -2390,7 +2390,7 @@ async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             # The feature was withdrawn: walking on to head runs
-            # 20260914_000000_drop_subscription_overflow_schema, which drops the
+            # 20260918_171648_drop_subscription_overflow_schema, which drops the
             # table and its indexes. This revision still has to build it on the
             # way through, because an old install upgrades through it.
             assert await conn.run_sync(_schema_state) is None
@@ -2478,8 +2478,8 @@ async def test_drop_overflow_downgrade_repairs_pin_indexes_on_pre_existing_table
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-overflow-downgrade.sqlite'}"
-    drop_revision = "20260914_000000_drop_subscription_overflow_schema"
-    parent_revision = "20260913_000000_add_oidc_provider_flow"
+    drop_revision = "20260918_171648_drop_subscription_overflow_schema"
+    parent_revision = "20260914_000000_add_scim_tokens"
 
     def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
         inspector = sa_inspect(sync_conn)
@@ -2593,7 +2593,7 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
         await session.commit()
 
     # Stop at the revision under test rather than at head: the feature was
-    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # withdrawn and 20260918_171648_drop_subscription_overflow_schema takes the
     # table (and with it this index) away again. The repair still has to happen
     # on the way through, because an install stranded below it upgrades here.
     overflow_revision = "20260908_000000_add_subscription_overflow"
@@ -2672,7 +2672,7 @@ async def test_model_source_pins_kind_expires_index_repairs_invalid_leftover_pos
         await session.commit()
 
     # Stop at the revision under test rather than at head: the feature was
-    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # withdrawn and 20260918_171648_drop_subscription_overflow_schema takes the
     # table (and with it this index) away again. The repair still has to happen
     # on the way through, because an install stranded below it upgrades here.
     index_revision = "20260911_000000_model_source_pins_kind_expires_index"
@@ -3379,3 +3379,61 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 
 # end bridge continuity abandonment
+
+
+@pytest.mark.asyncio
+async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tmp_path):
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'scim-overflow-merge.sqlite'}"
+    common_parent = "20260913_000000_add_oidc_provider_flow"
+    scim_revision = "20260914_000000_add_scim_tokens"
+    overflow_revision = "20260918_171648_drop_subscription_overflow_schema"
+    config = _build_alembic_config(db_url)
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == [overflow_revision]
+    assert script.get_revision(overflow_revision).down_revision == scim_revision
+
+    async def _schema_state(engine) -> dict[str, object]:
+        async with engine.connect() as conn:
+            table_rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))
+            tables = {row[0] for row in table_rows.fetchall()}
+            identity_rows = await conn.execute(text("PRAGMA table_info('dashboard_identities')"))
+            identity_columns = {row[1] for row in identity_rows.fetchall()}
+            settings_rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            settings_columns = {row[1] for row in settings_rows.fetchall()}
+            return {
+                "tables": tables,
+                "identity_columns": identity_columns,
+                "settings_columns": settings_columns,
+            }
+
+    first = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    assert first.current_revision == overflow_revision
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        at_head = await _schema_state(engine)
+        assert "dashboard_scim_tokens" in at_head["tables"]
+        assert "user_name" in at_head["identity_columns"]
+        assert "model_source_pins" not in at_head["tables"]
+        assert "subscription_overflow_source_id" not in at_head["settings_columns"]
+        assert "subscription_overflow_drain_until" not in at_head["settings_columns"]
+
+        await to_thread.run_sync(lambda: command.downgrade(config, common_parent))
+        at_parent = await _schema_state(engine)
+        assert "dashboard_scim_tokens" not in at_parent["tables"]
+        assert "user_name" not in at_parent["identity_columns"]
+        assert "model_source_pins" in at_parent["tables"]
+        assert "subscription_overflow_source_id" in at_parent["settings_columns"]
+        assert "subscription_overflow_drain_until" in at_parent["settings_columns"]
+
+        second = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert second.current_revision == overflow_revision
+        assert await _schema_state(engine) == at_head
+    finally:
+        await engine.dispose()

@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260914_000000_drop_subscription_overflow_schema"
-down_revision = "20260913_000000_add_oidc_provider_flow"
+revision = "20260918_171648_drop_subscription_overflow_schema"
+down_revision = "20260914_000000_add_scim_tokens"
 branch_labels = None
 depends_on = None
 

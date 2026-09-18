@@ -49,7 +49,7 @@ taken to promise that the parents' rows survive to `head`.
 
 ### Requirement: Withdrawn overflow storage is retired without stranding an intermediate install
 
-`20260914_000000_drop_subscription_overflow_schema` MUST remove the storage the
+`20260918_171648_drop_subscription_overflow_schema` MUST remove the storage the
 withdrawn subscription-exhaustion overflow feature left behind: the
 `model_source_pins` table with both of its indexes, and the
 `dashboard_settings` columns `subscription_overflow_source_id` and

@@ -31,6 +31,9 @@ _ROUTE_ERROR_NUMBERS = frozenset(
     for name in ("ENETDOWN", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH", "ENONET")
     if isinstance((value := getattr(errno, name, None)), int)
 )
+# ERROR_NETNAME_DELETED / ERROR_SEM_TIMEOUT. These establish a local
+# transport failure, not that the host is offline or dispatch never began.
+_WINDOWS_TRANSPORT_ERROR_NUMBERS = frozenset({64, 121})
 _MAX_RETRY_DELAY_SECONDS = 5.0
 # Retiring a known-bad generation protects later callers rather than retrying
 # the failed request, so it cannot inherit an already-expired request deadline.
@@ -59,7 +62,7 @@ def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
 
 
 def is_process_network_failure(exc: BaseException, *, include_permanent_dns: bool = True) -> bool:
-    """Return whether an exception represents host-wide DNS or route loss."""
+    """Identify local DNS, route, or Windows transport recovery failures."""
 
     for current in _exception_chain(exc):
         if isinstance(current, socket.gaierror):
@@ -68,6 +71,8 @@ def is_process_network_failure(exc: BaseException, *, include_permanent_dns: boo
             if include_permanent_dns and current.errno in _PERMANENT_DNS_ERROR_NUMBERS:
                 return True
         if isinstance(current, OSError) and current.errno in _ROUTE_ERROR_NUMBERS:
+            return True
+        if isinstance(current, OSError) and getattr(current, "winerror", None) in _WINDOWS_TRANSPORT_ERROR_NUMBERS:
             return True
     return False
 

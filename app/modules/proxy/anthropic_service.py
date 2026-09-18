@@ -34,12 +34,23 @@ from app.core.crypto import TokenEncryptor
 from app.core.providers import ANTHROPIC_PROVIDER_NAME, GLM_PROVIDER_NAME
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import naive_utc_to_epoch
-from app.db.models import Account, StickySessionKind
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.credits import (
+    CREDITS_USAGE_WINDOW,
+    OPENROUTER_CREDITS_QUOTA_KEY,
+    OPENROUTER_PROVIDER_NAME,
+    OPENROUTER_UPSTREAM_BASE_URL,
+    SUPPORTS_UPSTREAM_COUNT_TOKENS,
+    credits_exhausted,
+    window_from_usage,
+)
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _request_log_useragent_fields
+from app.modules.proxy.claude_codex_bridge import estimate_claude_input_tokens
 from app.modules.proxy.load_balancer import LoadBalancer, selectable_accounts
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
+from app.modules.usage.additional_quota_keys import get_additional_quota_definition_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +176,13 @@ class _AnthropicQuotaEligibility:
 class _AnthropicErrorDetails:
     message: str
     error_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnthropicResolvedMessageRequest:
+    payload: AnthropicMessageRequest
+    provider_name: str
+    quota_key: str
 
 
 class AnthropicProxyError(Exception):
@@ -566,6 +584,14 @@ class AnthropicProxyService:
 
         return AnthropicProxyStream(body=body(), media_type=media_type)
 
+    async def resolve_message_request(self, payload: AnthropicMessageRequest) -> AnthropicResolvedMessageRequest:
+        provider_name = _messages_provider_name(payload)
+        return AnthropicResolvedMessageRequest(
+            payload=payload,
+            provider_name=provider_name,
+            quota_key=_messages_quota_key(payload, provider_name=provider_name),
+        )
+
     async def count_tokens(
         self,
         body: Mapping[str, Any],
@@ -574,6 +600,13 @@ class AnthropicProxyService:
         model: str,
     ) -> AnthropicCountTokensResult:
         provider_name = _provider_name_for_model(model)
+        if provider_name == OPENROUTER_PROVIDER_NAME and not SUPPORTS_UPSTREAM_COUNT_TOKENS:
+            estimated = estimate_claude_input_tokens(body)
+            return AnthropicCountTokensResult(
+                status_code=200,
+                body=json.dumps({"input_tokens": estimated}).encode(),
+                media_type="application/json",
+            )
         # Token counting is quota-free upstream and account-agnostic, so any
         # active account may serve it: selection skips sticky affinity and uses
         # a dedicated quota key that never records cooldowns, keeping message
@@ -686,11 +719,14 @@ class AnthropicProxyService:
             headroom_reallocate=headroom_reallocate,
         )
         if selection.account is None:
+            labeled = f"No available {_provider_label(provider_name)} accounts"
+            raw_fallback = selection.error_message or labeled
+            fallback = labeled if raw_fallback.startswith("No available accounts") else raw_fallback
             message, retry_at = await self._selection_failure_details(
                 model=model,
                 quota_key=quota_key,
                 provider_name=provider_name,
-                fallback=selection.error_message or f"No available {_provider_label(provider_name)} accounts",
+                fallback=fallback,
                 quota_reset_at=eligibility.next_reset_at,
                 quota_blocked_count=eligibility.blocked_count,
                 quota_candidate_count=len(eligibility.account_ids),
@@ -792,6 +828,8 @@ class AnthropicProxyService:
         *,
         model: str | None = None,
     ) -> _AnthropicQuotaEligibility:
+        if provider_name == OPENROUTER_PROVIDER_NAME:
+            return await self._openrouter_credit_eligibility()
         now = int(time.time())
         settings = get_settings()
         fable_routing = provider_name == ANTHROPIC_PROVIDER_NAME and settings.anthropic_fable_routing_enabled
@@ -1273,6 +1311,32 @@ class AnthropicProxyService:
             service = ApiKeysService(repos.api_keys)
             await service.release_usage_reservation(reservation.reservation_id)
 
+    async def _openrouter_credit_eligibility(self) -> _AnthropicQuotaEligibility:
+        async with self._repo_factory() as repos:
+            provider_accounts = [
+                account
+                for account in await repos.accounts.list_accounts()
+                if account.provider.lower() == OPENROUTER_PROVIDER_NAME
+            ]
+            selectable = selectable_accounts(provider_accounts)
+            account_ids = [account.id for account in selectable]
+            credits_usage = await repos.usage.latest_by_account(
+                window=CREDITS_USAGE_WINDOW,
+                account_ids=account_ids,
+            )
+        eligible: list[str] = []
+        blocked = 0
+        for account in selectable:
+            if account.status == AccountStatus.QUOTA_EXCEEDED:
+                blocked += 1
+                continue
+            window = window_from_usage(credits_usage.get(account.id))
+            if window is not None and credits_exhausted(window):
+                blocked += 1
+                continue
+            eligible.append(account.id)
+        return _AnthropicQuotaEligibility(account_ids=eligible, blocked_count=blocked)
+
     async def claim_session_route(
         self,
         *,
@@ -1318,7 +1382,13 @@ def _messages_provider_name(payload: AnthropicMessageRequest) -> str:
 
 
 def _provider_name_for_model(model: str) -> str:
-    return GLM_PROVIDER_NAME if model.strip().lower().startswith("glm-") else ANTHROPIC_PROVIDER_NAME
+    normalized = model.strip().lower()
+    if normalized.startswith("glm-"):
+        return GLM_PROVIDER_NAME
+    definition = get_additional_quota_definition_for_model(model)
+    if definition is not None and definition.quota_key == OPENROUTER_CREDITS_QUOTA_KEY:
+        return OPENROUTER_PROVIDER_NAME
+    return ANTHROPIC_PROVIDER_NAME
 
 
 def _count_tokens_quota_key(provider_name: str) -> str:
@@ -1328,17 +1398,18 @@ def _count_tokens_quota_key(provider_name: str) -> str:
 
 
 def _upstream_base_url(provider_name: str) -> str:
-    settings = get_settings()
-    return (
-        settings.glm_anthropic_upstream_base_url
-        if provider_name == GLM_PROVIDER_NAME
-        else settings.anthropic_upstream_base_url
-    )
+    if provider_name == GLM_PROVIDER_NAME:
+        return get_settings().glm_anthropic_upstream_base_url
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return OPENROUTER_UPSTREAM_BASE_URL
+    return get_settings().anthropic_upstream_base_url
 
 
 def _messages_quota_key(payload: AnthropicMessageRequest, *, provider_name: str) -> str:
     if provider_name == GLM_PROVIDER_NAME:
         return "glm_coding_thinking" if payload.thinking else "glm_coding"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return OPENROUTER_CREDITS_QUOTA_KEY
     if _anthropic_fast_mode_requested(payload):
         return _ANTHROPIC_FAST_QUOTA_KEY
     return _anthropic_quota_key(payload)
@@ -1347,6 +1418,8 @@ def _messages_quota_key(payload: AnthropicMessageRequest, *, provider_name: str)
 def _messages_affinity_quota_key(payload: AnthropicMessageRequest, *, provider_name: str) -> str:
     if provider_name == GLM_PROVIDER_NAME:
         return "glm_coding_thinking" if payload.thinking else "glm_coding"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return OPENROUTER_CREDITS_QUOTA_KEY
     base = _anthropic_quota_key(payload)
     # Fable-class traffic gets its own affinity family so a session that
     # interleaves Fable and non-Fable requests holds two independent sticky
@@ -1393,24 +1466,42 @@ def _anthropic_sticky_key(
 
 
 def _sticky_prefix(provider_name: str) -> str:
-    return "glm" if provider_name == GLM_PROVIDER_NAME else "claude"
+    if provider_name == GLM_PROVIDER_NAME:
+        return "glm"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return "openrouter"
+    return "claude"
 
 
 def _provider_label(provider_name: str) -> str:
-    return "GLM" if provider_name == GLM_PROVIDER_NAME else "Anthropic"
+    if provider_name == GLM_PROVIDER_NAME:
+        return "GLM"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return "OpenRouter"
+    return "Anthropic"
 
 
 def _no_available_accounts_code(provider_name: str) -> str:
-    return "no_available_glm_accounts" if provider_name == GLM_PROVIDER_NAME else "no_available_anthropic_accounts"
+    if provider_name == GLM_PROVIDER_NAME:
+        return "no_available_glm_accounts"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return "no_available_openrouter_accounts"
+    return "no_available_anthropic_accounts"
 
 
 def _quota_cooldown_code(provider_name: str) -> str:
-    return "glm_quota_cooldown" if provider_name == GLM_PROVIDER_NAME else "anthropic_quota_cooldown"
+    if provider_name == GLM_PROVIDER_NAME:
+        return "glm_quota_cooldown"
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return "openrouter_quota_cooldown"
+    return "anthropic_quota_cooldown"
 
 
 def _other_provider_routing_message(provider_name: str) -> str:
     if provider_name == GLM_PROVIDER_NAME:
         return "OpenAI and Anthropic accounts are not eligible for GLM routing."
+    if provider_name == OPENROUTER_PROVIDER_NAME:
+        return "Subscription accounts are not eligible for OpenRouter routing."
     return "OpenAI accounts are not eligible for Claude routing."
 
 

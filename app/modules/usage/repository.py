@@ -289,6 +289,8 @@ def _usage_history_from_sqlite_row(row) -> UsageHistory:
         credits_has=bool(row[9]) if row[9] is not None else None,
         credits_unlimited=bool(row[10]) if row[10] is not None else None,
         credits_balance=float(row[11]) if row[11] is not None else None,
+        credits_cap=float(row[12]) if len(row) > 12 and row[12] is not None else None,
+        credits_spent=float(row[13]) if len(row) > 13 and row[13] is not None else None,
     )
 
 
@@ -316,7 +318,8 @@ def _latest_by_account_sqlite(
     latest_sql = f"""
         select id, account_id, recorded_at, window, used_percent,
                input_tokens, output_tokens, reset_at, window_minutes,
-               credits_has, credits_unlimited, credits_balance
+               credits_has, credits_unlimited, credits_balance,
+               credits_cap, credits_spent
         from usage_history
         where account_id = ?
           and {window_clause}
@@ -456,6 +459,8 @@ class UsageRepository:
         credits_has: bool | None = None,
         credits_unlimited: bool | None = None,
         credits_balance: float | None = None,
+        credits_cap: float | None = None,
+        credits_spent: float | None = None,
     ) -> UsageHistory:
         entry = UsageHistory(
             account_id=account_id,
@@ -469,6 +474,8 @@ class UsageRepository:
             credits_has=credits_has,
             credits_unlimited=credits_unlimited,
             credits_balance=credits_balance,
+            credits_cap=credits_cap,
+            credits_spent=credits_spent,
             recorded_at=recorded_at or utcnow(),
         )
         self._session.add(entry)

@@ -63,12 +63,18 @@ class AccountAdditionalWindow(DashboardModel):
     window_minutes: int | None = None
 
 
+class AccountCreditsWindow(DashboardModel):
+    balance: float
+    cap: float | None = None
+
+
 class AccountAdditionalQuota(DashboardModel):
     quota_key: str | None = None
     limit_name: str
     metered_feature: str
     display_label: str | None = None
     routing_policy: str = Field(default="inherit", pattern=r"^(inherit|normal|burn_first|preserve)$")
+    model_ids: list[str] = Field(default_factory=list)
     primary_window: AccountAdditionalWindow | None = None
     secondary_window: AccountAdditionalWindow | None = None
 
@@ -134,6 +140,9 @@ class AccountSummary(DashboardModel):
     credits_has: bool | None = None
     credits_unlimited: bool | None = None
     credits_balance: float | None = None
+    credits_cap: float | None = None
+    credits_spent: float | None = None
+    credits: AccountCreditsWindow | None = None
     reset_credits_available: int | None = None
     subscription: AccountSubscriptionLedger | None = None
     deactivation_reason: str | None = None
@@ -200,12 +209,15 @@ class AccountImportResponse(DashboardModel):
 
 
 class AccountApiKeyImportRequest(DashboardModel):
-    provider: str = Field(default="glm", pattern=r"^glm$")
+    provider: str = Field(default="glm", pattern=r"^(glm|openrouter)$")
     api_key: SecretStr = Field(min_length=1)
     email: str = Field(default="glm@z.ai", min_length=3, max_length=320)
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
     alias: str | None = Field(default="GLM Coding Plan", max_length=200)
     plan_type: str = Field(default="glm-coding", min_length=1, max_length=64)
+    credits_balance: float | None = None
+    credits_cap: float | None = None
+    credits_spent: float | None = None
 
 
 class OpenCodeOAuthAuth(DashboardModel):

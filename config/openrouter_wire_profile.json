@@ -1,0 +1,33 @@
+{
+  "decided_by": "live_call",
+  "called_at": "2026-09-18T19:46:45Z",
+  "model": "qwen/qwen3-coder-30b-a3b-instruct",
+  "messages": {
+    "method": "POST",
+    "url": "https://openrouter.ai/api/v1/messages",
+    "status": 200,
+    "content_type": "application/json",
+    "shape": "anthropic_message",
+    "response_type": "message",
+    "response_role": "assistant",
+    "usage_has_input_tokens": true,
+    "upstream_provider": "Novita"
+  },
+  "count_tokens": {
+    "method": "POST",
+    "url": "https://openrouter.ai/api/v1/messages/count_tokens",
+    "status": 404,
+    "body": {"error": {"message": "Not Found", "code": 404}}
+  },
+  "credits": {
+    "method": "GET",
+    "url": "https://openrouter.ai/api/v1/credits",
+    "status": 200,
+    "data_fields": ["total_credits", "total_usage"]
+  },
+  "wire": "anthropic_messages",
+  "anthropic_compat_is_correct_seam": true,
+  "supports_upstream_count_tokens": false,
+  "escape_hatch_needed": true,
+  "note": "The Anthropic messages door accepted a shipped slug and returned an Anthropic message with native input_tokens. count_tokens is not implemented, so the Kimi-style upstream count escape hatch is required. Credit balance is total_credits minus total_usage; cap is total_credits."
+}

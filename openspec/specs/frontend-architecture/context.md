@@ -1,7 +1,70 @@
 # Context: frontend-architecture
 
-Normative requirements live in [`spec.md`](./spec.md). This document currently
-covers the progressive-disclosure navigation and settings model.
+Normative requirements live in [`spec.md`](./spec.md). This document covers
+dashboard localization and the progressive-disclosure navigation and settings model.
+
+## Japanese dashboard locale
+
+### Purpose and scope
+
+Japanese extends the existing runtime locale mechanism to the entire translated
+dashboard surface. Requirements live in [spec.md](./spec.md). English remains the
+fallback. Backend messages, account names, model identifiers, and other external
+content retain their original values.
+
+### Decisions and constraints
+
+The flat `ja.json` bundle uses the same keys and interpolation variables as
+English, including plural variants for future key parity checks. All language
+menus display the native name `日本語`. The existing `codex-lb-language` storage
+key and query parameter → saved preference → browser detection order are reused;
+there is no new server setting or dependency.
+
+Japanese dates use `ja-JP` through the shared Intl formatters. The API-key expiry
+picker uses the installed DayPicker Japanese locale, including its accessible
+labels. Explicit ISO and time-format preferences, expiry serialization, timezone
+selection, compact `K/M/B` quantities, and USD `$` formatting are preserved.
+API-key limit summaries and details reuse the limit editor's translated period labels so
+daily, weekly, and monthly windows also follow the active language.
+Reports generation timestamps also use the shared formatter, including when the
+browser language differs from the selected dashboard language. The Reports page
+subscribes to date display preference changes so switching to ISO updates the
+visible timestamp immediately.
+The API-key edit dialog reuses the translated limit type, window, and all-model
+labels for current usage; for example, a weekly token limit without a model
+filter displays `トークン (週次, すべてのモデル)`. Model identifiers and
+numeric/currency formatting remain unchanged.
+
+Company sign-in uses the established `社内認証` terminology. The OIDC wizard,
+provider confirmation, pending-account screen, and account rename dialog share
+the same Japanese bundle. Provider names, claim names, redirect URLs, and the
+reference an administrator uses to locate a sign-in retain their original values.
+
+### Example and failure modes
+
+A first-time visitor using `ja-JP` sees the dashboard in Japanese. Choosing
+English in either language menu takes effect immediately and persists on reload.
+Opening `/settings?lang=ja` overrides that saved preference and stores Japanese.
+An unsupported language resolves to English. If browser storage is unavailable,
+the existing language detector can still use the URL or browser language, but
+cannot retain a manual selection across reloads.
+
+Provider recognition does not imply that a dashboard account exists: the
+Japanese pending-account screen asks the user to contact an administrator and
+preserves the sign-in reference. The connection test copy also distinguishes
+successful testing from enabling company sign-in; the test grant is valid for
+ten minutes and is consumed when sign-in is enabled.
+
+### Verification
+
+Locale tests compare all supported bundles' keys and Japanese interpolation and
+markup against English. Formatter and expiry-picker tests cover Japanese dates,
+relative times, operational units, and date selection. Browser regressions in
+`frontend/screenshots/capture.spec.ts` exercise real routes with fixture APIs,
+desktop/mobile menus, reload persistence, login copy, and validation markup.
+The bundle comparison also catches obsolete keys when main removes a feature.
+After synchronizing main, compare against the merged English bundle and rerun
+the frontend suite so both additions and removals are covered.
 
 ## Progressive disclosure (nav + settings)
 

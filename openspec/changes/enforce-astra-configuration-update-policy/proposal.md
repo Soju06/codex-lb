@@ -1,0 +1,62 @@
+## Why
+
+Subscription Astra clients persist `configuration_update` items across
+response and conversation anchors. API-key allowed/enforced reasoning
+controls currently inspect only request-level `reasoning.effort`, so an
+in-input update can bypass the key. Codex-rs already emits these items.
+
+## What Changes
+
+- Apply allowed and enforced reasoning controls to `configuration_update`
+  items on subscription Astra requests.
+- Reject unsupported Astra update shapes before upstream work.
+- On anchored continuations with `enforced_reasoning_effort`, prepend a
+  leading update for that enforced effort so inherited effort cannot
+  bypass policy. Allowed-list keys rely on per-request validation and
+  MUST NOT synthesize a default effort.
+- Do not enumerate permitted Astra reasoning efforts locally. Keep a
+  string-type check and Ultra→Max aliasing via
+  `resolve_wire_reasoning_effort`; let upstream own the value set.
+  `disabled` and `none` MUST be accepted.
+- Gate non-bridge HTTP `previous_response` trimming on `gpt-6-astra`.
+  HTTP-bridge internal trim may stay.
+- Keep client-plane Ultra distinct from Max during policy checks; map
+  Ultra to Max only at subscription wire serialization.
+- Do not apply subscription Astra schema restrictions to externally
+  configured model sources that share the model ID.
+- Leave catalog bootstrap to #2085. Do not move
+  `_REASONING_EFFORT_WIRE_ALIASES` / `resolve_wire_reasoning_effort`.
+- Out of scope: async tool continuity, WebSocket `response.steer`,
+  reservation `FOR UPDATE` on every finalize/release.
+
+## Capabilities
+
+### New Capabilities
+
+None.
+
+### Modified Capabilities
+
+- `api-keys`: reasoning controls cover `configuration_update` items and
+  enforced-effort Astra continuations. Allowed-list keys keep per-request
+  validation without a synthesized default.
+- `responses-api-compat`: subscription Astra preserves compatible
+  configuration-update history and rejects incompatible combinations.
+
+## Impact
+
+- Code: `app/modules/proxy/request_policy.py`, `app/core/openai/requests.py`,
+  `app/modules/proxy/api.py`, `app/modules/proxy/api_key_usage.py`,
+  `app/modules/proxy/_service/websocket/mixin.py`,
+  `app/modules/proxy/_service/support.py`, HTTP-bridge prepare path,
+  exception mapping.
+- Tests: `tests/unit/test_astra_request_policy.py`,
+  `tests/unit/test_astra_inherited_policy.py`,
+  `tests/unit/test_astra_serialization.py`, `tests/unit/test_proxy_errors.py`,
+  `tests/integration/test_astra_request_policy.py`,
+  `tests/integration/test_astra_inherited_policy.py`,
+  `tests/integration/test_astra_source_policy.py`,
+  `tests/integration/test_astra_late_policy_errors.py`,
+  `tests/integration/test_astra_http_bridge_history.py`,
+  `tests/integration/test_astra_websocket_owner_policy.py`.
+- No settings, schema, migration, or dashboard changes.

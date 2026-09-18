@@ -1,0 +1,4 @@
+- [x] Restamp the later overflow-retirement revision with a fresh timestamp.
+- [x] Chain the overflow-retirement revision after the SCIM revision.
+- [x] Add a disposable SQLite upgrade, downgrade, and re-upgrade regression.
+- [x] Run migration topology, focused migration tests, strict OpenSpec validation, and a port 2456 startup smoke test.

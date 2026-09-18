@@ -45,7 +45,7 @@ removed one revision earlier.
   are unchanged; only the target of the walk is named explicitly, so the
   requirement keeps stating a fact that stays true as the graph grows past it.
 - A new requirement states the retirement contract: what
-  `20260914_000000_drop_subscription_overflow_schema` MUST drop, that the pin
+  `20260918_171648_drop_subscription_overflow_schema` MUST drop, that the pin
   rows are discarded routing state, that every step MUST be guarded so an
   install missing either object still upgrades, and that the downgrade MUST
   restore the schema built by

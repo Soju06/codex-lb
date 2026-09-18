@@ -19,9 +19,7 @@ from app.core.auth import (
     parse_auth_json,
     token_expiry_epoch_ms,
 )
-from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.http import lease_http_session
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse,
@@ -538,6 +536,7 @@ class AccountsService:
         if saved.status == AccountStatus.ACTIVE:
             clear_account_routing_unavailable(saved.id)
         get_account_selection_cache().invalidate()
+        await propagate_account_routing_change()
         return AccountImportResponse(
             account_id=saved.id,
             email=saved.email,
@@ -665,16 +664,12 @@ class AccountsService:
         if result:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
-            get_api_key_cache().clear()
             # Finalization cascades the account_proxy_bindings row away, and
             # account ids are deterministic (delete-then-re-import regenerates
             # the same id), so the cached route outcome must not survive the
             # delete request; the worker invalidates again after finalizing.
             await get_upstream_route_cache().invalidate()
             await propagate_account_routing_change()
-            poller = get_cache_invalidation_poller()
-            if poller is not None:
-                await poller.bump(NAMESPACE_API_KEY)
             request_account_deletion_run()
         return result
 

@@ -9,6 +9,7 @@ directly for determinism (no sleeps).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth.api_key_cache import ApiKeyCache, get_api_key_cache
 from app.core.cache.invalidation import (
     _NAMESPACE_LOG_LABELS,
     NAMESPACE_ACCOUNT_ROUTING,
@@ -50,6 +52,8 @@ from app.modules.proxy.account_cache import (
     get_routing_availability_cache,
     is_account_routing_unavailable,
     mark_account_routing_unavailable,
+    propagate_account_routing_change,
+    request_account_routing_change,
 )
 from app.modules.settings.repository import SettingsRepository
 
@@ -126,17 +130,61 @@ async def test_pause_via_api_marks_peer_routing_unavailable(async_client, db_set
     await _insert_account(account_id)
 
     b_cache, b_poller = _make_replica_b_routing()
+    b_api_key_cache = ApiKeyCache(ttl_seconds=60)
+    b_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, b_api_key_cache.clear)
     await b_cache.refresh_from_db()
     await b_poller._poll_once()
     assert b_cache.is_unavailable(account_id) is False
 
+    local_api_key_cache = get_api_key_cache()
+    local_policy = object()
+    peer_policy = object()
+    await local_api_key_cache.set("local-policy", local_policy)
+    await b_api_key_cache.set("peer-policy", peer_policy)
+
     response = await async_client.post(f"/api/accounts/{account_id}/pause")
     assert response.status_code == 200
+    assert await local_api_key_cache.get("local-policy") is None
+    assert await b_api_key_cache.get("peer-policy") is peer_policy
 
     # The pause endpoint awaits a durable account_routing bump before returning,
-    # so a single peer poll converges.
+    # so one peer poll converges both routing and allocation-policy state.
     await b_poller._poll_once()
     assert b_cache.is_unavailable(account_id) is True
+    assert await b_api_key_cache.get("peer-policy") is None
+
+
+@pytest.mark.asyncio
+async def test_reauth_transition_evicts_cached_api_key_policy_on_peer(db_setup, poller_slot) -> None:
+    account_id = "acct-bus-reauth-policy"
+    await _insert_account(account_id)
+
+    source_poller = CacheInvalidationPoller(SessionLocal)
+    set_cache_invalidation_poller(source_poller)
+    peer_routing, peer_poller = _make_replica_b_routing()
+    peer_api_key_cache = ApiKeyCache(ttl_seconds=60)
+    peer_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, peer_api_key_cache.clear)
+    await peer_routing.refresh_from_db()
+    await source_poller._poll_once()
+    await peer_poller._poll_once()
+
+    local_api_key_cache = get_api_key_cache()
+    local_policy = object()
+    peer_policy = object()
+    await local_api_key_cache.set("reauth-local-policy", local_policy)
+    await peer_api_key_cache.set("reauth-peer-policy", peer_policy)
+
+    await _set_account_status(account_id, AccountStatus.REAUTH_REQUIRED)
+    request_account_routing_change()
+
+    assert await local_api_key_cache.get("reauth-local-policy") is None
+    assert await peer_api_key_cache.get("reauth-peer-policy") is peer_policy
+
+    await source_poller._poll_once()
+    await peer_poller._poll_once()
+
+    assert peer_routing.is_unavailable(account_id) is False
+    assert await peer_api_key_cache.get("reauth-peer-policy") is None
 
 
 @pytest.mark.asyncio
@@ -382,6 +430,119 @@ async def test_bump_failure_is_observable_and_does_not_raise(db_setup, caplog) -
     if before is not None:
         assert _counter_value(cache_invalidation_bump_failures_total, namespace) == before + 1
     assert await _namespace_version(namespace) is None
+    assert namespace in poller._pending_bumps
+
+
+@pytest.mark.asyncio
+async def test_direct_bump_unexpected_failure_keeps_the_namespace_pending(db_setup, monkeypatch) -> None:
+    namespace = "test_bump_unexpected_failure"
+    poller = CacheInvalidationPoller(SessionLocal)
+
+    async def fail(_namespace: str) -> None:
+        raise RuntimeError("driver exploded")
+
+    monkeypatch.setattr(poller, "_bump_once", fail)
+
+    assert await poller.bump(namespace) is False
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_bump_cancellation_keeps_the_namespace_pending(db_setup, monkeypatch) -> None:
+    namespace = "test_bump_cancelled"
+    poller = CacheInvalidationPoller(SessionLocal)
+    started = asyncio.Event()
+
+    async def never_finishes(_namespace: str) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(poller, "_bump_once", never_finishes)
+    task = asyncio.create_task(poller.bump(namespace))
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
+async def test_api_key_update_retries_failed_peer_invalidation(
+    async_client,
+    db_setup,
+    poller_slot,
+) -> None:
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "retrying-share-policy", "usageSharePercent": 20},
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    key_hash = hashlib.sha256(created.json()["key"].encode()).hexdigest()
+
+    factory = _FlakySessionFactory(failures=3)
+    source = CacheInvalidationPoller(factory)
+    set_cache_invalidation_poller(source)
+    peer_cache = ApiKeyCache(ttl_seconds=60)
+    peer = CacheInvalidationPoller(SessionLocal)
+    peer.on_invalidation(NAMESPACE_API_KEY, peer_cache.clear)
+    await peer._poll_once()
+
+    local_cache = get_api_key_cache()
+    local_policy = object()
+    peer_policy = object()
+    await local_cache.set(key_hash, local_policy)
+    await peer_cache.set(key_hash, peer_policy)
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"usageSharePercent": 35},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["usageSharePercent"] == 35
+    assert await local_cache.get(key_hash) is None
+    assert await peer_cache.get(key_hash) is peer_policy
+    assert NAMESPACE_API_KEY in source._pending_bumps
+
+    await source._poll_once()
+    await peer._poll_once()
+
+    assert NAMESPACE_API_KEY not in source._pending_bumps
+    assert await peer_cache.get(key_hash) is None
+
+
+@pytest.mark.asyncio
+async def test_account_routing_change_retries_failed_peer_policy_invalidation(
+    db_setup,
+    poller_slot,
+) -> None:
+    factory = _FlakySessionFactory(failures=3)
+    source = CacheInvalidationPoller(factory)
+    set_cache_invalidation_poller(source)
+    peer_cache = ApiKeyCache(ttl_seconds=60)
+    peer = CacheInvalidationPoller(SessionLocal)
+    peer.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, peer_cache.clear)
+    await peer._poll_once()
+
+    local_cache = get_api_key_cache()
+    local_policy = object()
+    peer_policy = object()
+    await local_cache.set("routing-local-policy", local_policy)
+    await peer_cache.set("routing-peer-policy", peer_policy)
+
+    assert await propagate_account_routing_change() is False
+    assert await local_cache.get("routing-local-policy") is None
+    assert await peer_cache.get("routing-peer-policy") is peer_policy
+    assert NAMESPACE_ACCOUNT_ROUTING in source._pending_bumps
+
+    await source._poll_once()
+    await peer._poll_once()
+
+    assert NAMESPACE_ACCOUNT_ROUTING not in source._pending_bumps
+    assert await peer_cache.get("routing-peer-policy") is None
 
 
 def test_namespace_log_labels_cover_all_namespaces() -> None:
@@ -404,26 +565,21 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) -> None:
-    """The marker is cleared before the write is awaited, so a cancelled write
-    must restore it — otherwise the namespace is neither written nor pending
-    and no later cycle can retry it. (At process stop no cycle remains either
-    way; shutdown delivery is explicitly out of scope, and the restore there
-    only keeps the pending set honest.)"""
+    """A cancelled write remains pending for a later poll cycle."""
     namespace = "test_flush_cancelled"
     started = asyncio.Event()
 
-    async def never_finishes(ns: str) -> bool:
+    async def never_finishes(_namespace: str) -> None:
         started.set()
         await asyncio.Event().wait()
-        return True
 
     poller = CacheInvalidationPoller(SessionLocal)
-    monkeypatch.setattr(poller, "bump", never_finishes)
+    monkeypatch.setattr(poller, "_bump_once", never_finishes)
     poller.request_bump(namespace)
 
     flush_task = asyncio.create_task(poller._flush_pending_bumps())
     await asyncio.wait_for(started.wait(), timeout=2.0)
-    assert namespace not in poller._pending_bumps, "marker is cleared before the write, by design"
+    assert namespace not in poller._pending_bumps
 
     flush_task.cancel()
     with pytest.raises(asyncio.CancelledError):

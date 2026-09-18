@@ -1706,8 +1706,16 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_mark_reauth_failure_keeps_account_routing_available() -> None:
+async def test_mark_reauth_failure_keeps_account_routing_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     account = _make_account("acc-reauth-routing-available", "reauth-routing@example.com")
+    routing_changes: list[bool] = []
+    monkeypatch.setattr(
+        load_balancer_module,
+        "request_account_routing_change",
+        lambda: routing_changes.append(True),
+    )
     accounts_repo = StubAccountsRepository([account])
     usage_repo = StubUsageRepository(primary={}, secondary={})
     sticky_repo = StubStickySessionsRepository()
@@ -1717,6 +1725,7 @@ async def test_mark_reauth_failure_keeps_account_routing_available() -> None:
 
     assert account.status == AccountStatus.REAUTH_REQUIRED
     assert is_account_routing_unavailable(account.id) is False
+    assert routing_changes == [True]
 
 
 @pytest.mark.asyncio

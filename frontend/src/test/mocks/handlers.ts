@@ -166,6 +166,7 @@ const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
+  usageSharePercent: z.number().int().min(1).max(100).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
 });
@@ -179,6 +180,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   allowedModels: z.array(z.string()).nullable().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
+  usageSharePercent: z.number().int().min(1).max(100).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
@@ -2867,6 +2869,7 @@ export const handlers = [
         assignedAccountIds: payload?.assignedAccountIds ?? [],
         assignedSourceIds: payload?.assignedSourceIds ?? [],
         trafficClass: payload?.trafficClass ?? "foreground",
+        usageSharePercent: payload?.usageSharePercent ?? null,
       }),
       key: `sk-test-generated-${sequence}`,
     });
@@ -2897,6 +2900,9 @@ export const handlers = [
       ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
       ...(payload.trafficClass !== undefined
         ? { trafficClass: payload.trafficClass }
+        : {}),
+      ...(payload.usageSharePercent !== undefined
+        ? { usageSharePercent: payload.usageSharePercent }
         : {}),
       ...(payload.assignedAccountIds !== undefined
         ? {

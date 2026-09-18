@@ -82,6 +82,9 @@ from app.modules.proxy._load_balancer.overload_backoff import (
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
+from app.modules.proxy._service.api_key_usage import (
+    _request_usage_refresh as _request_usage_refresh,
+)
 from app.modules.proxy._service.compact import (
     _service_tier_from_compact_payload as _service_tier_from_compact_payload,
 )
@@ -426,7 +429,6 @@ from app.modules.proxy.http_bridge_forwarding import (
 )
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
-from app.modules.usage.updater import UsageUpdater
 
 
 def _facade() -> Any:
@@ -1106,23 +1108,6 @@ def _is_model_scoped_rejection(
     if http_status is not None and http_status != 400:
         return False
     return is_model_scoped_upstream_rejection(message)
-
-
-def _request_usage_refresh(proxy: Any, account_id: str) -> None:
-    """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
-
-    ``mark_rate_limit`` persists status only, while the pool-exhaustion
-    predicate also needs a >= 100 % usage row that would otherwise wait for
-    the next scheduler tick. The refresh runs on its own background session
-    and never touches this request's ``Account``.
-    """
-    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
-    if schedule is None:
-        return
-    refresh = UsageUpdater.request_refresh(account_id)
-    if refresh is None:
-        return
-    schedule(refresh, action="request_usage_refresh", request_id=get_request_id() or "unknown")
 
 
 async def _handle_stream_error(

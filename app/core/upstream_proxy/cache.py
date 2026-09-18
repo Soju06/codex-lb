@@ -115,12 +115,8 @@ class UpstreamRouteCache:
         self.clear()
         if propagate:
             poller = get_cache_invalidation_poller()
-            if poller is not None and not await poller.bump(NAMESPACE_UPSTREAM_ROUTE):
-                # bump() never raises; on failure the coalesced pending-set
-                # retries on every poll cycle until the write lands, so peers
-                # still converge once the database recovers. The TTL backstop
-                # bounds staleness in the interim.
-                poller.request_bump(NAMESPACE_UPSTREAM_ROUTE)
+            if poller is not None:
+                await poller.bump(NAMESPACE_UPSTREAM_ROUTE)
 
 
 _upstream_route_cache = UpstreamRouteCache()

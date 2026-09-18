@@ -28,7 +28,10 @@ async def test_chat_bridge_cancellation_preserves_settlement_owner(monkeypatch, 
         finally:
             closed.set()
 
-    guarded = api._guard_chat_bridge_reservation(upstream(), reservation=None, service=object())
+    guarded = api._guard_chat_bridge_reservation(
+        upstream(),
+        cleanup=api._responses_reservation_cleanup(object(), None),
+    )
 
     async def next_item():
         return await anext(guarded)
@@ -60,7 +63,10 @@ async def test_chat_bridge_task_handoff_closes_underlying_stream_and_restores_co
 
     outer_token = support._bind_propagated_responses_service_cleanup_ready(outer_signal)
     try:
-        guarded = api._guard_chat_bridge_reservation(upstream(), reservation=None, service=object())
+        guarded = api._guard_chat_bridge_reservation(
+            upstream(),
+            cleanup=api._responses_reservation_cleanup(object(), None),
+        )
 
         async def next_item():
             return await anext(guarded)

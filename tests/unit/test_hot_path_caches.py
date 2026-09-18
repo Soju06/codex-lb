@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,6 +22,7 @@ from app.core.middleware.firewall_cache import get_firewall_ip_cache, reset_fire
 from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
+from app.modules.api_keys.usage_share import UsageShareEstimate
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -36,56 +37,214 @@ def _clear_hot_path_caches() -> None:
     get_account_selection_cache().invalidate()
 
 
-@pytest.mark.asyncio
-async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    api_key_data = ApiKeyData(
-        id="key_1",
-        name="hot-path",
-        key_prefix="sk-clb-test",
-        allowed_models=None,
-        enforced_model=None,
-        enforced_reasoning_effort=None,
-        enforced_service_tier=None,
-        expires_at=None,
-        is_active=True,
-        created_at=datetime.now(UTC),
-        last_used_at=None,
-    )
-    calls = 0
+def _api_key_data(**overrides: Any) -> ApiKeyData:
+    values: dict[str, Any] = {
+        "id": "key_1",
+        "name": "hot-path",
+        "key_prefix": "sk-clb-test",
+        "allowed_models": None,
+        "enforced_model": None,
+        "enforced_reasoning_effort": None,
+        "enforced_service_tier": None,
+        "expires_at": None,
+        "is_active": True,
+        "created_at": datetime.now(UTC),
+        "last_used_at": None,
+    }
+    values.update(overrides)
+    return ApiKeyData(**values)
+
+
+def _install_api_key_validator(
+    monkeypatch: pytest.MonkeyPatch,
+    *results: ApiKeyData,
+) -> list[str]:
+    calls: list[str] = []
+    result_iter = iter(results)
 
     class _SettingsCache:
         async def get(self) -> SimpleNamespace:
             return SimpleNamespace(api_key_auth_enabled=True)
 
     class _Service:
-        def __init__(self, _repo: object) -> None:
-            pass
+        def __init__(self, _repo: object, *, usage_repository: object | None = None) -> None:
+            del usage_repository
 
-        async def validate_key(self, _token: str) -> ApiKeyData:
-            nonlocal calls
-            calls += 1
-            return api_key_data
+        async def validate_key(self, token: str) -> ApiKeyData:
+            calls.append(token)
+            return next(result_iter)
 
     @asynccontextmanager
-    async def _fake_session() -> AsyncIterator[object]:
+    async def fake_session() -> AsyncIterator[object]:
         yield object()
 
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: _SettingsCache())
-    monkeypatch.setattr(auth_dependencies, "get_background_session", _fake_session)
+    monkeypatch.setattr(auth_dependencies, "get_background_session", fake_session)
     monkeypatch.setattr(auth_dependencies, "ApiKeysRepository", lambda _session: object())
     monkeypatch.setattr(auth_dependencies, "ApiKeysService", _Service)
+    return calls
 
+
+@pytest.mark.asyncio
+async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    api_key_data = _api_key_data()
+    calls = _install_api_key_validator(monkeypatch, api_key_data)
     token = "sk-clb-hot-path"
     expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     for _ in range(10):
-        resolved = await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}")
-        assert resolved == api_key_data
+        assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == api_key_data
 
-    assert calls == 1
+    assert calls == [token]
     cache = get_api_key_cache()
     assert expected_hash in cache._cache
     assert token not in cache._cache
+
+
+@pytest.mark.asyncio
+async def test_api_key_cache_does_not_retain_incomplete_usage_share_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    incomplete = _api_key_data(
+        id="key_usage_share_incomplete",
+        name="usage-share-incomplete",
+        key_prefix="sk-clb-incomplete",
+        created_at=now,
+        usage_share_percent=20,
+        usage_share_unavailable_account_ids=("account-1",),
+    )
+    complete = _api_key_data(
+        id=incomplete.id,
+        name=incomplete.name,
+        key_prefix=incomplete.key_prefix,
+        created_at=now,
+        usage_share_percent=20,
+        usage_share_estimate=UsageShareEstimate(
+            configured_percent=20,
+            estimated_used_credits=5.0,
+            allowance_credits=20.0,
+            capacity_credits=100.0,
+            reset_at=int((now + timedelta(hours=1)).timestamp()),
+            account_count=1,
+        ),
+    )
+    calls = _install_api_key_validator(monkeypatch, incomplete, complete)
+    token = "sk-clb-usage-share-incomplete"
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == incomplete
+    assert key_hash not in get_api_key_cache()._cache
+    assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == complete
+    assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == complete
+    assert calls == [token, token]
+    assert key_hash in get_api_key_cache()._cache
+
+
+@pytest.mark.asyncio
+async def test_api_key_cache_rebuilds_usage_share_snapshot_at_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+
+    def api_key_data(reset_at: int) -> ApiKeyData:
+        return _api_key_data(
+            id="key_usage_share_reset",
+            name="usage-share-reset",
+            key_prefix="sk-clb-reset",
+            created_at=now,
+            usage_share_percent=20,
+            usage_share_estimate=UsageShareEstimate(
+                configured_percent=20,
+                estimated_used_credits=20.0,
+                allowance_credits=20.0,
+                capacity_credits=100.0,
+                reset_at=reset_at,
+                account_count=1,
+            ),
+        )
+
+    stale = api_key_data(int((now - timedelta(seconds=1)).timestamp()))
+    refreshed = api_key_data(int((now + timedelta(hours=1)).timestamp()))
+    calls = _install_api_key_validator(monkeypatch, refreshed)
+    token = "sk-clb-usage-share-reset"
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    await get_api_key_cache().set(key_hash, stale)
+
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert calls == [token]
+
+
+@pytest.mark.asyncio
+async def test_api_key_cache_rebuilds_usage_share_snapshot_when_evidence_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+
+    def api_key_data(evidence_expires_at: int) -> ApiKeyData:
+        return _api_key_data(
+            id="key_usage_share_evidence",
+            name="usage-share-evidence",
+            key_prefix="sk-clb-evidence",
+            created_at=now,
+            usage_share_percent=20,
+            usage_share_estimate=UsageShareEstimate(
+                configured_percent=20,
+                estimated_used_credits=20.0,
+                allowance_credits=20.0,
+                capacity_credits=100.0,
+                reset_at=int((now + timedelta(hours=1)).timestamp()),
+                account_count=1,
+                evidence_expires_at=evidence_expires_at,
+            ),
+        )
+
+    stale = api_key_data(int((now - timedelta(seconds=1)).timestamp()))
+    refreshed = api_key_data(int((now + timedelta(minutes=3)).timestamp()))
+    calls = _install_api_key_validator(monkeypatch, refreshed)
+    token = "sk-clb-usage-share-evidence"
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    await get_api_key_cache().set(key_hash, stale)
+
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert calls == [token]
+
+
+@pytest.mark.asyncio
+async def test_api_key_cache_rebuilds_usage_share_snapshot_when_routing_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+
+    def api_key_data(routing_expires_at: int) -> ApiKeyData:
+        return _api_key_data(
+            id="key_usage_share_routing",
+            name="usage-share-routing",
+            key_prefix="sk-clb-routing",
+            created_at=now,
+            usage_share_percent=20,
+            usage_share_estimate=UsageShareEstimate(
+                configured_percent=20,
+                estimated_used_credits=20.0,
+                allowance_credits=20.0,
+                capacity_credits=100.0,
+                reset_at=int((now + timedelta(hours=1)).timestamp()),
+                account_count=1,
+                evidence_expires_at=int((now + timedelta(minutes=3)).timestamp()),
+                routing_expires_at=routing_expires_at,
+            ),
+        )
+
+    stale = api_key_data(int((now - timedelta(seconds=1)).timestamp()))
+    refreshed = api_key_data(int((now + timedelta(minutes=1)).timestamp()))
+    calls = _install_api_key_validator(monkeypatch, refreshed)
+    token = "sk-clb-usage-share-routing"
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    await get_api_key_cache().set(key_hash, stale)
+
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert await auth_dependencies.validate_proxy_api_key_authorization(f"Bearer {token}") == refreshed
+    assert calls == [token]
 
 
 @pytest.mark.asyncio
@@ -339,6 +498,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         enforced_model=None,
         enforced_reasoning_effort=None,
         enforced_service_tier=None,
+        usage_share_percent=None,
         expires_at=None,
         is_active=True,
         created_at=now,
@@ -355,6 +515,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         enforced_model=None,
         enforced_reasoning_effort=None,
         enforced_service_tier=None,
+        usage_share_percent=None,
         expires_at=None,
         is_active=True,
         created_at=now,
@@ -410,6 +571,7 @@ async def test_deactivated_key_rejected_immediately() -> None:
         enforced_model=None,
         enforced_reasoning_effort=None,
         enforced_service_tier=None,
+        usage_share_percent=None,
         expires_at=None,
         is_active=False,
         created_at=now,

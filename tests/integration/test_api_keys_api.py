@@ -46,6 +46,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsageHolder,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1213,6 +1214,11 @@ async def test_source_routed_chat_completion_settles_api_key_usage(async_client,
 
     monkeypatch.setattr(proxy_api, "forward_chat_completion", fake_forward)
 
+    def fail_usage_share_admission(*_args, **_kwargs) -> None:
+        raise AssertionError("model-source traffic must bypass usage-share admission")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_enforce_api_key_usage_share", fail_usage_share_admission)
+
     response = await async_client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}"},
@@ -1420,6 +1426,11 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
         return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
 
     monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    def fail_usage_share_admission(*_args, **_kwargs) -> None:
+        raise AssertionError("model-source traffic must bypass usage-share admission")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_enforce_api_key_usage_share", fail_usage_share_admission)
 
     async with async_client.stream(
         "POST",
@@ -4696,3 +4707,247 @@ async def test_stream_without_api_key_auth_skips_settlement(async_client, monkey
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
         assert len(lines) >= 1  # stream completed without error
+
+
+@pytest.mark.asyncio
+async def test_api_key_usage_share_percent_crud_and_strict_validation(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "usage-share-key",
+            "usageSharePercent": 25,
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    assert created.json()["usageSharePercent"] == 25
+
+    updated = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"usageSharePercent": 40},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["usageSharePercent"] == 40
+    assert updated.json()["limits"][0]["maxValue"] == 1_000
+
+    cleared = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"usageSharePercent": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["usageSharePercent"] is None
+    assert cleared.json()["limits"][0]["maxValue"] == 1_000
+
+    for invalid in (0, 101, True, 20.0, "20"):
+        response = await async_client.patch(
+            f"/api/api-keys/{key_id}",
+            json={"usageSharePercent": invalid},
+        )
+        assert response.status_code == 422, invalid
+
+
+@pytest.mark.asyncio
+async def test_usage_share_policy_loads_reauth_token_without_async_lazy_io(async_client) -> None:
+    account_id = await _import_account(async_client, "acc-usage-share-reauth", "usage-share-reauth@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "reauth-share-key",
+            "assignedAccountIds": [account_id],
+            "usageSharePercent": 20,
+        },
+    )
+    assert created.status_code == 200
+    plain_key = created.json()["key"]
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = AccountStatus.REAUTH_REQUIRED
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                window="secondary",
+                used_percent=10.0,
+                reset_at=int((now + timedelta(days=3)).timestamp()),
+                window_minutes=10_080,
+                recorded_at=now,
+            )
+        )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        validated = await ApiKeysService(
+            ApiKeysRepository(session),
+            usage_repository=UsageRepository(session),
+        ).validate_key(plain_key)
+
+    assert validated.usage_share_estimate is not None
+    assert validated.usage_share_estimate.account_count == 1
+    assert validated.usage_share_unavailable_account_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_usage_share_snapshot_blocks_every_subscription_http_surface_before_dispatch(
+    async_client,
+    monkeypatch,
+):
+    account_id = await _import_account(async_client, "acc-usage-share", "usage-share-estimate@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "estimated-share-key",
+            "assignedAccountIds": [account_id],
+            "usageSharePercent": 20,
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 10_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    plain_key = created.json()["key"]
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                window="secondary",
+                used_percent=50.0,
+                reset_at=int((now + timedelta(days=3)).timestamp()),
+                window_minutes=10_080,
+                recorded_at=now,
+            )
+        )
+        await session.commit()
+        logs = RequestLogsRepository(session)
+        for request_id, input_tokens, api_key_id in (
+            ("share-key", 40_000, key_id),
+            ("share-peer", 60_000, "peer-key"),
+        ):
+            await logs.add_log(
+                account_id=account_id,
+                request_id=request_id,
+                model="gpt-5.1-codex",
+                input_tokens=input_tokens,
+                output_tokens=0,
+                cached_input_tokens=0,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                requested_at=now,
+                cost_usd=0.0,
+                api_key_id=api_key_id,
+            )
+
+    async with SessionLocal() as session:
+        validated = await ApiKeysService(
+            ApiKeysRepository(session),
+            usage_repository=UsageRepository(session),
+        ).validate_key(plain_key)
+
+    estimate = validated.usage_share_estimate
+    assert estimate is not None
+    assert validated.usage_share_unavailable_account_ids == ()
+    assert estimate.capacity_credits == 7_560
+    assert estimate.estimated_used_credits == pytest.approx(1_512)
+    assert estimate.allowance_credits == pytest.approx(1_512)
+    assert estimate.exceeded
+
+    await _populate_test_registry()
+    enabled = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enabled.status_code == 200
+    dispatches: list[str] = []
+
+    def fail_stream(*_args, **_kwargs):
+        dispatches.append("responses")
+        raise AssertionError("usage-share refusal must precede stream construction")
+
+    async def fail_compact(*_args, **_kwargs):
+        dispatches.append("compact")
+        raise AssertionError("usage-share refusal must precede compact dispatch")
+
+    async def fail_transcribe(*_args, **_kwargs):
+        dispatches.append("transcribe")
+        raise AssertionError("usage-share refusal must precede transcription dispatch")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", fail_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", fail_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", fail_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", fail_transcribe)
+
+    headers = {"Authorization": f"Bearer {plain_key}"}
+    responses = [
+        await async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={"model": _TEST_MODELS[0], "input": "hi"},
+        ),
+        await async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={"model": _TEST_MODELS[0], "input": "hi", "stream": True},
+        ),
+        await async_client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": _TEST_MODELS[0], "messages": [{"role": "user", "content": "hi"}]},
+        ),
+        await async_client.post(
+            "/v1/responses/compact",
+            headers=headers,
+            json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+        ),
+        await async_client.post(
+            "/backend-api/transcribe",
+            headers=headers,
+            files={"file": ("sample.wav", b"audio", "audio/wav")},
+        ),
+        await async_client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={"model": "gpt-image-2", "prompt": "a red circle"},
+        ),
+        await async_client.post(
+            "/v1/images/edits",
+            headers=headers,
+            data={"model": "gpt-image-1", "prompt": "make it green"},
+            files={
+                "image": (
+                    "source.png",
+                    b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                    "image/png",
+                )
+            },
+        ),
+    ]
+
+    assert dispatches == []
+    for response in responses:
+        assert response.status_code == 429, response.text
+        assert response.json()["error"]["code"] == "api_key_usage_share_limit_reached"
+
+    async with SessionLocal() as session:
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == len(responses)
+        assert {reservation.status for reservation in reservations} == {"released"}
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0

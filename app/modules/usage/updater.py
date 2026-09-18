@@ -32,7 +32,12 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager, _clean_optional
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    propagate_account_routing_change,
+    request_account_routing_change,
+)
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.plan_downgrade_observations import (
@@ -153,8 +158,9 @@ _last_successful_refresh: dict[str, datetime] = {}
 _usage_refresh_auth_cooldowns: dict[str, float] = {}
 
 # Debounce window for request-triggered refreshes (a streamed
-# ``usage_limit_reached``): one immediate upstream fetch per account per
-# window collapses a 429 storm into a single call. Deliberately a constant
+# ``usage_limit_reached`` or fail-open usage-share admission): one immediate
+# upstream fetch per account per window collapses a request storm into one call.
+# Deliberately a constant
 # rather than a CODEX_LB_* setting (PRINCIPLES.md P2).
 _REQUEST_REFRESH_DEBOUNCE_SECONDS: Final[float] = 15.0
 # Accounts whose usage fetch failed with an ambiguous 401/403 are skipped for
@@ -548,7 +554,11 @@ class UsageUpdater:
         return not await self._additional_usage_is_stale(account.id, now=now, interval_seconds=interval_seconds)
 
     @staticmethod
-    async def _load_owned_session_updater(account_id: str) -> tuple[UsageUpdater, Account] | None:
+    async def _load_owned_session_updater(
+        account_id: str,
+        *,
+        allow_reauth_required: bool = False,
+    ) -> tuple[UsageUpdater, Account] | None:
         """Load a fresh eligible row for ``account_id`` with repositories that own their sessions."""
 
         @contextlib.asynccontextmanager
@@ -559,7 +569,9 @@ class UsageUpdater:
         account = await accounts_repo.get_by_id(account_id)
         if account is None:
             return None
-        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if account.status in (AccountStatus.PAUSED, AccountStatus.DEACTIVATED) or (
+            account.status == AccountStatus.REAUTH_REQUIRED and not allow_reauth_required
+        ):
             return None
         updater = UsageUpdater(
             BackgroundUsageRepository(),
@@ -611,6 +623,11 @@ class UsageUpdater:
             _mark_usage_refresh_auth_cooldown(account.id, 0)
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         except UsageFetchError as exc:
+            if access_token_override is not None and account.status == AccountStatus.REAUTH_REQUIRED:
+                # This is a best-effort read with the last stored access token.
+                # Its failure cannot prove anything new about account status.
+                _mark_usage_refresh_auth_cooldown(account.id, exc.status_code)
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
@@ -818,6 +835,8 @@ class UsageUpdater:
         account.deactivation_reason = reason
         if status == AccountStatus.DEACTIVATED:
             mark_account_routing_unavailable(account.id)
+        elif status == AccountStatus.REAUTH_REQUIRED:
+            request_account_routing_change()
         get_account_selection_cache().invalidate()
 
     async def _sync_identity_metadata(self, account: Account, payload: UsagePayload) -> bool:
@@ -849,11 +868,12 @@ class UsageUpdater:
         ):
             return True
 
-        account.plan_type = next_plan_type
-        account.workspace_id = next_workspace_id
-        account.workspace_label = next_workspace_label
-        account.seat_type = next_seat_type
+        plan_changed = next_plan_type != account.plan_type
         if not self._auth_manager:
+            account.plan_type = next_plan_type
+            account.workspace_id = next_workspace_id
+            account.workspace_label = next_workspace_label
+            account.seat_type = next_seat_type
             return True
 
         # Identity/plan/workspace sync only. This runs against a stale in-memory
@@ -861,15 +881,28 @@ class UsageUpdater:
         # through the metadata-only writer, which structurally cannot touch
         # token ciphertext. Persisting token material from this snapshot would
         # clobber a peer replica's concurrent refresh-token rotation.
-        await self._auth_manager._repo.update_account_metadata(
+        updated = await self._auth_manager._repo.update_account_metadata(
             account.id,
-            plan_type=account.plan_type,
+            plan_type=next_plan_type,
             email=account.email,
             chatgpt_account_id=account.chatgpt_account_id,
-            workspace_id=account.workspace_id,
-            workspace_label=account.workspace_label,
-            seat_type=account.seat_type,
+            workspace_id=next_workspace_id,
+            workspace_label=next_workspace_label,
+            seat_type=next_seat_type,
         )
+        if not updated:
+            return False
+
+        account.plan_type = next_plan_type
+        account.workspace_id = next_workspace_id
+        account.workspace_label = next_workspace_label
+        account.seat_type = next_seat_type
+        if plan_changed:
+            # Plan changes alter both routing inputs and usage-share capacity.
+            # Selection uses its narrow cache namespace; account_routing carries
+            # the existing cluster-wide allocation-policy eviction.
+            get_account_selection_cache().invalidate()
+            await propagate_account_routing_change()
         return True
 
     async def _recover_quota_status_from_usage(
@@ -979,11 +1012,23 @@ class UsageUpdater:
 
 async def _run_requested_refresh(account_id: str) -> None:
     async def refresh_factory() -> AccountRefreshResult:
-        loaded = await UsageUpdater._load_owned_session_updater(account_id)
+        loaded = await UsageUpdater._load_owned_session_updater(
+            account_id,
+            allow_reauth_required=True,
+        )
         if loaded is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
         updater, account = loaded
-        return await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+        access_token_override = (
+            updater._encryptor.decrypt(account.access_token_encrypted)
+            if account.status == AccountStatus.REAUTH_REQUIRED
+            else None
+        )
+        return await updater._refresh_account(
+            account,
+            usage_account_id=account.chatgpt_account_id,
+            access_token_override=access_token_override,
+        )
 
     try:
         # Two singleflight lanes exist per account: the scheduler (and

@@ -43,7 +43,7 @@ from app.core.exceptions import DashboardAuthError, DashboardPermissionError, Pr
 from app.core.request_locality import is_local_request
 from app.core.socket_peer import raw_socket_peer_host
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import AccountStatus, DashboardSettings, DashboardUser, DashboardUserStatus
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -59,6 +59,7 @@ from app.modules.dashboard_auth.service import (
 )
 from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.dashboard_users.break_glass import break_glass_second_factor_required, local_login_admits
+from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -157,17 +158,29 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
     cache = get_api_key_cache()
     cached = cast(ApiKeyData | None, await cache.get(token_hash))
     if cached is not None:
-        if cached.expires_at is not None and cached.expires_at <= utcnow():
+        now = utcnow()
+        usage_share_expires_at = (
+            cached.usage_share_estimate.snapshot_expires_at if cached.usage_share_estimate is not None else None
+        )
+        key_expired = cached.expires_at is not None and cached.expires_at <= now
+        usage_share_snapshot_expired = (
+            usage_share_expires_at is not None and usage_share_expires_at <= naive_utc_to_epoch(now)
+        )
+        if key_expired or usage_share_snapshot_expired:
             await cache.invalidate(token_hash)
         else:
             return cached
 
     version_before_read = cache.version
     async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
+        service = ApiKeysService(
+            ApiKeysRepository(session),
+            usage_repository=UsageRepository(session),
+        )
         try:
             validated = await service.validate_key(token)
-            await cache.set(token_hash, validated, if_version=version_before_read)
+            if not validated.usage_share_unavailable_account_ids:
+                await cache.set(token_hash, validated, if_version=version_before_read)
             return validated
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc

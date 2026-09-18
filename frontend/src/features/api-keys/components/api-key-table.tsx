@@ -87,11 +87,13 @@ function getUsageValue(apiKey: ApiKey, t: ReturnType<typeof useTranslation>["t"]
 }
 
 function getLimitValue(apiKey: ApiKey, t: ReturnType<typeof useTranslation>["t"]): string {
-  if (apiKey.limits.length === 0) {
-    return t("apiKeys.table.noLimit");
+  const parts = apiKey.usageSharePercent === null
+    ? []
+    : [t("apiKeys.table.usageShare", { percent: apiKey.usageSharePercent })];
+  if (apiKey.limits.length > 0) {
+    parts.push(formatLimitSummary(apiKey.limits, t));
   }
-
-  return formatLimitSummary(apiKey.limits, t);
+  return parts.join(" | ") || t("apiKeys.table.noLimit");
 }
 
 export type ApiKeyTableProps = {

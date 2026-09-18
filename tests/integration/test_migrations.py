@@ -2277,7 +2277,7 @@ async def test_subscription_overflow_settings_columns_migration_upgrade_and_down
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             # The feature was withdrawn: walking on to head runs
-            # 20260914_000000_drop_subscription_overflow_schema, which takes both
+            # 20260914_000001_drop_subscription_overflow_schema, which takes both
             # columns away again. This revision still has to add them on the way
             # through, because an old install upgrades through it.
             assert await conn.run_sync(_overflow_columns) == {}
@@ -2390,7 +2390,7 @@ async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
             # The feature was withdrawn: walking on to head runs
-            # 20260914_000000_drop_subscription_overflow_schema, which drops the
+            # 20260914_000001_drop_subscription_overflow_schema, which drops the
             # table and its indexes. This revision still has to build it on the
             # way through, because an old install upgrades through it.
             assert await conn.run_sync(_schema_state) is None
@@ -2478,8 +2478,8 @@ async def test_drop_overflow_downgrade_repairs_pin_indexes_on_pre_existing_table
     from app.db.migrate import _build_alembic_config
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-overflow-downgrade.sqlite'}"
-    drop_revision = "20260914_000000_drop_subscription_overflow_schema"
-    parent_revision = "20260913_000000_add_oidc_provider_flow"
+    drop_revision = "20260914_000001_drop_subscription_overflow_schema"
+    parent_revision = "20260914_000000_add_scim_tokens"
 
     def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
         inspector = sa_inspect(sync_conn)
@@ -2593,7 +2593,7 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
         await session.commit()
 
     # Stop at the revision under test rather than at head: the feature was
-    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # withdrawn and 20260914_000001_drop_subscription_overflow_schema takes the
     # table (and with it this index) away again. The repair still has to happen
     # on the way through, because an install stranded below it upgrades here.
     overflow_revision = "20260908_000000_add_subscription_overflow"
@@ -2672,7 +2672,7 @@ async def test_model_source_pins_kind_expires_index_repairs_invalid_leftover_pos
         await session.commit()
 
     # Stop at the revision under test rather than at head: the feature was
-    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # withdrawn and 20260914_000001_drop_subscription_overflow_schema takes the
     # table (and with it this index) away again. The repair still has to happen
     # on the way through, because an install stranded below it upgrades here.
     index_revision = "20260911_000000_model_source_pins_kind_expires_index"

@@ -530,31 +530,21 @@ async def test_device_oauth_flow_heals_deactivated_account_when_import_without_o
 
 
 @pytest.mark.asyncio
-async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_merge(monkeypatch):
+async def test_oauth_persist_tokens_publishes_routing_change_after_identity_merge(monkeypatch):
     repo = AsyncMock()
+    repo.upsert_account_slot.return_value = SimpleNamespace(id="acc_reauth_cache")
     service = oauth_module.OauthService(repo)
     account_cache = SimpleNamespace(invalidated=False)
+    cleared_account_ids: list[str] = []
+    propagate_routing_change = AsyncMock(return_value=True)
 
     def _invalidate_account_cache() -> None:
         account_cache.invalidated = True
 
     account_cache.invalidate = _invalidate_account_cache
-    api_key_cache = SimpleNamespace(cleared=False)
-
-    def _clear_api_key_cache() -> None:
-        api_key_cache.cleared = True
-
-    api_key_cache.clear = _clear_api_key_cache
-    poller = SimpleNamespace(bumped=[])
-
-    async def _bump(namespace: str) -> None:
-        poller.bumped.append(namespace)
-
-    poller.bump = _bump
-    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: account_cache, raising=False)
-    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: api_key_cache, raising=False)
-    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: poller, raising=False)
-    monkeypatch.setattr(oauth_module, "NAMESPACE_API_KEY", "api_key", raising=False)
+    monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: account_cache)
+    monkeypatch.setattr(oauth_module, "clear_account_routing_unavailable", cleared_account_ids.append)
+    monkeypatch.setattr(oauth_module, "propagate_account_routing_change", propagate_routing_change)
 
     payload = {
         "email": "reauth-cache@example.com",
@@ -577,8 +567,8 @@ async def test_oauth_persist_tokens_invalidates_routing_caches_after_identity_me
         "preserve_identity_slots": True,
     }
     assert account_cache.invalidated is True
-    assert api_key_cache.cleared is True
-    assert poller.bumped == ["api_key"]
+    assert cleared_account_ids == ["acc_reauth_cache"]
+    propagate_routing_change.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -591,8 +581,7 @@ async def test_oauth_persist_tokens_uses_slot_upsert_for_label_only_workspace(mo
         lambda: SimpleNamespace(invalidate=lambda: None),
         raising=False,
     )
-    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None), raising=False)
-    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None, raising=False)
+    monkeypatch.setattr(oauth_module, "propagate_account_routing_change", AsyncMock(return_value=True))
 
     payload = {
         "email": "label-workspace@example.com",
@@ -626,8 +615,7 @@ async def test_targeted_reauth_replaces_only_matching_team_seat(monkeypatch):
     repo = AsyncMock()
     service = oauth_module.OauthService(repo)
     monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: SimpleNamespace(invalidate=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
+    monkeypatch.setattr(oauth_module, "propagate_account_routing_change", AsyncMock(return_value=True))
 
     target_id = "shared-workspace_seat-a"
     existing_token = _encode_jwt(
@@ -768,8 +756,7 @@ async def test_targeted_reauth_allows_legacy_sub_match_for_new_chatgpt_user_id(m
     repo = AsyncMock()
     service = oauth_module.OauthService(repo)
     monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: SimpleNamespace(invalidate=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
+    monkeypatch.setattr(oauth_module, "propagate_account_routing_change", AsyncMock(return_value=True))
 
     target_id = "shared-workspace_legacy-seat-a"
     existing_token = _encode_jwt(
@@ -826,8 +813,7 @@ async def test_targeted_reauth_rejects_workspace_mismatch_when_chatgpt_account_i
     repo = AsyncMock()
     service = oauth_module.OauthService(repo)
     monkeypatch.setattr(oauth_module, "get_account_selection_cache", lambda: SimpleNamespace(invalidate=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_api_key_cache", lambda: SimpleNamespace(clear=lambda: None))
-    monkeypatch.setattr(oauth_module, "get_cache_invalidation_poller", lambda: None)
+    monkeypatch.setattr(oauth_module, "propagate_account_routing_change", AsyncMock(return_value=True))
 
     target_id = "legacy-workspace_seat-a"
     existing_token = _encode_jwt(

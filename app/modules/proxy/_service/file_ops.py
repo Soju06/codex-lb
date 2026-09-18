@@ -730,6 +730,7 @@ class _FileOpsMixin:
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                request_kind=kind,
                 failure_phase=failure_metadata.failure_phase,
                 failure_detail=failure_metadata.failure_detail,
                 failure_exception_type=failure_metadata.failure_exception_type,

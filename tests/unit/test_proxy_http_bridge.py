@@ -1305,6 +1305,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
         message=UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}'),
         scheduler=service._scheduler,
         clock=service._clock,
+        observed_at=5.0,
     )
     retire_after_drain.assert_awaited_once_with(session)
     retry_precreated.assert_not_awaited()
@@ -29988,6 +29989,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
         message=UpstreamWebSocketMessage(kind="text", text="late response"),
         scheduler=service._scheduler,
         clock=service._clock,
+        observed_at=ANY,
     )
     retry_precreated.assert_not_awaited()
     clear_anchor.assert_not_awaited()
@@ -47793,3 +47795,91 @@ async def test_http_bridge_reader_stamps_the_upstream_terminal_when_it_parses_th
 
     assert observed == {"terminal_at": 112.0, "finalizer_entered_at": 122.0}
     assert request_state.upstream_terminal_at == 112.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_exception_does_not_freeze_failed_terminal_time(monkeypatch):
+    clock = VirtualClock(monotonic_value=100.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(
+        service, "_retry_http_bridge_precreated_request", AsyncMock(side_effect=RuntimeError("retry failed"))
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="retry-timing",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.2","input":[]}',
+    )
+    session = _make_bridge_session(key_value="retry-timing", pending_requests=deque([state]), queued_request_count=1)
+    clock.advance(1.0)
+    with pytest.raises(RuntimeError, match="retry failed"):
+        await service._process_http_bridge_upstream_text(
+            session,
+            json.dumps({"type": "error", "error": {"code": "rate_limit_exceeded", "message": "rate limited"}}),
+            observed_at=101.0,
+        )
+    assert state in session.pending_requests
+    assert state.upstream_terminal_at is None
+    assert state.latency_first_output_ms is None
+    assert state.output_delta_count == 0
+
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock())
+    clock.advance(4.0)
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps({"type": "response.completed", "response": {"id": "retry-timing", "output": []}}),
+    )
+    finalize.assert_awaited_once()
+    assert state.upstream_terminal_at == 105.0
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_output_timing_precedes_downstream_queue_consumption(monkeypatch):
+    clock = VirtualClock(monotonic_value=100.0)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock)
+    finalized: list[tuple[int | None, int | None, int, float | None]] = []
+
+    async def finalize(state, **_kwargs):
+        finalized.append(
+            (
+                state.latency_first_token_ms,
+                state.latency_first_output_ms,
+                state.output_delta_count,
+                state.upstream_terminal_at,
+            )
+        )
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock())
+    state = proxy_service._WebSocketRequestState(
+        request_id="bridge-timing",
+        response_id="bridge-timing",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=100.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    session = _make_bridge_session(key_value="bridge-timing", pending_requests=deque([state]))
+    for observed_at, event in (
+        (100.125, {"type": "response.reasoning_summary_text.delta", "delta": "plan"}),
+        (100.25, {"type": "response.output_text.delta", "delta": "hello"}),
+        (100.75, {"type": "response.output_text.delta", "delta": "!"}),
+        (101.0, {"type": "response.completed", "response": {"id": "bridge-timing", "output": []}}),
+    ):
+        clock.monotonic_value = observed_at
+        await service._process_http_bridge_upstream_text(session, json.dumps(event), observed_at=observed_at)
+    # No downstream consumer has run, yet persisted timing evidence is complete.
+    assert state.event_queue is not None and state.event_queue.qsize() > 0
+    assert finalized == [(125, 250, 2, 101.0)]

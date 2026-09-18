@@ -203,7 +203,6 @@ from app.modules.proxy._service.support import (
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _signal_propagated_responses_service_cleanup_ready,
-    _ttft_event_visible_at,
     _WebSocketRequestState,
     configured_upstream_stream_transport,
     mark_upstream_websocket_transport_failure,
@@ -5253,14 +5252,6 @@ class _HTTPBridgeStreamingMixin:
                 circuit_keepalive_until = None
                 block_payload = parse_sse_data_json(event_block)
                 block_event_type = _event_type_from_payload(None, block_payload)
-                if request_state.latency_first_token_ms is None:
-                    ttft_visible_at = _ttft_event_visible_at(
-                        block_event_type, block_payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
-                    )
-                    if ttft_visible_at is not None:
-                        request_state.latency_first_token_ms = max(
-                            0, int((ttft_visible_at - request_state.started_at) * 1000)
-                        )
                 if not propagate_http_errors and _is_previous_response_not_found_error(
                     code=_normalize_error_code(
                         _websocket_event_error_code(block_event_type, block_payload),

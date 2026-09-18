@@ -72,7 +72,7 @@ from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
     UPSTREAM_SOFT_OVERLOAD_CODES,
@@ -531,6 +531,38 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
+def _stream_responses(
+    proxy: _StreamingServiceProtocol,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    *,
+    codex_session_affinity: bool = False,
+    propagate_http_errors: bool = False,
+    openai_cache_affinity: bool = False,
+    api_key: ApiKeyData | None = None,
+    api_key_reservation: ApiKeyUsageReservationData | None = None,
+    suppress_text_done_events: bool = False,
+    request_transport: str = _REQUEST_TRANSPORT_HTTP,
+    client_ip: str | None = None,
+    enforce_openai_sdk_contract: bool = True,
+) -> AsyncIterator[str]:
+    _maybe_log_proxy_request_payload("stream", payload, headers)
+    filtered = _facade().filter_inbound_headers(headers)
+    return proxy._stream_with_retry(
+        payload,
+        filtered,
+        codex_session_affinity=codex_session_affinity,
+        propagate_http_errors=propagate_http_errors,
+        openai_cache_affinity=openai_cache_affinity,
+        api_key=api_key,
+        api_key_reservation=api_key_reservation,
+        suppress_text_done_events=suppress_text_done_events,
+        request_transport=request_transport,
+        client_ip=client_ip,
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
+
+
 def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
     if code is None:
         return False
@@ -787,7 +819,9 @@ def _mark_stream_settlement_interrupted(
     )
 
 
-def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock: Clock) -> bool:
+def _stamp_terminal(
+    settlement: _StreamSettlement, event_type: str | None, clock: Clock, *, observed_at: float | None = None
+) -> bool:
     """Return whether ``event_type`` is an upstream terminal frame, stamping its parse instant on the settlement.
 
     Called at the HTTP stream's terminal-detection sites before the frame is
@@ -797,7 +831,8 @@ def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock
     """
     if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
         return False
-    settlement.upstream_terminal_at = clock.monotonic()
+    if settlement.upstream_terminal_at is None:
+        settlement.upstream_terminal_at = clock.monotonic() if observed_at is None else observed_at
     return True
 
 

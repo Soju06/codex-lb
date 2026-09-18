@@ -560,6 +560,10 @@ class RequestLog(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Nullable for historical rows and sources without observed output timing.
+    latency_first_output_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_delta_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_upstream_terminal_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Pre-attempt wait (account selection, admission waits, failed failover
     # attempts) — kept out of latency_ms/latency_first_token_ms so those two
     # always share the successful attempt's anchor.

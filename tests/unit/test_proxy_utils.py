@@ -53418,10 +53418,8 @@ def test_normalize_stream_payload_for_http_block_still_rewrites_error_envelopes_
 
 @pytest.mark.asyncio
 async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbatim(monkeypatch):
-    # After the TTFT window settles, canonically framed delta frames are
-    # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
-    # JSON-parsed; usage settlement from the parsed terminal frame is
-    # unchanged.
+    # Inspect canonical output deltas to qualify timing while preserving
+    # upstream UTF-8 bytes and spacing exactly.
     from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
 
     settings = _make_proxy_settings()
@@ -53472,10 +53470,8 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
         )
     ]
 
-    # created (lifecycle), the first delta (TTFT window still open), and
-    # completed (lifecycle) are parsed; the settled second delta is relayed
-    # without any JSON parse.
-    assert mixin_parse.call_count == 3
+    # Both output deltas are inspected for nonempty content, without re-encoding.
+    assert mixin_parse.call_count == 4
     # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
     # spacing, not the ensure_ascii canonical re-encode.
     assert chunks[2] == verbatim_delta
@@ -53483,6 +53479,8 @@ async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbat
     assert request_logs.calls[0]["status"] == "success"
     assert request_logs.calls[0]["input_tokens"] == 3
     assert request_logs.calls[0]["output_tokens"] == 5
+
+    assert request_logs.calls[0]["output_delta_count"] == 2
 
 
 @pytest.mark.asyncio

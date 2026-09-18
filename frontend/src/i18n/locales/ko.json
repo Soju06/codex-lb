@@ -2004,5 +2004,20 @@
   "auth.login.signInFailed": "로그인이 끝나지 않았습니다. 다시 시도하세요.",
   "auth.pending.subtitleProvider": "{{provider}}(으)로 로그인됨",
   "auth.pending.bodyProvider": "{{provider}}는 사용자를 확인했지만 이 대시보드에는 아직 계정이 없습니다. 관리자에게 추가를 요청한 뒤 다시 시도하세요.",
-  "auth.pending.referenceLabel": "관리자가 이 로그인을 찾을 수 있도록 아래 참조 코드를 알려주세요:"
+  "auth.pending.referenceLabel": "관리자가 이 로그인을 찾을 수 있도록 아래 참조 코드를 알려주세요:",
+  "dashboard.requestDetails.ttftExplanation": "구독 계정 요청에서 TTFT는 게이트웨이가 첫 텍스트, 공개 추론 또는 도구 출력을 관측한 지연 시간입니다. HTTP 시도는 별도로 기록된 대기 시간을 제외하며 WebSocket 및 브리지는 대기를 포함할 수 있습니다. 사용자 지정 모델 소스는 업스트림이 보고한 시간을 사용합니다. 클라이언트의 전체 지연 시간은 아닙니다.",
+  "dashboard.requestDetails.tpsExplanation": "TPS는 첫 비추론 출력부터 업스트림 완료까지의 초당 비추론 출력 토큰 추정치입니다. 출력 청크 2개 이상과 100 ms 이상이 필요하며, 속도 제한이 아닌 표본 품질 기준입니다.",
+  "dashboard.requestDetails.firstOutput": "첫 비추론 출력",
+  "dashboard.requestDetails.speedSample": "TPS 표본 품질",
+  "dashboard.requestDetails.legacyEstimate": "기존 방식 추정치",
+  "dashboard.generationTpsStatus.estimated": "관측된 출력 속도 추정치",
+  "dashboard.generationTpsStatus.legacy_estimate": "기존 방식 추정치: 출력 청크 정보가 없어 일별 TPS 중앙값에서 제외됩니다.",
+  "dashboard.generationTpsStatus.insufficient_sample": "표본 부족: 비추론 출력이 없거나, 출력 청크가 2개 미만이거나, 출력 시간이 100 ms 미만입니다.",
+  "dashboard.generationTpsStatus.missing_usage": "TPS 없음: 출력 또는 추론 사용량을 알 수 없습니다.",
+  "dashboard.generationTpsStatus.missing_timing": "TPS 없음: 출력 시간 정보가 없습니다.",
+  "dashboard.generationTpsStatus.invalid_sample": "TPS 없음: 시간 또는 사용량 값이 일치하지 않습니다.",
+  "dashboard.generationTpsStatus.incomplete": "TPS 없음: 요청이 성공적으로 완료되지 않았습니다.",
+  "reports.charts.tpsSamples": "유효 표본 {{count}}개 · 관측된 출력 속도 추정치",
+  "reports.charts.noQualifiedSpeedSamples": "유효한 출력 속도 표본이 없습니다. 기존 방식 추정치, 미완료 및 부족한 표본은 제외됩니다.",
+  "dashboard.requestDetails.upstreamCompletion": "업스트림 완료"
 }

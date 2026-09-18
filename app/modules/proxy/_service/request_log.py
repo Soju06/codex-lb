@@ -162,6 +162,8 @@ class _RequestLogMixin:
         latency_ms: int,
         status: str,
         latency_first_token_ms: int | None = None,
+        output_delta_count: int | None = None,
+        latency_first_output_ms: int | None = None,
         latency_queue_ms: int | None = None,
         latency_response_created_ms: int | None = None,
         latency_first_upstream_event_ms: int | None = None,
@@ -214,8 +216,9 @@ class _RequestLogMixin:
         latency_upstream_send_ms: int | None = None,
         # Start-to-upstream-terminal latency stamped when the terminal frame was
         # parsed, before downstream delivery, terminal bookkeeping, settlement
-        # and cleanup. Not persisted; it is the end of the throughput sample's
-        # span. ``None`` (no terminal frame was parsed) falls back to
+        # and cleanup. Persisted separately from total latency; it also ends
+        # the throughput sample's span. For routing only, a missing terminal
+        # (no terminal frame was parsed) falls back to
         # ``latency_ms``; such rows are error rows and are not sampled.
         latency_upstream_terminal_ms: int | None = None,
     ) -> None:
@@ -230,6 +233,9 @@ class _RequestLogMixin:
                 latency_ms=latency_ms,
                 status=status,
                 latency_first_token_ms=latency_first_token_ms,
+                latency_first_output_ms=latency_first_output_ms,
+                output_delta_count=output_delta_count,
+                latency_upstream_terminal_ms=latency_upstream_terminal_ms,
                 latency_queue_ms=latency_queue_ms,
                 latency_response_created_ms=latency_response_created_ms,
                 latency_first_upstream_event_ms=latency_first_upstream_event_ms,
@@ -440,6 +446,9 @@ class _RequestLogMixin:
         latency_ms: int,
         status: str,
         latency_first_token_ms: int | None = None,
+        latency_upstream_terminal_ms: int | None = None,
+        output_delta_count: int | None = None,
+        latency_first_output_ms: int | None = None,
         latency_queue_ms: int | None = None,
         latency_response_created_ms: int | None = None,
         latency_first_upstream_event_ms: int | None = None,
@@ -506,6 +515,9 @@ class _RequestLogMixin:
                     connection_request_kind=connection_request_kind,
                     latency_ms=latency_ms,
                     latency_first_token_ms=latency_first_token_ms,
+                    latency_first_output_ms=latency_first_output_ms,
+                    output_delta_count=output_delta_count,
+                    latency_upstream_terminal_ms=latency_upstream_terminal_ms,
                     latency_queue_ms=latency_queue_ms,
                     latency_response_created_ms=latency_response_created_ms,
                     latency_first_upstream_event_ms=latency_first_upstream_event_ms,

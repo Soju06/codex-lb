@@ -423,6 +423,8 @@ describe("RecentRequestsTable", () => {
             apiKeyName: "Key Speed",
             apiKeyId: "key-speed",
             requestId: "req-speed",
+            generationTps: 200,
+            generationTpsStatus: "estimated",
             conversationId: null,
             requestKind: "normal",
             model: "gpt-5.1",
@@ -457,7 +459,7 @@ describe("RecentRequestsTable", () => {
 
     expect(row).not.toBeNull();
     expect(within(row as HTMLElement).getByText("200ms")).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByText("200.0")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("≈200.0")).toBeInTheDocument();
   });
 
   it("shows reasoning as secondary token metadata and an included-output detail", () => {
@@ -483,6 +485,35 @@ describe("RecentRequestsTable", () => {
       "Reasoning tokens (included in output)",
     );
     expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("80");
+  });
+
+  it("does not recalculate an insufficient short-output sample", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST,
+      outputTokensRaw: 120,
+      reasoningTokens: 110,
+      latencyMs: 2005,
+      latencyFirstTokenMs: 2000,
+      generationTps: null,
+      generationTpsStatus: "insufficient_sample",
+    }]} />);
+
+    expect(screen.queryByText(/2000/)).not.toBeInTheDocument();
+    expect(screen.getByTitle(/Insufficient sample/)).toHaveTextContent("--");
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText(/Insufficient sample/)).toBeInTheDocument();
+  });
+
+  it("uses the backend estimate and distinguishes legacy samples", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST,
+      generationTps: 42.25,
+      generationTpsStatus: "legacy_estimate",
+    }]} />);
+
+    expect(screen.getByText("≈42.3")).toBeInTheDocument();
+    expect(screen.getByText("Legacy estimate")).toBeInTheDocument();
+    expect(screen.getByTitle(/excluded from daily TPS medians/)).toBeInTheDocument();
   });
 
   it("renders a known zero reasoning count", () => {

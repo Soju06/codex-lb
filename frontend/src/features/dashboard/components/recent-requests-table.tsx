@@ -112,6 +112,7 @@ export type RecentRequestsTableProps = {
 type RequestLogTableHeadProps = {
   column: RequestLogColumnId;
   label: string;
+  description?: string;
   resizeLabel: string;
   className?: string;
   width?: number;
@@ -121,6 +122,7 @@ type RequestLogTableHeadProps = {
 function RequestLogTableHead({
   column,
   label,
+  description,
   resizeLabel,
   className,
   width,
@@ -191,6 +193,7 @@ function RequestLogTableHead({
   return (
     <TableHead
       aria-label={label}
+      title={description}
       className={cn(
         "relative text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80",
         className,
@@ -280,17 +283,7 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
 }
 
 function formatGenerationSpeed(request: RequestLog): string | null {
-  if (request.outputTokensRaw == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
-    return null;
-  }
-
-  const outputCount = request.outputTokensRaw - (request.reasoningTokens ?? 0);
-  const generationMs = request.latencyMs - request.latencyFirstTokenMs;
-  if (outputCount <= 0 || generationMs <= 0) {
-    return null;
-  }
-
-  return (outputCount / (generationMs / 1000)).toFixed(1);
+  return request.generationTps == null ? null : `≈${request.generationTps.toFixed(1)}`;
 }
 
 function formatCompactElapsed(ms: number | null | undefined): string | null {
@@ -401,8 +394,8 @@ export function RecentRequestsTable({
               {isColumnVisible("model") ? <RequestLogTableHead column="model" label={t("dashboard.requests.columns.model")} resizeLabel={resizeLabel(t("dashboard.requests.columns.model"))} width={columnWidths?.model} onWidthChange={onColumnWidthChange} /> : null}
               {isColumnVisible("transport") ? <RequestLogTableHead column="transport" label={t("dashboard.requests.columns.transport")} resizeLabel={resizeLabel(t("dashboard.requests.columns.transport"))} className="pr-3" width={columnWidths?.transport} onWidthChange={onColumnWidthChange} /> : null}
               {isColumnVisible("status") ? <RequestLogTableHead column="status" label={t("dashboard.requests.columns.status")} resizeLabel={resizeLabel(t("dashboard.requests.columns.status"))} className="pl-3" width={columnWidths?.status} onWidthChange={onColumnWidthChange} /> : null}
-              {isColumnVisible("ttft") ? <RequestLogTableHead column="ttft" label={t("dashboard.requests.columns.ttft")} resizeLabel={resizeLabel(t("dashboard.requests.columns.ttft"))} className="text-right" width={columnWidths?.ttft} onWidthChange={onColumnWidthChange} /> : null}
-              {isColumnVisible("tps") ? <RequestLogTableHead column="tps" label={t("dashboard.requests.columns.tps")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tps"))} className="text-right" width={columnWidths?.tps} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("ttft") ? <RequestLogTableHead column="ttft" label={t("dashboard.requests.columns.ttft")} description={t("dashboard.requestDetails.ttftExplanation")} resizeLabel={resizeLabel(t("dashboard.requests.columns.ttft"))} className="text-right" width={columnWidths?.ttft} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("tps") ? <RequestLogTableHead column="tps" label={t("dashboard.requests.columns.tps")} description={t("dashboard.requestDetails.tpsExplanation")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tps"))} className="text-right" width={columnWidths?.tps} onWidthChange={onColumnWidthChange} /> : null}
               {isColumnVisible("tokens") ? <RequestLogTableHead column="tokens" label={t("dashboard.requests.columns.tokens")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tokens"))} className="text-right" width={columnWidths?.tokens} onWidthChange={onColumnWidthChange} /> : null}
               {isColumnVisible("cost") ? <RequestLogTableHead column="cost" label={t("dashboard.requests.columns.cost")} resizeLabel={resizeLabel(t("dashboard.requests.columns.cost"))} className="text-right" width={columnWidths?.cost} onWidthChange={onColumnWidthChange} /> : null}
               {isColumnVisible("details") ? <RequestLogTableHead column="details" label={t("dashboard.requests.columns.details")} resizeLabel={resizeLabel(t("dashboard.requests.columns.details"))} className="pr-4" width={columnWidths?.details} onWidthChange={onColumnWidthChange} /> : null}
@@ -501,8 +494,9 @@ export function RecentRequestsTable({
                   {isColumnVisible("ttft") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCompactElapsed(request.latencyFirstTokenMs) ?? "--"}
                   </TableCell> : null}
-                  {isColumnVisible("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  {isColumnVisible("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums" title={t(`dashboard.generationTpsStatus.${request.generationTpsStatus ?? "missing_timing"}`)}>
                     {generationSpeed ?? "--"}
+                    {request.generationTpsStatus === "legacy_estimate" ? <div className="whitespace-normal text-[11px] leading-tight text-muted-foreground">{t("dashboard.requestDetails.legacyEstimate")}</div> : null}
                   </TableCell> : null}
                   {isColumnVisible("tokens") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     <div className="leading-tight">
@@ -601,8 +595,11 @@ export function RecentRequestsTable({
                 <RequestDetailField label={t("dashboard.requests.columns.plan")} value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.elapsed")} value={formatElapsed(selectedRequest?.latencyMs ?? null)} />
                 <RequestDetailField label="TTFT" value={formatElapsed(selectedRequest?.latencyFirstTokenMs ?? null)} />
+                <RequestDetailField label={t("dashboard.requestDetails.firstOutput")} value={formatElapsed(selectedRequest?.latencyFirstOutputMs ?? null)} />
+                <RequestDetailField label={t("dashboard.requestDetails.upstreamCompletion")} value={formatElapsed(selectedRequest?.latencyUpstreamTerminalMs ?? null)} />
                 <RequestDetailField label={t("dashboard.requestDetails.queue")} value={formatElapsed(selectedRequest?.latencyQueueMs ?? null)} />
                 <RequestDetailField label="TPS" value={selectedRequest ? (formatGenerationSpeed(selectedRequest) ?? "—") : "—"} />
+                <RequestDetailField label={t("dashboard.requestDetails.speedSample")} value={t(`dashboard.generationTpsStatus.${selectedRequest?.generationTpsStatus ?? "missing_timing"}`)} />
                 {selectedRequest?.reasoningTokens != null ? (
                   <RequestDetailField
                     label={t("dashboard.requestDetails.reasoningTokensIncluded")}
@@ -738,6 +735,8 @@ export function RecentRequestsTable({
               </div>
             </div>
           </div>
+          <p className="text-xs text-muted-foreground">{t("dashboard.requestDetails.ttftExplanation")}</p>
+          <p className="text-xs text-muted-foreground">{t("dashboard.requestDetails.tpsExplanation")}</p>
           <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>

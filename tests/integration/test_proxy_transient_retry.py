@@ -15,11 +15,15 @@ import base64
 import json
 import logging
 import time
-from unittest.mock import MagicMock
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 
+import app.core.clients.proxy as core_proxy
+import app.core.resilience.network_recovery as network_recovery
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
@@ -712,6 +716,67 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
     b_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_b"]
     assert len(a_calls) == 3
     assert len(b_calls) >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("winerror", [64, 121])
+@pytest.mark.parametrize("pre_dispatch", [False, True])
+async def test_stream_windows_transport_recovery_preserves_replay_safety(
+    async_client, monkeypatch, winerror, pre_dispatch
+):
+    account_id = await _import_account(async_client, "acc_windows_transport", "windows-transport@example.com")
+    error = OSError("Windows network transport failed")
+    error.winerror = winerror
+    if pre_dispatch:
+        error = aiohttp.ClientConnectorError(ConnectionKey("example.invalid", 443, True, True, None, None, None), error)
+
+    class FailedSession:
+        def post(self, *args, **kwargs):
+            del args, kwargs
+            raise error
+
+    failed_session = FailedSession()
+    rotate = AsyncMock(return_value="rotated")
+    monkeypatch.setattr(network_recovery, "rotate_shared_http_transport", rotate)
+    monkeypatch.setattr(network_recovery, "backoff_seconds", lambda attempt: 0)
+    calls: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, selected_account_id, **kwargs):
+        del kwargs
+        calls.append(selected_account_id)
+        if len(calls) == 1:
+            async for event in core_proxy.stream_responses(
+                payload,
+                headers,
+                access_token,
+                selected_account_id,
+                session=cast(aiohttp.ClientSession, failed_session),
+                upstream_stream_transport_override="http",
+                raise_for_status=True,
+            ):
+                yield event
+            return
+        yield _success_sse_event("resp_windows_recovered")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+    )
+
+    rotate.assert_awaited_once()
+    assert rotate.call_args.kwargs["failed_session"] is failed_session
+    if pre_dispatch:
+        assert "response.completed" in response.text, response.text
+        assert calls == ["acc_windows_transport", "acc_windows_transport"]
+    else:
+        assert calls == ["acc_windows_transport"]
+        assert "response.completed" not in response.text
+        assert "proxy_network_unavailable" in response.text
+        async with SessionLocal() as session:
+            account = await session.get(Account, account_id)
+            assert account is not None
+            assert account.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

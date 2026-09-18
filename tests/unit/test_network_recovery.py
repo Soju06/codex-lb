@@ -66,6 +66,26 @@ def test_process_network_error_requires_stable_code_not_message_text() -> None:
     assert not network_recovery.is_process_network_error("upstream_unavailable")
 
 
+@pytest.mark.parametrize("winerror", [64, 121])
+def test_windows_transport_failure_requires_typed_provenance(winerror: int) -> None:
+    error = OSError("Windows transport failure")
+    error.winerror = winerror
+    assert network_recovery.is_process_network_failure(error)
+    assert not network_recovery.is_pre_dispatch_connection_failure(error)
+
+    wrapped = _connector_error(error)
+    assert network_recovery.is_process_network_failure(wrapped)
+    assert network_recovery.is_pre_dispatch_connection_failure(wrapped)
+    assert not network_recovery.is_process_network_failure(OSError(f"[WinError {winerror}] disconnected"))
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 10061])
+def test_unrelated_windows_errors_do_not_enter_network_recovery(winerror: int) -> None:
+    error = OSError("not a recognized transport failure")
+    error.winerror = winerror
+    assert not network_recovery.is_process_network_failure(error)
+
+
 @pytest.mark.asyncio
 async def test_recovery_controller_retries_and_logs_recovery(monkeypatch, caplog) -> None:
     sleep = AsyncMock()

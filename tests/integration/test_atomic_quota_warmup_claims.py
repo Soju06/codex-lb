@@ -908,6 +908,8 @@ async def test_concurrent_initial_free_quota_claims_allow_one_sliding_deadline(
                 after_secondary={candidate.id: monthly},
                 previous_plan_types={candidate.id: "free"},
                 refresh_started_at=refresh_started_at,
+                usage_limit_secondary={},
+                usage_limit_monthly={},
             )
 
     await asyncio.gather(replica(first_reset_at), replica(first_reset_at + 60))

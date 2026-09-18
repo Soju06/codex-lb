@@ -1286,6 +1286,16 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
     wait_for_reachable = AsyncMock()
     validate_advertise = AsyncMock()
 
+    # Bridge registration must not depend on the shared test database.
+    monkeypatch.setattr(
+        main.AccountsRepository,
+        "seed_hard_sticky_outage_grace_on_startup",
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.account_cache.RoutingAvailabilityCache.refresh_from_db",
+        AsyncMock(),
+    )
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings_cache", lambda: settings_cache)
     monkeypatch.setattr(main, "ensure_auto_bootstrap_token", AsyncMock(return_value=None))

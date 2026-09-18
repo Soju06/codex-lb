@@ -89,6 +89,16 @@ TIMESTAMP_PREFIX_PATTERN = re.compile(r"^(\d{8}_\d{6})_")
 # merge revision): zero violations at or after the cutoff.
 RATCHET_PREFIX = "20260911_000000"
 
+# Both revisions already landed on main; renaming them would break stamped
+# databases. Exempt only this exact pair, with its explicit repair present.
+_REPAIRED_COLLISION = frozenset(
+    {
+        "20260914_000000_add_scim_tokens",
+        "20260914_000000_drop_subscription_overflow_schema",
+    }
+)
+_COLLISION_REPAIR = "20260918_000000_merge_scim_and_overflow_removal"
+
 _FAILURE_PREFIX = "check_migration_topology"
 
 
@@ -364,6 +374,11 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         if len(group) < 2:
             continue
         if not _ratcheted((prefix,), ratchet_prefix):
+            continue
+        if (
+            frozenset(item.revision for item in group) == _REPAIRED_COLLISION
+            and frozenset(parents.get(_COLLISION_REPAIR, ())) == _REPAIRED_COLLISION
+        ):
             continue
         group = sorted(group, key=lambda item: item.revision)
         described = "; ".join(revision.describe() for revision in group)

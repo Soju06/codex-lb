@@ -3699,16 +3699,31 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.pending_requests.remove(status_request_state)
                         session.queued_request_count = max(0, session.queued_request_count - 1)
                 if staged:
-                    # A busy create gate forwards the upstream terminal as-is;
-                    # only a replay that was attempted and failed is rewritten.
-                    status_request_state.error_http_status_override = 502
-                    (
-                        _downstream_text,
-                        event_block,
-                        event,
-                        payload,
-                        event_type,
-                    ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
+                    # A failed retry must not hide an upstream quota response
+                    # (including its reset metadata) behind a synthetic 502.
+                    # Other replay failures remain fail-closed as
+                    # ``stream_incomplete`` because their original terminal is
+                    # not a status-bearing quota response.
+                    preserve_upstream_rate_limit = _http_error_status_from_payload(
+                        payload
+                    ) == 429 and retry_error_code in {
+                        "rate_limit_exceeded",
+                        "usage_limit_reached",
+                        "insufficient_quota",
+                        "usage_not_included",
+                        "quota_exceeded",
+                    }
+                    if preserve_upstream_rate_limit:
+                        _clear_websocket_request_error_overrides(status_request_state)
+                    else:
+                        status_request_state.error_http_status_override = 502
+                        (
+                            _downstream_text,
+                            event_block,
+                            event,
+                            payload,
+                            event_type,
+                        ) = _build_stream_incomplete_terminal_event_for_request(status_request_state)
 
         completed_usage = (
             event.response.usage if event_type == "response.completed" and event and event.response else None

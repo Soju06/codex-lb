@@ -19,8 +19,9 @@ maintenance.
 - Auth Guardian candidate selection and its fresh per-account recheck use the
   existing `app.core.auth.refresh.should_refresh()` predicate.
 - The guardian-only 12-hour constant, scheduler field, and selection parameter
-  are removed. The six-hour polling cadence remains; it merely notices accounts
-  after the canonical eight-day window becomes due.
+  are removed. The six-hour polling cadence remains and determines the next
+  eligibility scan after the canonical eight-day window becomes due; the fixed
+  100-account batch and active failure backoff still govern admission.
 - Active and paused account eligibility, leader gating, cross-replica refresh
   claims, and failure backoff remain unchanged. After the fresh row passes the
   shared predicate, the worker keeps `force=True` only as execution of that

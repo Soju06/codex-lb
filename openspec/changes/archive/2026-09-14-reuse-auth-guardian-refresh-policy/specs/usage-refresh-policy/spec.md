@@ -12,8 +12,11 @@ maximum refresh age or shorten the shared window. Candidate selection and the
 fresh per-account recheck MUST both use that predicate. Once the fresh row is
 admitted, the worker MUST call `ensure_fresh(..., force=True)` to execute that
 already-approved refresh without making a second age decision on a different
-clock. The scan cadence only bounds how long an eligible account waits after
-crossing the shared window.
+clock. The six-hour scan cadence bounds only the time until the next
+eligibility scan. Each pass MUST exclude accounts in active failure backoff and
+MUST admit no more than the fixed 100-account batch, ordered by oldest
+`last_refresh`; an eligible account outside that batch can therefore wait
+through additional scans before refresh.
 
 Proactive credential refresh MUST NOT change a paused account's routing
 eligibility: a paused account remains excluded from request routing regardless
@@ -47,6 +50,15 @@ a precondition for any refresh work.
 - **WHEN** Auth Guardian selects refresh candidates
 - **THEN** the account is not selected
 - **AND** no guardian-specific shorter age can make it eligible
+
+#### Scenario: Eligible account is outside the per-pass batch
+
+- **GIVEN** more than 100 accounts are stale and otherwise eligible
+- **AND** an account is outside the first 100 after ordering by oldest
+  `last_refresh` and excluding accounts in active failure backoff
+- **WHEN** Auth Guardian runs the next leader-gated scan
+- **THEN** that account is not selected during that pass
+- **AND** it remains eligible for admission during a later scan
 
 #### Scenario: Shared refresh-policy change applies to the guardian
 

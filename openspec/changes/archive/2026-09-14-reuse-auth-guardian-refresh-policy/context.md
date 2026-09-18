@@ -12,9 +12,12 @@ stale. Request preflight already owns that decision in `should_refresh()`.
 `should_refresh(last_refresh, now)` is the sole age predicate for both request
 preflight and Auth Guardian. The guardian keeps its six-hour scan cadence and
 passes its injected wall clock to the shared predicate. Once an eligible
-account crosses the shared eight-day window, the next leader-gated scan admits
-it. After a fresh per-account recheck confirms it is still due, the worker uses
-the existing serialized `force=True` exchange path.
+account crosses the shared eight-day window, the next leader-gated scan
+considers it. Admission still excludes active failure backoff and is limited to
+the 100 accounts with the oldest `last_refresh`, so batch pressure can defer an
+account through later scans. After a fresh per-account recheck confirms an
+admitted account is still due, the worker uses the existing serialized
+`force=True` exchange path.
 
 The guardian-specific max-age constant and constructor field are deleted. They
 are not retained as test seams because retaining them would preserve two policy
@@ -46,6 +49,8 @@ switch; this change deliberately adds no tuning setting.
 
 An active or paused account successfully refreshed at 00:00 on Monday remains
 ineligible on every guardian scan for the next eight days. After the shared
-window is crossed, the first subsequent six-hour guardian scan selects it and
-runs the normal serialized token rotation. A request that receives an upstream
-401 before then still takes the existing immediate forced-refresh path.
+window is crossed, the first subsequent six-hour guardian scan selects it only
+if it is admitted within the 100-account batch and is not in active failure
+backoff; otherwise a later scan can select it. A request that receives an
+upstream 401 before then still takes the existing immediate forced-refresh
+path, limiting the practical impact of deferred proactive admission.

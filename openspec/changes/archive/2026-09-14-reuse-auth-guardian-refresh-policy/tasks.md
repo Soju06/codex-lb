@@ -11,3 +11,5 @@
   twelve hours.
 - [x] Run focused backend/frontend checks, OpenSpec validation, repository
   lint/type checks as practical, and review the final diff before committing.
+- [x] Review follow-up: distinguish scan cadence from batch admission and
+  active failure backoff in the normative and explanatory timing contract.

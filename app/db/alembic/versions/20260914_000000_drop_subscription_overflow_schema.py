@@ -47,6 +47,15 @@ def _column_names(connection: Connection, table_name: str) -> set[str]:
     return {str(column["name"]) for column in inspector.get_columns(table_name) if column.get("name") is not None}
 
 
+def _index_names(connection: Connection, table_name: str) -> set[str]:
+    # A fresh inspector per call, because the caller may have created the table
+    # after an earlier reflection filled another inspector's cache.
+    inspector = sa.inspect(connection)
+    if not inspector.has_table(table_name):
+        return set()
+    return {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
+
+
 def _add_columns(names: Sequence[sa.Column]) -> None:
     with op.batch_alter_table(_SETTINGS_TABLE) as batch_op:
         for column in names:
@@ -97,8 +106,17 @@ def downgrade() -> None:
             sa.Column("purge_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("pin_key"),
         )
+
+    # Each index is reflected on its own rather than ridden along with CREATE
+    # TABLE, exactly as 20260908_000000_add_subscription_overflow does it: a
+    # downgrade interrupted between the table and its indexes -- or a partial
+    # restore that already carries the table -- would otherwise land stamped at
+    # the parent with neither index, and nothing later would build them.
+    # Both tables are empty here, so the plain in-transaction build is right on
+    # either dialect; CONCURRENTLY would buy nothing and cannot run in this
+    # transaction.
+    existing_indexes = _index_names(bind, _PINS_TABLE)
+    if _PURGE_INDEX not in existing_indexes:
         op.create_index(_PURGE_INDEX, _PINS_TABLE, ["purge_at"], unique=False)
-        # The table is freshly created and empty here, so the plain in-transaction
-        # build is right on both dialects; CONCURRENTLY would buy nothing and
-        # cannot run inside this transaction.
+    if _KIND_EXPIRES_INDEX not in existing_indexes:
         op.create_index(_KIND_EXPIRES_INDEX, _PINS_TABLE, ["kind", "expires_at"], unique=False)

@@ -2462,6 +2462,85 @@ async def test_model_source_pins_index_migration_replaces_valid_decoy_index(tmp_
 
 
 @pytest.mark.asyncio
+async def test_drop_overflow_downgrade_repairs_pin_indexes_on_pre_existing_table(tmp_path):
+    """Downgrading the withdrawal onto a database that already carries the table builds both indexes.
+
+    The table guard skips ``CREATE TABLE`` for a pre-existing
+    ``model_source_pins`` -- an earlier downgrade interrupted between the table
+    and its indexes, or a partial restore that carries the table alone. Riding
+    the two ``CREATE INDEX`` calls along with the table would leave such a
+    database stamped at the parent with neither index and nothing later to
+    build them, so each index is reflected on its own.
+    """
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-overflow-downgrade.sqlite'}"
+    drop_revision = "20260914_000000_drop_subscription_overflow_schema"
+    parent_revision = "20260913_000000_add_oidc_provider_flow"
+
+    def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_source_pins"):
+            return {}
+        return {
+            str(index["name"]): (tuple(index["column_names"]), bool(index["unique"]))
+            for index in inspector.get_indexes("model_source_pins")
+        }
+
+    def _settings_columns(sync_conn) -> set[str]:
+        return {
+            str(column["name"])
+            for column in sa_inspect(sync_conn).get_columns("dashboard_settings")
+            if str(column["name"]).startswith("subscription_overflow_")
+        }
+
+    result = await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
+    assert result.current_revision == drop_revision
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) == {}
+            assert await conn.run_sync(_settings_columns) == set()
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE model_source_pins (
+                        pin_key VARCHAR NOT NULL PRIMARY KEY,
+                        kind VARCHAR NOT NULL,
+                        source_id VARCHAR NOT NULL,
+                        api_key_id VARCHAR,
+                        created_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        expires_at DATETIME NOT NULL,
+                        purge_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            # Both indexes present, and the settings columns are back: the
+            # restored schema matches the revision this downgrades to, whatever
+            # state the table was found in.
+            assert await conn.run_sync(_indexes) == {
+                "ix_model_source_pins_purge_at": (("purge_at",), False),
+                "ix_model_source_pins_kind_expires_at": (("kind", "expires_at"), False),
+            }
+            assert await conn.run_sync(_settings_columns) == {
+                "subscription_overflow_source_id",
+                "subscription_overflow_drain_until",
+            }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     not _is_postgresql_database_url(_DATABASE_URL),
     reason="PostgreSQL-only invalid pin-index repair test",

@@ -3575,10 +3575,7 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
     resolved_ips: list[str] = []
     seen: set[str] = set()
     for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            return None
-        addr = sockaddr[0]
+        addr = info[4][0]
         if not isinstance(addr, str):
             return None
         ip = _parse_ip_literal(addr)

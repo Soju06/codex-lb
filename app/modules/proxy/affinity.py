@@ -102,6 +102,12 @@ class _AffinityPolicy:
     # only: it never participates in routing, but it is the signal that tells
     # an operator whether unanchored threads are being held or are churning.
     prompt_cache_derivation_outcome: str | None = None
+    # Internal, one-way-derived exact-thread keys used only by the optional
+    # fresh-subagent placement preference. They never prove request ownership
+    # and stay out of selection_kwargs(): the load balancer never sees them.
+    subagent_parent_selection_key: str | None = None
+    subagent_parent_response_marker_key: str | None = None
+    response_bound_thread_marker_key: str | None = None
 
     @property
     def selection_key(self) -> str | None:
@@ -192,6 +198,11 @@ def _codex_session_selection_key(key: str) -> str:
     # sentinel above—not secrecy—provides source separation from raw rows.
     digest = sha256(key.encode()).hexdigest()
     return f"{_CODEX_SELECTION_KEY_PREFIX}:session_header:{digest}"
+
+
+def _response_bound_thread_marker_key(thread_selection_key: str) -> str:
+    digest = sha256(thread_selection_key.encode()).hexdigest()
+    return f"{_CODEX_SELECTION_KEY_PREFIX}:response_bound_thread:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +538,52 @@ def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesReque
     return responses_payload_is_account_neutral_fresh_replay(replay_payload)
 
 
+def _request_is_account_neutral_fresh_child(payload: ResponsesRequest) -> bool:
+    replay_payload = dict(payload.to_replay_safety_payload())
+    if replay_payload.get("type") == "response.create":
+        replay_payload.pop("type")
+    return responses_payload_is_account_neutral_fresh_replay(replay_payload)
+
+
+def _with_subagent_lineage(
+    policy: _AffinityPolicy,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+) -> _AffinityPolicy:
+    identity = _codex_backend_identity(headers)
+    own_thread_key = identity.thread_selection_key
+    previous_response_id = payload.previous_response_id
+    marker_key = (
+        _response_bound_thread_marker_key(own_thread_key)
+        if own_thread_key is not None and isinstance(previous_response_id, str) and bool(previous_response_id.strip())
+        else None
+    )
+
+    normalized = {key.lower(): value for key, value in headers.items()}
+    subagent = normalized.get("x-openai-subagent", "").strip()
+    parent_thread_id = normalized.get("x-codex-parent-thread-id", "").strip()
+    parent_thread_key: str | None = None
+    if (
+        subagent
+        and parent_thread_id
+        and identity.thread_id is not None
+        and parent_thread_id != identity.thread_id
+        and policy.kind == StickySessionKind.PROMPT_CACHE
+        and policy.codex_session_source == "thread_header"
+        and _request_is_account_neutral_fresh_child(payload)
+    ):
+        parent_thread_key = _codex_backend_identity(headers, thread_id=parent_thread_id).thread_selection_key
+
+    return replace(
+        policy,
+        subagent_parent_selection_key=parent_thread_key,
+        subagent_parent_response_marker_key=(
+            _response_bound_thread_marker_key(parent_thread_key) if parent_thread_key is not None else None
+        ),
+        response_bound_thread_marker_key=marker_key,
+    )
+
+
 def _affinity_with_payload_continuity(
     policy: _AffinityPolicy,
     payload: ResponsesRequest | ResponsesCompactRequest,
@@ -827,4 +884,5 @@ def _sticky_key_for_responses_request(
     ):
         policy = replace(policy, abandon_unavailable_legacy_owner=True)
     policy = replace(policy, prompt_cache_derivation_outcome=resolution.outcome)
-    return _affinity_with_payload_continuity(policy, payload)
+    policy = _affinity_with_payload_continuity(policy, payload)
+    return _with_subagent_lineage(policy, payload, headers)

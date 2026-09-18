@@ -855,6 +855,20 @@ describe("RoutingSettings", () => {
     expect(screen.getAllByText("Fill first").length).toBeGreaterThan(0);
   });
 
+  it("saves the parent-bound-only subagent preference", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.click(screen.getByRole("combobox", { name: "Subagent account preference" }));
+    await user.click(await screen.findByRole("option", { name: "Only when parent uses previous response IDs" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      subagentAccountPreference: "parent_bound_only",
+    });
+  });
+
   it("explains routing strategy trade-offs and account-safety guidance", () => {
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
 

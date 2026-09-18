@@ -1396,6 +1396,12 @@ class DashboardSettings(Base):
         server_default=text("'capacity_weighted'"),
         nullable=False,
     )
+    subagent_account_preference: Mapped[str] = mapped_column(
+        String,
+        default="off",
+        server_default=text("'off'"),
+        nullable=False,
+    )
     relative_availability_power: Mapped[float] = mapped_column(
         Float,
         default=2.0,

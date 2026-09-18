@@ -2459,13 +2459,13 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
     class _BusyRepo(_FakeApiKeysRepository):
         def __init__(self) -> None:
             super().__init__()
-            self.get_usage_reservation_calls = 0
+            self.claim_calls = 0
 
-        async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
-            self.get_usage_reservation_calls += 1
-            if self.get_usage_reservation_calls < 3:
+        async def transition_usage_reservation_status(self, reservation_id: str, **kwargs) -> bool:
+            self.claim_calls += 1
+            if self.claim_calls < 3:
                 raise OperationalError("settle usage reservation", {}, Exception("database is locked"))
-            return await super().get_usage_reservation(reservation_id)
+            return await super().transition_usage_reservation_status(reservation_id, **kwargs)
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
@@ -2496,7 +2496,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
     assert stored is not None
     assert stored.status == "finalized"
     assert limits[0].current_value == 15
-    assert repo.get_usage_reservation_calls == 5
+    assert repo.claim_calls == 3
     assert repo.rollback_calls >= 2
 
 
@@ -2507,13 +2507,13 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
     class _BusyRepo(_FakeApiKeysRepository):
         def __init__(self) -> None:
             super().__init__()
-            self.get_usage_reservation_calls = 0
+            self.claim_calls = 0
 
-        async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None:
-            self.get_usage_reservation_calls += 1
-            if self.get_usage_reservation_calls < 3:
+        async def transition_usage_reservation_status(self, reservation_id: str, **kwargs) -> bool:
+            self.claim_calls += 1
+            if self.claim_calls < 3:
                 raise OperationalError("release usage reservation", {}, Exception("database is locked"))
-            return await super().get_usage_reservation(reservation_id)
+            return await super().transition_usage_reservation_status(reservation_id, **kwargs)
 
     repo = _BusyRepo()
     service = ApiKeysService(repo)
@@ -2538,7 +2538,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
     assert stored is not None
     assert stored.status == "released"
     assert limits[0].current_value == 0
-    assert repo.get_usage_reservation_calls == 5
+    assert repo.claim_calls == 3
     assert repo.rollback_calls >= 2
 
 

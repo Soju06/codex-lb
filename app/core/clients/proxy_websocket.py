@@ -54,7 +54,7 @@ from app.core.clients.proxy import (
     _openai_error_detail,
     filter_inbound_headers,
 )
-from app.core.clients.websocket_dispatch import WebSocketDispatchTransport
+from app.core.clients.websocket_dispatch import WebSocketDispatchTransport, current_websocket_send_callback
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
@@ -511,11 +511,27 @@ class CodexUpstreamWebSocket:
         self._endpoint_id = endpoint_id
         self._response_headers = _normalize_response_headers(response_headers)
         self._dispatch_transport: WebSocketDispatchTransport | None = None
-        if isinstance(websocket, aiohttp.ClientWebSocketResponse):
-            self._dispatch_transport = WebSocketDispatchTransport(websocket._writer.transport)
-            websocket._writer.transport = self._dispatch_transport.as_transport()
 
     async def send_text(self, text: str) -> None:
+        if self._dispatch_transport is None and current_websocket_send_callback() is not None:
+            if isinstance(self._websocket, aiohttp.ClientWebSocketResponse):
+                try:
+                    writer = self._websocket._writer
+                    transport = writer.transport
+                    if not isinstance(transport, asyncio.Transport):
+                        raise TypeError("unsupported aiohttp transport")
+                    dispatch_transport = WebSocketDispatchTransport(transport)
+                    writer.transport = dispatch_transport.as_transport()
+                except (AttributeError, TypeError):
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "steering_not_supported",
+                            "Steering dispatch is unavailable on this transport; retry on a new connection.",
+                            error_type="server_error",
+                        ),
+                    ) from None
+                self._dispatch_transport = dispatch_transport
         try:
             if self._dispatch_transport is None:
                 result = self._websocket.send_str(text)

@@ -691,8 +691,19 @@ async def _close_downstream_after_sequenced_replay_refusal(
 
 
 @contextmanager
-def _websocket_response_create_dispatch_context(request_state: _WebSocketRequestState | None) -> Iterator[None]:
+def _websocket_response_create_dispatch_context(
+    request_state: _WebSocketRequestState | None,
+    control: _WebSocketUpstreamControl | None = None,
+) -> Iterator[None]:
     if request_state is None:
+        yield
+        return
+
+    if request_state.steering_parent_response_id is None and (
+        control is None
+        or request_state.previous_response_id not in control.rejected_steering_parent_ids
+        and request_state.previous_response_id not in control.steering_continuations
+    ):
         yield
         return
 
@@ -2961,7 +2972,7 @@ class _WebSocketMixin:
                             dispatch_state = request_state
                         with (
                             _websocket_archive_request_context(archive_request_id),
-                            _websocket_response_create_dispatch_context(dispatch_state),
+                            _websocket_response_create_dispatch_context(dispatch_state, upstream_control),
                         ):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -2973,7 +2984,9 @@ class _WebSocketMixin:
                         if (
                             request_state_registered
                             and upstream_control is not None
-                            and request_state.response_create_sent_at is None
+                            and (
+                                request_state.response_create_sent_at is None or error_code == "steering_not_supported"
+                            )
                         ):
                             async with pending_lock:
                                 continuation = upstream_control.steering_continuations.get(

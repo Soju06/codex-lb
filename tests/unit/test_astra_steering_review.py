@@ -52,8 +52,11 @@ def test_steering_configuration_omits_synthesized_empty_tools() -> None:
         transport="websocket",
         client_metadata=None,
     )
-    assert request_state.steering_configuration is not None
-    assert "tools" not in request_state.steering_configuration
+    assert request_state.steering_configuration is None
+    successor = steering_module.steering_response_payload(
+        request_state, parent_id="parent", input_items=[{"role": "user", "content": "Correction"}]
+    )
+    assert "tools" not in successor.model_dump_for_forwarding()
 
 
 def test_empty_input_text_is_rejected_as_nonempty_steering_input() -> None:

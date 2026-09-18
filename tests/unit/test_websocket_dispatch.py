@@ -299,3 +299,34 @@ async def test_adapter_double_without_transport_never_infers_handoff(kind: str) 
     dispatched: list[str] = []
     await _tracked_send(upstream, "explicit", lambda: dispatched.append("explicit"))
     assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_ordinary_sends_leave_writer_unchanged() -> None:
+    async with _connected_adapter("aiohttp") as (upstream, raw):
+        transport = raw._writer.transport
+        assert not isinstance(transport, WebSocketDispatchTransport)
+        await upstream.send_text("ordinary")
+        assert raw._writer.transport is transport
+        assert (await upstream.receive()).text == "ordinary"
+        dispatched = []
+        await _tracked_send(upstream, "steering", lambda: dispatched.append(True))
+        assert isinstance(raw._writer.transport, WebSocketDispatchTransport)
+        assert dispatched == [True]
+        assert (await upstream.receive()).text == "steering"
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_missing_writer_fails_sensitive_send_without_breaking_ordinary_traffic(monkeypatch) -> None:
+    from app.core.clients.proxy import ProxyResponseError
+
+    async with _connected_adapter("aiohttp") as (upstream, raw):
+        writer = raw._writer
+        monkeypatch.delattr(raw, "_writer")
+        with pytest.raises(ProxyResponseError) as error:
+            await _tracked_send(upstream, "must not dispatch", lambda: pytest.fail("dispatched"))
+        assert error.value.status_code == 503
+        monkeypatch.setattr(raw, "_writer", writer, raising=False)
+        await upstream.send_text("ordinary")
+        assert (await upstream.receive()).text == "ordinary"
+        assert not isinstance(writer.transport, WebSocketDispatchTransport)

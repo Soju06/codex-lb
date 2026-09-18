@@ -356,3 +356,13 @@ refresh, exactly-once settlement and cancellation-safe reservation attachment
 are documented in `../api-keys/context.md`. Detailed implementation rationale
 and rejected approaches are retained with the archived
 `support-astra-websocket-steering` change.
+
+
+Ordinary Astra request preparation reuses `request_text`; it does not create a
+second full forwarding dictionary. Configuration is derived from that owned
+serialization when steering or completed-parent retention needs it. aiohttp's
+private writer transport is left untouched until a steering-sensitive explicit
+send needs observation. Missing private transport support produces a local
+`steering_not_supported` failure before dispatch; the normal request cleanup
+releases its reservation and permits a corrected continuation or unrelated
+request. The connection itself is not broken by capability detection.

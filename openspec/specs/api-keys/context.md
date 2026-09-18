@@ -58,6 +58,8 @@ while a later admitted input waits for transport handoff; only the earlier
 increment is refunded.
 
 Reservation adjustments lock the reservation before updating its limit rows.
-Terminal claims retain their existing lock behavior but reload current item
-values after claiming, including when the ORM session retains an older graph.
+Terminal claims retain their existing lock behavior and read current item
+values once after claiming, including when the ORM session retains an older
+graph. No preliminary unlocked reservation read is needed: a failed status
+claim rolls back without charging or releasing again.
 Failed refunds stay conservatively reserved for terminal reconciliation.

@@ -106,6 +106,7 @@ async def test_completed_astra_releases_bodies_before_next_steer_and_tool_contin
 
     def prepare(*args, **kwargs):
         state, text = original_prepare(*args, **kwargs)
+        assert state.steering_configuration is None
         prepared_efforts.append(state.reasoning_effort)
         return state, text
 

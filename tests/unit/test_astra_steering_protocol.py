@@ -1269,7 +1269,8 @@ async def test_steering_size_limit_rejects_before_forwarding_or_reservation(monk
 
 
 @pytest.mark.asyncio
-async def test_explicit_continuation_retries_after_presend_size_rejection(monkeypatch):
+@pytest.mark.parametrize("rejection", ["payload_too_large", "steering_not_supported"])
+async def test_explicit_continuation_retries_after_presend_size_rejection(monkeypatch, rejection):
     call = {"type": "function_call", "call_id": "tool", "name": "slow", "arguments": "{}"}
     result = {"type": "function_call_output", "call_id": "tool", "output": "saved"}
     oversized = {**result, "output": "x" * 1000}
@@ -1315,16 +1316,28 @@ async def test_explicit_continuation_retries_after_presend_size_rejection(monkey
             await original_admit(state, **kwargs)
             if not limited and state.previous_response_id == "r1" and state.request_text is not None:
                 # Prepared frame fits; adding the account metadata at dispatch exceeds it.
-                monkeypatch.setattr(
-                    proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", len(state.request_text.encode()) + 1
-                )
+                if rejection == "payload_too_large":
+                    monkeypatch.setattr(
+                        proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", len(state.request_text.encode()) + 1
+                    )
+                else:
+                    from app.core.clients.proxy import ProxyResponseError
+                    from app.core.errors import openai_error
+
+                    original_send = upstream.send_text
+
+                    async def reject_once(text):
+                        monkeypatch.setattr(upstream, "send_text", original_send)
+                        raise ProxyResponseError(503, openai_error("steering_not_supported", "Unavailable"))
+
+                    monkeypatch.setattr(upstream, "send_text", reject_once)
                 limited = True
 
         monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", admit)
 
     _, reservations, settled, released, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
     failures = [event for event in socket.sent if event["type"] == "response.failed"]
-    assert [event["response"]["error"]["code"] for event in failures] == ["payload_too_large"]
+    assert [event["response"]["error"]["code"] for event in failures] == [rejection]
     assert saw("response.completed", "r2")(socket.sent)
     assert len(upstream.sent) == 3
     assert upstream.sent[-1]["input"] == [result]

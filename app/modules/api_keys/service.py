@@ -1323,10 +1323,6 @@ class ApiKeysService:
         cost_microdollars_override: int | None = None,
     ) -> None:
         async with sqlite_writer_section():
-            reservation = await self._repository.get_usage_reservation(reservation_id)
-            if reservation is None or reservation.status != "reserved":
-                return
-
             claimed = await self._repository.transition_usage_reservation_status(
                 reservation_id,
                 expected_status="reserved",
@@ -1335,9 +1331,8 @@ class ApiKeysService:
             if not claimed:
                 await self._repository.rollback()
                 return
-            # Extend/reduce may have committed a new reserved_delta after the
-            # unlocked read above. Reload items after claiming the status so
-            # settlement does not reconcile against a stale budget.
+            # Claim first, then read the current items once. The status update
+            # owns the row lock, so concurrent adjustments cannot race this read.
             reservation = await self._repository.get_usage_reservation(reservation_id)
             if reservation is None:
                 await self._repository.rollback()
@@ -1438,10 +1433,6 @@ class ApiKeysService:
 
     async def _release_usage_reservation_once(self, reservation_id: str) -> None:
         async with sqlite_writer_section():
-            reservation = await self._repository.get_usage_reservation(reservation_id)
-            if reservation is None or reservation.status != "reserved":
-                return
-
             claimed = await self._repository.transition_usage_reservation_status(
                 reservation_id,
                 expected_status="reserved",

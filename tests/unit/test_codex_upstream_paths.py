@@ -431,6 +431,37 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "expected_url"),
+    [
+        pytest.param("thread/goal/get", "https://chatgpt.test/codex/thread/goal/get", id="codex-namespace-default"),
+        pytest.param("wham/agent-identities/jwks", "https://chatgpt.test/wham/agent-identities/jwks", id="wham"),
+        pytest.param("ps/plugins/list", "https://chatgpt.test/ps/plugins/list", id="plugin-catalog"),
+        pytest.param("plugins/featured", "https://chatgpt.test/plugins/featured", id="plugin-featured"),
+    ],
+)
+async def test_codex_control_request_keeps_root_namespaces_out_of_codex_prefix(
+    route: ResolvedUpstreamRoute, path: str, expected_url: str
+) -> None:
+    client = _CodexClient()
+
+    await codex_control_request(
+        path,
+        method="GET",
+        payload=None,
+        query_params={},
+        headers={"accept": "application/json"},
+        access_token="access",
+        account_id="chatgpt_account",
+        base_url="https://chatgpt.test",
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert client.calls[0]["url"] == expected_url
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
     client = _CodexClient(_CompactStreamResponse())
     trace = UpstreamProxyRouteTrace()

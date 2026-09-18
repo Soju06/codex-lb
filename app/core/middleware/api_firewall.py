@@ -93,6 +93,10 @@ def add_api_firewall_middleware(app: FastAPI) -> None:
 def _is_protected_api_path(path: str) -> bool:
     if path == "/backend-api/codex" or path.startswith("/backend-api/codex/"):
         return True
+    # The Codex plugin-catalog passthrough spends pool credentials upstream, so
+    # it sits behind the same allowlist as the other proxy surfaces.
+    if path == "/plugins/featured" or path == "/ps/plugins" or path.startswith("/ps/plugins/"):
+        return True
     return path == "/v1" or path.startswith("/v1/")
 
 

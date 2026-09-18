@@ -5603,7 +5603,12 @@ async def codex_control_request(
     effective_privacy_policy = (
         CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME if normalized_path == "realtime/calls" else privacy_policy
     )
-    upstream_path = normalized_path if normalized_path.startswith("wham/") else f"codex/{normalized_path}"
+    # Control requests default to the ``codex/`` namespace; ``wham/`` and the
+    # plugin catalog (``ps/plugins/*``, ``plugins/featured``) sit directly under
+    # ``backend-api`` upstream and are forwarded verbatim.
+    upstream_path = (
+        normalized_path if normalized_path.startswith(("wham/", "ps/", "plugins/")) else f"codex/{normalized_path}"
+    )
     url = f"{upstream_base}/{upstream_path}"
     request_method = method.upper()
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept=headers.get("accept", "*/*"))

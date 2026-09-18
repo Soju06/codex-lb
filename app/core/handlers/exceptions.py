@@ -87,6 +87,9 @@ def _error_format(request: Request) -> str | None:
         return "dashboard"
     if path in {"/v1", "/backend-api"} or path.startswith(("/v1/", "/backend-api/")):
         return "openai"
+    # Codex plugin-catalog namespace (reached via chatgpt_base_url).
+    if path in {"/ps", "/plugins"} or path.startswith(("/ps/", "/plugins/")):
+        return "openai"
     return None
 
 

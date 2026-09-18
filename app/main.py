@@ -1032,6 +1032,7 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.wham_router)
+    app.include_router(proxy_api.plugin_catalog_router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
@@ -1069,7 +1070,10 @@ def create_app() -> FastAPI:
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
-    excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    # ``ps/`` and ``plugins/`` are the Codex plugin-catalog namespace: an unknown
+    # path there must 404 like any other API miss instead of returning the
+    # dashboard HTML to a client expecting JSON.
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "health", "ps/", "plugins/")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

@@ -4,18 +4,29 @@ import type { TFunction } from "i18next";
 import {
   createRoleMapping,
   deleteRoleMapping,
+  issueScimToken,
   listAssignableRoles,
   listAuditEntries,
   listAuthProviders,
   listRoleMappings,
+  listScimTokens,
   reorderRoleMappings,
+  revokeScimToken,
+  rotateScimToken,
+  startOidcTestLogin,
   updateAuthProvider,
   updateRoleMapping,
   type AuthProviderUpdateRequest,
   type RoleMappingCreateRequest,
   type RoleMappingUpdateRequest,
 } from "@/features/organisation/api";
-import { REFUSED_ACTION, REFUSED_REASON, refusedSince } from "@/features/organisation/rules";
+import {
+  oidcFieldFromParam,
+  REFUSED_ACTION,
+  REFUSED_REASON,
+  refusedSince,
+  type OidcField,
+} from "@/features/organisation/rules";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { getSettings, updateSettings } from "@/features/settings/api";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
@@ -26,6 +37,7 @@ export const PROVIDERS_QUERY_KEY = ["auth-providers", "list"] as const;
 export const MAPPINGS_QUERY_KEY = ["role-mappings", "list"] as const;
 export const REFUSED_SIGN_INS_QUERY_KEY = ["audit-logs", "refused-sign-ins"] as const;
 export const ASSIGNABLE_ROLES_QUERY_KEY = ["role-mappings", "assignable-roles"] as const;
+export const SCIM_TOKENS_QUERY_KEY = ["scim-tokens", "list"] as const;
 /** The shared settings query key; the login-policy card reads and writes the same row. */
 export const SETTINGS_QUERY_KEY = ["settings", "detail"] as const;
 
@@ -44,6 +56,15 @@ const EXPLAINED_ERROR_CODES = new Set([
   // The break-glass guard, in both directions (PLAN §4.2/§4.6).
   "break_glass_requires_totp",
   "last_break_glass_protected",
+  // The company sign-in pre-flight and the connection document (PLAN §4.6).
+  "oidc_test_login_required",
+  "invalid_provider_config",
+  "config_not_supported",
+  "oidc_provider_unreachable",
+  "oidc_rate_limited",
+  // Automatic account management credentials (PLAN §4.6-A1: issuing one is
+  // itself a delegation, so `insufficient_delegation` above is its refusal).
+  "scim_token_not_found",
 ]);
 
 /**
@@ -65,6 +86,23 @@ export function breakGlassAccountFromError(error: unknown): string | null {
   }
   const username = (details as { username?: unknown }).username;
   return typeof username === "string" && username.length > 0 ? username : null;
+}
+
+/**
+ * The connection field an `invalid_provider_config` refusal blames, so the
+ * message lands on the input that caused it rather than only at the top of the
+ * dialog. The server puts it in `param`, beside the code, not in `details`.
+ */
+export function refusedOidcField(error: unknown): OidcField | null {
+  if (!(error instanceof ApiError)) {
+    return null;
+  }
+  const envelope = error.details;
+  if (typeof envelope !== "object" || envelope === null || !("param" in envelope)) {
+    return null;
+  }
+  const param = (envelope as { param?: unknown }).param;
+  return typeof param === "string" ? oidcFieldFromParam(param) : null;
 }
 
 export function organisationErrorMessage(error: unknown, t: TFunction): string {
@@ -94,6 +132,16 @@ export function useRoleMappings(enabled = true) {
  */
 export function useAssignableRoles(enabled = true) {
   return useQuery({ queryKey: ASSIGNABLE_ROLES_QUERY_KEY, queryFn: listAssignableRoles, enabled });
+}
+
+/**
+ * The credentials the identity provider pushes with. Gated on the same
+ * `security:write` as the rest of this group, so the card fetches whenever the
+ * group is open — including on an install that cannot use them yet, because
+ * the card has to say whether any already exist before it says why it is off.
+ */
+export function useScimTokens(enabled = true) {
+  return useQuery({ queryKey: SCIM_TOKENS_QUERY_KEY, queryFn: listScimTokens, enabled });
 }
 
 /**
@@ -131,6 +179,30 @@ export function useOrganisationMutations() {
       updateAuthProvider(providerId, payload),
     onSuccess: settle,
   });
+  // The same write, on its own mutation: the company sign-in card and the
+  // reverse-proxy card both PATCH a provider row and each renders "the error"
+  // under its own header, so one shared mutation would show each card the
+  // other's refusal.
+  //
+  // It is also the one write in this group whose variables carry a credential —
+  // the OIDC connection document holds the client secret in clear, because the
+  // server replaces the document whole and cannot inherit one. A settled
+  // mutation keeps its variables, and this hook belongs to the group rather
+  // than to the dialog that typed them, so without `gcTime: 0` the secret would
+  // sit in the mutation cache for as long as the settings page stays mounted.
+  // Zero only takes effect once nothing observes the mutation, which is what
+  // the dialog's `reset()` after the write arranges.
+  const updateOidcProvider = useMutation({
+    mutationFn: ({ providerId, payload }: { providerId: string; payload: AuthProviderUpdateRequest }) =>
+      updateAuthProvider(providerId, payload),
+    onSuccess: settle,
+    gcTime: 0,
+  });
+  // The pre-flight's answer is only where to send the window. Its verdict is a
+  // stamp on the provider row, which is why `refreshProviders` exists: the
+  // callback redirects the window it opened and tells this application nothing.
+  const startTestLogin = useMutation({ mutationFn: startOidcTestLogin });
+  const refreshProviders = () => queryClient.invalidateQueries({ queryKey: PROVIDERS_QUERY_KEY });
   const createMapping = useMutation({
     mutationFn: (payload: RoleMappingCreateRequest) => createRoleMapping(payload),
     onSuccess: settle,
@@ -164,8 +236,67 @@ export function useOrganisationMutations() {
     onSuccess: settle,
   });
 
-  const busy = [updateProvider, createMapping, updateMapping, removeMapping, reorderMappings, updateLoginPolicy].some(
-    (mutation) => mutation.isPending,
-  );
-  return { updateProvider, createMapping, updateMapping, removeMapping, reorderMappings, updateLoginPolicy, busy };
+  // Issuing and rotating are the two writes whose ANSWER carries a credential,
+  // and they are the only two in this group that do not settle themselves.
+  //
+  // Two reasons, both load-bearing. `settle()` refreshes the session, and the
+  // first credential flips `access_summary.scim_tokens` from zero — which
+  // re-renders the group around the dialog that is showing the plaintext. And
+  // refetching the list while that dialog is open replaces the row it was
+  // opened for. The card calls `settleScimTokens` when the dialog is
+  // dismissed instead, which is the one moment the value is known to be gone
+  // from the screen.
+  //
+  // Neither answer may linger here. The card resets both the moment it copies
+  // one into its own state, because `gcTime: 0` only disposes of a mutation
+  // nothing observes any more and this hook observes them both for as long as
+  // the group is open; `gcTime: 0` is then the backstop for the unmount that
+  // never reaches a dismissal. The plaintext lives in the card's own state for
+  // as long as it is needed and nowhere else.
+  const issueToken = useMutation({
+    mutationFn: (payload: { label: string }) => issueScimToken(payload),
+    gcTime: 0,
+  });
+  const rotateToken = useMutation({ mutationFn: (tokenId: string) => rotateScimToken(tokenId), gcTime: 0 });
+  const revokeToken = useMutation({
+    mutationFn: (tokenId: string) => revokeScimToken(tokenId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: SCIM_TOKENS_QUERY_KEY });
+      await settle();
+    },
+  });
+  const settleScimTokens = async () => {
+    await queryClient.invalidateQueries({ queryKey: SCIM_TOKENS_QUERY_KEY });
+    await settle();
+  };
+
+  const busy = [
+    updateProvider,
+    updateOidcProvider,
+    startTestLogin,
+    createMapping,
+    updateMapping,
+    removeMapping,
+    reorderMappings,
+    updateLoginPolicy,
+    issueToken,
+    rotateToken,
+    revokeToken,
+  ].some((mutation) => mutation.isPending);
+  return {
+    updateProvider,
+    updateOidcProvider,
+    startTestLogin,
+    refreshProviders,
+    createMapping,
+    updateMapping,
+    removeMapping,
+    reorderMappings,
+    updateLoginPolicy,
+    issueToken,
+    rotateToken,
+    revokeToken,
+    settleScimTokens,
+    busy,
+  };
 }

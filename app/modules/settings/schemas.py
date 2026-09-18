@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Literal
 
 from pydantic import Field, StrictInt, field_validator
@@ -10,6 +9,7 @@ from app.modules.shared.schemas import DashboardModel
 _DEFAULT_WEEKLY_PACE_WORKING_DAYS = "0,1,2,3,4,5,6"
 _WEEKLY_PACE_SMOOTHING_MINUTES = (15, 30, 60, 120, 240)
 _HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN = r"^(smart|always_http|always_websocket|pinned)$"
+_THREAD_CACHE_IDENTITY_MODE_PATTERN = r"^(shared|isolated)$"
 
 
 def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
@@ -58,6 +58,10 @@ class DashboardSettingsResponse(DashboardModel):
     upstream_stream_transport: str = Field(pattern=r"^(auto|http|websocket)$")
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
+    # Effective mode; ``provenance.thread_cache_identity_mode`` says whether it
+    # came from the dashboard column, the environment or the code default.
+    thread_cache_identity_mode: str = Field(pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
+    thread_cache_identity_mode_override: str | None = Field(default=None, pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
     proxy_account_response_create_limit_environment_value: int = Field(ge=0)
     proxy_account_response_create_limit_override: int | None = Field(default=None, ge=0)
@@ -93,12 +97,6 @@ class DashboardSettingsResponse(DashboardModel):
     relative_availability_power: float = Field(gt=0.0)
     relative_availability_top_k: int = Field(ge=1, le=20)
     single_account_id: str | None = None
-    subscription_overflow_source_id: str | None = None
-    subscription_overflow_drain_until: datetime | None = None
-    # Derived, read-only: the drain deadline minus the tombstone grace and one
-    # day (the clear time plus the 7-day pin idle limit); ``None`` when no drain
-    # is armed. The date every pinned conversation has expired by.
-    subscription_overflow_pins_expire_by: datetime | None = None
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
     dashboard_session_ttl_seconds: int = Field(ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
@@ -241,6 +239,12 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         default=None,
         pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN,
     )
+    # Tri-state like the caps below: omitted = unchanged, null = inherit the
+    # environment value or the ``shared`` code default, value = store.
+    thread_cache_identity_mode: str | None = Field(
+        default=None,
+        pattern=_THREAD_CACHE_IDENTITY_MODE_PATTERN,
+    )
     proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_recovery_reserve: int | None = Field(default=None, ge=0)
@@ -269,10 +273,6 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     relative_availability_power: float | None = Field(default=None, gt=0.0)
     relative_availability_top_k: int | None = Field(default=None, ge=1, le=20)
     single_account_id: str | None = Field(default=None, max_length=255)
-    # Tri-state via ``model_fields_set``: absent = unchanged, null = off
-    # (arms the drain deadline), value = designate. The drain deadline itself
-    # is read-only.
-    subscription_overflow_source_id: str | None = Field(default=None, max_length=255)
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
     dashboard_session_ttl_seconds: int | None = Field(default=None, ge=3600)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
@@ -390,39 +390,6 @@ class DashboardSettingsUpdateRequest(DashboardModel):
         if value not in _WEEKLY_PACE_SMOOTHING_MINUTES:
             raise ValueError("weekly_pace_smoothing_minutes must be one of 15, 30, 60, 120, 240")
         return value
-
-
-class SubscriptionOverflowContextWindowMismatch(DashboardModel):
-    registry: int
-    source: int | None = None
-    max_output_tokens: int | None = None
-
-
-class SubscriptionOverflowPreflightModel(DashboardModel):
-    slug: str
-    enabled: bool
-    never_overflows: bool
-    never_overflows_reason: str | None = None
-    undeclared_tool_types: list[str] = Field(default_factory=list)
-    supports_vision: bool
-    supports_streaming: bool
-    priced: bool
-    context_window_mismatch: SubscriptionOverflowContextWindowMismatch | None = None
-    warnings: list[str] = Field(default_factory=list)
-
-
-class SubscriptionOverflowPreflightResponse(DashboardModel):
-    source_id: str
-    source_name: str
-    source_enabled: bool
-    eligible: bool
-    blockers: list[str] = Field(default_factory=list)
-    drain_until: datetime | None = None
-    served_models: list[SubscriptionOverflowPreflightModel] = Field(default_factory=list)
-    missing_models: list[str] = Field(default_factory=list)
-    scoped_api_key_count: int = Field(ge=0)
-    live_pin_count: int = Field(ge=0)
-    tombstone_count: int = Field(ge=0)
 
 
 class RuntimeConnectAddressResponse(DashboardModel):

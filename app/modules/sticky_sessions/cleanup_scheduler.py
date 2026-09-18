@@ -431,6 +431,21 @@ class StickySessionCleanupScheduler:
                             )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:
+                            # Same grace window as the sticky sweep above, and
+                            # for the same reason: an owner that has been
+                            # unroutable across it is not coming back on its
+                            # own, so its threads must be free to rebind.
+                            retire_now = utcnow()
+                            retired_owner_count = await bridge_repo.retire_stale_unavailable_bridge_owners(
+                                retire_now - timedelta(seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS),
+                                now=retire_now,
+                            )
+                            if retired_owner_count > 0:
+                                logger.info(
+                                    "Retired durable HTTP bridge continuity owners that stayed unroutable "
+                                    "retired_count=%s",
+                                    retired_owner_count,
+                                )
                             bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
                             if bridge_deleted_count > 0:
                                 logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)

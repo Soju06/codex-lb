@@ -117,6 +117,7 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "circuit_breaker_enabled": "T3",
     "soft_drain_enabled": "T3",
     "deterministic_failover_enabled": "T3",
+    "thread_cache_identity_mode": "T3",
     "backpressure_max_concurrent_requests": "T1",
     "bulkhead_proxy_limit": "T1",
     "bulkhead_dashboard_limit": "T1",

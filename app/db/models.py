@@ -77,40 +77,6 @@ class FileAccountPin(Base):
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
 
 
-class ModelSourcePin(Base):
-    """Stickiness of a conversation, anchor, or bounce to a subscription-overflow model source.
-
-    ``pin_key`` is namespaced by ``kind`` (``thread`` | ``anchor`` | ``bounce``; a
-    plain string because the routing stage owns the values). ``source_id``
-    carries no foreign key so rows outlive a deleted source for the drain
-    window instead of cascading away. A row answers lookups while
-    ``purge_at > now``; ``expires_at <= now`` marks it a tombstone. Timestamps
-    are timezone-aware like ``file_account_pins`` because the database clock is
-    authoritative for expiry. No runtime code reads this table yet (#2123 WP-A).
-    """
-
-    __tablename__ = "model_source_pins"
-
-    pin_key: Mapped[str] = mapped_column(String, primary_key=True)
-    kind: Mapped[str] = mapped_column(String, nullable=False)
-    source_id: Mapped[str] = mapped_column(String, nullable=False)
-    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    purge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    # ``purge_at`` serves the retention prune. The dashboard overview's live
-    # thread-pin count filters ``kind = 'thread' AND expires_at > now``, which
-    # ``purge_at`` cannot narrow (every live row has a future ``purge_at``), so
-    # it gets its own composite index -- an overview poll runs every 30 s and
-    # thread pins accumulate across the drain window.
-    __table_args__ = (
-        Index("ix_model_source_pins_purge_at", "purge_at"),
-        Index("ix_model_source_pins_kind_expires_at", "kind", "expires_at"),
-    )
-
-
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -953,10 +919,17 @@ class LocalLoginPolicy(str, Enum):
     BREAK_GLASS_ONLY = "break_glass_only"
 
 
-#: Username of the account the legacy shared dashboard password is migrated
-#: into. During the expand/contract release its credentials are mirrored to the
-#: legacy ``dashboard_settings`` columns so older replicas keep working.
+#: Name the install's first (break-glass) account is created under, and the one
+#: name no other account may take. It is a reservation of the *name*: the
+#: account itself may be renamed, so nothing may identify it by this string.
 COMPAT_ADMIN_USERNAME = "admin"
+
+#: Deterministic id of that account, so the migration and the runtime bootstrap
+#: path create the same row, re-runs stay idempotent, and every path that has to
+#: find the bootstrapped account after a rename has a stable handle.
+COMPAT_ADMIN_USER_ID = str(
+    uuid.uuid5(uuid.UUID("6f1c0e4e-2b4a-4c1e-9c3b-7a5d2e8f0a11"), "codex-lb:dashboard-user:compat-admin")
+)
 
 
 class DashboardUser(Base):
@@ -1041,6 +1014,12 @@ class DashboardIdentity(Base):
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: What the provider calls this person, as pushed and unslugified. Only the
+    #: SCIM path writes it, because only SCIM has to answer a filter on the
+    #: provider's own spelling: our usernames have no ``@``, so an address can
+    #: never equal one and an identity provider reconciling its own resources
+    #: would otherwise match nothing it created.
+    user_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -1131,10 +1110,96 @@ class DashboardAuthProvider(Base):
     link_by_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     skip_role_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     idp_mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: Proof that the acting admin's own browser completed a round trip through
+    #: this exact configuration. Enabling a redirect-style provider requires one
+    #: no older than ten minutes; freshness is computed on read, never stored as
+    #: a deadline, and a connection-field write clears it.
+    test_login_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    test_login_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class DashboardOidcLoginFlow(Base):
+    """One in-flight OIDC round trip, held where every replica can see it.
+
+    The callback routinely lands on a replica that did not serve the start, so
+    the flow cannot live in process memory. Neither the ``state`` nor the
+    ``nonce`` is stored in clear: the ``state`` arrives in the callback URL and
+    the ``nonce`` arrives inside the ID token, so both can be hashed and
+    compared, and a copy that is never needed in clear is only a liability. The
+    row is consumed by one conditional ``DELETE``, which is what makes a state
+    single-use across the fleet.
+    """
+
+    __tablename__ = "dashboard_oidc_login_flows"
+    __table_args__ = (Index("idx_dashboard_oidc_login_flows_expires_at", "expires_at"),)
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_auth_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    #: ``login``, ``test`` or ``step_up``; it decides where the browser lands,
+    #: which is why no destination is ever accepted from the caller.
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    acting_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    #: The redirect URI exactly as sent, so the token exchange repeats it
+    #: byte-identically even if the configuration changes mid-flow.
+    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: A digest of the connection document this flow was started against. A
+    #: pre-flight proves *a configuration*, so the stamp it leaves must name the
+    #: one it actually reached: without this a configuration write that commits
+    #: while the callback is exchanging its code would be handed the proof that
+    #: the previous issuer worked.
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DashboardScimToken(Base):
+    """A bearer credential that may reach ``/scim/v2`` and nothing else.
+
+    Only the SHA-256 digest of the secret is stored, in a unique index, so the
+    lookup is an index equality and no copy of the credential exists after it
+    is issued; ``token_prefix`` is the non-secret head of the value, kept in
+    clear so an operator can tell two tokens apart. Rotation replaces the
+    digest and the prefix on the same row, so the id, the label and the sync
+    history survive and the previous secret stops working the moment the write
+    commits. ``provider_key`` is the identity namespace the token writes and
+    reads: it comes from this row on every request and never from the caller.
+    """
+
+    __tablename__ = "dashboard_scim_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    #: A snapshot link, cleared rather than cascaded: revoking a token is an
+    #: act of its own and must not be a side effect of deleting its issuer.
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DashboardRoleMappingClaim(str, Enum):
@@ -1258,6 +1323,10 @@ class DashboardSettings(Base):
         server_default=text("'smart'"),
         nullable=False,
     )
+    # T3, tri-state: NULL inherits the environment value and then the ``shared``
+    # code default. Never seeded from the environment (configuration-tiers,
+    # "Environment values are fallbacks, never seeds").
+    thread_cache_identity_mode: Mapped[str | None] = mapped_column(String, nullable=True)
     proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1348,8 +1417,6 @@ class DashboardSettings(Base):
     # purpose: a dangling id means "off", mirroring single_account_id. The drain
     # deadline is armed when the designation is cleared and compared against
     # utcnow() (naive UTC) like every other dashboard_settings timestamp.
-    subscription_overflow_source_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    subscription_overflow_drain_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -1391,7 +1458,6 @@ class DashboardSettings(Base):
         server_default=text(f"'{LocalLoginPolicy.ENABLED.value}'"),
         nullable=False,
     )
-    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     guest_access_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1422,8 +1488,6 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
-    totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     telemetry_consent: Mapped[str] = mapped_column(
         String(16),
         default="undecided",
@@ -1694,6 +1758,8 @@ class ApiKey(Base):
         nullable=False,
     )
     transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL = follow the fleet (dashboard, then environment, then ``shared``).
+    thread_cache_identity_override: Mapped[str | None] = mapped_column(String, nullable=True)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -2452,6 +2518,14 @@ class HttpBridgeSessionRecord(Base):
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Continuity-owner retirement, mirroring sticky_sessions' pair: a non-NULL
+    # scope retires ownership only for the matching typed source, while a
+    # non-NULL timestamp with NULL scope retires it globally. Deleting the row
+    # instead would be indistinguishable from "never seen" and would leave the
+    # lookup failing closed forever; a marker says the owner was deliberately
+    # abandoned, so picking a fresh one is authorized.
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -230,6 +230,12 @@ if PROMETHEUS_AVAILABLE:
         ["surface", "source", "outcome"],
         registry=REGISTRY,
     )
+    continuity_replay_rejected_total = Counter(
+        "codex_lb_continuity_replay_rejected_total",
+        "Total cross-account continuity replays refused by surface and refusing proof",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
     continuity_fail_closed_total = Counter(
         "codex_lb_continuity_fail_closed_total",
         "Total continuity fail-closed or masked retryable outcomes by surface and reason",
@@ -433,38 +439,6 @@ if PROMETHEUS_AVAILABLE:
         ["source_id", "cause"],
         registry=REGISTRY,
     )
-    model_source_live_pins = Gauge(
-        "codex_lb_model_source_live_pins",
-        "Live model-source pins by kind (sampled)",
-        ["kind"],
-        registry=REGISTRY,
-        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
-    )
-    # Subscription-exhaustion overflow (#2123 WP-C2, design §11). ``route`` and
-    # ``outcome`` are closed enums (``app.modules.proxy.overflow.OVERFLOW_OUTCOMES``);
-    # the breaker gauge is per replica worker (0 closed, 1 open, 2 half-open) and
-    # bounded by the number of configured sources.
-    subscription_overflow_total = Counter(
-        "codex_lb_subscription_overflow_total",
-        "Total subscription-exhaustion overflow decisions by route and outcome",
-        ["route", "outcome"],
-        registry=REGISTRY,
-    )
-    model_source_breaker_state = Gauge(
-        "codex_lb_model_source_breaker_state",
-        "Per-source overflow breaker state (0 closed, 1 open, 2 half-open)",
-        ["source_id"],
-        registry=REGISTRY,
-        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
-    )
-    # Read-only pool-exhaustion probe (#2123 WP-C1, design decision 28): declines
-    # by reason; the label set is closed (``drain_strategy``).
-    pool_exhaustion_probe_declined_total = Counter(
-        "codex_lb_pool_exhaustion_probe_declined_total",
-        "Total read-only pool-exhaustion probes that declined to evaluate the pool, by reason",
-        ["reason"],
-        registry=REGISTRY,
-    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -515,6 +489,7 @@ else:
     bridge_forward_latency_seconds: HistogramLike | None = None
     bridge_public_contract_error_total: CounterLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
+    continuity_replay_rejected_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
     account_lease_acquired_total: CounterLike | None = None
     account_lease_released_total: CounterLike | None = None
@@ -547,10 +522,6 @@ else:
     model_source_bulkhead_rejections_total: CounterLike | None = None
     model_source_bulkhead_in_flight: GaugeLike | None = None
     model_source_usage_estimated_total: CounterLike | None = None
-    model_source_live_pins: GaugeLike | None = None
-    subscription_overflow_total: CounterLike | None = None
-    model_source_breaker_state: GaugeLike | None = None
-    pool_exhaustion_probe_declined_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -594,6 +565,7 @@ __all__ = [
     "event_loop_lag_seconds",
     "event_loop_lag_warnings_total",
     "continuity_owner_resolution_total",
+    "continuity_replay_rejected_total",
     "http_bridge_prewarm_total",
     "http_bridge_retry_circuit_total",
     "http_bridge_spool_cleanup_backlog_likely",
@@ -609,15 +581,12 @@ __all__ = [
     "image_requests_total",
     "make_scrape_registry",
     "mark_process_dead",
-    "model_source_breaker_state",
     "model_source_bulkhead_in_flight",
     "model_source_bulkhead_rejections_total",
     "model_source_dispatch_abandoned_total",
     "model_source_dispatch_total",
-    "model_source_live_pins",
     "model_source_timeout_total",
     "model_source_usage_estimated_total",
-    "pool_exhaustion_probe_declined_total",
     "prometheus_client",
     "prompt_cache_key_derivation_total",
     "proxy_phase_latency_seconds",
@@ -626,7 +595,6 @@ __all__ = [
     "requests_total",
     "stream_pool_capacity",
     "stream_pool_inflight",
-    "subscription_overflow_total",
     "upstream_reasoning_replay_400_total",
     "upstream_request_duration_seconds",
     "upstream_requests_total",

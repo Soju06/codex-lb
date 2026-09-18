@@ -4,7 +4,7 @@ import hashlib
 import logging
 from time import time
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.core.audit.service import AuditActor, AuditService, AuditTarget
@@ -35,6 +35,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.auth.external_identity import ExternalResolution, resolve_trusted_header_request
+from app.core.auth.providers.registry import get_auth_provider_registry
 from app.core.auth.step_up import STEP_UP_COOKIE, STEP_UP_UNAVAILABLE_MESSAGE, step_up_expires_at
 from app.core.bootstrap import (
     ensure_auto_bootstrap_token,
@@ -62,9 +63,16 @@ from app.dependencies import (
     get_dashboard_auth_context,
     get_dashboard_users_context,
 )
+from app.modules.dashboard_auth.oidc_flows import (
+    OIDC_PENDING_COOKIE,
+    clear_pending_marker,
+    get_oidc_pending_cookie_store,
+)
 from app.modules.dashboard_auth.schemas import (
     DashboardAuthSessionResponse,
+    DashboardLoginHint,
     DashboardMeResponse,
+    DashboardPendingArrival,
     GuestLoginRequest,
     GuestPasswordSetRequest,
     InviteAcceptRequest,
@@ -110,6 +118,7 @@ from app.modules.dashboard_auth.service import (
     get_step_up_cookie_store,
     get_totp_rate_limiter,
     hash_password,
+    is_local_password_session,
     log_login_failed,
     session_clock,
     session_user,
@@ -220,6 +229,37 @@ _UNAUTHENTICATED_ACCOUNT_FIELDS: dict[str, object] = {
 }
 
 
+async def _refused_company_sign_in(request: Request, login: DashboardLoginHint | None) -> DashboardLoginHint | None:
+    """This browser's own refusal marker, projected onto the login hint, or ``None``.
+
+    The marker is read here and nowhere else, and only for a caller that holds
+    no session: what it carries is a lossy echo of an identity this very
+    browser presented a moment ago, so handing it back to that browser tells it
+    nothing it did not already know, and there is no request shape that gets it
+    for anybody else's address.
+
+    A marker naming a row that no longer exists yields nothing rather than a
+    guess. The label belongs to the row; an install that deleted it has no
+    label to give, and inventing one from the active providers would be the
+    screen asserting which provider refused somebody.
+    """
+
+    if login is None:
+        return None
+    marker = get_oidc_pending_cookie_store().get(request.cookies.get(OIDC_PENDING_COOKIE))
+    if marker is None:
+        return None
+    row = next((row for row in await get_auth_provider_registry().rows() if row.id == marker.provider_id), None)
+    if row is None:
+        return None
+    return login.model_copy(
+        update={
+            "pending_identity": True,
+            "pending_arrival": DashboardPendingArrival(provider=row.label, reference=marker.reference),
+        }
+    )
+
+
 async def _decorate_session_response(
     description: SessionDescription,
     *,
@@ -239,8 +279,11 @@ async def _decorate_session_response(
     # local login policy admits the account -- the same call the session gate
     # makes, so ``password_session_active`` never advertises a fallback the
     # gate would refuse.
-    fallback_admitted = resolved is None or local_login_admits(
-        resolved.user, (await get_settings_cache().get()).local_login_policy
+    fallback_admitted = resolved is None or (
+        # An OIDC session is not the local fallback (it is the very thing the
+        # policy closes the local door against), so it never reports one.
+        is_local_password_session(resolved.state)
+        and local_login_admits(resolved.user, (await get_settings_cache().get()).local_login_policy)
     )
     fallback_authorized = fully_authorized and fallback_admitted
 
@@ -261,6 +304,13 @@ async def _decorate_session_response(
                 update["authenticated"] = False
                 update["password_required"] = False
                 update.update(_UNAUTHENTICATED_ACCOUNT_FIELDS)
+        # A company sign-in this install refused, described to the browser it
+        # refused -- and only while that browser has nothing better: a session
+        # is the answer to the same question and supersedes the marker.
+        if not bool(update.get("authenticated", response.authenticated)):
+            refused = await _refused_company_sign_in(request, response.login)
+            if refused is not None:
+                update["login"] = refused
         return response.model_copy(update=update)
 
     if request_auth.mode == DashboardAuthMode.TRUSTED_HEADER:
@@ -359,7 +409,7 @@ async def _trusted_header_session_response(
             "totp_enrollment_required": False,
             "access_summary": await context.service.access_summary() if manages_users else None,
             "assignable_role_ids": assignable_role_ids() if manages_users else [],
-            "step_up": step_up_state(user, verified_at=recorded_step_up(request, user)),
+            "step_up": await step_up_state(user, verified_at=recorded_step_up(request, user)),
         }
     )
 
@@ -1181,6 +1231,20 @@ async def step_up(
 
     verified_at = session_clock()
     response = _step_up_response(verified_at)
+    await record_step_up_on(response, request, user, verified_at=verified_at)
+    return response
+
+
+async def record_step_up_on(response: Response, request: Request, user: DashboardUser, *, verified_at: int) -> None:
+    """Write a completed step-up onto ``response``, by whichever of the two paths fits.
+
+    A cookie session carries the proof in its own ``su`` claim; a principal
+    that has no session cookie (a trusted-header account) carries it in the
+    generation-bound step-up cookie. Shared with the OIDC step-up completion so
+    that flow mints the proof through these same two paths instead of adding a
+    third: one function, one set of cookie attributes, one lifetime.
+    """
+
     state = get_dashboard_session_store().get(request.cookies.get(DASHBOARD_SESSION_COOKIE))
     if state is not None and state.is_user and state.user_id == user.id and state.password_verified:
         # Keep the session exactly as it was (method, TOTP step, remaining life); only ``su`` changes.
@@ -1195,7 +1259,6 @@ async def step_up(
         _set_session_cookie(response, session_id, request, max_age_seconds=session_ttl_seconds)
     else:
         _set_step_up_cookie(response, user, request, verified_at=verified_at)
-    return response
 
 
 async def _step_up_header_account(
@@ -1234,7 +1297,7 @@ def _step_up_response(verified_at: int) -> JSONResponse:
     return JSONResponse(status_code=200, content=body.model_dump(by_alias=True))
 
 
-def _set_step_up_cookie(response: JSONResponse, user: DashboardUser, request: Request, *, verified_at: int) -> None:
+def _set_step_up_cookie(response: Response, user: DashboardUser, request: Request, *, verified_at: int) -> None:
     response.set_cookie(
         key=STEP_UP_COOKIE,
         value=get_step_up_cookie_store().create(
@@ -1257,10 +1320,13 @@ async def logout_dashboard(
     context.service.logout(session_id)
     response = JSONResponse(status_code=200, content={"status": "ok"})
     response.delete_cookie(key=DASHBOARD_SESSION_COOKIE, path="/")
+    # The pending screen's Logout is how a refused person leaves it, so the
+    # refusal marker goes with the session; otherwise the screen comes back.
+    clear_pending_marker(response)
     return response
 
 
-def _set_session_cookie(response: JSONResponse, session_id: str, request: Request, *, max_age_seconds: int) -> None:
+def _set_session_cookie(response: Response, session_id: str, request: Request, *, max_age_seconds: int) -> None:
     response.set_cookie(
         key=DASHBOARD_SESSION_COOKIE,
         value=session_id,
@@ -1270,3 +1336,9 @@ def _set_session_cookie(response: JSONResponse, session_id: str, request: Reques
         max_age=max_age_seconds,
         path="/",
     )
+
+
+# The OIDC sign-in routes are written in their own module but mount on *this*
+# router: one prefix, one error format, one set of middleware exemptions, no
+# second ``include_router``. Imported last, when ``router`` exists.
+from app.modules.dashboard_auth import oidc_api as _oidc_api  # noqa: E402,F401

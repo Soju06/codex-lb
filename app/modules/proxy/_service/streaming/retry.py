@@ -25,7 +25,15 @@ from app.core.clients.proxy import (
     is_confirmed_pre_dispatch_transport_error,
     pop_stream_timeout_overrides,
 )
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+    cache_scope_payload_overhead_bytes,
+)
+from app.core.clients.thread_cache_identity import (
+    effective_thread_cache_identity_mode as _effective_thread_cache_identity_mode,
+)
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.errors import (
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
     openai_error,
@@ -357,6 +365,16 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        # Resolved once per request: the API-key override wins, then the fleet
+        # value. ``shared`` is a strict no-op downstream. The fleet value is read
+        # off the *overlaid* settings, not the raw dashboard row: the row's column
+        # is NULL until an operator sets it, so reading it directly would keep the
+        # proxy on ``shared`` while ``GET /api/settings`` reported the environment
+        # value as effective. ``DASHBOARD_MODE_SETTINGS`` puts the column back on
+        # top where it belongs -- dashboard over environment over default.
+        thread_cache_identity_mode, thread_cache_identity_from_key = _effective_thread_cache_identity_mode(
+            api_key, with_dashboard_overrides(base_settings)
+        )
         upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
         upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
@@ -391,7 +409,13 @@ class _StreamingRetryMixin:
                 model=payload.model,
                 headers=headers,
                 has_image_generation_tool=image_generation_bypass,
-                payload_size_estimate_bytes=payload_size_estimate,
+                # Include what isolated mode will inject: that choice is passed
+                # down as an explicit override, which short-circuits the
+                # post-injection size check, so a request just under the
+                # websocket budget has to be measured at its egress size here.
+                payload_size_estimate_bytes=(
+                    payload_size_estimate + cache_scope_payload_overhead_bytes(thread_cache_identity_mode)
+                ),
             )
             upstream_stream_transport = resolved_base_transport
             if not explicit_transport and (
@@ -470,6 +494,8 @@ class _StreamingRetryMixin:
             sticky_key_source=affinity_observation.source,
             derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+            thread_cache_identity_mode=thread_cache_identity_mode,
+            thread_cache_identity_from_key=thread_cache_identity_from_key,
         )
         routing_strategy = _facade()._routing_strategy(settings)
         max_attempts = _facade()._STREAM_MAX_ACCOUNT_ATTEMPTS
@@ -959,6 +985,7 @@ class _StreamingRetryMixin:
                     client_ip=client_ip,
                     tool_call_dedupe=tool_call_dedupe,
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    thread_cache_identity=ThreadCacheIdentity(thread_cache_identity_mode, account.id),
                 )
                 try:
                     try:
@@ -2284,6 +2311,7 @@ class _StreamingRetryMixin:
                                 ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                                thread_cache_identity=ThreadCacheIdentity(thread_cache_identity_mode, account.id),
                             )
                             try:
                                 try:

@@ -247,10 +247,12 @@ async def test_the_rule_list_refuses_duplicates_unknown_claims_and_unknown_provi
     )
     assert unknown_claim.status_code == 422 and _error(unknown_claim) == "unknown_claim"
 
+    # A kind with no row at all. ``oidc`` is no longer one: its row is seeded
+    # (disabled) so an operator can write the group rules before connecting.
     unknown_provider = await async_client.post(
         MAPPINGS,
         json={
-            "provider": "oidc",
+            "provider": "saml",
             "providerKey": "default",
             "claimName": "groups",
             "claimValue": "platform",

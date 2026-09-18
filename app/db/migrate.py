@@ -5,16 +5,19 @@ import logging
 import re
 import time
 import warnings
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator, cast
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util.exc import CommandError
 from anyio import to_thread
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 _ALEMBIC_VERSION_TABLE = "alembic_version"
 _ALEMBIC_VERSION_COLUMN = "version_num"
 _LEGACY_MIGRATIONS_TABLE = "schema_migrations"
+_RUNTIME_SENTINELS_TABLE = "runtime_sentinels"
 _REQUIRED_TABLES_FOR_LEGACY_STAMP = frozenset(
     {
         "accounts",
@@ -684,6 +688,231 @@ def _resolved_lock_timeout_seconds(lock_timeout_seconds: float | None) -> float:
     return get_settings().database_migration_lock_timeout_seconds
 
 
+#: The revision that copied the legacy dashboard credentials onto the account
+#: row (release N), and the one that drops the columns they lived in (this
+#: release). The drop **descends** from the re-projection, so any upgrade that
+#: crosses the drop re-projects first, in the same run: a database stamped at
+#: any older revision reaches head in one command with its credentials intact,
+#: and refusing that jump would keep every existing install from starting.
+CREDENTIAL_REPROJECTION_REVISION = "20260909_020000_reproject_compat_admin_credentials"
+CREDENTIAL_DROP_REVISION = "20260912_010000_drop_legacy_dashboard_credentials"
+
+#: The table the dropped columns live in, and therefore the evidence that there
+#: is an install here at all: a replica of an earlier release maps those columns
+#: and loads this row whole, so until the table exists there is nothing for one
+#: to be serving and nothing to drain.
+_CREDENTIAL_MIRROR_TABLE = "dashboard_settings"
+
+_CREDENTIAL_DROP_DRAIN_WARNING = (
+    "Dropping the legacy dashboard credential columns (%s). Replicas of any earlier release map these "
+    "columns and load the settings row whole, so their settings reads fail once this commits: stop them "
+    "before this migration runs, not after. Rollback is supported to the immediately previous release only."
+)
+
+
+#: Durable "the legacy credential layer is retired" marker, written into
+#: ``runtime_sentinels`` by ``CREDENTIAL_DROP_REVISION`` and read back here.
+#: Frozen as a literal on both sides for the same reason the revision freezes
+#: its identifiers: neither may import the other.
+LEGACY_CREDENTIALS_RETIRED_SENTINEL = "dashboard_legacy_credentials_retired"
+
+_LEDGER_BEHIND_SCHEMA_WARNING = (
+    "Database has already retired the legacy dashboard credential columns (%s recorded it in "
+    "%s), but its Alembic ledger says %s, which does not include that revision. Stamping the "
+    "ledger at it rather than replaying the chain over this schema: the replay re-creates those "
+    "columns empty and the re-projection between them reads that emptiness as a removed "
+    "password, which would clear the account row that now holds the only dashboard credential "
+    "this install has."
+)
+
+
+def _remapped(revision: str) -> str:
+    return OLD_TO_NEW_REVISION_MAP.get(revision, revision)
+
+
+def _pending_revisions(config: Config, current_revisions: Sequence[str], revision: str) -> frozenset[str]:
+    """Exactly the revisions ``command.upgrade(config, revision)`` would apply.
+
+    ``revision`` is whatever the caller passed, which is every target form
+    Alembic accepts: ``head``/``heads``, a full id, an unambiguous id *prefix*,
+    and a relative spec such as ``+1`` or ``<prefix>+2``. Resolving it by hand
+    -- special-casing ``head`` and otherwise treating the string as a literal
+    id -- silently mis-reads the last three: they resolve fine inside
+    ``command.upgrade`` a moment later, so the drop would run with nothing
+    said. This asks ``ScriptDirectory._upgrade_revs``, which is the function
+    ``command.upgrade`` itself calls to plan the run, so the check and the
+    command cannot disagree. ``iterate_revisions`` is the public spelling and
+    was the first attempt; it raises ``RangeNotAncestorError`` for a ledger
+    holding several heads when the target is on one branch, where the upgrade
+    succeeds -- one resolver, not two, is the point.
+
+    Empty on anything unanswerable: an id this build does not know (the caller
+    is a schema stamped ahead, which ``_run_upgrade_locked`` refuses on its own)
+    or a target Alembic itself cannot resolve (it raises the same error a beat
+    later, and a warning about a command that is going to fail helps nobody).
+    """
+
+    script_directory = ScriptDirectory.from_config(config)
+    known = _known_revisions(config)
+    resolved_current = tuple(_remapped(item) for item in current_revisions)
+    if any(item not in known for item in resolved_current):
+        return frozenset()
+    try:
+        # Alembic annotates ``current_rev`` as ``str``, but ``command.upgrade``
+        # itself hands it the migration context's *tuple* of heads and the
+        # resolver takes any collection. Narrowing to one would mis-plan a
+        # ledger that holds several.
+        steps = script_directory._upgrade_revs(revision, cast("Any", resolved_current))
+    except (CommandError, RevisionError):
+        return frozenset()
+    return frozenset(step.revision.revision for step in steps if step.revision.revision)
+
+
+def _check_legacy_credential_drop(config: Config, sync_database_url: str, revision: str) -> None:
+    """Read the ledger *and* the schema, then decide; no side effects, no DDL."""
+
+    with _sync_connection(sync_database_url) as connection:
+        tables = _read_table_names(connection)
+        current_revisions = (
+            _read_current_revisions_from_connection(connection) if _ALEMBIC_VERSION_TABLE in tables else ()
+        )
+        has_existing_schema = _CREDENTIAL_MIRROR_TABLE in tables
+    check_legacy_credential_drop(
+        config,
+        current_revisions,
+        revision,
+        has_existing_schema=has_existing_schema,
+    )
+
+
+def check_legacy_credential_drop(
+    config: Config,
+    current_revisions: Sequence[str],
+    revision: str,
+    *,
+    has_existing_schema: bool,
+) -> None:
+    """State the drain requirement before the legacy credential columns go.
+
+    Called before any DDL, and it deliberately claims only what the ledger and
+    the schema can show. Nothing is refused: ``CREDENTIAL_REPROJECTION_REVISION``
+    is an ancestor of ``CREDENTIAL_DROP_REVISION``, so a database stamped
+    anywhere below both reaches head in one command with the credentials copied
+    onto the account rows before the columns they came from disappear, and the
+    ordering that makes that true is pinned by a test rather than re-checked
+    here. What no signal anywhere can show is whether a replica of an earlier
+    release is serving right now, so the drain requirement is a warning an
+    operator must act on rather than a condition this process can verify.
+
+    An empty ledger is *not* on its own a fresh install, which is why
+    ``has_existing_schema`` is asked for separately. ``alembic_version`` can be
+    absent, truncated, or restored without its rows over a schema that has been
+    serving for months, and that database reads identically to a new one -- yet
+    it is the one that most needs to be told, because the replay it is about to
+    run reaches ``CREDENTIAL_DROP_REVISION`` and drops the columns for real (the
+    chain's early revisions are inspector-guarded, so replaying over an existing
+    schema does not fail first). The fresh case is therefore read off the data:
+    ``_CREDENTIAL_MIRROR_TABLE`` is where the doomed columns live, and until it
+    exists there is no install here for a replica of an earlier release to be
+    serving. Both halves have to hold -- an empty ledger *and* no such table.
+
+    ``config.attributes["codex_lb_fresh_install"]`` is deliberately not that
+    signal: it is false whenever an ``alembic_version`` table merely exists, so
+    an empty one left behind by a crashed first run would turn today's missing
+    warning into a warning about a database with nothing to drain -- and a
+    published revision already reads that attribute to pick its defaults, so it
+    is not free to redefine.
+    """
+
+    if not current_revisions and not has_existing_schema:
+        # No ledger and no schema: a fresh install. The chain creates the
+        # tables without the dropped columns ever holding anything.
+        return
+
+    if CREDENTIAL_DROP_REVISION in _pending_revisions(config, current_revisions, revision):
+        logger.warning(_CREDENTIAL_DROP_DRAIN_WARNING, CREDENTIAL_DROP_REVISION)
+
+
+def _read_runtime_sentinel(connection: Connection, name: str) -> str | None:
+    if _RUNTIME_SENTINELS_TABLE not in _read_table_names(connection):
+        return None
+    row = connection.execute(
+        text(f"SELECT value FROM {_RUNTIME_SENTINELS_TABLE} WHERE name = :name"),
+        {"name": name},
+    ).first()
+    return None if row is None else str(row[0])
+
+
+def _ledger_has_applied(config: Config, current_revisions: Sequence[str], revision: str) -> bool:
+    """Whether ``revision`` is at or below any of ``current_revisions``."""
+
+    script_directory = ScriptDirectory.from_config(config)
+    return any(
+        item.revision == revision
+        for current in current_revisions
+        for item in script_directory.iterate_revisions(current, "base")
+    )
+
+
+def _reconcile_retired_credential_ledger(config: Config) -> str | None:
+    """Re-stamp a ledger that sits below a schema which already retired the credentials.
+
+    The same shape as ``_bootstrap_legacy_history``: a database whose ledger
+    does not describe it is placed at the revision its own data proves it
+    reached, rather than replayed. The evidence is the marker
+    ``CREDENTIAL_DROP_REVISION`` writes into ``runtime_sentinels``, and only
+    that revision writes it (its downgrade removes it again), so the marker
+    means the three columns are gone -- whatever the ledger says. A ledger that
+    disagrees has been lost, rewound or restored from a partial backup, and it
+    is the ledger that is wrong.
+
+    The evidence has to be data, because the ledger is the thing that went
+    missing. And the replay it prevents is not merely wasteful, it is
+    destructive: ``20260213_000600``/``20260213_000700`` re-add
+    ``password_hash``, ``totp_secret_encrypted`` and ``totp_last_verified_step``
+    to an existing ``dashboard_settings`` as **empty** columns, and
+    ``CREDENTIAL_REPROJECTION_REVISION`` then reads that emptiness as "the
+    previous release removed the password" and NULLs the credential on the
+    account row -- which, after this release, is the only copy, so the install
+    is locked out of its own dashboard. (Replaying
+    ``20260909_010000_add_dashboard_users`` over a schema whose ledger was
+    rewound *past* the column re-creation fails outright instead, on
+    ``no such column: password_hash``.) Both of those revisions are published
+    and must not be edited to defend themselves -- an install that has applied
+    a revision never applies it again -- so the defence is here, before the
+    first one runs.
+
+    Call this *after* ``_remap_legacy_alembic_revisions``: it needs a ledger
+    Alembic can resolve, and a ledger it cannot is left alone so the upgrade
+    raises its own error rather than a stamp raising one earlier.
+
+    Returns the stamped revision, or ``None`` when nothing was stamped.
+    """
+
+    sync_database_url = _required_sqlalchemy_url(config)
+    with _sync_connection(sync_database_url) as connection:
+        has_ledger = _ALEMBIC_VERSION_TABLE in _read_table_names(connection)
+        marker = _read_runtime_sentinel(connection, LEGACY_CREDENTIALS_RETIRED_SENTINEL)
+        current_revisions = _read_current_revisions_from_connection(connection) if has_ledger else ()
+
+    if marker is None:
+        return None
+    if any(revision not in _known_revisions(config) for revision in current_revisions):
+        return None
+    if current_revisions and _ledger_has_applied(config, current_revisions, CREDENTIAL_DROP_REVISION):
+        return None
+
+    logger.warning(
+        _LEDGER_BEHIND_SCHEMA_WARNING,
+        marker,
+        _RUNTIME_SENTINELS_TABLE,
+        ",".join(current_revisions) if current_revisions else f"no {_ALEMBIC_VERSION_TABLE} table",
+    )
+    _ensure_alembic_version_table_capacity(config)
+    command.stamp(config, CREDENTIAL_DROP_REVISION)
+    return CREDENTIAL_DROP_REVISION
+
+
 def _schema_ahead_error(state: MigrationState) -> MigrationBootstrapError:
     return MigrationBootstrapError(
         f"Database schema revision(s) {','.join(state.unknown_revisions)} are not known to this build "
@@ -758,6 +987,16 @@ def _run_upgrade_locked(
     _ensure_alembic_version_table_capacity(config)
     if auto_remap_legacy_revisions:
         _remap_legacy_alembic_revisions(config)
+    # The second ledger repair, and the one that must not be skipped: replaying
+    # the chain over a schema that already retired the legacy credential
+    # columns destroys the account credentials (see the function). It runs
+    # after the remap because it needs a ledger Alembic can resolve.
+    if _reconcile_retired_credential_ledger(config) is not None:
+        config.attributes["codex_lb_fresh_install"] = False
+    # Last read before the first DDL: the legacy bootstrap, the remap and the
+    # reconciliation may all have moved the ledger, and the question is what
+    # this database has actually applied at the moment the upgrade starts.
+    _check_legacy_credential_drop(config, _required_sqlalchemy_url(config), revision)
     command.upgrade(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)

@@ -338,6 +338,16 @@ def validate_bind(host: str, *, allow_public_bind: bool) -> None:
         raise ValueError("non-loopback origin fixture bind requires --allow-public-bind")
 
 
+# Public aliases, behaviour-free: ``codex_body_capture`` builds its own origin
+# app and must decode request bodies, answer with the same Responses lifecycle,
+# and apply the same loopback rule as this fixture. The existing tests keep
+# covering the private names.
+decode_request_body = _decode_request_body
+response_events = _response_events
+sse_frames = _sse
+loopback_host = _loopback_host
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")

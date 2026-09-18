@@ -1,3 +1,4 @@
+import { LOCAL_SIGN_IN_PROVIDER } from "@/test/mocks/factories";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -43,6 +44,7 @@ describe("AuthSessionSchema", () => {
         providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
         localLogin: "enabled",
         pendingIdentity: false,
+        pendingArrival: null,
       },
       accessSummary: null,
       assignableRoleIds: [],
@@ -119,7 +121,7 @@ describe("AuthSessionSchema", () => {
       permissions: ["read", "write", "users:manage:all"],
       user: { id: "u1", username: "admin", displayName: null, role: { id: "r1", slug: "admin", name: "Admin", kind: "preset" } },
       authMethod: "password",
-      login: { usernameField: "shown", providers: [{ kind: "password", label: "Password" }], localLogin: "enabled" },
+      login: { usernameField: "shown", providers: [LOCAL_SIGN_IN_PROVIDER], localLogin: "enabled" },
       accessSummary: {
         usersTotal: 2,
         usersActive: 2,

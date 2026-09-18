@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    continuity_replay_rejected_total,
     http_bridge_routing_total,
     upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
@@ -124,6 +125,8 @@ def _maybe_log_proxy_request_shape(
     sticky_key_source: str | None = None,
     prompt_cache_key_set: bool | None = None,
     derivation_outcome: str | None = None,
+    thread_cache_identity_mode: str | None = None,
+    thread_cache_identity_from_key: bool | None = None,
 ) -> None:
     trace_channels = _service_get_settings().trace_channels
     if "shape" not in trace_channels:
@@ -150,7 +153,8 @@ def _maybe_log_proxy_request_shape(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
         "sticky_kind=%s sticky_key_source=%s derivation_outcome=%s prompt_cache_key_set=%s"
-        " session_header_present=%s tools_hash=%s model_class=%s",
+        " session_header_present=%s tools_hash=%s model_class=%s"
+        " thread_cache_identity_mode=%s thread_cache_identity_from_key=%s",
         request_id,
         kind,
         payload.model,
@@ -168,6 +172,8 @@ def _maybe_log_proxy_request_shape(
         session_header_present,
         tools_hash,
         model_class,
+        thread_cache_identity_mode,
+        thread_cache_identity_from_key,
     )
 
 
@@ -250,6 +256,19 @@ def _record_continuity_owner_resolution(
         _hash_identifier_or_none(previous_response_id),
         _hash_identifier_or_none(session_id),
     )
+
+
+def _record_continuity_replay_rejected(*, surface: str, reason: str) -> None:
+    """Count one refusal to move an unavailable owner's turn to another account.
+
+    The recovery gate is a conjunction of independent proofs, so the caller
+    reports the first one that refused; the paired ``owner_unavailable_replay_rejected``
+    bridge event carries the request-scoped identifiers.
+    """
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("continuity_replay_rejected_total", continuity_replay_rejected_total)
+    if prometheus_available and counter is not None:
+        counter.labels(surface=surface, reason=reason).inc()
 
 
 def _format_continuity_fail_closed_diagnostics(

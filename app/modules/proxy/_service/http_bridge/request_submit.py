@@ -45,7 +45,14 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_SHARED,
+    ThreadCacheIdentity,
+    apply_thread_cache_identity,
+    thread_cache_identity_from,
+)
 from app.core.clock import REAL_CLOCK, Clock, clock_for, scheduler_for
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.errors import openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
@@ -363,6 +370,52 @@ async def _rollback_http_bridge_recovery_turn_state_registration(
     return await _await_task_deferring_cancellation(rollback_task)
 
 
+def _bridge_thread_cache_identity(session: Any) -> ThreadCacheIdentity | None:
+    """The mode this bridge session sends under, or ``None`` for a pure no-op.
+
+    The bridge dispatches ``response.create`` itself rather than going through
+    ``_stream_responses_with_session``, so without this a thread served partly
+    by the bridge and partly by the per-turn bypass would alternate between a
+    scoped and an unscoped identity turn by turn — the worst possible outcome,
+    because upstream would see two names for one thread on one account.
+
+    The fleet value is read off the overlaid settings (dashboard over
+    environment over default). The per-API-key override is deliberately not
+    consulted here: this path holds only the key's id, not the row, and a
+    request that reaches the bridge has already had the override applied at
+    ingress when it was dispatched through the ordinary transport. Resolving it
+    a second time from a different source could disagree with that decision.
+    """
+
+    mode = getattr(with_dashboard_overrides(_service_get_settings()), "thread_cache_identity_mode", None)
+    identity = thread_cache_identity_from(mode, getattr(getattr(session, "account", None), "id", None))
+    return identity
+
+
+def _text_with_thread_cache_identity(text_data: str, identity: ThreadCacheIdentity | None) -> str:
+    """Scope the frame's thread identity for egress only.
+
+    Send-only, exactly like ``_text_with_operation_id``: the result is never
+    written back to ``request_state.request_text`` or
+    ``fresh_upstream_request_text``, because
+    ``_http_bridge_operation_fingerprint`` must keep hashing account-neutral
+    text. If a scoped value entered the durable fingerprint, every account swap
+    would change the operation identity and the spool lookup would miss
+    mid-recovery.
+    """
+
+    if identity is None or identity.mode == THREAD_CACHE_IDENTITY_MODE_SHARED:
+        return text_data
+    try:
+        frame = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(frame, dict):
+        return text_data
+    apply_thread_cache_identity(frame, identity)
+    return json.dumps(frame, ensure_ascii=True, separators=(",", ":"))
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
@@ -372,6 +425,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     clock: Clock = REAL_CLOCK,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
+    text_data = _text_with_thread_cache_identity(text_data, _bridge_thread_cache_identity(session))
     # Operation metadata is added after the initial payload sizing pass. Check
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.

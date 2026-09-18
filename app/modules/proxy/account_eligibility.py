@@ -10,6 +10,26 @@ from app.db.models import Account, AccountStatus
 ROUTABLE_STATUSES = (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
 """Statuses whose sessions keep serving requests (reauth stays routable until expiry)."""
 
+HARD_OWNER_UNAVAILABLE_STATUSES = frozenset(
+    {
+        AccountStatus.PAUSED,
+        AccountStatus.DEACTIVATED,
+        AccountStatus.RATE_LIMITED,
+        AccountStatus.QUOTA_EXCEEDED,
+        AccountStatus.REAUTH_REQUIRED,
+    }
+)
+"""Statuses a hard continuity owner can sit in while it cannot serve its thread.
+
+Usable directly in SQL, unlike :func:`reauth_access_token_is_expired`, which
+needs a decrypted token. ``REAUTH_REQUIRED`` belongs here only because every
+consumer pairs the set with a long inactivity grace: an owner that has been
+warning about reauthentication for hours without serving its thread is not
+coming back on its own, whatever its stored token claims. Anything deciding
+routability *now* must use :data:`ROUTABLE_STATUSES` plus the expiry check
+instead.
+"""
+
 
 def stored_access_token_expires_at(
     encrypted_access_token: bytes | None,

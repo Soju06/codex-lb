@@ -44,6 +44,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
 	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
 	tests/integration/test_migrations.py::test_account_pending_deletion_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_bridge_continuity_abandonment_migration_upgrade_and_downgrade \
+	tests/integration/test_repositories.py::test_retire_stale_unavailable_bridge_owners_frees_a_reauth_pinned_thread \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
 	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \
@@ -58,7 +60,8 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
-	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_scim_v2_users.py::test_a_patch_meets_the_length_caps_a_replace_meets
 SHELL := bash
 
 .PHONY: help

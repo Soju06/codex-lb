@@ -86,10 +86,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate canonical OpenSpec capabilities
         run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+
+      - name: Strictly validate changed OpenSpec folders
+        run: python3 .github/scripts/validate_changed_openspec.py
 
   frontend-lint:
     name: Frontend lint (eslint)
@@ -710,7 +714,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy scan results to GitHub Security
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           sarif_file: trivy-results.sarif
@@ -867,7 +871,7 @@ jobs:
           fi
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
 
       - name: Build and check the flake
         run: nix flake check --print-build-logs

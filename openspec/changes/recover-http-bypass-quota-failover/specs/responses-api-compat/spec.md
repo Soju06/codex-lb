@@ -21,6 +21,12 @@ Incomplete or unverified history MUST retain its ownership constraints.
 - **WHEN** a bypass request cannot prove full history
 - **THEN** the request retains its required account
 
+#### Scenario: Optional durable verification is unavailable
+
+- **WHEN** the optional durable full-resend lookup fails
+- **THEN** the service preserves bridge affinity and continues normal HTTP fallback
+- **AND** required owner resolution remains authoritative and fail-closed
+
 #### Scenario: Explicit ownership retains ownership
 
 - **WHEN** a bypass request references previous_response_id, a file owner, or an account-owned item

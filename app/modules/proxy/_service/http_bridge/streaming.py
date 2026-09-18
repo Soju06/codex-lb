@@ -1081,10 +1081,18 @@ class _HTTPBridgeStreamingMixin:
                 and _http_bridge_payload_looks_like_full_resend(payload)
                 and _http_bridge_payload_is_account_neutral_fresh_replay(payload)
             ):
-                durable_lookup = await self._durable_bridge.lookup_turn_state_target(
-                    turn_state=turn_state,
-                    api_key_id=api_key.id if api_key is not None else None,
-                )
+                try:
+                    durable_lookup = await self._durable_bridge.lookup_turn_state_target(
+                        turn_state=turn_state,
+                        api_key_id=api_key.id if api_key is not None else None,
+                    )
+                except Exception:
+                    durable_lookup = None
+                    logger.warning(
+                        "Optional HTTP fallback full-resend lookup failed; preserving affinity request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
                 if durable_lookup is not None and _verify_durable_full_resend(payload, durable_lookup) is not None:
                     owner_account_id = await self._resolve_compact_turn_state_owner(
                         turn_state=turn_state,

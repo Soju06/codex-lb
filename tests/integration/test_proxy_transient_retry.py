@@ -716,7 +716,8 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "history", ["full", "missing_output", "wrong_prefix", "explicit_anchor", "owned_item", "file_owner"]
+    "history",
+    ["full", "missing_output", "wrong_prefix", "explicit_anchor", "owned_item", "file_owner", "lookup_failure"],
 )
 async def test_http_bypass_quota_failover_requires_verified_full_history(async_client, monkeypatch, history):
     from app.dependencies import get_proxy_service_for_app
@@ -769,6 +770,18 @@ async def test_http_bypass_quota_failover_requires_verified_full_history(async_c
         lease_ttl_seconds=60.0,
         turn_state=turn_state,
     )
+    lookup_calls = 0
+    if history == "lookup_failure":
+        original_lookup = service._durable_bridge.lookup_turn_state_target
+
+        async def fail_first_lookup(*args, **kwargs):
+            nonlocal lookup_calls
+            lookup_calls += 1
+            if lookup_calls == 1:
+                raise RuntimeError("optional durable lookup unavailable")
+            return await original_lookup(*args, **kwargs)
+
+        monkeypatch.setattr(service._durable_bridge, "lookup_turn_state_target", fail_first_lookup)
 
     full_input = [
         *prior_input,
@@ -789,7 +802,7 @@ async def test_http_bypass_quota_failover_requires_verified_full_history(async_c
     async def fake_stream(payload, headers, access_token, account_id, **kwargs):
         del payload, access_token, kwargs
         calls.append((account_id, dict(headers)))
-        if account_id == "acc_bypass_a":
+        if account_id == "acc_bypass_a" and history != "lookup_failure":
             raise ProxyResponseError(
                 429,
                 openai_error("usage_limit_reached", "usage limit reached"),
@@ -809,6 +822,11 @@ async def test_http_bypass_quota_failover_requires_verified_full_history(async_c
         assert [account for account, _headers in calls] == ["acc_bypass_a", "acc_bypass_b"]
         for _account, sent_headers in calls:
             assert "x-codex-turn-state" not in {key.lower() for key in sent_headers}
+    elif history == "lookup_failure":
+        assert "response.completed" in response.text, response.text
+        assert [account for account, _headers in calls] == ["acc_bypass_a"]
+        assert "x-codex-turn-state" in {key.lower() for key in calls[0][1]}
+        assert lookup_calls >= 2
     else:
         assert "response.completed" not in response.text
         assert not any(account == "acc_bypass_b" for account, _headers in calls)

@@ -13,3 +13,6 @@ fresh full resend and is not rewritten.
 
 Forwarded owner requests, previous_response_id, files, response-owned items,
 incomplete history, missing durable state, and owner conflicts remain fail-closed.
+Failure of the optional durable full-resend lookup is treated as unavailable
+proof: the service preserves affinity and continues normal HTTP fallback, where
+required owner resolution remains authoritative and fail-closed.

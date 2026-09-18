@@ -14,9 +14,16 @@ from app.core.utils.time import from_epoch_seconds, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, AdditionalUsageHistory, UsageHistory
 from app.modules.accounts import reset_credit_cache
 from app.modules.accounts.auth_manager import is_locally_owned
+from app.modules.accounts.credits import (
+    OPENROUTER_CREDITS_QUOTA_KEY,
+    OPENROUTER_PROVIDER_NAME,
+    credits_exhausted,
+    window_from_usage,
+)
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
+    AccountCreditsWindow,
     AccountIdentityMismatch,
     AccountLimitWarmupStatus,
     AccountRequestUsage,
@@ -28,6 +35,7 @@ from app.modules.accounts.schemas import (
     UsageTrendPoint,
 )
 from app.modules.accounts.subscription_status import is_subscription_usable, normalize_subscription_status
+from app.modules.usage.additional_quota_keys import raw_model_ids_for_quota_key
 from app.modules.usage.identity_mismatch import get_identity_mismatch
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -44,6 +52,7 @@ def build_account_summaries(
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
     monthly_usage: dict[str, UsageHistory] | None = None,
+    credits_usage: dict[str, UsageHistory] | None = None,
     request_usage_by_account: dict[str, AccountRequestUsage] | None = None,
     additional_quotas_by_account: dict[str, list[AccountAdditionalQuota]] | None = None,
     limit_warmups_by_account: dict[str, AccountLimitWarmup] | None = None,
@@ -58,6 +67,7 @@ def build_account_summaries(
             primary_usage.get(account.id),
             secondary_usage.get(account.id),
             monthly_usage.get(account.id) if monthly_usage else None,
+            credits_usage.get(account.id) if credits_usage else None,
             request_usage_by_account.get(account.id) if request_usage_by_account else None,
             additional_quotas_by_account.get(account.id) if additional_quotas_by_account else None,
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
@@ -107,6 +117,7 @@ def _account_to_summary(
     primary_usage: UsageHistory | None,
     secondary_usage: UsageHistory | None,
     monthly_usage: UsageHistory | None,
+    credits_usage: UsageHistory | None,
     request_usage: AccountRequestUsage | None,
     additional_quotas: list[AccountAdditionalQuota] | None,
     limit_warmup: AccountLimitWarmup | None,
@@ -254,6 +265,24 @@ def _account_to_summary(
     )
     # AccountSummary still carries the raw credit fields below so extra-usage
     # burn stays dashboard-visible even though it never rescues the status.
+    credits_cap = None
+    credits_spent = None
+    credits_window_model = None
+    if normalize_provider_name(account.provider) == OPENROUTER_PROVIDER_NAME:
+        openrouter_window = window_from_usage(credits_usage)
+        if openrouter_window is not None:
+            credits_has = True
+            credits_unlimited = False
+            credits_balance = openrouter_window.balance
+            credits_cap = openrouter_window.cap
+            credits_spent = openrouter_window.spent
+            credits_window_model = AccountCreditsWindow(
+                balance=openrouter_window.balance,
+                cap=openrouter_window.cap,
+            )
+            if credits_exhausted(openrouter_window):
+                effective_status = AccountStatus.QUOTA_EXCEEDED
+        additional_quotas = _openrouter_additional_quotas(additional_quotas)
     account_is_locally_owned = is_locally_owned(account, config_settings.get_settings())
     return AccountSummary(
         account_id=account.id,
@@ -291,6 +320,9 @@ def _account_to_summary(
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
+        credits_cap=credits_cap,
+        credits_spent=credits_spent,
+        credits=credits_window_model,
         reset_credits_available=(
             reset_credit_cache.get_count(account.id)
             if normalize_provider_name(account.provider) == OPENAI_PROVIDER_NAME
@@ -308,6 +340,28 @@ def _account_to_summary(
         owner_instance=account.owner_instance,
         is_locally_owned=account_is_locally_owned,
     )
+
+
+def _openrouter_additional_quotas(
+    existing: list[AccountAdditionalQuota] | None,
+) -> list[AccountAdditionalQuota]:
+    model_ids = list(raw_model_ids_for_quota_key(OPENROUTER_CREDITS_QUOTA_KEY))
+    quotas = list(existing or [])
+    for index, quota in enumerate(quotas):
+        if quota.quota_key == OPENROUTER_CREDITS_QUOTA_KEY:
+            quotas[index] = quota.model_copy(update={"model_ids": model_ids})
+            return quotas
+    quotas.append(
+        AccountAdditionalQuota(
+            quota_key=OPENROUTER_CREDITS_QUOTA_KEY,
+            limit_name=OPENROUTER_CREDITS_QUOTA_KEY,
+            metered_feature="openrouter_completions",
+            display_label="OpenRouter credits",
+            routing_policy="normal",
+            model_ids=model_ids,
+        )
+    )
+    return quotas
 
 
 def _identity_mismatch_status(account_id: str) -> AccountIdentityMismatch | None:

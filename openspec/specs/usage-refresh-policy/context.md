@@ -24,6 +24,14 @@ account locally; it does not globally de-route it or move owner-bound continuity
 to another account. At known expiry, selection and bridge reuse reject the
 account before upstream I/O.
 
+Auth Guardian polls periodically so idle and paused accounts do not depend on
+request traffic, but it uses that same `should_refresh()` policy rather than a
+shorter background-only clock. The shared window is currently eight days. The
+six-hour cadence bounds the time until the next eligibility scan, while active
+failure backoff and the fixed 100-account batch can defer admission to a later
+scan. Request-time forced refresh remains available when traffic reaches an
+account before proactive admission.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:

@@ -1512,7 +1512,7 @@
   "settings.backgroundJobs.title": "后台任务",
   "settings.backgroundJobs.description": "无需请求流量即周期运行的循环。在此处更改之前，每个开关都继承其环境变量（或默认值）；循环持续运行，并在所有副本的下一个 tick 应用更改，无需重启。",
   "settings.backgroundJobs.authGuardian.label": "Auth Guardian",
-  "settings.backgroundJobs.authGuardian.description": "主动刷新空闲超过 12 小时的账户凭据，避免其 refresh token 过期。",
+  "settings.backgroundJobs.authGuardian.description": "按与请求相同的凭据时效规则刷新活跃及已暂停账户，帮助保持闲置 refresh token 可用。",
   "settings.backgroundJobs.authGuardian.ariaLabel": "Auth Guardian",
   "settings.backgroundJobs.authGuardian.blockedByTopology": "被拓扑阻止：这是一个没有 leader 选举的多副本环，因此无论此开关如何，guardian 都保持空闲。设置 CODEX_LB_LEADER_ELECTION_ENABLED=true 以在 leader 门控下运行。",
   "settings.backgroundJobs.automations.label": "自动化调度器",

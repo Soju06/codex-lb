@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.auth import guardian as guardian_module
+from app.core.auth import refresh as refresh_module
 from app.core.auth.guardian import AuthGuardianScheduler, build_auth_guardian_scheduler, select_auth_guardian_candidates
 from app.core.auth.refresh import RefreshError
 from app.core.config import settings as settings_module
@@ -20,6 +21,12 @@ from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.unit
+
+_STALE_AGE = timedelta(days=refresh_module.TOKEN_REFRESH_INTERVAL_DAYS + 1)
+
+
+def _stale_refresh(now: datetime, extra_days: int = 0) -> datetime:
+    return now - _STALE_AGE - timedelta(days=extra_days)
 
 
 def _account(account_id: str, *, status: AccountStatus, last_refresh: datetime) -> Account:
@@ -82,23 +89,49 @@ def test_select_auth_guardian_candidates_returns_stale_eligible_accounts_only() 
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
         _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
-        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
-        _account("oldest-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=20)),
-        _account("stale-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=18)),
+        _account("thirteen-hour-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
+        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now)),
+        _account(
+            "oldest-active",
+            status=AccountStatus.ACTIVE,
+            last_refresh=_stale_refresh(now, 2),
+        ),
+        _account(
+            "stale-paused",
+            status=AccountStatus.PAUSED,
+            last_refresh=_stale_refresh(now, 1),
+        ),
         _account("fresh-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=1)),
-        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=24)),
-        _account("deactivated", status=AccountStatus.DEACTIVATED, last_refresh=now - timedelta(hours=24)),
-        _account("rate-limited", status=AccountStatus.RATE_LIMITED, last_refresh=now - timedelta(hours=24)),
-        _account("quota-exceeded", status=AccountStatus.QUOTA_EXCEEDED, last_refresh=now - timedelta(hours=24)),
+        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=_stale_refresh(now)),
+        _account("deactivated", status=AccountStatus.DEACTIVATED, last_refresh=_stale_refresh(now)),
+        _account("rate-limited", status=AccountStatus.RATE_LIMITED, last_refresh=_stale_refresh(now)),
+        _account("quota-exceeded", status=AccountStatus.QUOTA_EXCEEDED, last_refresh=_stale_refresh(now)),
     ]
 
-    selected = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=10)
+    selected = select_auth_guardian_candidates(accounts, now=now, limit=10)
 
     assert [account.id for account in selected] == ["oldest-active", "stale-paused", "stale-active"]
 
-    batched = select_auth_guardian_candidates(accounts, now=now, max_age_seconds=12 * 3600, limit=2)
+    batched = select_auth_guardian_candidates(accounts, now=now, limit=2)
 
     assert [account.id for account in batched] == ["oldest-active", "stale-paused"]
+
+
+def test_select_auth_guardian_candidates_tracks_shared_refresh_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 1, 10, 12, 0, 0)
+    account = _account(
+        "policy",
+        status=AccountStatus.ACTIVE,
+        last_refresh=now - timedelta(days=2),
+    )
+
+    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 1)
+    assert select_auth_guardian_candidates([account], now=now, limit=10) == [account]
+
+    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 3)
+    assert select_auth_guardian_candidates([account], now=now, limit=10) == []
 
 
 def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
@@ -241,9 +274,11 @@ def _tick_scheduler(
     topology_blocked: bool = False,
     leader_election_enabled: bool = True,
     clock: Callable[[], datetime] | None = None,
+    repo: _Repo | None = None,
 ) -> AuthGuardianScheduler:
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
-    repo = _Repo([account])
+    if repo is None:
+        account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
+        repo = _Repo([account])
 
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[_Repo]:
@@ -257,7 +292,6 @@ def _tick_scheduler(
         enabled=True,
         dashboard_enabled=dashboard_enabled,
         topology_blocked=topology_blocked,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -275,8 +309,8 @@ def _tick_scheduler(
 async def test_auth_guardian_ticks_follow_the_dashboard_toggle_without_restart() -> None:
     """M2: booted enabled -> dashboard off -> next tick skipped -> dashboard on -> next tick runs."""
     now = datetime(2026, 1, 2, 12, 0, 0)
-    # Fake clock: every tick is one guardian interval later, so the account
-    # refreshed on the first tick is stale again (> max age) by the third.
+    # Advance beyond the shared refresh window on each synthetic tick so the
+    # account refreshed on the first tick is due again by the third.
     clock = {"now": now}
     calls: list[str] = []
     toggle = {"enabled": True}
@@ -285,7 +319,7 @@ async def test_auth_guardian_ticks_follow_the_dashboard_toggle_without_restart()
         return toggle["enabled"]
 
     def tick() -> None:
-        clock["now"] += timedelta(hours=13)
+        clock["now"] += _STALE_AGE
 
     scheduler = _tick_scheduler(calls, now=now, dashboard_enabled=dashboard_enabled, clock=lambda: clock["now"])
 
@@ -349,8 +383,8 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
         _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
-        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
-        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=now - timedelta(hours=13)),
+        _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now)),
+        _account("reauth", status=AccountStatus.REAUTH_REQUIRED, last_refresh=_stale_refresh(now)),
     ]
     repo = _Repo(accounts)
     calls: list[str] = []
@@ -363,7 +397,6 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=2,
         jitter_seconds=0.0,
@@ -380,9 +413,34 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
 
 
 @pytest.mark.asyncio
+async def test_auth_guardian_rechecks_shared_freshness_before_refresh() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    account = _account("became-fresh", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
+    calls: list[str] = []
+
+    class _FreshOnReadRepo(_Repo):
+        async def get_by_id(self, account_id: str) -> Account | None:
+            current = await super().get_by_id(account_id)
+            if current is not None:
+                current.last_refresh = now - timedelta(hours=13)
+            return current
+
+    scheduler = _tick_scheduler(
+        calls,
+        now=now,
+        dashboard_enabled=_always_enabled,
+        repo=_FreshOnReadRepo([account]),
+    )
+
+    await scheduler._refresh_once()
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changing_status() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    paused = _account("stale-paused", status=AccountStatus.PAUSED, last_refresh=now - timedelta(hours=13))
+    paused = _account("stale-paused", status=AccountStatus.PAUSED, last_refresh=_stale_refresh(now))
     repo = _Repo([paused])
     calls: list[str] = []
 
@@ -394,7 +452,6 @@ async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changin
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -420,7 +477,7 @@ async def test_auth_guardian_refresh_once_survives_candidate_session_close() -> 
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         async with session_factory() as session:
-            session.add(_account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)))
+            session.add(_account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now)))
             await session.commit()
 
         @asynccontextmanager
@@ -436,7 +493,6 @@ async def test_auth_guardian_refresh_once_survives_candidate_session_close() -> 
             interval_seconds=21600,
             enabled=True,
             dashboard_enabled=_always_enabled,
-            max_age_seconds=12 * 3600,
             batch_size=10,
             concurrency=1,
             jitter_seconds=0.0,
@@ -459,7 +515,7 @@ async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replica
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
 
@@ -474,7 +530,6 @@ async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replica
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -500,7 +555,7 @@ async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replica
 @pytest.mark.asyncio
 async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
 
@@ -515,7 +570,6 @@ async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -536,7 +590,7 @@ async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None
 @pytest.mark.asyncio
 async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
     ring_counted = False
@@ -554,7 +608,6 @@ async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled()
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -578,7 +631,7 @@ async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
     cache = _AccountSelectionCache()
@@ -593,7 +646,6 @@ async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -613,7 +665,7 @@ async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
 @pytest.mark.asyncio
 async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("transport-failure", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("transport-failure", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
     failures = {
@@ -633,7 +685,6 @@ async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -656,7 +707,7 @@ async def test_auth_guardian_permanent_refresh_failure_invalidates_account_selec
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("permanent-failure", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("permanent-failure", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     calls: list[str] = []
     cache = _AccountSelectionCache()
@@ -678,7 +729,6 @@ async def test_auth_guardian_permanent_refresh_failure_invalidates_account_selec
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -720,7 +770,6 @@ async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: py
         interval_seconds=1,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,
@@ -742,9 +791,17 @@ async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: py
 async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
-        _account("backoff-oldest", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=30)),
-        _account("runnable-older", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=20)),
-        _account("runnable-newer", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
+        _account(
+            "backoff-oldest",
+            status=AccountStatus.ACTIVE,
+            last_refresh=_stale_refresh(now, 4),
+        ),
+        _account(
+            "runnable-older",
+            status=AccountStatus.ACTIVE,
+            last_refresh=_stale_refresh(now, 2),
+        ),
+        _account("runnable-newer", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now)),
     ]
     repo = _Repo(accounts)
     calls: list[str] = []
@@ -757,7 +814,6 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=2,
         concurrency=1,
         jitter_seconds=0.0,
@@ -777,7 +833,7 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
 @pytest.mark.asyncio
 async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
-    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13))
+    account = _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     repo = _Repo([account])
     started = asyncio.Event()
     allow_finish = asyncio.Event()
@@ -808,7 +864,6 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
         interval_seconds=21600,
         enabled=True,
         dashboard_enabled=_always_enabled,
-        max_age_seconds=12 * 3600,
         batch_size=10,
         concurrency=1,
         jitter_seconds=0.0,

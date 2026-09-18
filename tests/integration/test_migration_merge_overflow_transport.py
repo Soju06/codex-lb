@@ -149,7 +149,7 @@ def branch_database(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[
         engine.dispose()
 
 
-def test_overflow_transport_merge_is_the_only_head_with_both_original_parents(tmp_path: Path) -> None:
+def test_overflow_transport_merge_is_on_single_head_path_with_both_original_parents(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.sqlite'}")
     script = ScriptDirectory.from_config(config)
     # Later revisions build on the merge; the graph must still have one head
@@ -192,6 +192,10 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     for column in added_columns:
         backfilled = {row.pop(column) for row in merged_settings}
         assert len(backfilled) == 1, (column, backfilled)
+        # The restored reset warm-up threshold is this branch's own addition: it
+        # must land on the requested 0.0 default instead of merely being uniform.
+        if column == "limit_warmup_reset_threshold_percent":
+            assert backfilled == {0.0}, (column, backfilled)
     # Revisions after the merge also *retire* dashboard_settings columns (the
     # legacy credential trio, once `dashboard_users` became the only authority).
     # A column that no longer exists carries no per-row state either, and it is

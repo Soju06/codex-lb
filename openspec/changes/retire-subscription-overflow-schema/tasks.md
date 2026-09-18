@@ -22,6 +22,14 @@
   plant `model_source_pins` with neither index, downgrade to the parent, and
   assert both indexes and both settings columns are back. Verified it fails on
   the pre-fix revision (0 indexes) and passes on the fixed one.
+- [x] State the drain requirement for the *upgrade* direction, not only for
+  rollback: every release below this one maps both settings columns and loads
+  the settings row whole, and the chart's migration Job is a `pre-upgrade` hook,
+  so pre-withdrawal replicas must be stopped before the drop commits. Recorded
+  in the revision docstring, the proposal, the spec delta and
+  `docs/deployment/kubernetes.md` (next to the legacy-credential drop's own
+  section). No pre-DDL warning is added: `check_legacy_credential_drop()` is
+  written around the credential columns, and generalizing it is separate work.
 - [x] Spec delta: `database-migrations` — MODIFIED "Overflow and transport
   migration heads converge without rewriting history" (anchored at the merge
   revision, with a scenario for continuing to head), ADDED "Withdrawn overflow

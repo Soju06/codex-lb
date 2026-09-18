@@ -12,6 +12,16 @@ fresh install created from current metadata) upgrades cleanly. The downgrade
 restores exactly what ``20260908_000000_add_subscription_overflow`` and
 ``20260911_000000_model_source_pins_kind_expires_index`` built, so the pair
 round-trips.
+
+**This upgrade is not rolling-safe.** Every release below this one maps both
+``dashboard_settings`` columns and loads the settings row as a whole entity, so
+its settings reads fail the moment the columns are gone -- and the chart's
+migration Job is a ``pre-upgrade`` hook, which runs before the new pods roll and
+therefore before the old ones drain. Pre-withdrawal replicas must be stopped
+before this runs; ``docs/deployment/kubernetes.md`` carries the procedure. It
+refuses nothing, and unlike ``20260912_010000_drop_legacy_dashboard_credentials``
+it says nothing either: that revision's pre-DDL drain warning in
+``app/db/migrate.py`` is written around the credential columns it protects.
 """
 
 from collections.abc import Sequence

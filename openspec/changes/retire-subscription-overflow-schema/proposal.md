@@ -82,9 +82,29 @@ None.
 - The three historical revisions stay in the graph unchanged. An install
   stopped below them still upgrades through them and then past them, so their
   own tests keep asserting what each revision builds at its own point.
-- Operators running a pre-withdrawal release against a database that has taken
-  this revision: the two settings columns are gone, so the old image's settings
-  read fails. Stand a rolled-back replica up **before** running the migration,
-  as with the legacy dashboard-credential drop.
+- **This upgrade is not rolling-safe, and the window opens on the way up, not
+  only on rollback.** Every release below this one maps both settings columns
+  and loads the settings row as one entity — `SettingsRepository.get_or_create()`
+  issues `session.get(DashboardSettings, 1)`, and the upstream-proxy resolver
+  issues `select(DashboardSettings)` — so a pod of an earlier release that is
+  still serving when the drop commits fails every settings read (PostgreSQL
+  `UndefinedColumn`). The chart's migration Job is a `pre-upgrade` hook
+  (`codex-lb.migrationHookPhases` resolves to `pre-upgrade` on every values
+  branch), so it runs *before* the new pods roll and therefore before the old
+  ones drain: an ordinary `helm upgrade` leaves that window open. Stop or scale
+  every pre-withdrawal replica to zero before this migration runs — or disable
+  the Job and run the migration by hand once the old colour is stopped — and do
+  not start a rolled-back replica while the drop is in flight. This is the same
+  rule, for the same reason, as the legacy dashboard-credential drop
+  (`20260912_010000`, shipped in v1.25.0-beta.9): an upgrade that crosses both
+  drops needs one stop, not two, but an install already on beta.9 or later
+  needs its own.
+- Unlike that drop, this revision adds no pre-DDL warning of its own.
+  `check_legacy_credential_drop()` in `app/db/migrate.py` is specific to the
+  credential revision — its message, its sentinel and its fresh-install
+  evidence all name those columns — and generalizing it into a table of
+  not-rolling-safe drops is a separate concern from retiring this storage. The
+  operator-facing procedure therefore lives in
+  `docs/deployment/kubernetes.md`, next to the credential drop's.
 
 Follow-up to the overflow withdrawal (#2123).

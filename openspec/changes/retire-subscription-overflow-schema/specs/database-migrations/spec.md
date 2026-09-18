@@ -79,6 +79,16 @@ already carries the table alone, MUST still end with both indexes present;
 riding the index steps along with table creation would strand such a database
 stamped at the parent with no index and no later step to build one.
 
+This upgrade MUST NOT be presented as rolling-safe. Every release below the
+retirement maps both settings columns and loads the settings row as one entity,
+so a replica of such a release that is still serving when the drop commits fails
+every settings read; the chart's migration Job runs as a `pre-upgrade` hook,
+which fires before the new pods roll and therefore before the old ones drain.
+The operator documentation MUST require stopping or scaling every
+pre-retirement replica to zero before this migration runs, MUST name the two
+dropped settings columns, and MUST state that a rolled-back replica MUST NOT be
+started while the drop is in flight.
+
 #### Scenario: Install below the overflow revisions upgrades straight to head
 
 - **GIVEN** a populated database stamped below
@@ -115,3 +125,17 @@ stamped at the parent with no index and no later step to build one.
 - **THEN** the revision MUST skip table creation and MUST still create both
   missing indexes
 - **AND** the restored schema MUST match the revision it downgraded to
+
+#### Scenario: Operator documentation requires the stop before the drop
+
+- **GIVEN** the Kubernetes deployment guide, whose upgrade path runs the
+  migration Job as a `pre-upgrade` hook
+- **WHEN** an operator upgrades from any release below the retirement
+- **THEN** the guide MUST tell them to stop or scale every pre-retirement
+  replica to zero before the migration runs, or to run the migration by hand
+  once the old colour is stopped
+- **AND** it MUST name `dashboard_settings.subscription_overflow_source_id` and
+  `subscription_overflow_drain_until` as the columns whose removal breaks an
+  earlier release's settings reads
+- **AND** it MUST state that no window is supported in which a pre-retirement
+  pod runs against the post-drop schema

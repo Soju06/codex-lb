@@ -9,6 +9,7 @@ from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
+from app.core.utils.masking import mask_email
 from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import (
@@ -66,14 +67,6 @@ def build_account_summaries(
         )
         for account in accounts
     ]
-
-
-def mask_email(email: str) -> str:
-    """Keep the first character of the local part and the domain: ``a***@example.com``."""
-
-    local, sep, domain = email.partition("@")
-    prefix = local[:1] if local else ""
-    return f"{prefix}***{sep}{domain}" if sep else f"{prefix}***"
 
 
 def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) -> set[tuple[str, str, str | None]]:

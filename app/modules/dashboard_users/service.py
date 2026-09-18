@@ -3,8 +3,7 @@
 Every mutation is attributed to the calling principal (``AuditActor``), bumps
 the ``dashboard_users`` cache namespace so peers drop their copy, and applies
 the invariants in one place: no self role/status change, at least one active
-admin preset, delegation subset checks, the compat ``admin`` lock, and the
-credential-required rule.
+admin preset, delegation subset checks, and the credential-required rule.
 """
 
 from __future__ import annotations
@@ -99,10 +98,6 @@ class SelfModificationForbiddenError(ValueError):
 
 
 class LastAdminProtectedError(ValueError):
-    pass
-
-
-class CompatUserLockedError(ValueError):
     pass
 
 
@@ -298,7 +293,13 @@ class DashboardUsersService:
 
     @staticmethod
     def _new_username(raw: str) -> str:
-        """Normalise and validate a username chosen for a person; ``admin`` stays the break-glass account's."""
+        """Normalise and validate a username chosen for a person; ``admin`` stays the break-glass account's.
+
+        The reservation is a rule about the *name*: the bootstrapped account
+        may be renamed away from it, and no account -- including that one --
+        may take it afterwards, so the name the recovery runbooks use can never
+        come to mean somebody else.
+        """
 
         username = normalize_username(raw)
         if not is_valid_username(username):
@@ -306,6 +307,19 @@ class DashboardUsersService:
         if username == COMPAT_ADMIN_USERNAME:
             raise InvalidUsernameError("'admin' is reserved for the local break-glass account")
         return username
+
+    @classmethod
+    def _renamed_username(
+        cls, user: DashboardUser, payload: DashboardUserUpdateRequest, fields: set[str]
+    ) -> str | None:
+        """The normalised new name, or ``None`` when the request does not rename."""
+
+        if "username" not in fields:
+            return None
+        if payload.username is None:
+            raise InvalidUsernameError("A username cannot be cleared")
+        username = cls._new_username(payload.username)
+        return None if username == user.username else username
 
     async def _expected_identity(self, payload: DashboardUserCreateRequest) -> ExpectedIdentityRequest | None:
         """Validate the SSO fields: they need an active non-password provider, and the
@@ -339,9 +353,10 @@ class DashboardUsersService:
     async def update_user(
         self, principal: DashboardPrincipal, user_id: str, payload: DashboardUserUpdateRequest, *, actor_ip: str | None
     ) -> UserListing:
-        """Rules, in this order: compat lock, self, invite pending, externally
-        managed role, delegation (new role), act-on (current role), last admin,
-        last qualifying break-glass, credential required."""
+        """Rules, in this order: self, invite pending, externally managed role,
+        delegation (new role), act-on (current role), last admin, last
+        qualifying break-glass, credential required. The account the install
+        bootstrapped is subject to exactly these and to nothing else."""
 
         caller_id = self._require_account(principal)
         await self._purge_expired()
@@ -356,8 +371,13 @@ class DashboardUsersService:
             if payload.is_break_glass is not None and payload.is_break_glass != user.is_break_glass
             else None
         )
-        if (role_changes or new_status is not None) and user.username == COMPAT_ADMIN_USERNAME:
-            raise CompatUserLockedError("The migrated 'admin' account keeps its role and status in this release")
+        # A rename is not a role or status change: it is allowed on the
+        # caller's own account and never moves ``session_generation``. It is
+        # validated up front so a taken or reserved name is refused before any
+        # other field is applied.
+        new_username = self._renamed_username(user, payload, fields)
+        if new_username is not None and await self._repo.get_by_username(new_username) is not None:
+            raise UsernameTakenError("Username is already taken")
         if (role_changes or new_status is not None) and is_self:
             raise SelfModificationForbiddenError("You cannot change your own role or status")
         if new_status is not None and user.status == DashboardUserStatus.INVITED.value:
@@ -417,10 +437,13 @@ class DashboardUsersService:
             )
 
         old_role_slug = user.role.slug
+        old_username = user.username
         new_role_slug = new_role.slug if new_role is not None else None
         key_hashes: list[str] = []
         try:
             profile_changed = await self._apply_profile(user, payload, fields)
+            if new_username is not None:
+                user.username = new_username
             if new_status == DashboardUserStatus.DISABLED.value:
                 key_hashes = await self._repo.deactivate_owned_keys(user.id)
             if overridden_source is not None or designation_after:
@@ -456,10 +479,22 @@ class DashboardUsersService:
             user = await self._repo.commit_user(user.id, bump_generation=bump)
         except IntegrityError as exc:
             await self._repo.rollback()
+            # A concurrent writer took the name or the address between the
+            # pre-check and this commit; the unique index says which.
+            if new_username is not None and await self._repo.conflicting_field(new_username, None) == "username":
+                raise UsernameTakenError("Username is already taken") from exc
             raise EmailTakenError("E-mail is already in use") from exc
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
 
+        if new_username is not None:
+            self._audit(
+                "user_renamed",
+                principal,
+                user.id,
+                actor_ip,
+                {"username": user.username, "from": old_username, "to": user.username},
+            )
         if profile_changed or designation is not None:
             self._audit(
                 "user_updated",
@@ -527,8 +562,6 @@ class DashboardUsersService:
         user = await self._get(user_id)
         if user.id == caller_id:
             raise SelfModificationForbiddenError("You cannot delete your own account")
-        if user.username == COMPAT_ADMIN_USERNAME:
-            raise CompatUserLockedError("The migrated 'admin' account cannot be deleted in this release")
         counts_as_admin = _is_active(user) and _is_admin_preset(user)
         if counts_as_admin:
             await self._assert_other_active_admin(user.id)
@@ -600,40 +633,59 @@ class DashboardUsersService:
         account PATCH — the SCIM ``active=false`` endpoint of Phase 3b and the
         identity resolver — so none of them can bypass the break-glass guard.
         A refusal audits ``scim_deprovision_refused`` next to raising, because
-        the caller is a machine whose 409 nobody reads. Returns ``False`` when
-        the account was already inactive (nothing to do, nothing audited).
+        the caller is a machine whose 409 nobody reads.
+
+        An account that never accepted its invitation is deactivated rather
+        than ignored: its invite is deleted in this same transaction and the
+        row moves to ``disabled``. A human revoke deletes such an account
+        outright, which a back channel must not do — the caller has to keep
+        finding that person by the name it pushed — and an ``sso_only`` invite
+        never expires, so ignoring it would leave a way in open forever.
+        Returns ``False`` when the account was already inactive (nothing to do,
+        nothing audited), which is what makes a redelivered push idempotent.
         """
 
         await self._repo.acquire_write_intent()
         user = await self._get(user_id)
-        if not _is_active(user):
+        invited = user.status == DashboardUserStatus.INVITED.value
+        if not _is_active(user) and not invited:
             return False
+        # An invited account is not active, so it counts for neither invariant:
+        # the guards below read the same way the account PATCH reads them.
+        counts_as_admin = _is_active(user) and _is_admin_preset(user)
+        # Read off the row while it is still loaded: a rollback below expires
+        # every attribute, and reading one back then is synchronous IO in an
+        # async context — the refusal would surface as a driver error.
+        username = user.username
+        role_id = user.role_id
         try:
             guarded = await self.assert_break_glass_remains(user, status=DashboardUserStatus.DISABLED.value)
         except LastBreakGlassProtectedError:
-            AuditService.log_async(
-                "scim_deprovision_refused",
-                actor_ip=actor_ip,
-                details={"username": user.username, "source": source, "reason": "last_break_glass_protected"},
-                actor=actor,
-                target=AuditTarget("user", user.id),
-                severity=AuditSeverity.WARNING,
-            )
+            self._audit_deprovision_refused(user_id, username, actor=actor, actor_ip=actor_ip, source=source)
             raise
-        if _is_admin_preset(user):
-            await self._assert_other_active_admin(user.id)
-        key_hashes = await self._repo.deactivate_owned_keys(user.id)
+        if counts_as_admin:
+            await self._assert_other_active_admin(user_id)
+        key_hashes = await self._repo.deactivate_owned_keys(user_id)
+        invite_deleted = await self._repo.delete_invite(user_id) if invited else False
         if not await self._repo.update_role_status_guarded(
-            user.id,
-            role_id=user.role_id,
+            user_id,
+            role_id=role_id,
             status=DashboardUserStatus.DISABLED.value,
-            require_other_admin=_is_admin_preset(user),
+            require_other_admin=counts_as_admin,
             require_other_break_glass=guarded,
         ):
+            # Which invariant actually lost is a re-read, not a guess: both
+            # predicates rode into the one UPDATE, and naming the wrong one
+            # sends the operator to fix an account that was never the problem.
             await self._repo.rollback()
-            raise LastAdminProtectedError("At least one active admin account must remain")
-        username = user.username
-        await self._repo.commit_user(user.id, bump_generation=True)
+            if counts_as_admin and await self._repo.count_active_admins(exclude_user_id=user_id) == 0:
+                raise LastAdminProtectedError("At least one active admin account must remain")
+            self._audit_deprovision_refused(user_id, username, actor=actor, actor_ip=actor_ip, source=source)
+            raise LastBreakGlassProtectedError(
+                "This is the only emergency account that can still sign in while local sign-in is restricted; "
+                "designate another admin with two-factor first"
+            )
+        await self._repo.commit_user(user_id, bump_generation=True)
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
         AuditService.log_async(
@@ -650,6 +702,92 @@ class DashboardUsersService:
             actor=actor,
             target=AuditTarget("user", user_id),
         )
+        if invite_deleted:
+            # The same action the management side writes when an invitation
+            # stops being usable, so one search answers "when did this link
+            # die" whoever killed it.
+            AuditService.log_async(
+                "invite_revoked",
+                actor_ip=actor_ip,
+                details={"username": username, "source": source},
+                actor=actor,
+                target=AuditTarget("user", user_id),
+            )
+        return True
+
+    def _audit_deprovision_refused(
+        self, user_id: str, username: str, *, actor: AuditActor, actor_ip: str | None, source: str
+    ) -> None:
+        """One row per refusal, written where the refusal is raised.
+
+        Both places that raise it are inside :meth:`deactivate_user`, so the
+        machine caller that maps the exception to its own envelope adds
+        nothing: a second row written there would double-count every refused
+        leaver. It takes plain values rather than the row because one caller
+        has already rolled the transaction back.
+        """
+
+        AuditService.log_async(
+            "scim_deprovision_refused",
+            actor_ip=actor_ip,
+            details={"username": username, "source": source, "reason": "last_break_glass_protected"},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+            severity=AuditSeverity.WARNING,
+        )
+
+    async def reactivate_user(
+        self,
+        user_id: str,
+        *,
+        actor: AuditActor,
+        actor_ip: str | None,
+        source: str,
+    ) -> bool:
+        """Re-enable an account through one back-channel: status, commit, then the owner keys.
+
+        The principal-free twin of :meth:`deactivate_user`, for callers that are
+        machines rather than people — the SCIM ``active=true`` push. Fabricating
+        a :class:`DashboardPrincipal` to reuse the administrative
+        :meth:`reactivate_keys` instead would hand a bearer token a blanket
+        ``assert_can_act_on`` bypass over every account on the install, which is
+        exactly the escalation this separation exists to prevent.
+
+        The two halves are ordered, not merged: the restoring ``UPDATE`` reads
+        the owner's status in an ``EXISTS`` predicate, so the status flip has to
+        be committed before it runs or it would restore nothing. Only keys the
+        owner cascade turned off come back; an administrator's explicit revoke
+        (``manual``) and an expiry are never resurrected. Returns ``False`` when
+        the account was already active (nothing written, nothing audited).
+        """
+
+        await self._repo.acquire_write_intent()
+        user = await self._get(user_id)
+        if _is_active(user):
+            return False
+        if user.status == DashboardUserStatus.INVITED.value:
+            raise InvitePendingError("The account has not accepted its invitation yet")
+        username = user.username
+        user.status = DashboardUserStatus.ACTIVE.value
+        await self._repo.commit_user(user.id)
+        await self._invalidate_users()
+        AuditService.log_async(
+            "user_enabled",
+            actor_ip=actor_ip,
+            details={"username": username, "source": source},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+        )
+        key_hashes = await self._repo.reactivate_owner_disabled_keys(user.id)
+        if key_hashes:
+            await self._invalidate_api_keys(key_hashes)
+            AuditService.log_async(
+                "user_keys_reactivated",
+                actor_ip=actor_ip,
+                details={"count": len(key_hashes), "source": source},
+                actor=actor,
+                target=AuditTarget("user", user_id),
+            )
         return True
 
     # --- invites (management side) ---
@@ -714,10 +852,6 @@ class DashboardUsersService:
         user = await self._get(user_id)
         if user.id == caller_id:
             raise SelfModificationForbiddenError("Disable your own TOTP through /totp/disable")
-        if user.username == COMPAT_ADMIN_USERNAME and (await self._auth.get_settings()).totp_required_on_login:
-            # A previous-release replica reads the legacy columns: without a
-            # secret and with the policy on it would refuse this account forever.
-            raise CompatUserLockedError("Turn off 'require TOTP on login' before resetting the 'admin' account's TOTP")
         assert_can_act_on(principal.grants, resolve_role_grants(user.role))
         await self.assert_break_glass_remains(user, has_totp=False)
         await self._auth.set_user_totp_secret(user.id, None, bump_generation=True, preserve_policy=True)

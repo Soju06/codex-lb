@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   externalProviders,
   isLocalLoginRequested,
+  isSignInFailureRequested,
   localFormDisclosure,
   LOCAL_LOGIN_URL,
 } from "@/features/auth/local-login";
@@ -32,6 +33,27 @@ describe("isLocalLoginRequested", () => {
 
   it("matches the URL the login-policy card hands out", () => {
     expect(isLocalLoginRequested(LOCAL_LOGIN_URL.slice(LOCAL_LOGIN_URL.indexOf("?")))).toBe(true);
+  });
+});
+
+describe("isSignInFailureRequested", () => {
+  it("recognises the marker the server redirects a failed company sign-in to", () => {
+    expect(isSignInFailureRequested("?sso=failed")).toBe(true);
+    expect(isSignInFailureRequested("sso=failed")).toBe(true);
+    expect(isSignInFailureRequested("?local=1&sso=failed")).toBe(true);
+  });
+
+  it("is false for anything else, including a value that only looks like it", () => {
+    expect(isSignInFailureRequested("")).toBe(false);
+    expect(isSignInFailureRequested("?sso=1")).toBe(false);
+    expect(isSignInFailureRequested("?sso=failure")).toBe(false);
+    expect(isSignInFailureRequested("?ssofailed=1")).toBe(false);
+  });
+
+  it("matches the destination the backend names, and the two questions stay separate", () => {
+    // `OIDC_FAILURE_PATH` in app/modules/dashboard_auth/oidc_api.py.
+    expect(isSignInFailureRequested("?sso=failed")).toBe(true);
+    expect(isLocalLoginRequested("?sso=failed")).toBe(false);
   });
 });
 

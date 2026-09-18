@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { rememberFlow } from "@/features/auth/oidc-window";
 import { createDashboardAuthSession } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
@@ -24,6 +25,7 @@ function restrictedSession() {
             providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }, PROXY],
             localLogin: "break_glass_only",
             pendingIdentity: false,
+            pendingArrival: null,
           },
         }),
       ),
@@ -34,6 +36,7 @@ function restrictedSession() {
 describe("/login with the real routes", () => {
   afterEach(() => {
     window.history.pushState({}, "", "/");
+    window.sessionStorage.clear();
     useAuthStore.setState({ ...useAuthStore.getInitialState(), initialized: false });
   });
 
@@ -64,5 +67,19 @@ describe("/login with the real routes", () => {
 
     await waitFor(() => expect(window.location.pathname).toBe("/dashboard"));
     expect(screen.queryByText("Page not found")).not.toBeInTheDocument();
+  });
+
+  // The server ends a failed sign-in flow at the login screen. For a pre-flight
+  // the browser refused a window to, that lands the still-signed-in operator
+  // there in the tab they started from, and the dashboard is a page away from
+  // the card that is waiting to tell them what happened.
+  it("returns a same-tab sign-in flow that failed to the card that started it", async () => {
+    rememberFlow({ providerId: "provider_oidc", purpose: "test-login", verifiedAt: null });
+    window.history.pushState({}, "", "/login?sso=failed");
+
+    renderWithProviders(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/settings"));
+    expect(`${window.location.search}${window.location.hash}`).toBe("?org=1#oidc");
   });
 });

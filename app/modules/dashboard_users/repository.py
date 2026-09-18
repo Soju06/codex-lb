@@ -148,6 +148,23 @@ class DashboardUsersRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def has_identity(self, user_id: str, *, provider: str, provider_key: str) -> bool:
+        """Whether this account holds any identity on that provider.
+
+        The other direction of :meth:`get_identity`, and deliberately a bare
+        existence check: the caller (step-up availability) needs to know that
+        the provider can vouch for the account, not which subject it uses.
+        """
+
+        stmt = (
+            select(DashboardIdentity.id)
+            .where(DashboardIdentity.user_id == user_id)
+            .where(DashboardIdentity.provider == provider)
+            .where(DashboardIdentity.provider_key == provider_key)
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def list_users(self) -> Sequence[DashboardUser]:
         stmt = _user_query().order_by(DashboardUser.created_at.asc(), DashboardUser.id.asc())
         return (await self._session.execute(stmt)).scalars().all()
@@ -478,6 +495,27 @@ class DashboardUsersRepository:
             if (await self._session.execute(taken)).first() is not None:
                 return "email"
         return None
+
+    async def delete_invite(self, user_id: str) -> bool:
+        """Delete the account's invite row and keep the account (no commit); ``False`` = there was none.
+
+        The one primitive nothing else offers. A human revoke on an account
+        that never accepted deletes the account too, and the lazy purge does
+        the same; a back-channel deactivation must leave the row behind,
+        because the caller has to keep finding that person afterwards. The
+        DELETE is not conditional on the invite still being live: an account
+        moving out of ``invited`` has no use for a spent one either, and
+        leaving it would strand a row the purge — which only looks at
+        ``invited`` accounts — would never reach again.
+        """
+
+        deleted = await self._session.execute(
+            delete(DashboardUserInvite)
+            .where(DashboardUserInvite.user_id == user_id)
+            .returning(DashboardUserInvite.id)
+            .execution_options(synchronize_session=False)
+        )
+        return deleted.scalar_one_or_none() is not None
 
     async def purge_expired_invited_users(self, now: datetime) -> int:
         """Delete ``invited`` accounts whose invite expired (row + invite); returns how many.

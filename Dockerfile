@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.12 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.13 AS uv-bin
 
 FROM rust:1.96.0-slim-bookworm AS native-egress-build
 
@@ -51,8 +51,9 @@ WORKDIR /app
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
-        bsdutils libblkid1 libc-bin libc6 libcap2 libmount1 libsmartcols1 libssl3t64 \
-        libsystemd0 libudev1 libuuid1 openssl sed util-linux \
+        bsdutils gzip libblkid1 libc-bin libc6 libcap2 libmount1 libpcre2-8-0 \
+        libsmartcols1 libsqlite3-0 libssl3t64 \
+        libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
     && rm -rf /var/lib/apt/lists/*

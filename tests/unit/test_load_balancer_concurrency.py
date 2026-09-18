@@ -3251,6 +3251,37 @@ async def test_select_account_forwards_exclusions_to_sticky_selection_request(
 
 
 @pytest.mark.asyncio
+async def test_isolated_and_excluded_prompt_cache_owner_keeps_its_mapping() -> None:
+    """Isolation must not convert a request-local spillover into a rebind: an
+    owner excluded by this request's own retry loop keeps its mapping whether
+    or not it is also isolated for overload."""
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-isolated-excluded")
+    assert alternate is not None
+    thread_key = "thread-isolated-excluded-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+
+    selected = await balancer.select_account(
+        **_thread_row_kwargs(thread_key),
+        exclude_account_ids={owner.id},
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    # Kept, not rebound -- and kept *alive*: the row is rewritten onto its own
+    # owner so a 1800 s TTL cannot expire it inside a 1800 s isolation window.
+    assert sticky_repo.upserts == [(thread_key, owner.id, StickySessionKind.PROMPT_CACHE)]
+    assert sticky_repo.deleted == []
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_security_work_excluded_prompt_cache_owner_is_rebound() -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-security-excluded")
     assert alternate is not None
@@ -3384,7 +3415,7 @@ async def test_excluded_prompt_cache_owner_not_in_pool_is_rebound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_isolated_and_capped_prompt_cache_owner_is_rebound() -> None:
+async def test_isolated_and_capped_prompt_cache_owner_keeps_its_mapping() -> None:
     balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-isolated-capped")
     assert alternate is not None
     thread_key = "thread-isolated-capped-key"
@@ -3396,6 +3427,193 @@ async def test_isolated_and_capped_prompt_cache_owner_is_rebound() -> None:
         overload_backoff_level=3,
         overload_last_trip_at=now,
     )
+    saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
+
+    selected = await balancer.select_account(**_thread_row_kwargs(thread_key))
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    # Request-local release: the alternate serves the turn and the thread row
+    # still points at the isolated owner, so the thread returns home once
+    # isolation lifts instead of gaining a permanent new owner.
+    # Kept, not rebound -- and kept *alive*: the row is rewritten onto its own
+    # owner so a 1800 s TTL cannot expire it inside a 1800 s isolation window.
+    assert sticky_repo.upserts == [(thread_key, owner.id, StickySessionKind.PROMPT_CACHE)]
+    for lease in [*saturated_leases, selected.lease]:
+        await balancer.release_account_lease(lease)
+
+
+def _make_probing_pool_balancer(
+    prefix: str,
+    *,
+    probing_count: int = 3,
+) -> tuple[LoadBalancer, Account, Account, _StubStickySessionsRepository]:
+    """An owner, one healthy sibling, and several due PROBING siblings."""
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    owner = _make_account(f"{prefix}-owner")
+    healthy = _make_account(f"{prefix}-healthy")
+    probing = [_make_account(f"{prefix}-probing-{index}") for index in range(probing_count)]
+    accounts = [owner, healthy, *probing]
+    usage_rows = {
+        account.id: _usage_row(index + 100, account.id, window="primary", reset_at=now_epoch + 300)
+        for index, account in enumerate(accounts)
+    }
+    secondary_rows = {
+        account.id: _usage_row(index + 200, account.id, window="secondary", reset_at=now_epoch + 3600)
+        for index, account in enumerate(accounts)
+    }
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_id = owner.id
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository(accounts),
+            _StubUsageRepository(usage_rows, secondary_rows),
+            sticky_repo,
+        )
+    )
+    for index, account in enumerate(probing):
+        balancer._runtime[account.id] = RuntimeState(
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=balancer._clock.time() - PROBE_QUIET_SECONDS * 10 - index,
+        )
+    return balancer, owner, healthy, sticky_repo
+
+
+@pytest.mark.asyncio
+async def test_a_retained_release_is_counted_once_admission_succeeded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counter is emitted from the admitted path, not from selection.
+
+    Selection can still lose its candidate to a concurrent lease, or be retried
+    on stale account state; a release that never served must not appear in the
+    metric the accounts-per-conversation change is judged by, and a retried
+    attempt must not appear twice.
+    """
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-counted-release")
+    assert alternate is not None
+    thread_key = "thread-counted-release-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.load_balancer")
+    selected = await balancer.select_account(**_thread_row_kwargs(thread_key))
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    messages = [record.getMessage() for record in caplog.records]
+    retained = [message for message in messages if "sticky_owner_overload_isolation_reroute" in message]
+    assert len(retained) == 1, messages
+    assert "mapping=retained" in retained[0]
+    assert owner.id not in retained[0] and alternate.id not in retained[0]
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_retained_thread_does_not_rotate_through_due_probes() -> None:
+    """The public routing path, with probing siblings in the pool.
+
+    A recovery probe is the one admission that is *meant* to move: the due
+    probe is whichever probing account went quiet longest, so admitting one
+    advances its clock and hands the next turn to a sibling. A retained thread
+    following that rotation would fan out across the pool exactly as the
+    rebinding it replaces did.
+    """
+
+    balancer, owner, healthy, sticky_repo = _make_probing_pool_balancer("thread-probe-rotation")
+    thread_key = "thread-probe-rotation-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+
+    picks = []
+    for _ in range(8):
+        selected = await balancer.select_account(**_thread_row_kwargs(thread_key))
+        assert selected.account is not None, selected.error_message
+        picks.append(selected.account.id)
+        await balancer.release_account_lease(selected.lease)
+
+    assert set(picks) == {healthy.id}, picks
+    # Retained throughout: every write is a refresh onto the isolated owner.
+    assert {upsert[1] for upsert in sticky_repo.upserts} == {owner.id}
+    assert sticky_repo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_an_isolated_owner_dropped_before_selection_is_still_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The counter has to see releases it never gets a state for.
+
+    ``_selectable_accounts`` removes paused and deactivated accounts before
+    states are built, so an isolated owner in that condition never reaches
+    selection at all -- yet its mapping is still rebound, which is exactly the
+    permanent half of what isolation does to a conversation.
+    """
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-isolated-offpool")
+    assert alternate is not None
+    thread_key = "thread-isolated-offpool-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    owner.status = AccountStatus.PAUSED
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.load_balancer")
+    selected = await balancer.select_account(**_thread_row_kwargs(thread_key))
+
+    assert selected.account is not None
+    assert selected.account.id == alternate.id
+    assert sticky_repo.upserts == [(thread_key, alternate.id, StickySessionKind.PROMPT_CACHE)]
+    messages = [record.getMessage() for record in caplog.records]
+    released = [message for message in messages if "sticky_owner_overload_isolation_reroute" in message]
+    assert len(released) == 1, messages
+    assert "mapping=rebound" in released[0]
+    assert owner.id not in released[0] and alternate.id not in released[0]
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_capped_prompt_cache_owner_that_is_gone_is_rebound() -> None:
+    """Retention is for owners that come back.
+
+    A capped owner is absent from the selection states whatever its status, so
+    the decision has to be made here, where the pre-cap states are still
+    visible: a paused owner would otherwise keep its mapping -- and, while it
+    is also isolated, keep it refreshed -- forever.
+    """
+
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-capped-paused")
+    assert alternate is not None
+    thread_key = "thread-capped-paused-key"
+    sticky_repo.account_ids_by_key = {thread_key: owner.id}
+    owner.status = AccountStatus.PAUSED
+    now = balancer._clock.time()
+    balancer._runtime[owner.id] = RuntimeState(
+        overload_backoff_until=now + 900.0,
+        overload_isolated_until=now + 900.0,
+        overload_backoff_level=3,
+        overload_last_trip_at=now,
+    )
+    # Capped as well, so the owner leaves the selection states for a reason
+    # that on its own would have preserved the mapping.
     saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="stream") for _ in range(8)]
 
     selected = await balancer.select_account(**_thread_row_kwargs(thread_key))

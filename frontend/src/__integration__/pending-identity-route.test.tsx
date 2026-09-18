@@ -24,7 +24,7 @@ describe("/auth/pending with the real routes", () => {
             authMode: "trusted_header",
             role: "guest",
             permissions: [],
-            login: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true },
+            login: { usernameField: "shown", providers: [], localLogin: "enabled", pendingIdentity: true, pendingArrival: null },
           }),
         ),
       ),

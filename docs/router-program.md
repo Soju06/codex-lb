@@ -218,3 +218,41 @@ returns `opus-seat`, the pulse fires in a fresh session.
   watchdog forbid it.) The health route is `/health`; `/api/health` is 404.
 - `route learn` on a fixture ledger with 10 failing closeouts proposes the
   demotion; with 9 it does not.
+
+## CLOSEOUT (2026-09-19 22:35 UTC)
+
+Outcome: deployed and live. Lanes S1, S2, S3 landed on `lane/router`; each
+was verified cross-vendor on Codex Sol xhigh (read-only) and the substantive
+findings were fixed (closeout double-close, pools `source` order, doctor
+false-negative on 429). Runtime deploy: `~/.agent-lb/runtime/backups/router-20260919T222049`,
+sync.log line `selective deploy router-pools source=e9d6c1d9`.
+
+Proven live (this session, receipts in the LB session map and
+`~/.claude/logs/dispatch.jsonl`):
+- `GET /api/pools`: fable `source: scoped_marker`, 1/5 eligible, headroom 89%.
+- `route doctor --write`: exit 0, all seats ok, Opus by `recent_success`.
+- `route pick implement` → opus-seat; `explore` → Explore/claude-sonnet-5;
+  `mechanical` → cursor-seat/grok; `verify --author-vendor anthropic` →
+  codex-verifier. Never an Anthropic verifier for Anthropic-authored work.
+- Ledger: a real Opus subagent wrote a dispatch row and a closeout row.
+- Pulse: fires in 0.2s with the session's Fable-per-hour number.
+- launchd `com.aneyman.route-doctor` loaded, last exit 0, every 30 min.
+
+Unverified: `route learn` on real data (needs ≥10 closeouts per class; only a
+synthetic ledger has exercised the demotion path); the pulse in a session other
+than this one; L4 dashboard strip (not built).
+
+Known imprecision: closeout `ok` is a regex read of the subagent's last
+message; the doctor's 1-token probe cannot reproduce real-session routing
+(bare requests 429 while sessions succeed), so it is a secondary signal only.
+
+Not this lane's: repo-wide `ruff format --check` (28 files) and `ruff check .`
+(3 errors) were red on `main` before this program; `clients/*` have no `.py`
+extension so the repo gate never lints them; the main checkout carries 65
+uncommitted files from other work.
+
+Security note: the deploy seat printed `AGENT_LB_FEDERATION_TOKEN` into its
+own transcript while reading the launchd plist. Rotation is Alex's call.
+
+Next exact step: after a day of real dispatches, `route report --days 1`, then
+`route learn` (dry run) and read the proposal before `--apply`.

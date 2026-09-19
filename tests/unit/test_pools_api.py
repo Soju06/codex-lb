@@ -123,6 +123,41 @@ def test_one_fresh_marker_makes_the_pool_authoritative_and_mixes_per_account() -
     assert pool.aggregate_remaining_percent == 60.0
 
 
+def test_a_held_account_marker_still_names_the_source() -> None:
+    """C1 reads `source` off any fresh marker, usable or not: a paused account
+    still proves the vendor's scoped signal is arriving, and the headroom must
+    keep coming from the usable accounts only."""
+    summaries = [
+        _summary("paused", status="paused", scoped_used_percent=20.0, secondary_remaining=100.0),
+        _summary("live", secondary_remaining=40.0, fable_eligible=True),
+    ]
+
+    pool = _pool(build_pools(summaries), "anthropic-fable")
+
+    assert pool.source == "scoped_marker"
+    assert pool.eligible_accounts == 1
+    assert pool.headroom_percent == 40.0
+    assert pool.aggregate_remaining_percent == 40.0
+
+
+def test_a_canceled_account_marker_also_names_the_source() -> None:
+    summaries = [
+        _summary("canceled", subscription_status="canceled", scoped_used_percent=20.0),
+        _summary("live", secondary_remaining=40.0, fable_eligible=True),
+    ]
+
+    assert _pool(build_pools(summaries), "anthropic-fable").source == "scoped_marker"
+
+
+def test_only_stale_markers_on_held_accounts_stay_heuristic() -> None:
+    summaries = [
+        _summary("paused", status="paused", scoped_used_percent=20.0, scoped_fresh=False),
+        _summary("live", secondary_remaining=40.0, fable_eligible=True),
+    ]
+
+    assert _pool(build_pools(summaries), "anthropic-fable").source == "weekly_heuristic"
+
+
 def test_no_weekly_sample_counts_as_a_fresh_window() -> None:
     pool = _pool(build_pools([_summary("a", fable_eligible=True)]), "anthropic-fable")
 

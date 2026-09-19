@@ -119,17 +119,20 @@ def _fable_pool(anthropic: list[AccountSummary]) -> PoolSummary:
     """The Fable-scoped pool, read the way the balancer reads eligibility.
 
     Per account: Anthropic's own Fable-scoped marker when it is fresh, else the
-    overall-weekly window. `source` reports which signal carried the pool — a
-    single fresh marker anywhere is enough to make the pool authoritative.
+    overall-weekly window. `source` answers a different question — whether the
+    vendor's scoped signal is arriving at all — so it is read across every
+    Anthropic account with a marker, including ones held out of the arithmetic.
+    A paused account still proves the refresh pipeline is alive.
     """
+    saw_fresh_marker = any(
+        summary.fable_scoped_weekly is not None and summary.fable_scoped_weekly.fresh for summary in anthropic
+    )
     candidates: list[_Candidate] = []
-    saw_fresh_marker = False
     for summary in anthropic:
         if not is_pool_usable(summary):
             continue
         marker = summary.fable_scoped_weekly
         if marker is not None and marker.fresh:
-            saw_fresh_marker = True
             candidates.append(
                 _Candidate(
                     remaining_percent=max(0.0, 100.0 - float(marker.used_percent)),

@@ -9,14 +9,17 @@ from typing import Any, cast
 import aiohttp
 import httpx
 from aiohttp_socks import ProxyConnector
-from fastapi import APIRouter, Body, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Request
 from python_socks import ProxyType
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.core.audit.service import AuditService
-from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
+from app.core.audit.service import AuditActor, AuditService, AuditSeverity, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole, Permission
 from app.core.auth.dependencies import (
+    ensure_dashboard_permission,
+    ensure_step_up,
+    require_dashboard_permission,
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
@@ -32,17 +35,27 @@ from app.core.config.dashboard_overrides import DASHBOARD_TIMEOUT_SETTINGS
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
+from app.core.config.spool_retention import (
+    OPERATION_SPOOL_RETENTION_SETTING,
+    SPOOL_RETENTION_FLOOR_INPUTS,
+    binding_spool_retention_floor_term,
+    operation_spool_retention_floor_seconds,
+)
 from app.core.conversation_archive import CONVERSATION_ARCHIVE_SETTING, CONVERSATION_ARCHIVE_TOGGLED_ACTION
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError, DashboardSettingsConflictError
+from app.core.exceptions import (
+    DashboardBadRequestError,
+    DashboardConflictError,
+    DashboardNotFoundError,
+    DashboardSettingsConflictError,
+)
 from app.core.resilience.toggles import RESILIENCE_TOGGLE_SETTINGS
 from app.core.timeout_invariants import find_timeout_invariant_violations
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint, sends_plaintext_credentials
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
-from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
     get_account_selection_cache,
@@ -50,17 +63,18 @@ from app.modules.proxy.account_cache import (
 )
 from app.modules.settings.repository import ModelContextWindowOverridesRepository
 from app.modules.settings.schemas import (
+    SECURITY_SETTINGS_FIELDS,
     AccountProxyBindingRequest,
     AccountProxyBindingResponse,
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    LocalLoginPolicyLiteral,
     ModelContextWindowOverrideResponse,
     ModelContextWindowOverridesResponse,
     ModelContextWindowOverrideUpsertRequest,
     RuntimeConnectAddressResponse,
     SettingProvenance,
-    SubscriptionOverflowPreflightResponse,
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
     UpstreamProxyEndpointResponse,
@@ -70,12 +84,6 @@ from app.modules.settings.schemas import (
     UpstreamProxyPoolResponse,
 )
 from app.modules.settings.service import DashboardSettingsUpdateData
-from app.modules.settings.subscription_overflow import (
-    load_subscription_overflow_preflight,
-    resolve_drain_until,
-    resolve_pins_expire_by,
-    validate_overflow_source,
-)
 from app.modules.usage.additional_quota_keys import (
     get_additional_quota_routing_policy,
     list_additional_quota_definitions,
@@ -188,6 +196,8 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         upstream_stream_transport=settings.upstream_stream_transport,
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
+        thread_cache_identity_mode=settings.thread_cache_identity_mode,
+        thread_cache_identity_mode_override=settings.thread_cache_identity_mode_override,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
         proxy_account_response_create_limit_environment_value=(
             getattr(
@@ -242,9 +252,6 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
         single_account_id=settings.single_account_id,
-        subscription_overflow_source_id=settings.subscription_overflow_source_id,
-        subscription_overflow_drain_until=settings.subscription_overflow_drain_until,
-        subscription_overflow_pins_expire_by=resolve_pins_expire_by(settings.subscription_overflow_drain_until),
         openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
         dashboard_session_ttl_seconds=settings.dashboard_session_ttl_seconds,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
@@ -262,7 +269,10 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         warmup_model=settings.warmup_model,
         import_without_overwrite=settings.import_without_overwrite,
         totp_required_on_login=settings.totp_required_on_login,
-        totp_configured=settings.totp_configured,
+        totp_required_for_admin_role=settings.totp_required_for_admin_role,
+        local_login_policy=cast(LocalLoginPolicyLiteral, settings.local_login_policy),
+        users_without_totp_count=settings.users_without_totp_count,
+        admins_without_totp_count=settings.admins_without_totp_count,
         api_key_auth_enabled=settings.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
@@ -296,6 +306,15 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         conversation_archive_enabled=settings.conversation_archive_enabled,
         conversation_archive_dir=conversation_archive_dir,
         # end M5 conversation archive
+        # R2 spool retention: the effective window plus the floor the API would
+        # enforce, so the data retention card can mirror the check client-side.
+        http_responses_session_bridge_operation_spool_retention_seconds=(
+            settings.http_responses_session_bridge_operation_spool_retention_seconds
+        ),
+        http_responses_session_bridge_operation_spool_retention_floor_seconds=(
+            operation_spool_retention_floor_seconds(settings, startup_settings=environment_settings)
+        ),
+        # end R2 spool retention
         version=settings.version,
         # C2-1 timeouts
         upstream_connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
@@ -324,35 +343,24 @@ async def get_settings(
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
-    settings = await context.service.get_settings()
+    settings = await context.service.get_settings(actor_user_id=principal.user_id)
     return _dashboard_settings_response(settings, principal=principal)
 
 
-@router.get("/subscription-overflow/preflight", response_model=SubscriptionOverflowPreflightResponse)
-async def get_subscription_overflow_preflight(
-    source_id: str = Query(min_length=1, max_length=255),
-    _write_access=Depends(require_dashboard_write_access),
-    context: SettingsContext = Depends(get_settings_context),
-) -> SubscriptionOverflowPreflightResponse:
-    # Write access rather than session-only: the report enumerates the source
-    # catalog and key scoping, which a read-only guest must not see.
-    settings = await context.repository.get_or_create()
-    preflight = await load_subscription_overflow_preflight(
-        context.session,
-        source_id,
-        drain_until=settings.subscription_overflow_drain_until,
-    )
-    if preflight is None:
-        raise DashboardNotFoundError("Model source not found")
-    return preflight
-
-
-@router.get("/runtime/connect-address", response_model=RuntimeConnectAddressResponse)
+@router.get(
+    "/runtime/connect-address",
+    response_model=RuntimeConnectAddressResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_runtime_connect_address(request: Request) -> RuntimeConnectAddressResponse:
     return RuntimeConnectAddressResponse(connect_address=_resolve_runtime_connect_address(request))
 
 
-@router.get("/upstream-proxy", response_model=UpstreamProxyAdminResponse)
+@router.get(
+    "/upstream-proxy",
+    response_model=UpstreamProxyAdminResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.OPS_WRITE))],
+)
 async def get_upstream_proxy_admin(
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyAdminResponse:
@@ -393,7 +401,7 @@ async def get_upstream_proxy_admin(
 @router.post("/upstream-proxy/endpoints", response_model=UpstreamProxyEndpointResponse)
 async def create_upstream_proxy_endpoint(
     payload: UpstreamProxyEndpointCreateRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _security_access=Depends(require_dashboard_permission(Permission.SECURITY_WRITE)),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
     if payload.username is not None and ":" in payload.username:
@@ -888,6 +896,101 @@ def _validate_timeout_invariants(payload: DashboardSettingsUpdateRequest, curren
         )
 
 
+# R2 spool retention
+class _ProposedSpoolRetentionInputs:
+    """Effective floor inputs after ``payload`` is applied, over ``current``.
+
+    The three inputs behave differently in the update request: the two reuse
+    windows are non-nullable dashboard columns with no environment layer, so a
+    ``None`` there only ever means "unchanged"; the bridge request budget is
+    tri-state, so an explicit null returns it to the environment value.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self, payload: DashboardSettingsUpdateRequest, current, startup_settings) -> None:
+        values: dict[str, float] = {}
+        for name in SPOOL_RETENTION_FLOOR_INPUTS:
+            proposed = getattr(payload, name, None)
+            inheritable = name in settings_module.Settings.model_fields
+            if proposed is None and inheritable and name in payload.model_fields_set:
+                # Explicit null on a tri-state field: inherit the environment
+                # value (the process default for a partial startup fake).
+                proposed = getattr(startup_settings, name, None)
+                if proposed is None:
+                    proposed = getattr(settings_module.get_settings(), name)
+            values[name] = float(proposed if proposed is not None else getattr(current, name))
+        self._values = values
+
+    def __getattr__(self, name: str) -> object:
+        try:
+            return self._values[name]
+        except KeyError as exc:  # keep ``getattr(obj, name, default)`` working
+            raise AttributeError(name) from exc
+
+
+def _proposed_spool_retention_seconds(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> float:
+    """Effective spool retention after ``payload``: value = store, null = inherit, absent = current."""
+    if OPERATION_SPOOL_RETENTION_SETTING not in payload.model_fields_set:
+        return float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING))
+    proposed = getattr(payload, OPERATION_SPOOL_RETENTION_SETTING)
+    if proposed is not None:
+        return float(proposed)
+    inherited = current.provenance[OPERATION_SPOOL_RETENTION_SETTING]
+    return float(resolve_inheritable(None, inherited.env_value, inherited.default).value)
+
+
+def _validate_spool_retention_floor(payload: DashboardSettingsUpdateRequest, current, startup_settings) -> None:
+    """Reject a PUT that would leave the operation spool shorter than its replay floor.
+
+    The spool holds the raw request payload and the response events that
+    durable bridge recovery replays, so it must outlive every window in which a
+    spooled operation may still be read. Both the retention window and the floor
+    are evaluated on the effective values (dashboard column, else environment,
+    else code default) before and after the change.
+
+    A configuration can already be below the floor without ever passing through
+    here -- the environment alias alone decides it while the column is NULL --
+    and that state must not make the dashboard read-only. The rule is therefore
+    "no worse", not "bypass": while below the floor an update is accepted only
+    when it leaves the retention no shorter and the floor no higher than it
+    found them, so unrelated edits go through but deepening the violation does
+    not. Startup warns about the state (``_report_dashboard_timeout_overrides``)
+    so the first refusal is never a surprise.
+    """
+    if not {OPERATION_SPOOL_RETENTION_SETTING, *SPOOL_RETENTION_FLOOR_INPUTS} & payload.model_fields_set:
+        return
+    before_retention = float(getattr(current, OPERATION_SPOOL_RETENTION_SETTING))
+    before_floor = operation_spool_retention_floor_seconds(current, startup_settings=startup_settings)
+    after_inputs = _ProposedSpoolRetentionInputs(payload, current, startup_settings)
+    after_retention = _proposed_spool_retention_seconds(payload, current, startup_settings)
+    term, after_floor = binding_spool_retention_floor_term(after_inputs, startup_settings=startup_settings)
+    if after_retention >= after_floor:
+        return
+    if after_retention >= before_retention and after_floor <= before_floor:
+        # Neither side got worse. Only reachable from an already-violating
+        # state: a healthy one has before_retention >= before_floor >=
+        # after_floor > after_retention >= before_retention, a contradiction.
+        return
+    if before_retention < before_floor:
+        raise DashboardBadRequestError(
+            f"{OPERATION_SPOOL_RETENTION_SETTING} is already below its replay floor "
+            f"({before_retention:g}s < {before_floor:g}s) and this change would deepen it "
+            f"({before_retention:g}s -> {after_retention:g}s against a floor of "
+            f"{before_floor:g}s -> {after_floor:g}s, bound by {term}); raise the retention to at least "
+            f"{after_floor:g}s, or leave both no worse than they are",
+            code="spool_retention_below_floor",
+        )
+    raise DashboardBadRequestError(
+        f"{OPERATION_SPOOL_RETENTION_SETTING} must be at least {after_floor:g}s: the operation spool is replayed "
+        f"for as long as {term} ({after_floor:g}s), so a shorter window deletes transcripts a recovery still needs",
+        code="spool_retention_below_floor",
+    )
+
+
+# end R2 spool retention
+
+
 def _proposed_reset_credit_polling_enabled(payload: DashboardSettingsUpdateRequest, current) -> bool:
     """M2 background jobs: the reset-credit polling toggle as it will be after this update.
 
@@ -930,7 +1033,18 @@ async def update_settings(
     principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> DashboardSettingsResponse:
-    current = await context.service.get_settings()
+    current = await context.service.get_settings(actor_user_id=principal.user_id)
+    # The dashboard client submits the whole form on every save, so a security
+    # field merely being present must not require security:write; only a value
+    # that differs from what is stored does.
+    security_changes = {
+        name
+        for name in payload.model_fields_set & SECURITY_SETTINGS_FIELDS
+        if getattr(payload, name) is not None and getattr(payload, name) != getattr(current, name)
+    }
+    if security_changes:
+        ensure_dashboard_permission(principal, Permission.SECURITY_WRITE)
+        await ensure_step_up(request, principal, Permission.SECURITY_WRITE)
     if payload.expected_version is not None and payload.expected_version != current.version:
         raise DashboardSettingsConflictError(
             "Settings were modified since this form was loaded; reload and retry",
@@ -940,22 +1054,6 @@ async def update_settings(
         and payload.upstream_proxy_default_pool_id is not None
     ):
         await _validate_proxy_pool_id(context, payload.upstream_proxy_default_pool_id)
-    overflow_provided = "subscription_overflow_source_id" in payload.model_fields_set
-    overflow_source_id = (
-        payload.subscription_overflow_source_id if overflow_provided else current.subscription_overflow_source_id
-    )
-    if (
-        overflow_provided
-        and overflow_source_id is not None
-        and overflow_source_id != current.subscription_overflow_source_id
-    ):
-        validate_overflow_source(await ModelSourcesRepository(context.session).get_by_id(overflow_source_id))
-    overflow_drain_until = resolve_drain_until(
-        current.subscription_overflow_source_id,
-        overflow_source_id,
-        current.subscription_overflow_drain_until,
-        utcnow(),
-    )
     # The reset-credit refresh loop is the sole driver of automatic redemption,
     # so "auto-redeem on, polling off" is a setting that can never run. The gate
     # gets the effective (dashboard-aware) values this request would leave
@@ -1044,6 +1142,7 @@ async def update_settings(
                 code="invalid_proxy_account_stream_recovery_reserve",
             )
         _validate_timeout_invariants(payload, current, startup_settings)  # C2-1 timeouts + C2-2 lease TTL
+        _validate_spool_retention_floor(payload, current, startup_settings)  # R2 spool retention
         timeout_fields = {name: _timeout_field(payload, name) for name in DASHBOARD_TIMEOUT_SETTINGS}
         updated = await context.service.update_settings(
             DashboardSettingsUpdateData(
@@ -1059,6 +1158,8 @@ async def update_settings(
                 http_downstream_transport_policy=(
                     payload.http_downstream_transport_policy or current.http_downstream_transport_policy
                 ),
+                thread_cache_identity_mode=_dashboard_value(payload, "thread_cache_identity_mode"),
+                clear_thread_cache_identity_mode=_clears_dashboard_value(payload, "thread_cache_identity_mode"),
                 proxy_account_response_create_limit=(
                     payload.proxy_account_response_create_limit
                     if "proxy_account_response_create_limit" in payload.model_fields_set
@@ -1162,12 +1263,6 @@ async def update_settings(
                     else current.relative_availability_top_k
                 ),
                 single_account_id=single_account_id,
-                subscription_overflow_source_id=overflow_source_id,
-                clear_subscription_overflow_source=overflow_provided and overflow_source_id is None,
-                subscription_overflow_drain_until=overflow_drain_until,
-                set_subscription_overflow_drain_until=(
-                    overflow_drain_until != current.subscription_overflow_drain_until
-                ),
                 openai_cache_affinity_max_age_seconds=(
                     payload.openai_cache_affinity_max_age_seconds
                     if payload.openai_cache_affinity_max_age_seconds is not None
@@ -1218,6 +1313,14 @@ async def update_settings(
                     payload.totp_required_on_login
                     if payload.totp_required_on_login is not None
                     else current.totp_required_on_login
+                ),
+                totp_required_for_admin_role=(
+                    payload.totp_required_for_admin_role
+                    if payload.totp_required_for_admin_role is not None
+                    else current.totp_required_for_admin_role
+                ),
+                local_login_policy=(
+                    payload.local_login_policy if payload.local_login_policy is not None else current.local_login_policy
                 ),
                 api_key_auth_enabled=(
                     payload.api_key_auth_enabled
@@ -1340,6 +1443,14 @@ async def update_settings(
                     and payload.conversation_archive_enabled is None
                 ),
                 # end M5 conversation archive
+                # R2 spool retention: tri-state via model_fields_set.
+                http_responses_session_bridge_operation_spool_retention_seconds=_dashboard_value(
+                    payload, OPERATION_SPOOL_RETENTION_SETTING
+                ),
+                clear_http_responses_session_bridge_operation_spool_retention_seconds=_clears_dashboard_value(
+                    payload, OPERATION_SPOOL_RETENTION_SETTING
+                ),
+                # end R2 spool retention
                 # C2-1 timeouts
                 upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][0],
                 clear_upstream_connect_timeout_seconds=timeout_fields["upstream_connect_timeout_seconds"][1],
@@ -1381,8 +1492,18 @@ async def update_settings(
             # repository must apply the UPDATE only if the row still carries
             # that version; a writer committing in between yields 409 instead
             # of silently reverting its fields.
+            actor_user_id=principal.user_id,
             expected_version=current.version,
         )
+    except BreakGlassRequiresTotpError as exc:
+        # Before the generic ValueError arm: this refusal is a 409 whose body
+        # names the account that would clear it, not a malformed-input 400.
+        raise DashboardConflictError(
+            str(exc),
+            code="break_glass_requires_totp",
+            param=exc.username,
+            details={"username": exc.username},
+        ) from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_totp_config") from exc
 
@@ -1402,6 +1523,7 @@ async def update_settings(
             "upstream_stream_transport",
             "prohibit_fast_mode",
             "http_downstream_transport_policy",
+            "thread_cache_identity_mode",
             "proxy_account_response_create_limit",
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",
@@ -1418,8 +1540,6 @@ async def update_settings(
             "relative_availability_power",
             "relative_availability_top_k",
             "single_account_id",
-            "subscription_overflow_source_id",
-            "subscription_overflow_drain_until",
             "openai_cache_affinity_max_age_seconds",
             "dashboard_session_ttl_seconds",
             "http_responses_session_bridge_prompt_cache_idle_ttl_seconds",
@@ -1432,6 +1552,8 @@ async def update_settings(
             "warmup_model",
             "import_without_overwrite",
             "totp_required_on_login",
+            "totp_required_for_admin_role",
+            "local_login_policy",
             "api_key_auth_enabled",
             "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
@@ -1454,6 +1576,7 @@ async def update_settings(
             "circuit_breaker_enabled",
             *BACKGROUND_JOB_SETTINGS,  # M2 background jobs
             CONVERSATION_ARCHIVE_SETTING,  # M5 conversation archive
+            OPERATION_SPOOL_RETENTION_SETTING,  # R2 spool retention
             *DASHBOARD_TIMEOUT_SETTINGS,  # C2-1 timeouts
         )
         if getattr(current, field_name) != getattr(updated, field_name)
@@ -1462,7 +1585,12 @@ async def update_settings(
     # storing the inherited value (or clearing it) changes ownership without
     # changing the effective value; audit that too. An effective archive flip
     # additionally gets its own audit line naming the actor (further below).
-    for field_name in (*RESILIENCE_TOGGLE_SETTINGS, *BACKGROUND_JOB_SETTINGS, CONVERSATION_ARCHIVE_SETTING):
+    for field_name in (
+        *RESILIENCE_TOGGLE_SETTINGS,
+        *BACKGROUND_JOB_SETTINGS,
+        CONVERSATION_ARCHIVE_SETTING,
+        OPERATION_SPOOL_RETENTION_SETTING,  # R2 spool retention
+    ):
         if current.provenance[field_name] != updated.provenance[field_name] and field_name not in changed_fields:
             changed_fields.append(field_name)
     # C2-1 timeouts: a dashboard value equal to the inherited one still changes
@@ -1515,8 +1643,21 @@ async def update_settings(
     AuditService.log_async(
         "settings_changed",
         actor_ip=actor_ip,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "dashboard"),
         details={"changed_fields": changed_fields},
     )
+    if current.local_login_policy != updated.local_login_policy:
+        # Who may use the local password form is a security decision with its
+        # own event: ``settings_changed`` lists field names, this names values.
+        AuditService.log_async(
+            "login_policy_changed",
+            actor_ip=actor_ip,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("settings", "local_login_policy"),
+            details={"from": current.local_login_policy, "to": updated.local_login_policy},
+            severity=AuditSeverity.WARNING,
+        )
     # M5 conversation archive: enabling turns the proxy into a full
     # prompt/response recorder readable by the same dashboard admin, so every
     # effective on/off change is a dedicated audit event with the actor, not

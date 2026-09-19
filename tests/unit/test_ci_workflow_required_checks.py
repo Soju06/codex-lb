@@ -90,7 +90,8 @@ def test_openspec_validation_is_required_for_spec_only_changes() -> None:
     assert "\n    needs:" not in openspec_job
     assert "\n    if:" not in openspec_job
     assert "npx --yes @fission-ai/openspec@1.11.0 validate --specs" in openspec_job
-    assert "--strict" not in openspec_job
+    assert "fetch-depth: 0" in openspec_job
+    assert "python3 .github/scripts/validate_changed_openspec.py" in openspec_job
     assert "- openspec" in required_job
 
 

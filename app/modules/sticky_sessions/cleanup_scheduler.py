@@ -8,8 +8,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core import startup as startup_module
 from app.core.config.settings import get_settings
+from app.core.config.spool_retention import (
+    bridge_session_reuse_window_seconds,
+    resolve_operation_spool_retention_seconds,
+)
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     http_bridge_spool_cleanup_backlog_likely,
@@ -17,11 +23,11 @@ from app.core.metrics.prometheus import (
     http_bridge_spool_cleanup_duration_seconds,
     http_bridge_spool_cleanup_runs_total,
 )
+from app.core.rate_limiter.db_rate_limiter import get_rate_limit_attempt_sweeper
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
-from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy.durable_bridge_repository import (
     DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
     DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
@@ -52,6 +58,23 @@ _STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS = 6 * 3600
 # Keep each pass large enough to outpace steady-state expiry, but small enough
 # that a historical backlog is resumed across scheduler ticks instead of
 # monopolizing the database in one drain-all loop.
+# No key-prefix sweep of the `sticky_thread` kind exists, deliberately.
+#
+# A prompt-cache key derived by the proxy -- the retired content-hash shape
+# (`{model_class}-{api_key_id[:12]}-{hash}`) and the current thread-anchored
+# `v2t-` shape alike -- is only ever produced when `openai_cache_affinity` is
+# enabled, and that is exactly the branch that classifies the mapping as
+# PROMPT_CACHE (see `_sticky_key_for_responses_request` /
+# `_sticky_key_for_compact_request`: the STICKY_THREAD branch is `elif
+# sticky_threads_enabled`, reachable only with cache affinity off, where the
+# derivation supplies no sticky key at all). So a derived key can never be
+# written as a `sticky_thread` row, and `purge_prompt_cache_before` already
+# retires every derived row of either shape at the freshness window.
+#
+# A `sticky_thread` row whose key starts with `std-`/`codex-`/`mini-` is
+# therefore necessarily *client-supplied*, and `sticky_thread` has no TTL by
+# design. Deleting those rows by key prefix silently drops a client's soft
+# locality because its key text happens to look like a retired proxy shape.
 _OPERATION_RETENTION_BATCH_SIZE = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
 _OPERATION_RETENTION_MAX_BATCHES = 4
 _OPERATION_RETENTION_TIME_BUDGET_SECONDS = 5.0
@@ -180,6 +203,28 @@ def _merge_backlog_signal(previous: bool, attempted: bool | None) -> bool:
     return previous if attempted is None else attempted
 
 
+async def _purge_expired_rate_limit_attempts(session: AsyncSession) -> None:
+    """Age out ``rate_limit_attempts`` on every leader pass.
+
+    ``clear_for_key`` only runs on a *successful* sign-in, so failed attempts
+    have no other way out of the table, and the failed-login keys now carry a
+    caller-supplied username: without this the row count is the attacker's to
+    choose. It runs whatever the sticky-mapping toggle says, for the same
+    reason the operation retention sweep does, and its failure is contained so
+    it can never cost the rest of the pass.
+    """
+
+    try:
+        await get_rate_limit_attempt_sweeper().cleanup(session)
+    except Exception:
+        logger.exception("Rate-limit attempt retention failed")
+        # The rest of the pass must not inherit a half-finished transaction,
+        # and a rollback that fails on an already-broken session says nothing
+        # the log above has not already said.
+        with contextlib.suppress(Exception):
+            await session.rollback()
+
+
 def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -> float:
     """Retention for abandoned durable bridge rows.
 
@@ -188,14 +233,12 @@ def _abandoned_bridge_retention_seconds(dashboard_settings: DashboardSettings) -
     exceed the prompt-cache affinity max age. Purging the ACTIVE durable row
     earlier would strip a still-reusable session of its durable ownership and
     continuity aliases, so retention must cover the longest reuse window.
+
+    That window is also the first term of the operation spool retention floor,
+    so both read it from one definition (``app.core.config.spool_retention``).
     """
 
-    return max(
-        float(dashboard_settings.openai_cache_affinity_max_age_seconds),
-        float(dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds),
-        float(_http_bridge_helpers.HTTP_BRIDGE_IDLE_TTL_SECONDS),
-        float(_http_bridge_helpers.HTTP_BRIDGE_CODEX_IDLE_TTL_SECONDS),
-    )
+    return bridge_session_reuse_window_seconds(dashboard_settings)
 
 
 @dataclass(slots=True)
@@ -271,10 +314,15 @@ class StickySessionCleanupScheduler:
         result = await _get_leader_election().run_if_leader(self._cleanup_operation_retention_as_leader)
         return result if result is not None else self._operation_retention_cancelled_backlog_likely
 
-    async def _run_operation_retention(self, bridge_repo: DurableBridgeRepository) -> bool | None:
-        operation_cutoff = utcnow() - timedelta(
-            seconds=get_settings().http_responses_session_bridge_operation_spool_retention_seconds
-        )
+    async def _run_operation_retention(
+        self,
+        bridge_repo: DurableBridgeRepository,
+        dashboard_settings: DashboardSettings,
+    ) -> bool | None:
+        # R2 spool retention: one resolve per pass from the snapshot this pass
+        # already loaded, so the retention window and the reuse windows the
+        # floor is derived from can never disagree inside one pass.
+        operation_cutoff = utcnow() - timedelta(seconds=resolve_operation_spool_retention_seconds(dashboard_settings))
         retention_started_at = time.monotonic()
         error_type: str | None = None
         cancellation: OperationRetentionCleanupCancelledError | None = None
@@ -322,7 +370,8 @@ class StickySessionCleanupScheduler:
                 async with get_background_session() as session:
                     if not startup_module._bridge_durable_schema_ready and await missing_durable_bridge_tables(session):
                         return False
-                    return await self._run_operation_retention(DurableBridgeRepository(session))
+                    dashboard_settings = await SettingsRepository(session).get_or_create()
+                    return await self._run_operation_retention(DurableBridgeRepository(session), dashboard_settings)
             except Exception as exc:
                 result = OperationRetentionCleanupResult(
                     deleted_operations=0,
@@ -348,14 +397,20 @@ class StickySessionCleanupScheduler:
             retention_attempted = False
             try:
                 async with get_background_session() as session:
+                    await _purge_expired_rate_limit_attempts(session)
                     settings_repo = SettingsRepository(session)
                     bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)
-                    settings = await settings_repo.get_or_create() if self.enabled else None
+                    # R2 spool retention: operation retention needs the row
+                    # too, so it is loaded for every pass, not only when
+                    # sticky-mapping cleanup is enabled.
+                    settings = await settings_repo.get_or_create()
 
                     if self.enabled:
-                        assert settings is not None
                         cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                        # Retires every proxy-derived prompt-cache mapping, of
+                        # either key shape: see the module note above on why no
+                        # `sticky_thread` key-prefix sweep belongs here.
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
                             logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
@@ -376,7 +431,21 @@ class StickySessionCleanupScheduler:
                             )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
                         if self.enabled:
-                            assert settings is not None
+                            # Same grace window as the sticky sweep above, and
+                            # for the same reason: an owner that has been
+                            # unroutable across it is not coming back on its
+                            # own, so its threads must be free to rebind.
+                            retire_now = utcnow()
+                            retired_owner_count = await bridge_repo.retire_stale_unavailable_bridge_owners(
+                                retire_now - timedelta(seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS),
+                                now=retire_now,
+                            )
+                            if retired_owner_count > 0:
+                                logger.info(
+                                    "Retired durable HTTP bridge continuity owners that stayed unroutable "
+                                    "retired_count=%s",
+                                    retired_owner_count,
+                                )
                             bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
                             if bridge_deleted_count > 0:
                                 logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
@@ -402,7 +471,7 @@ class StickySessionCleanupScheduler:
                                 )
                         if self.operation_retention_enabled:
                             retention_attempted = True
-                            backlog_likely = await self._run_operation_retention(bridge_repo)
+                            backlog_likely = await self._run_operation_retention(bridge_repo, settings)
                 if self.enabled:
                     ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
                     ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)

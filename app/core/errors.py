@@ -69,6 +69,8 @@ class OpenAIErrorEnvelope(TypedDict):
 class DashboardErrorDetail(TypedDict):
     code: str
     message: str
+    param: NotRequired[str]
+    details: NotRequired[dict[str, JsonValue]]
 
 
 class DashboardErrorEnvelope(TypedDict):
@@ -133,8 +135,46 @@ def openai_error(
     return {"error": detail}
 
 
-def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:
-    return {"error": {"code": code, "message": message}}
+def dashboard_error(
+    code: str,
+    message: str,
+    *,
+    param: str | None = None,
+    details: Mapping[str, JsonValue] | None = None,
+) -> DashboardErrorEnvelope:
+    detail: DashboardErrorDetail = {"code": code, "message": message}
+    if param is not None:
+        detail["param"] = param
+    if details:
+        detail["details"] = dict(details)
+    return {"error": detail}
+
+
+#: RFC 7644 §3.12. Every body from ``/scim/v2`` carries this media type, and
+#: every refusal carries the error schema below; an identity provider reads
+#: both and neither the dashboard nor the OpenAI envelope means anything to it.
+SCIM_CONTENT_TYPE = "application/scim+json"
+SCIM_ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
+
+
+class ScimErrorEnvelope(TypedDict):
+    schemas: list[str]
+    status: str
+    detail: str
+    scimType: NotRequired[str]
+
+
+def scim_error(status_code: int, detail: str, *, scim_type: str | None = None) -> ScimErrorEnvelope:
+    """RFC 7644's error body. ``status`` is a string there, not a number."""
+
+    envelope: ScimErrorEnvelope = {
+        "schemas": [SCIM_ERROR_SCHEMA],
+        "status": str(status_code),
+        "detail": detail,
+    }
+    if scim_type is not None:
+        envelope["scimType"] = scim_type
+    return envelope
 
 
 def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:

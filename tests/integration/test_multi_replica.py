@@ -296,15 +296,15 @@ async def test_automations_scheduler_tick_body_runs_once_across_two_replicas(db_
 
 @pytest.mark.asyncio
 async def test_audit_log_records_from_different_modules(db_session):
-    from app.core.audit.service import _write_audit_log
+    from app.core.audit.service import AuditService
 
-    await _write_audit_log(
+    await AuditService.log(
         "account_created",
         actor_ip="1.2.3.4",
         details={"name": "test"},
         request_id="req-1",
     )
-    await _write_audit_log(
+    await AuditService.log(
         "api_key_created",
         actor_ip="1.2.3.5",
         details={"name": "key1"},

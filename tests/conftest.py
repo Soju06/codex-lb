@@ -40,6 +40,8 @@ os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.modules.auth_providers.seed import seed_default_auth_providers  # noqa: E402
+from app.modules.dashboard_roles.seed import seed_preset_dashboard_roles  # noqa: E402
 
 
 class _NoopScheduler:
@@ -75,6 +77,7 @@ BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
     "build_account_usage_rollup_scheduler",
     "build_data_retention_scheduler",
     "build_telemetry_scheduler",
+    "build_account_deletion_scheduler",
 )
 
 
@@ -129,6 +132,10 @@ def _recreate_test_schema(sync_conn) -> None:
     _drop_test_migration_tables(sync_conn)
     Base.metadata.drop_all(sync_conn)
     Base.metadata.create_all(sync_conn)
+    # Production seeds these through the migration and at startup; the test
+    # schema is built with create_all, so seed the preset role rows here too.
+    seed_preset_dashboard_roles(sync_conn)
+    seed_default_auth_providers(sync_conn)
 
 
 def _reset_test_database(sync_conn) -> None:
@@ -491,6 +498,20 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
+
+        get_dashboard_users_cache().clear()
+    except Exception:
+        pass
+    try:
+        from app.core.auth.providers.registry import get_auth_provider_registry
+        from app.modules.dashboard_users.identity_resolver import get_identity_resolution_cache
+
+        get_auth_provider_registry().clear()
+        get_identity_resolution_cache().clear()
+    except Exception:
+        pass
+    try:
         from app.core.upstream_proxy.cache import get_upstream_route_cache
 
         get_upstream_route_cache().clear()
@@ -518,6 +539,15 @@ def _reset_global_state() -> None:
         from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 
         get_api_key_last_used_coalescer().clear()
+    except Exception:
+        pass
+    try:
+        # Thread anchors are process-global by design (one live thread keeps
+        # one derived prompt_cache_key), so a body reused by the next test
+        # would otherwise resolve to the previous test's key and account.
+        from app.modules.proxy.thread_anchors import reset_thread_anchor_index
+
+        reset_thread_anchor_index()
     except Exception:
         pass
     try:

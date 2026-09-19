@@ -15,7 +15,12 @@ import type {
 } from "@/features/api-keys/schemas";
 import { getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
 
-export function useApiKeys() {
+export type ApiKeyQueryOptions = {
+  /** Set false for principals the backend would answer with 403 (read-only guests). */
+  enabled?: boolean;
+};
+
+export function useApiKeys({ enabled = true }: ApiKeyQueryOptions = {}) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -23,6 +28,7 @@ export function useApiKeys() {
     queryKey: ["api-keys", "list"],
     queryFn: listApiKeys,
     select: (data) => data,
+    enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   });
@@ -86,22 +92,22 @@ export function useApiKeys() {
   };
 }
 
-export function useApiKeyTrends(keyId: string | null) {
+export function useApiKeyTrends(keyId: string | null, { enabled = true }: ApiKeyQueryOptions = {}) {
   return useQuery({
     queryKey: ["api-keys", "trends", keyId],
     queryFn: () => getApiKeyTrends(keyId!),
-    enabled: !!keyId,
+    enabled: enabled && !!keyId,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
   });
 }
 
-export function useApiKeyUsage7Day(keyId: string | null) {
+export function useApiKeyUsage7Day(keyId: string | null, { enabled = true }: ApiKeyQueryOptions = {}) {
   return useQuery({
     queryKey: ["api-keys", "usage-7d", keyId],
     queryFn: () => getApiKeyUsage7Day(keyId!),
-    enabled: !!keyId,
+    enabled: enabled && !!keyId,
     staleTime: 2 * 60_000,
     refetchInterval: 2 * 60_000,
     refetchIntervalInBackground: false,

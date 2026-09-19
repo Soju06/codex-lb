@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import {
@@ -106,13 +106,34 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
 
 export type UseRequestLogsOptions = {
   enabled?: boolean;
+  /**
+   * Set false for read-only sessions: the API-key filter control is hidden for
+   * them, so any `apiKeyId` carried by the URL (bookmark, or an admin's
+   * selection retained across logout) is ignored and removed instead of being
+   * sent as an invisible restriction.
+   */
+  allowApiKeyFilters?: boolean;
 };
 
 export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const enabled = options.enabled ?? true;
+  const allowApiKeyFilters = options.allowApiKeyFilters ?? true;
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
+  const filters = useMemo(() => {
+    const parsed = parseFilterState(searchParams);
+    if (allowApiKeyFilters || parsed.apiKeyIds.length === 0) {
+      return parsed;
+    }
+    return { ...parsed, apiKeyIds: [] };
+  }, [allowApiKeyFilters, searchParams]);
+  const hasHiddenApiKeyParams = !allowApiKeyFilters && searchParams.has("apiKeyId");
+  useEffect(() => {
+    if (!hasHiddenApiKeyParams) {
+      return;
+    }
+    setSearchParams(writeFilterState(filters, searchParams), { replace: true });
+  }, [filters, hasHiddenApiKeyParams, searchParams, setSearchParams]);
   const filtersApplied = requestLogFiltersApplied(filters);
   const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
   const listFilters = useMemo<RequestLogsListFilters>(

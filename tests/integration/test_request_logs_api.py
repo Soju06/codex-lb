@@ -437,7 +437,7 @@ async def test_request_logs_api_rejects_guest_conversation_filter_and_preserves_
         app_instance.dependency_overrides.pop(validate_dashboard_session, None)
 
     assert guest_response.status_code == 403
-    assert guest_response.json()["error"]["code"] == "admin_access_required"
+    assert guest_response.json()["error"]["code"] == "permission_required"
 
     admin_response = await async_client.get(
         "/api/request-logs",

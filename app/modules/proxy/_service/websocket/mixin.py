@@ -457,10 +457,6 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
-from app.modules.proxy._service.websocket.overflow import (
-    bounce_exhausted_websocket_turn,
-    bounce_pinned_or_anchored_websocket_turn,
-)
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
@@ -473,6 +469,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_from_turn_state_header,
     _websocket_continuity_aliases_from_headers,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import (
     CAPABILITY_ROUTING_UNAVAILABLE_CODE,
@@ -757,6 +754,7 @@ def _websocket_archive_request_state_for_payload(
         previous_response_id_hint=_facade()._previous_response_id_from_not_found_message(error_message),
         error_message=error_message,
         allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+        event_type=event_type,
     )
 
 
@@ -1881,15 +1879,6 @@ class _WebSocketMixin:
                                             request_state.previous_response_owner_account_id,
                                         ),
                                     )
-                                if await bounce_pinned_or_anchored_websocket_turn(
-                                    proxy,
-                                    websocket,
-                                    client_send_lock=client_send_lock,
-                                    api_key=request_state.api_key or api_key,
-                                    request_state=request_state,
-                                    headers=headers,
-                                ):
-                                    continue
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -3165,6 +3154,7 @@ class _WebSocketMixin:
         synthesized_turn_state: str | None = None,
         capability_header_values: tuple[str, ...] | None = None,
     ) -> _PreparedWebSocketRequest:
+        """Validate a create frame, reserve usage, and prepare safe continuity metadata."""
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         refreshed_api_key = await proxy._refresh_websocket_api_key_policy(api_key)
@@ -3298,6 +3288,7 @@ class _WebSocketMixin:
                 continuity_state,
                 responses_payload=responses_payload,
                 codex_session_affinity=codex_session_affinity,
+                api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
             )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)
@@ -3424,7 +3415,6 @@ class _WebSocketMixin:
                 if isinstance(responses_payload.input, list)
                 else None,
             )
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(responses_payload) is not None
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -3476,28 +3466,21 @@ class _WebSocketMixin:
             api_key=api_key,
             synthesized_turn_state=synthesized_turn_state,
         )
-        sticky_key_source = "none"
-        if affinity_policy.codex_session_source == "thread_header":
-            sticky_key_source = "thread_header"
-        elif affinity_policy.kind == StickySessionKind.CODEX_SESSION:
-            turn_state_key = _sticky_key_from_turn_state_header(headers)
-            if turn_state_key is not None and turn_state_key == synthesized_turn_state:
-                sticky_key_source = "generated_turn_state"
-            elif turn_state_key is not None:
-                sticky_key_source = "turn_state_header"
-            else:
-                sticky_key_source = "session_header"
-        elif affinity_policy.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(
+            affinity_policy,
+            synthesized_turn_state=synthesized_turn_state,
+        )
         _maybe_log_proxy_request_shape(
             "websocket",
             responses_payload,
             headers,
-            sticky_kind=affinity_policy.kind.value if affinity_policy.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=affinity_observation.kind,
+            sticky_key_source=affinity_observation.source,
+            derivation_outcome=affinity_policy.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(responses_payload) is not None,
         )
         request_state.affinity_policy = affinity_policy
+        request_state.affinity_observation = affinity_observation
 
         # First-turn ``input_file.file_id`` references must land on the
         # account that registered the upload (chatgpt-account-id-scoped).
@@ -4153,15 +4136,6 @@ class _WebSocketMixin:
                 error_code="previous_response_owner_unavailable",
                 error_message=message,
             )
-            return None
-        if error_code == USAGE_LIMIT_REACHED and await bounce_exhausted_websocket_turn(
-            proxy,
-            websocket,
-            client_send_lock=client_send_lock,
-            api_key=api_key,
-            request_state=request_state,
-            headers=headers or {},
-        ):
             return None
         _facade().logger.warning(
             "Websocket account selection failed request_id=%s model=%s preferred_account_id=%s "
@@ -5525,6 +5499,7 @@ class _WebSocketMixin:
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
                     allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
+                    event_type=event_type,
                 )
                 release_create_gate = False
             else:
@@ -6515,11 +6490,10 @@ class _WebSocketMixin:
             settlement.record_success = False
         if event_type in {"response.failed", "error"}:
             _observe_terminal_stream_error_frame(error_code, error_message)
-            settlement.account_health_error = _facade()._should_penalize_stream_error(error_code) and not getattr(
-                request_state,
-                "account_health_error_handled",
-                False,
-            )
+            settlement.account_health_error = _facade()._should_penalize_stream_error(
+                error_code,
+                error_message,
+            ) and not getattr(request_state, "account_health_error_handled", False)
         if (
             request_state.suppressed_duplicate_tool_call
             and error_code == _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
@@ -6591,6 +6565,7 @@ class _WebSocketMixin:
             )
             try:
                 await proxy._write_request_log(
+                    affinity_observation=request_state.affinity_observation,
                     account_id=account_id_value,
                     api_key=api_key,
                     request_id=request_log_response_id,
@@ -6690,6 +6665,16 @@ class _WebSocketMixin:
                         account,
                         _stream_settlement_error_payload(settlement),
                         settlement.error_code or "upstream_error",
+                        # Evidence only, for the soft-overload window. On the
+                        # HTTP bridge a terminal ``error`` frame can carry the
+                        # upstream HTTP status, which the bridge already parsed
+                        # into this field; such a failure is not a status-less
+                        # terminal. It stays ``None`` for a direct WebSocket
+                        # terminal, which is the shape the window is for.
+                        # Forwarding it positionally would double-count the
+                        # reasoning-replay metric for a frame already counted at
+                        # ``_observe_terminal_stream_error_frame``.
+                        upstream_http_status=request_state.error_http_status_override,
                     )
                 except Exception:
                     _facade().logger.warning(
@@ -6746,6 +6731,7 @@ class _WebSocketMixin:
         if request_state.skip_request_log:
             return
         await proxy._write_request_log(
+            affinity_observation=request_state.affinity_observation,
             account_id=account_id,
             api_key=api_key,
             request_id=request_state.request_log_id or request_state.request_id,
@@ -7120,6 +7106,7 @@ class _WebSocketMixin:
                     )
             try:
                 await proxy._write_request_log(
+                    affinity_observation=request_state.affinity_observation,
                     account_id=account_id_value,
                     # HTTP-bridge callers fan a shared session failure out to
                     # requests from multiple API keys, so they pass api_key=None;

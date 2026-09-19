@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
@@ -41,17 +42,52 @@ class DashboardAuthMode(StrEnum):
 class DashboardRequestAuth:
     mode: DashboardAuthMode
     actor: str | None = None
+    #: Groups the proxy asserted for ``actor`` (empty unless the groups header arrived exactly once).
+    groups: tuple[str, ...] = ()
 
 
-def normalize_dashboard_auth_proxy_header(value: str) -> str:
+def normalize_dashboard_auth_proxy_header(value: str, field_name: str = "dashboard_auth_proxy_header") -> str:
+    """Validate a proxy-asserted header name; ``field_name`` names the setting in the error."""
+
     header = value.strip()
     if not header:
-        raise ValueError("dashboard_auth_proxy_header must not be empty")
+        raise ValueError(f"{field_name} must not be empty")
     if not _HEADER_NAME_PATTERN.fullmatch(header):
-        raise ValueError("dashboard_auth_proxy_header must be a valid HTTP header name")
+        raise ValueError(f"{field_name} must be a valid HTTP header name")
     if header.lower() in _FORBIDDEN_PROXY_AUTH_HEADERS:
-        raise ValueError(f"dashboard_auth_proxy_header must not use reserved header '{header}'")
+        raise ValueError(f"{field_name} must not use reserved header '{header}'")
     return header
+
+
+#: Bounds on the group set a proxy may assert: a rule list is evaluated per
+#: sign-in, so an unbounded header must not turn into unbounded work.
+MAX_PROXY_GROUPS = 100
+MAX_PROXY_GROUP_LENGTH = 200
+
+
+def parse_proxy_groups(raw_values: Sequence[str]) -> tuple[str, ...]:
+    """The group set of a trusted-header request: comma-separated, case-folded, bounded.
+
+    Honoured only when the header appears exactly once. A second occurrence
+    means something upstream is not stripping a client-supplied copy, so the
+    set fails closed to empty (which demotes a person rather than admitting
+    one). Items are trimmed, empties dropped, over-long items dropped, and the
+    result deduplicated case-insensitively and capped.
+    """
+
+    if len(raw_values) != 1:
+        return ()
+    groups: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values[0].split(","):
+        group = item.strip().casefold()
+        if not group or len(group) > MAX_PROXY_GROUP_LENGTH or group in seen:
+            continue
+        seen.add(group)
+        groups.append(group)
+        if len(groups) == MAX_PROXY_GROUPS:
+            break
+    return tuple(groups)
 
 
 def _trusted_proxy_networks() -> tuple[IPv4Network | IPv6Network, ...]:
@@ -108,7 +144,8 @@ def _get_trusted_header_auth(request: Request) -> DashboardRequestAuth | None:
     actor = raw_actors[0].strip()
     if not actor:
         return None
-    return DashboardRequestAuth(mode=DashboardAuthMode.TRUSTED_HEADER, actor=actor)
+    groups = parse_proxy_groups(request.headers.getlist(settings.dashboard_auth_proxy_groups_header))
+    return DashboardRequestAuth(mode=DashboardAuthMode.TRUSTED_HEADER, actor=actor, groups=groups)
 
 
 def _is_trusted_proxy_source(

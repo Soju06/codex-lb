@@ -9,6 +9,7 @@ import logging
 
 import pytest
 
+from app.core.auth.refresh import TOKEN_REFRESH_INTERVAL_DAYS
 from app.core.config.settings import _REMOVED_SETTINGS, Settings, warn_removed_settings
 
 pytestmark = pytest.mark.unit
@@ -95,8 +96,9 @@ def test_removed_settings_tuple_covers_the_current_warning_batch():
     # (remove-upstream-stream-transport-env: the dashboard owns the value)
     # + 27 never-tuned core tunables (constantize-core-tunables)
     # + seven K2 bridge names (constantize-session-bridge-tunables)
-    # + the ambiguous-continuation recovery mode (drop-bridge-recovery-modes).
-    assert len(_REMOVED_SETTINGS) == 34 + 7 + 1
+    # + the ambiguous-continuation recovery mode (drop-bridge-recovery-modes)
+    # + the token refresh interval (constantize-token-refresh-interval).
+    assert len(_REMOVED_SETTINGS) == 34 + 7 + 1 + 1
     assert all(name.startswith("CODEX_LB_") for name in _REMOVED_SETTINGS)
     assert len(set(_REMOVED_SETTINGS)) == len(_REMOVED_SETTINGS)
 
@@ -212,7 +214,6 @@ def test_constantized_core_tunables_are_listed_and_ignored(monkeypatch):
     for name in CONSTANTIZED_CORE_TUNABLE_ENV_NAMES:
         assert not hasattr(settings, name.removeprefix("CODEX_LB_").lower())
     # Kept on purpose: still a real setting (see the constantize-core-tunables change).
-    assert settings.token_refresh_interval_days == 8
     assert settings.rate_limit_reset_credits_refresh_enabled is True
     assert settings.proxy_response_create_limit == 256
 
@@ -263,3 +264,22 @@ def test_dropped_bridge_recovery_mode_env_is_listed_and_ignored(monkeypatch, cap
         found = warn_removed_settings({_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME: "server_indefinite_recovery"})
 
     assert found == [_DROPPED_BRIDGE_RECOVERY_MODE_ENV_NAME]
+
+
+_TOKEN_REFRESH_INTERVAL_ENV_NAME = "CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS"
+
+
+def test_token_refresh_interval_env_is_listed_and_ignored(monkeypatch, caplog):
+    """The proactive refresh window is the fixed constant in ``app/core/auth/refresh.py``."""
+    assert _TOKEN_REFRESH_INTERVAL_ENV_NAME in _REMOVED_SETTINGS
+    # The removed field was a plain ``int``; a non-numeric value is inert now.
+    monkeypatch.setenv(_TOKEN_REFRESH_INTERVAL_ENV_NAME, "365")
+
+    settings = Settings()
+    assert not hasattr(settings, "token_refresh_interval_days")
+    assert TOKEN_REFRESH_INTERVAL_DAYS == 8
+
+    with caplog.at_level(logging.WARNING, logger="app.core.config.settings"):
+        found = warn_removed_settings({_TOKEN_REFRESH_INTERVAL_ENV_NAME: "365"})
+
+    assert found == [_TOKEN_REFRESH_INTERVAL_ENV_NAME]

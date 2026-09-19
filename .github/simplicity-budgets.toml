@@ -23,7 +23,7 @@ max_lines = 60
 # Single source of truth for dashboard nav width. If the nav refactor moves or
 # renames this array, the checker exits 2 until path/array here are repointed —
 # that coupling is intentional.
-path = "frontend/src/components/layout/app-header.tsx"
+path = "frontend/src/components/layout/nav-items.ts"
 array = "CORE_NAV_ITEMS"
 max_items = 5
 
@@ -53,8 +53,15 @@ max_items = 5
 # K2 bridge: constantize-session-bridge-tunables fixed seven never-tuned
 # HTTP session bridge tunables; 96 -> 95 drop-bridge-recovery-modes deleted
 # the ambiguous-continuation recovery mode selector (fail-closed is the only
-# behaviour now).
-max = 95
+# behaviour now); 95 -> 96 dashboard_auth_proxy_groups_header (the reverse
+# proxy's group header must match that proxy's config, so it cannot be a
+# dashboard row, PR-2c-2); 96 -> 95 constantize-token-refresh-interval fixed
+# the proactive token-refresh window at eight days and emptied the `MIGRATING`
+# backlog; 95 -> 96 thread_cache_identity_mode (a fleet-wide behaviour switch an
+# operator must be able to roll back without a deploy, so it needs a dashboard
+# home; the environment leg exists only so an operator locked out of the
+# dashboard can still pin the mode at boot, and it is a fallback, never a seed).
+max = 96
 
 [root_files]
 # Complete allowlist of tracked repository-root entries (files and

@@ -6,7 +6,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, text, true, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
 
@@ -16,11 +17,14 @@ from app.db.models import (
     AccountStatus,
     ApiKey,
     ApiKeyAccountAssignment,
+    ApiKeyDeactivatedReason,
     ApiKeyLimit,
     ApiKeyModelSourceAssignment,
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     ApiKeyUsageRollup,
+    DashboardUser,
+    DashboardUserStatus,
     LimitType,
     LimitWindow,
     ModelSource,
@@ -32,6 +36,10 @@ from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
 from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
 from app.modules.api_keys.limit_windows import advance_limit_reset
+
+
+class ApiKeyOwnerDisabledError(ValueError):
+    """Re-enabling a key whose owner account is disabled is refused."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +364,7 @@ class ApiKeysRepository:
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
+        thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
@@ -395,6 +404,9 @@ class ApiKeysRepository:
         if transport_policy_override is not _UNSET:
             assert transport_policy_override is None or isinstance(transport_policy_override, str)
             row.transport_policy_override = transport_policy_override
+        if thread_cache_identity_override is not _UNSET:
+            assert thread_cache_identity_override is None or isinstance(thread_cache_identity_override, str)
+            row.thread_cache_identity_override = thread_cache_identity_override
         if usage_sections is not _UNSET:
             assert isinstance(usage_sections, str)
             row.usage_sections = usage_sections
@@ -409,6 +421,14 @@ class ApiKeysRepository:
             row.expires_at = expires_at
         if is_active is not _UNSET:
             assert isinstance(is_active, bool)
+            if is_active and not row.is_active:
+                if row.owner_user_id is not None and await self._owner_is_disabled(row.owner_user_id):
+                    raise ApiKeyOwnerDisabledError("The key's owner is disabled; re-enable the account first")
+                row.deactivated_reason = None
+            elif not is_active:
+                # An explicit revoke wins over the owner cascade: reactivate-keys
+                # must not resurrect a key an operator blocked by hand.
+                row.deactivated_reason = ApiKeyDeactivatedReason.MANUAL.value
             row.is_active = is_active
         if key_hash is not _UNSET:
             assert isinstance(key_hash, str)
@@ -419,6 +439,28 @@ class ApiKeysRepository:
         if commit:
             await self._session.commit()
         return await self.get_by_id(key_id)
+
+    async def _owner_is_disabled(self, owner_user_id: str) -> bool:
+        """Read the owner's status under a lock so a concurrent disable cannot land between check and write.
+
+        SQLite: take the database write lock now (``BEGIN IMMEDIATE``, as the
+        account mutations do), so the disable either committed before this
+        read or waits for this transaction. PostgreSQL: lock the owner row
+        ``FOR UPDATE``; the disable's UPDATE of that row blocks until commit.
+        """
+
+        stmt = select(DashboardUser.status).where(DashboardUser.id == owner_user_id)
+        if self._session.get_bind().dialect.name == "sqlite":
+            try:
+                await self._session.execute(text("BEGIN IMMEDIATE"))
+            except OperationalError as exc:
+                if "within a transaction" not in str(exc).lower():
+                    raise
+                await self._session.execute(text("UPDATE api_keys SET id = id WHERE 1 = 0"))
+        else:
+            stmt = stmt.with_for_update()
+        status = (await self._session.execute(stmt)).scalar_one_or_none()
+        return status == DashboardUserStatus.DISABLED.value
 
     async def delete(self, key_id: str) -> bool:
         row = await self.get_by_id(key_id)

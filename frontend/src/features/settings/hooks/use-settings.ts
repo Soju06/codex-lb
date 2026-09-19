@@ -10,7 +10,6 @@ import {
   deleteModelContextWindowOverride,
   getModelContextWindowOverrides,
   getSettings,
-  getSubscriptionOverflowPreflight,
   getTelemetryConsent,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
@@ -44,14 +43,9 @@ export function useSettings() {
       toast.success(t("settings.toasts.saved"));
       void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
       void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
-      void queryClient.invalidateQueries({ queryKey: ["settings", "subscription-overflow-preflight"] });
     },
     onError: (error: Error) => {
-      if (error instanceof ApiError && error.code === "subscription_overflow_source_invalid") {
-        toast.error(t("settings.routing.subscriptionOverflow.errors.sourceInvalid"));
-      } else {
-        toast.error(error.message || t("settings.toasts.saveFailed"));
-      }
+      toast.error(error.message || t("settings.toasts.saveFailed"));
       if (error instanceof ApiError && error.code === "settings_conflict") {
         // Another writer committed since this form was loaded; refetch so the
         // next save carries the fresh expectedVersion.
@@ -63,19 +57,6 @@ export function useSettings() {
   return {
     settingsQuery,
     updateSettingsMutation,
-  };
-}
-
-// Read-only readiness report for a designated (or about-to-be designated)
-// subscription-overflow source; idle until a source id is known.
-export function useSubscriptionOverflowPreflight(sourceId: string | null) {
-  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
-    queryKey: ["settings", "subscription-overflow-preflight", sourceId],
-    queryFn: () => getSubscriptionOverflowPreflight(sourceId ?? ""),
-    enabled: sourceId !== null,
-  });
-  return {
-    preflightQuery: { data, error, isFetching, isLoading, isPending, isSuccess, refetch },
   };
 }
 
@@ -122,7 +103,9 @@ export function useTelemetryPreview(enabled: boolean) {
   };
 }
 
-export function useUpstreamProxyAdmin() {
+// `enabled: false` keeps the admin query idle for principals the backend would
+// answer with 403 (read-only guests).
+export function useUpstreamProxyAdmin(options?: { enabled?: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
@@ -137,6 +120,7 @@ export function useUpstreamProxyAdmin() {
   } = useQuery({
     queryKey: ["settings", "upstream-proxy"],
     queryFn: getUpstreamProxyAdmin,
+    enabled: options?.enabled ?? true,
   });
   const upstreamProxyQuery = {
     data: upstreamProxyData,

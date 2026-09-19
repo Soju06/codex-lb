@@ -17,6 +17,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
 from app.core.clients.codex_version_snapshot import CODEX_VERSION
+from app.core.clients.thread_cache_identity import (
+    THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+    normalize_thread_cache_identity_mode,
+)
 from app.core.utils.proxy_env import outbound_proxy_env_configured
 
 logger = logging.getLogger(__name__)
@@ -123,6 +127,13 @@ _REMOVED_SETTINGS: tuple[str, ...] = (
     # three non-default ambiguous-continuation recovery modes were deleted and
     # the shipped ``fail_closed`` behaviour is now the only one.
     "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_AMBIGUOUS_CONTINUATION_RECOVERY_MODE",
+    # constantize-token-refresh-interval (first release after v1.25.0-beta.7):
+    # the proactive refresh window is the fixed eight-day
+    # ``TOKEN_REFRESH_INTERVAL_DAYS`` in ``app/core/auth/refresh.py``. Its only
+    # live consumer, the traffic-parity canary, now suppresses proactive
+    # refresh by stamping its isolated ``auth.json`` inside the window instead
+    # of widening the window for the whole process.
+    "CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS",
 )
 
 
@@ -327,7 +338,6 @@ class Settings(BaseSettings):
     auth_guardian_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
-    token_refresh_interval_days: int = 8
     # T1 (topology). Path to a JSON registry of additional usage quota keys
     # that replaces the bundled ``config/additional_quota_registry.json``.
     # Unset (or blank) keeps the bundled registry. The Alembic backfill
@@ -363,6 +373,7 @@ class Settings(BaseSettings):
     )
     # Keep durable transcript material short-lived by default. The transcript
     # is sensitive prompt/output data and is only a recovery aid.
+    # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_operation_spool_retention_seconds: float = Field(
         default=7 * 24 * 60 * 60,
         gt=0,
@@ -452,6 +463,11 @@ class Settings(BaseSettings):
         return _effective_environ()
 
     dashboard_auth_proxy_header: str = "Remote-User"
+    # T1 (topology). The header the reverse proxy puts the caller's groups in;
+    # it must match that proxy's configuration, so it cannot live in the
+    # dashboard (policy D2). Optional: an install whose proxy sends no such
+    # header simply has no groups and matches no group rule.
+    dashboard_auth_proxy_groups_header: str = "Remote-Groups"
 
     # --- Multi-replica & production settings ---
     # Prometheus metrics
@@ -477,6 +493,12 @@ class Settings(BaseSettings):
     # ``dashboard_settings`` columns win when set.
     soft_drain_enabled: bool = True
     deterministic_failover_enabled: bool = True
+
+    # Thread cache identity mode: "shared" (default) or "isolated".
+    # T3 -> dashboard: the same-name nullable ``dashboard_settings`` column
+    # wins when it is non-NULL; this field is the environment fallback only.
+    # ``shared`` is byte-for-byte the pre-existing outbound request.
+    thread_cache_identity_mode: str = THREAD_CACHE_IDENTITY_MODE_DEFAULT
 
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
@@ -561,6 +583,29 @@ class Settings(BaseSettings):
             return Path(stripped).expanduser()
         raise TypeError("data_dir must be a path")
 
+    @field_validator("thread_cache_identity_mode", mode="before")
+    @classmethod
+    def _normalize_thread_cache_identity_mode(cls, value: object) -> str:
+        """Coerce an unrecognised value to ``shared`` instead of letting it escape.
+
+        The settings API constrains this field to ``shared``/``isolated``, so a
+        typo in the environment variable would otherwise reach the response
+        model and fail ``GET /api/settings`` for every setting at once. A
+        behaviour toggle is also the wrong thing to make a boot failure, so the
+        unrecognised value degrades to the safe default and says so.
+        """
+        if value is None:
+            return THREAD_CACHE_IDENTITY_MODE_DEFAULT
+        normalized = normalize_thread_cache_identity_mode(value)
+        if normalized is not None:
+            return normalized
+        logger.warning(
+            "CODEX_LB_THREAD_CACHE_IDENTITY_MODE=%r is not a known mode; using %r",
+            value,
+            THREAD_CACHE_IDENTITY_MODE_DEFAULT,
+        )
+        return THREAD_CACHE_IDENTITY_MODE_DEFAULT
+
     @field_validator("database_url")
     @classmethod
     def _expand_database_url(cls, value: str) -> str:
@@ -621,6 +666,13 @@ class Settings(BaseSettings):
         if not isinstance(value, str):
             raise TypeError("dashboard_auth_proxy_header must be a string")
         return normalize_dashboard_auth_proxy_header(value)
+
+    @field_validator("dashboard_auth_proxy_groups_header", mode="before")
+    @classmethod
+    def _normalize_dashboard_auth_proxy_groups_header(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("dashboard_auth_proxy_groups_header must be a string")
+        return normalize_dashboard_auth_proxy_header(value, "dashboard_auth_proxy_groups_header")
 
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
@@ -733,6 +785,17 @@ class Settings(BaseSettings):
             return self
         if not self.firewall_trust_proxy_headers:
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dashboard_auth_proxy_headers_differ(self) -> "Settings":
+        # One header cannot be both the identity and the group claim: that
+        # would turn the username into a group and hand out roles by name.
+        if self.dashboard_auth_proxy_groups_header.lower() == self.dashboard_auth_proxy_header.lower():
+            raise ValueError(
+                "dashboard_auth_proxy_groups_header must not equal dashboard_auth_proxy_header "
+                f"('{self.dashboard_auth_proxy_header}')"
+            )
         return self
 
     @model_validator(mode="after")

@@ -90,32 +90,164 @@ async def test_per_key_http_override_suppresses_native_history_promotion(async_c
     assert raw_calls[-1]["upstream_transport"] == "http"
 
 
+def _image_history(image_url, *, position=-1):
+    history = _promotion_history()
+    history[position] = {"role": "user", "content": [{"type": "input_image", "image_url": image_url}]}
+    return history
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bypass", ["image", "payload_size"])
-async def test_promoted_http_bypass_reasons_are_counted(async_client, promotion_transport, monkeypatch, bypass):
+async def test_promoted_oversized_payload_bypass_is_counted_and_pins_http(
+    async_client, promotion_transport, monkeypatch
+):
     upstreams, raw_calls, _ = promotion_transport
     routing_counter = Mock()
     monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
-    if bypass == "payload_size":
-        # The payload bypass compares against the fixed upstream frame budget
-        # (MAX_SSE_EVENT_BYTES - 2 MiB headroom, floored at 1 MiB): shrink it so
-        # a 1 MiB + 1 history trips the bypass.
-        monkeypatch.setattr(core_proxy_module, "MAX_SSE_EVENT_BYTES", 3 * 1024 * 1024)
-        history = _promotion_history("x" * (1024 * 1024 + 1))
-    else:
-        history = _promotion_history()
-        history[-1] = {
-            "role": "user",
-            "content": [
-                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
-            ],
-        }
+    # The payload bypass compares against the fixed upstream frame budget
+    # (MAX_SSE_EVENT_BYTES - 2 MiB headroom, floored at 1 MiB): shrink it so
+    # a 1 MiB + 1 history trips the bypass.
+    monkeypatch.setattr(core_proxy_module, "MAX_SSE_EVENT_BYTES", 3 * 1024 * 1024)
+    history = _promotion_history("x" * (1024 * 1024 + 1))
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
     assert not upstreams
     assert raw_calls[-1]["upstream_transport"] == "http"
     routing_counter.labels.assert_any_call(stage="admission", reason="smart_history")
-    routing_counter.labels.assert_any_call(stage="bypass", reason=bypass)
+    routing_counter.labels.assert_any_call(stage="bypass", reason="payload_size")
+
+
+@pytest.mark.asyncio
+async def test_promoted_image_bypass_is_counted_without_pinning_http(async_client, promotion_transport, monkeypatch):
+    # Regression for #2363: the image bypass frees bridge pending slots, and it
+    # must keep doing that, but an inline ``data:`` image below the frame budget
+    # must no longer drag the request onto the upstream HTTP transport.
+    upstreams, raw_calls, _ = promotion_transport
+    routing_counter = Mock()
+    monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
+    history = _image_history("data:image/png;base64,aGVsbG8=")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "auto"
+    routing_counter.labels.assert_any_call(stage="admission", reason="smart_history")
+    routing_counter.labels.assert_any_call(stage="bypass", reason="image")
+
+
+@pytest.mark.asyncio
+async def test_historical_image_does_not_pin_later_turns_to_http(async_client, promotion_transport):
+    # The reported production shape: Codex keeps earlier screenshots in the
+    # input, so before #2363 one historical image pinned every later turn of the
+    # thread to the degraded upstream HTTP path.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _image_history("data:image/png;base64,aGVsbG8=", position=0)
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_oversized_image_request_still_pins_http(async_client, promotion_transport, monkeypatch):
+    upstreams, raw_calls, dashboard = promotion_transport
+    routing_counter = Mock()
+    monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
+    monkeypatch.setattr(core_proxy_module, "MAX_SSE_EVENT_BYTES", 3 * 1024 * 1024)
+    # Pin the websocket explicitly so the size clause of the narrowed predicate
+    # is the only thing that can still produce "http" here: an explicit pin
+    # short-circuits _resolve_stream_transport before its own frame-budget gate,
+    # which would otherwise satisfy this assertion on its own. This is also the
+    # configuration the residual pin exists for, since that short-circuit is what
+    # would turn an oversized image payload into a local 400 payload_too_large.
+    dashboard.upstream_stream_transport = "websocket"
+    history = _image_history("data:image/png;base64," + "A" * (1024 * 1024 + 1))
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+    # The size gate runs first and already disables the bridge, so only
+    # ``payload_size`` is counted; the image gate is skipped, as it is today for
+    # every oversized image request.
+    bypass_reasons = [
+        call.kwargs["reason"] for call in routing_counter.labels.call_args_list if call.kwargs["stage"] == "bypass"
+    ]
+    assert bypass_reasons == ["payload_size"]
+
+
+@pytest.mark.asyncio
+async def test_external_image_url_request_still_pins_http(async_client, promotion_transport):
+    # An external URL survives when ``_inline_content_images`` cannot fetch it,
+    # and the upstream websocket does not accept one, so this shape keeps the pin.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _image_history("https://example.com/shot.png")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_external_image_url_inside_a_tool_output_still_pins_http(async_client, promotion_transport):
+    # A ``function_call_output`` output array is a routine Codex tool-result
+    # shape, and the URL inliner never walks into it, so an external URL there
+    # is still external at the upstream. It has to keep the pin even though it
+    # is deeper than the shapes ``_count_external_image_urls`` visits.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _promotion_history()
+    history[-1] = {
+        "type": "function_call_output",
+        "call_id": "call_shot",
+        "output": [{"type": "input_image", "image_url": "https://example.com/shot.png"}],
+    }
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_external_image_url_pins_http_under_an_explicit_websocket_override(async_client, promotion_transport):
+    # The residual pin is deliberately evaluated ahead of an explicit websocket
+    # override: the override short-circuits the transport resolver, so without
+    # the pin the upstream WebSocket would be handed a URL it does not accept.
+    upstreams, raw_calls, dashboard = promotion_transport
+    dashboard.upstream_stream_transport = "websocket"
+    history = _image_history("https://example.com/shot.png")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["https", "HTTPS", "HtTp"])
+async def test_external_image_url_scheme_match_is_case_insensitive(async_client, promotion_transport, scheme):
+    # URL schemes are case-insensitive, and this is the fail-safe direction:
+    # missing one sends a raw external URL to a websocket that accepts only
+    # ``data:``.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _image_history(f"{scheme}://example.com/shot.png")
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client, promotion_transport):
+    # The counterpart that makes the clause above narrow rather than a
+    # reinstatement of the old blanket pin: an inline image nested just as
+    # deeply is carried by the websocket unchanged, so it must not pin.
+    upstreams, raw_calls, _ = promotion_transport
+    history = _promotion_history()
+    history[-1] = {
+        "type": "function_call_output",
+        "call_id": "call_shot",
+        "output": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}],
+    }
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "auto"
 
 
 @pytest.mark.asyncio

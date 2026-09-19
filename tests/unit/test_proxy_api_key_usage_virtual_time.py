@@ -366,7 +366,9 @@ async def test_deferred_keyed_stream_health_apply_task_is_scheduler_owned(monkey
     service = _service(scheduler)
     applied: list[tuple[str, str]] = []
 
-    async def handle_stream_error(account: Any, error: Any, code: str, http_status: int | None = None) -> None:
+    async def handle_stream_error(
+        account: Any, error: Any, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
         del error, http_status
         applied.append((account.id, code))
 

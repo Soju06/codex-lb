@@ -322,7 +322,7 @@ async def test_settings_put_conflicts_when_writer_commits_between_check_and_upda
     second_writer_committed = asyncio.Event()
     call_count = 0
 
-    async def racing_update(self, payload, *, expected_version=None):
+    async def racing_update(self, payload, *, expected_version=None, actor_user_id=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -331,7 +331,7 @@ async def test_settings_put_conflicts_when_writer_commits_between_check_and_upda
             # service touches the row again so writer B can commit in between.
             first_writer_passed_check.set()
             await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
-        return await original_update(self, payload, expected_version=expected_version)
+        return await original_update(self, payload, expected_version=expected_version, actor_user_id=actor_user_id)
 
     monkeypatch.setattr(SettingsService, "update_settings", racing_update)
 

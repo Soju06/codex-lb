@@ -91,6 +91,9 @@ export function AccountList({
       all: withoutProvider.length,
       openai: 0,
       anthropic: 0,
+      glm: 0,
+      kimi: 0,
+      openrouter: 0,
     };
     for (const account of withoutProvider) {
       counts[account.provider ?? "openai"] += 1;

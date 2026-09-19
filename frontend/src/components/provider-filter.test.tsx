@@ -23,7 +23,7 @@ describe("ProviderFilter", () => {
     render(
       <ProviderFilter
         value="all"
-        counts={{ all: 8, openai: 5, anthropic: 3 }}
+        counts={{ all: 8, openai: 5, anthropic: 3, glm: 0, kimi: 0, openrouter: 0 }}
         onChange={vi.fn()}
       />,
     );
@@ -40,7 +40,7 @@ describe("ProviderFilter", () => {
     render(
       <ProviderFilter
         value="anthropic"
-        counts={{ all: 8, openai: 5, anthropic: 3 }}
+        counts={{ all: 8, openai: 5, anthropic: 3, glm: 0, kimi: 0, openrouter: 0 }}
         onChange={vi.fn()}
       />,
     );
@@ -65,7 +65,7 @@ describe("ProviderFilter", () => {
     render(
       <ProviderFilter
         value="all"
-        counts={{ all: 8, openai: 5, anthropic: 3 }}
+        counts={{ all: 8, openai: 5, anthropic: 3, glm: 0, kimi: 0, openrouter: 0 }}
         onChange={onChange}
       />,
     );
@@ -83,7 +83,7 @@ describe("ProviderFilter", () => {
     render(
       <ProviderFilter
         value="all"
-        counts={{ all: 5, openai: 5, anthropic: 0 }}
+        counts={{ all: 5, openai: 5, anthropic: 0, glm: 0, kimi: 0, openrouter: 0 }}
         onChange={onChange}
       />,
     );

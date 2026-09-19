@@ -79,6 +79,20 @@ class AccountAdditionalQuota(DashboardModel):
     secondary_window: AccountAdditionalWindow | None = None
 
 
+class AccountFableScopedWeekly(DashboardModel):
+    """Anthropic's own Fable-scoped weekly marker for this account.
+
+    The same row the balancer's Fable eligibility reads. `fresh` is false once
+    the marker is older than the shared staleness window, in which case routing
+    falls back to the overall-weekly heuristic and this row is only history.
+    """
+
+    used_percent: float
+    reset_at: datetime | None = None
+    recorded_at: datetime | None = None
+    fresh: bool = False
+
+
 class AccountSubscriptionLedger(DashboardModel):
     status: str | None = Field(default=None, pattern=SUBSCRIPTION_STATUS_PATTERN)
     next_charge_at: datetime | None = None
@@ -120,6 +134,10 @@ class AccountSummary(DashboardModel):
     # Anthropic only: weekly usage below the Fable threshold, i.e. the balancer
     # will consider this account for Fable-class requests. Null for other providers.
     fable_eligible: bool | None = None
+    # Anthropic only: the raw Fable-scoped weekly marker behind fable_eligible,
+    # so a caller can see how much of the Fable week is left, not just the
+    # boolean. Null when no marker row exists for the account.
+    fable_scoped_weekly: AccountFableScopedWeekly | None = None
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None

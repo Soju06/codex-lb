@@ -24,6 +24,7 @@ from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
     AccountCreditsWindow,
+    AccountFableScopedWeekly,
     AccountIdentityMismatch,
     AccountLimitWarmupStatus,
     AccountRequestUsage,
@@ -298,6 +299,7 @@ def _account_to_summary(
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
         security_work_authorized=bool(account.security_work_authorized),
         fable_eligible=_fable_eligible(account, secondary_used_percent, fable_scoped_weekly),
+        fable_scoped_weekly=_fable_scoped_weekly_summary(account, fable_scoped_weekly),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
             secondary_remaining_percent=secondary_remaining_percent,
@@ -431,6 +433,26 @@ def _fable_eligible(
     if secondary_used_percent is None:
         return True
     return float(secondary_used_percent) < threshold
+
+
+def _fable_scoped_weekly_summary(
+    account: Account,
+    fable_scoped_weekly: AdditionalUsageHistory | None,
+) -> AccountFableScopedWeekly | None:
+    """Serialize the Fable-scoped weekly marker behind `fable_eligible`.
+
+    Anthropic accounts only, and only when a marker row exists — there is no
+    such window for other providers and no useful zero to report before the
+    first refresh has recorded one.
+    """
+    if account.provider != ANTHROPIC_PROVIDER_NAME or fable_scoped_weekly is None:
+        return None
+    return AccountFableScopedWeekly(
+        used_percent=float(fable_scoped_weekly.used_percent),
+        reset_at=from_epoch_seconds(fable_scoped_weekly.reset_at),
+        recorded_at=fable_scoped_weekly.recorded_at,
+        fresh=_fable_scoped_weekly_is_fresh(fable_scoped_weekly.recorded_at),
+    )
 
 
 def _fable_scoped_weekly_is_fresh(recorded_at: datetime | None) -> bool:

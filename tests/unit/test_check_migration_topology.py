@@ -153,6 +153,50 @@ def test_timestamp_prefix_collision_when_chained_reports_lost_ordering(checker: 
     assert not any(message.startswith("alembic_head_count_invalid") for message in _errors(reports))
 
 
+@pytest.mark.parametrize("extend_branches", [False, True], ids=["direct-merge", "descendant-merge"])
+def test_converged_timestamp_collision_preserves_published_revisions(
+    checker: ModuleType, tmp_path: Path, extend_branches: bool
+) -> None:
+    """A complete merge repairs a published fork without renaming either revision."""
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    left = "20260912_000000_left_branch"
+    right = "20260912_000000_right_branch"
+    _write_revision(versions, left, head)
+    _write_revision(versions, right, head)
+    if extend_branches:
+        _write_revision(versions, "20260913_000000_left_child", left)
+        _write_revision(versions, "20260913_010000_right_child", right)
+        left = "20260913_000000_left_child"
+        right = "20260913_010000_right_child"
+    _write_revision(versions, "20260914_000000_merge", (left, right))
+
+    reports, _ = checker.run_all(versions_dir=versions, base_ref="")
+    assert _errors(reports) == []
+    assert _warnings(reports) == []
+
+
+def test_partially_converged_timestamp_collision_remains_an_error(checker: ModuleType, tmp_path: Path) -> None:
+    """Merging two branches cannot hide a third revision in the same timestamp slot."""
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    _write_revision(versions, "20260912_000000_left_branch", head)
+    _write_revision(versions, "20260912_000000_right_branch", head)
+    _write_revision(versions, "20260912_000000_unmerged_branch", head)
+    _write_revision(
+        versions,
+        "20260914_000000_partial_merge",
+        ("20260912_000000_left_branch", "20260912_000000_right_branch"),
+    )
+
+    reports, _ = checker.run_all(versions_dir=versions, base_ref="")
+    assert [message.split()[0] for message in _errors(reports)] == [
+        "alembic_head_count_invalid",
+        "alembic_timestamp_prefix_collision",
+    ]
+    assert _warnings(reports) == []
+
+
 def test_prefix_collision_before_the_ratchet_is_grandfathered(checker: ModuleType, tmp_path: Path) -> None:
     """Existing history keeps its 36 collision groups; only new slots are enforced."""
     versions = tmp_path / "versions"

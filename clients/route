@@ -438,7 +438,10 @@ def command_pick(args: argparse.Namespace) -> int:
 
     cross_vendor = bool(spec.get("cross_vendor"))
     if cross_vendor and not args.author_vendor:
-        fail(f"class {args.task_class!r} is cross_vendor: pass --author-vendor <vendor> so the author's vendor is excluded")
+        fail(
+            f"class {args.task_class!r} is cross_vendor: pass --author-vendor <vendor> "
+            "so the author's vendor is excluded"
+        )
 
     chain = spec.get("chain")
     if not isinstance(chain, list) or not chain:
@@ -450,7 +453,8 @@ def command_pick(args: argparse.Namespace) -> int:
     pools = pools_by_id(document)
     state = read_state()
 
-    ordered = apply_overrides([entry for entry in chain if isinstance(entry, dict)], table.get("overrides"), args.task_class)
+    entries = [entry for entry in chain if isinstance(entry, dict)]
+    ordered = apply_overrides(entries, table.get("overrides"), args.task_class)
     routable: list[dict[str, Any]] = []
     skipped: list[str] = []
     for entry in ordered:
@@ -759,13 +763,16 @@ def read_ledger(since: datetime) -> tuple[list[dict[str, Any]], list[dict[str, A
     return dispatches, closeouts
 
 
-def aggregate(dispatches: list[dict[str, Any]], closeouts: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+RowKey = tuple[str, str, str]
+
+
+def aggregate(dispatches: list[dict[str, Any]], closeouts: list[dict[str, Any]]) -> dict[RowKey, dict[str, Any]]:
     """Join closeouts to dispatches by (session_id, name), oldest unmatched dispatch first."""
     pending: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
-    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+    rows: dict[RowKey, dict[str, Any]] = {}
 
     def row_for(record: dict[str, Any]) -> dict[str, Any]:
-        key = (
+        key: RowKey = (
             str(record.get("task_class") or "unknown"),
             str(record.get("subagent_type") or "unknown"),
             str(record.get("model") or "unknown"),
@@ -867,7 +874,7 @@ def command_report(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def proposals(rows: dict[tuple[str, str, str], dict[str, Any]], *, minimum: int, floor: float) -> list[dict[str, Any]]:
+def proposals(rows: dict[RowKey, dict[str, Any]], *, minimum: int, floor: float) -> list[dict[str, Any]]:
     found = []
     for key in sorted(rows):
         row = rows[key]

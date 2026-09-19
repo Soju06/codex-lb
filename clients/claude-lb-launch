@@ -703,14 +703,12 @@ def proxy_ready_path(session_id: str) -> Path:
     return shim_dir / f"{session_id}.proxy"
 
 
-def _raise_fd_soft_limit() -> None:
-    """Launchd starts children with a 256-fd soft cap; a proxy shim serving a
-    whole desktop session (or machine) needs real headroom while idle-reaping
-    catches up, so lift the soft limit toward macOS's OPEN_MAX. Best-effort:
-    a refusal must never stop the shim from serving."""
+def _raise_fd_soft_limit(target: int = 10240) -> None:
+    """Raise this process's soft limit only, preserving an operator's hard cap."""
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        target = 10240 if hard == resource.RLIM_INFINITY else min(hard, 10240)
+        if hard != resource.RLIM_INFINITY:
+            target = min(hard, target)
         if soft < target:
             resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
     except (OSError, ValueError):
@@ -1857,6 +1855,21 @@ def run_headless_with_resume(
     return 1
 
 
+def _check_working_directory() -> None:
+    try:
+        os.getcwd()
+        with os.scandir(".") as entries:
+            next(entries, None)
+    except OSError as error:
+        print(
+            f"cc: cannot read the current working directory: {error.strerror}. "
+            "Change to an accessible directory and retry. Claude was not started; "
+            "raising file-descriptor limits will not fix directory access.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from error
+
+
 def main() -> None:
     if len(sys.argv) >= 6 and sys.argv[1] == "--lb-proxy":
         run_lb_proxy(sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5])
@@ -1878,6 +1891,9 @@ def main() -> None:
             shared=True,
         )
         return
+
+    _check_working_directory()
+    _raise_fd_soft_limit(65536)
 
     if sys.argv[1:] == ["--doctor"]:
         sys.exit(run_opus_doctor())

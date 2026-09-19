@@ -25,21 +25,15 @@ and the general pool never runs out. So Fable is rationed and nothing else is.
 
 ## The seats
 
-| Class | Seat | Model | Pool |
-| --- | --- | --- | --- |
-| driver / plan | — (main loop) | `claude-fable-5-1` | anthropic-fable |
-| review | `plan-reviewer` | `claude-planner` | anthropic-fable |
-| explore | `Explore` | `claude-sonnet-5` | anthropic-general |
-| implement | `opus-seat` | `claude-opus-5` | anthropic-general |
-| mechanical | `cursor-seat` | `cursor-grok-4.6-medium-fast` | cursor |
-| verify (non-Anthropic author) | `verifier` | `claude-opus-5` | anthropic-general |
-| verify (Anthropic author) | `codex-verifier` | `gpt-5.6-sol-xhigh` | openai-codex |
-| computer use | `computer-use` | `gpt-6-astra` | openai-codex |
+Which seat serves which class, on which model, out of which pool, is
+`config/coding-agents/routing-table.json` and nothing else — this file does not
+restate it, because a second copy is a copy that goes stale.
 
-Ask the router rather than picking from memory: `route pick <class>
-[--author-vendor V]` returns the first seat whose pool is live, with its
-fallback chain. The chain lives in `config/coding-agents/routing-table.json`;
-`route pools` shows what is left in each pool.
+Read it through the router rather than from memory: `route pick <class>
+[--author-vendor V]` returns the first seat whose pool is live plus its
+fallback chain, and `route pools` shows what is left in each pool. Classes:
+`plan` (the driver keeps it), `review`, `explore`, `implement`, `mechanical`,
+`verify`, `computer`.
 
 `cursor-seat` and `codex-verifier` are thin forwarders: the work runs on
 Cursor's and OpenAI's quotas, not on ours. Never a `claude-fable-*` model on

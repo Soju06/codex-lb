@@ -307,6 +307,8 @@ def main() -> int:
         changes[settings_path] = desired_settings_text
     modes: dict[Path, int] = {}
     preserved_agents: list[tuple[str, Path]] = []
+    adopted: list[tuple[Path, Path]] = []
+    backup_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     for relative_path, owner_relative_path, owner_marker, template_relative_path, mode in MANAGED_AGENTS:
         template_path = source / template_relative_path
         if not template_path.exists():
@@ -327,6 +329,15 @@ def main() -> int:
             elif agent_path.exists():
                 preserved_agents.append(("unmanaged", agent_path))
         else:
+            # Adoption: a file that predates this installer (Explore.md,
+            # verifier.md, seat-guard.py, routing-pulse.py all exist today) is
+            # backed up once, beside itself, before it is first overwritten.
+            if agent_text and not agent_owned and agent_text != agent_template:
+                if not any(agent_path.parent.glob(f"{agent_path.name}.pre-router-*")):
+                    backup_path = agent_path.with_name(f"{agent_path.name}.pre-router-{backup_stamp}")
+                    changes[backup_path] = agent_text
+                    modes[backup_path] = mode
+                    adopted.append((agent_path, backup_path))
             if agent_text != agent_template:
                 changes[agent_path] = agent_template
             if not agent_owned:
@@ -346,6 +357,8 @@ def main() -> int:
         "remove managed routing configuration from" if args.uninstall else "converge managed routing configuration in"
     )
     if args.preview:
+        for original, backup_path in adopted:
+            print(f"would back up {original} to {backup_path}")
         for path in changes:
             print(f"would {action} {path}")
         for reason, path in preserved_agents:
@@ -381,6 +394,8 @@ def main() -> int:
         else:
             write_atomic(path, content, modes.get(path))
             print(f"updated {path}")
+    for original, backup_path in adopted:
+        print(f"backed up {original} to {backup_path}")
     for reason, path in preserved_agents:
         print(f"preserved {reason} {path}")
     return 0

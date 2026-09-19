@@ -8,6 +8,7 @@ which is most of what these hooks promise.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -126,7 +127,8 @@ def test_fork_is_allowed_and_flagged(tmp_path, ledger):
 
 
 def test_records_the_dispatch_fields(tmp_path, ledger):
-    payload = dispatch_payload("opus-seat", "claude-opus-5", "[class:implement] ship it", name="lane-s2")
+    prompt = "[class:implement] ship it"
+    payload = dispatch_payload("opus-seat", "claude-opus-5", prompt, name="lane-s2")
     run(SEAT_GUARD, payload, ledger, tmp_path)
     record = lines(ledger)[-1]
     assert record["session_id"] == SESSION
@@ -136,6 +138,7 @@ def test_records_the_dispatch_fields(tmp_path, ledger):
     assert record["task_class"] == "implement"
     assert record["cwd"] == "/repo"
     assert record["ts"].endswith("Z")
+    assert record["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
 
 
 def test_task_class_falls_back_to_the_routing_table(tmp_path, ledger):
@@ -208,6 +211,72 @@ def stop_payload(agent_type: str, message: str = "Done, tests pass.", **extra) -
         "last_assistant_message": message,
         **extra,
     }
+
+
+def agent_transcript(path: Path, prompt: str) -> Path:
+    """A subagent transcript: its first user entry is the Agent prompt verbatim.
+
+    Shape taken from a real file under
+    ``~/.claude/projects/<slug>/<session>/subagents/agent-*.jsonl`` (2026-09-19).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"type": "user", "isSidechain": True, "message": {"role": "user", "content": prompt}}) + "\n"
+        + json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "working"}}) + "\n"
+    )
+    return path
+
+
+def test_closeout_joins_on_the_prompt_hash(tmp_path, ledger):
+    """The hash beats recency: the older dispatch is the one that stopped."""
+    wanted = "[class:explore] read the pools endpoint"
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", wanted, name="scout"), ledger, tmp_path)
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", "[class:implement] build", name="builder"),
+        ledger, tmp_path)
+    transcript = agent_transcript(tmp_path / "subagents" / "agent-scout.jsonl", wanted)
+    run(CLOSEOUT, stop_payload("opus-seat", agent_transcript_path=str(transcript)), ledger, tmp_path)
+    record = lines(ledger)[-1]
+    assert record["match"] == "prompt_hash"
+    assert record["name"] == "scout"
+    assert record["task_class"] == "explore"
+    dispatches = [row for row in lines(ledger) if row["event"] == "dispatch"]
+    assert record["prompt_sha256"] == next(row["prompt_sha256"] for row in dispatches if row["name"] == "scout")
+
+
+def test_closeout_falls_back_when_the_transcript_is_unreadable(tmp_path, ledger):
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", "[class:implement] build", name="builder"),
+        ledger, tmp_path)
+    missing = tmp_path / "subagents" / "gone.jsonl"
+    run(CLOSEOUT, stop_payload("opus-seat", agent_transcript_path=str(missing)), ledger, tmp_path)
+    assert lines(ledger)[-1]["match"] == "fallback"
+    assert lines(ledger)[-1]["name"] == "builder"
+
+
+def test_closeout_falls_back_when_the_transcript_is_garbage(tmp_path, ledger):
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", "[class:implement] build", name="builder"),
+        ledger, tmp_path)
+    broken = tmp_path / "subagents" / "broken.jsonl"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{not json\n")
+    run(CLOSEOUT, stop_payload("opus-seat", agent_transcript_path=str(broken)), ledger, tmp_path)
+    assert lines(ledger)[-1]["match"] == "fallback"
+
+
+def test_closeout_ignores_a_session_transcript_path(tmp_path, ledger):
+    """transcript_path is the parent session's; only a /subagents/ path is ours."""
+    prompt = "[class:explore] look"
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", prompt, name="scout"), ledger, tmp_path)
+    session_file = agent_transcript(tmp_path / "projects" / "session.jsonl", prompt)
+    run(CLOSEOUT, stop_payload("opus-seat", transcript_path=str(session_file)), ledger, tmp_path)
+    assert lines(ledger)[-1]["match"] == "fallback"
+
+
+def test_closeout_names_the_seat_both_ways(tmp_path, ledger):
+    run(SEAT_GUARD, dispatch_payload("codex-verifier", "gpt-5.6-sol-xhigh"), ledger, tmp_path)
+    run(CLOSEOUT, stop_payload("codex-verifier"), ledger, tmp_path)
+    record = lines(ledger)[-1]
+    assert record["agent_type"] == "codex-verifier"
+    assert record["subagent_type"] == "codex-verifier"
 
 
 def test_closeout_matches_the_newest_open_dispatch(tmp_path, ledger):
@@ -403,6 +472,47 @@ def test_pulse_is_silent_when_the_lb_is_down(tmp_path, ledger):
     assert result.returncode == 0 and result.stdout.strip() == ""
     # A failed probe must not burn the throttle: the next prompt still checks.
     assert not (tmp_path / ".cache" / "routing-pulse" / SESSION).exists()
+
+
+def test_installer_backs_up_a_file_it_adopts(tmp_path):
+    """Explore.md, verifier.md, seat-guard.py and routing-pulse.py exist today."""
+    installer = HOOKS.parent / "install-policy.py"
+    home = tmp_path / "home"
+    (home / ".claude" / "agents").mkdir(parents=True)
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}\n")
+    explore = home / ".claude" / "agents" / "Explore.md"
+    explore.write_text("---\nname: Explore\nmodel: sonnet\n---\n\nthe seat as it was before.\n")
+    guard = home / ".claude" / "hooks" / "seat-guard.py"
+    guard.write_text("#!/usr/bin/env python3\n# the hook as it was before\n")
+
+    def install(*flags):
+        return subprocess.run(
+            [sys.executable, str(installer), "--home", str(home), *flags],
+            capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+
+    preview = install("--print")
+    assert f"would back up {explore}" in preview
+    assert f"would back up {guard}" in preview
+
+    output = install()
+    backups = sorted(home.glob(".claude/*/*.pre-router-*"))
+    assert [path.name.split(".pre-router-")[0] for path in backups] == ["Explore.md", "seat-guard.py"]
+    saved = {path.name.split(".pre-router-")[0]: path.read_text() for path in backups}
+    assert "the seat as it was before." in saved["Explore.md"]
+    assert "the hook as it was before" in saved["seat-guard.py"]
+    for backup in backups:
+        assert f"backed up {str(backup).split('.pre-router-')[0]}" in output
+    # The originals are now the managed copies.
+    assert "claude-sonnet-5" in explore.read_text()
+    assert "prompt_sha256" in guard.read_text()
+
+    # Adopting is a one-off: converged, and no second backup even if re-run.
+    assert "already converged" in install()
+    (home / ".agent-lb" / "managed" / "coding-agents" / "Explore").unlink()
+    install()
+    assert len(sorted(home.glob(".claude/*/*.pre-router-*"))) == len(backups)
 
 
 def test_pulse_ignores_a_short_session_id(tmp_path, ledger):

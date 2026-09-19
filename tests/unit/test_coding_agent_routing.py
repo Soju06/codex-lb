@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -12,25 +13,26 @@ ADAPTER = ROOT / "config" / "coding-agents" / "claude-adapter.md"
 VERIFIER = ROOT / "config" / "coding-agents" / "verify-routing"
 
 
-def test_canonical_claude_native_routes_use_opus_5_high_with_fable_first_planner() -> None:
+def test_canonical_policy_states_the_routing_rule() -> None:
+    """The canon carries the rule; the seat lineup moved to the routing table.
+
+    Router program, 2026-09-19: Fable is the one rationed pool, so it drives and
+    judges and nothing else runs on it, while Opus is the unrationed default
+    seat. A seat/model table in prose would be a second copy of the routing
+    table, free to drift, so its absence is part of the contract.
+    """
     routing = ROUTING.read_text()
     adapter = ADAPTER.read_text()
     verifier = VERIFIER.read_text()
 
-    assert "| Driver (main loop)" in routing
-    assert "| `claude-opus-5`" in routing
-    assert "| high" in routing
-    assert "| Frontend designer" in routing
-    assert "| Planner (lane lead)" in routing
-    planner_row = next(line for line in routing.splitlines() if "| Planner (lane lead)" in line)
-    assert "`claude-planner`" in planner_row
-    assert "Fable 5 primary, Opus 5 on scoped exhaustion" in planner_row
+    assert "Fable is the driver and the judge" in routing
+    assert "Opus 5 is the default seat, and it is not rationed" in routing
+    assert "Verification is cross-vendor" in routing
+    assert "config/coding-agents/routing-table.json" in routing
+    assert "route pick" in routing
+    assert not [line for line in routing.splitlines() if "| Driver (main loop)" in line]
     for legacy in ("claude-opus-4-8", "Fable/high"):
-        assert legacy not in "\n".join(
-            line
-            for line in routing.splitlines()
-            if any(route in line for route in ("Driver (main loop)", "Frontend designer"))
-        )
+        assert legacy not in routing
         assert legacy not in adapter
     assert 'settings.get("model") == "fable"' in verifier
     assert 'settings.get("effortLevel") == "high"' in verifier
@@ -38,19 +40,16 @@ def test_canonical_claude_native_routes_use_opus_5_high_with_fable_first_planner
     assert "claude-opus-5" in verifier
 
 
-def test_gpt_sol_routes_remain_fixed() -> None:
-    routing = ROUTING.read_text()
+def test_routing_table_is_the_single_source_of_seat_truth() -> None:
+    table = json.loads((ROOT / "config" / "coding-agents" / "routing-table.json").read_text())
     verifier = VERIFIER.read_text()
-    expected_rows = (
-        "| Explore / scouts       | `~/.claude/agents/Explore.md`           "
-        "| `gpt-5.6-sol-medium` | medium, fast tier |",
-        "| Implementer            | `~/.claude/agents/implementer.md`       "
-        "| `gpt-5.6-terra-medium` | medium, fast tier |",
-        "| Verifier (adversarial) | `~/.claude/agents/verifier.md`          "
-        "| `gpt-5.6-sol-xhigh`  | xhigh, fast tier  |",
-    )
-    for row in expected_rows:
-        assert row in routing
+
+    chains = {name: spec.get("chain") or [] for name, spec in table["classes"].items()}
+    assert chains["explore"][0] == {"seat": "Explore", "model": "claude-sonnet-5"}
+    assert chains["implement"][0] == {"seat": "opus-seat", "model": "claude-opus-5"}
+    assert table["classes"]["verify"]["cross_vendor"] is True
+    # No Fable anywhere in a seat chain: Fable is the driver, never a seat.
+    assert not [entry for chain in chains.values() for entry in chain if "fable" in entry.get("model", "")]
     assert 'CCGPT_MODEL = "gpt-5.6-sol"' in verifier
     assert '"--effort", "high"' in verifier
 

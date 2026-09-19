@@ -12,6 +12,7 @@ Every Agent call, allowed or denied, appends a C2 ``dispatch`` line to
 ``~/.claude/logs/dispatch.jsonl``. Fail-open: an I/O or parse error never blocks.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CATCH_ALL = {"general-purpose", "claude", ""}
+# The Agent tool's model parameter is an enum (sonnet|opus|haiku|fable), not a
+# full model id, so match the substring: "fable" and "claude-fable-5-1" both hit.
 FABLE = "fable"
 CLASS_TAG = re.compile(r"^\s*\[class:([a-z0-9_-]+)\]", re.IGNORECASE)
 LEDGER = Path(os.environ.get("DISPATCH_LEDGER") or Path.home() / ".claude" / "logs" / "dispatch.jsonl")
@@ -86,6 +89,7 @@ def main() -> None:
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     subagent = str(tool_input.get("subagent_type") or "").strip().lower()
     model = str(tool_input.get("model") or "").strip().lower()
+    prompt = str(tool_input.get("prompt") or "")
 
     record = {
         "ts": now(),
@@ -94,7 +98,10 @@ def main() -> None:
         "subagent_type": subagent or None,
         "model": model or None,
         "name": str(tool_input.get("name") or "") or None,
-        "task_class": task_class(str(tool_input.get("prompt") or ""), subagent),
+        "task_class": task_class(prompt, subagent),
+        # The join key for the closeout: a subagent's transcript opens with this
+        # exact prompt string, so the pair can be matched without guessing.
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "cwd": payload.get("cwd"),
     }
 

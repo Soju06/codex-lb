@@ -129,37 +129,41 @@ check(
 installer_text = (REPO / "scripts" / "install-claude-clients.sh").read_text()
 check("CLIENT_NAMES=(cc fable opus)" in installer_text, "client installer installs cc, fable, and opus")
 
+# The canon states the RULE; which seat serves which class lives in the routing
+# table, and is checked there (router program, 2026-09-19). A seat/model table
+# in the canon would be a second copy free to go stale, so its absence is the
+# check.
 routing_text = CANONICAL.read_text() if CANONICAL.is_file() else ""
-check("## Fable driver mode" in routing_text, "canonical policy documents Fable driver mode")
-for seat, model, effort in (
-    ("Driver (main loop)", "claude-opus-5", "high"),
-    ("Explore / scouts", "gpt-5.6-sol-medium", "medium, fast tier"),
-    ("Implementer", "gpt-5.6-terra-medium", "medium, fast tier"),
-    ("Verifier (adversarial)", "gpt-5.6-sol-xhigh", "xhigh, fast tier"),
-    ("Frontend designer", "claude-fable-5", "inherit high"),
-    ("Planner (lane lead)", "claude-planner", "high"),
-    ("Plan reviewer", "claude-planner", "high"),
+for phrase in (
+    "Fable is the driver and the judge",
+    "Opus 5 is the default seat, and it is not rationed",
+    "Verification is cross-vendor",
+    "config/coding-agents/routing-table.json",
+    "route pick",
 ):
-    matching_rows = [line for line in routing_text.splitlines() if f"| {seat}" in line]
-    check(
-        len(matching_rows) == 1 and f"`{model}`" in matching_rows[0] and effort in matching_rows[0],
-        f"{seat} retains canonical {model}/{effort} routing",
-    )
-# Frontend designer is exempt from the claude-fable-5 scan since the seat was
-# pinned to Fable (design is Fable always — owner, 2026-08-20).
-for stale_model, seats in (
-    ("claude-fable-5", ("Driver (main loop)",)),
-    ("claude-opus-4-8", ("Driver (main loop)", "Frontend designer")),
+    check(phrase in routing_text, f"canonical policy states: {phrase}")
+check(
+    not [line for line in routing_text.splitlines() if "| Driver (main loop)" in line],
+    "canonical policy does not duplicate the routing table",
+)
+
+table_path = HOME / ".agent-lb" / "managed" / "coding-agents" / "routing-table.json"
+table = json.loads(table_path.read_text()) if table_path.is_file() else {"classes": {}}
+for task_class, seat, model in (
+    ("explore", "Explore", "claude-sonnet-5"),
+    ("implement", "opus-seat", "claude-opus-5"),
+    ("mechanical", "cursor-seat", "cursor-grok-4.6-medium-fast"),
+    ("verify", "codex-verifier", "gpt-5.6-sol-xhigh"),
 ):
-    migrated_rows = [
-        line
-        for line in routing_text.splitlines()
-        if any(seat in line for seat in seats)
-    ]
+    chain = (table.get("classes", {}).get(task_class) or {}).get("chain") or []
     check(
-        all(stale_model not in row for row in migrated_rows),
-        f"migrated Claude-native routes do not retain {stale_model}",
+        any(entry.get("seat") == seat and entry.get("model") == model for entry in chain),
+        f"routing table routes {task_class} to {seat} on {model}",
     )
+check(
+    (table.get("classes", {}).get("verify") or {}).get("cross_vendor") is True,
+    "routing table marks verify cross-vendor",
+)
 
 launcher_text = (REPO / "clients" / "claude-lb-launch").read_text()
 check('CCGPT_MODEL = "gpt-5.6-sol"' in launcher_text, "CCDEX compatibility model remains gpt-5.6-sol")

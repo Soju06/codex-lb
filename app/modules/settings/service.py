@@ -35,6 +35,8 @@ class DashboardSettingsData:
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    team_mode_enabled: bool
+    team_public_base_url: str | None
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
@@ -68,6 +70,8 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+    team_mode_enabled: bool
+    team_public_base_url: str | None
     limit_warmup_enabled: bool
     limit_warmup_windows: str
     limit_warmup_model: str
@@ -111,6 +115,8 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            team_mode_enabled=row.team_mode_enabled,
+            team_public_base_url=row.team_public_base_url,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,
@@ -151,6 +157,8 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
+            team_mode_enabled=payload.team_mode_enabled,
+            team_public_base_url=payload.team_public_base_url,
             limit_warmup_enabled=payload.limit_warmup_enabled,
             limit_warmup_windows=payload.limit_warmup_windows,
             limit_warmup_model=payload.limit_warmup_model,
@@ -187,6 +195,8 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            team_mode_enabled=row.team_mode_enabled,
+            team_public_base_url=row.team_public_base_url,
             limit_warmup_enabled=row.limit_warmup_enabled,
             limit_warmup_windows=row.limit_warmup_windows,
             limit_warmup_model=row.limit_warmup_model,

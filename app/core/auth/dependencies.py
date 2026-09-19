@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from ipaddress import ip_address, ip_network
 from typing import cast
 
 from fastapi import Request, Security
@@ -15,8 +14,13 @@ from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.exceptions import DashboardAuthError, ProxyAuthError, ProxyUpstreamError
-from app.core.request_locality import is_local_request, resolve_request_client_host
+from app.core.exceptions import (
+    DashboardAuthError,
+    DashboardForbiddenError,
+    ProxyAuthError,
+    ProxyUpstreamError,
+)
+from app.core.request_locality import is_local_request, is_unauthenticated_client_allowed
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
 from app.core.utils.time import utcnow
 from app.db.session import get_background_session
@@ -28,6 +32,8 @@ from app.modules.dashboard_auth.service import DASHBOARD_SESSION_COOKIE, get_das
 logger = logging.getLogger(__name__)
 
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
+
+API_KEY_TOKEN_PREFIX = "sk-clb-"
 
 
 # --- Error format markers ---
@@ -59,10 +65,14 @@ async def validate_proxy_api_key_authorization(
 ) -> ApiKeyData | None:
     settings = await get_settings_cache().get()
     if not settings.api_key_auth_enabled:
-        if request is not None and not is_local_request(request):
-            if not _is_proxy_unauthenticated_client_allowed(request):
-                raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
-        return None
+        if request is None or is_local_request(request) or _is_proxy_unauthenticated_client_allowed(request):
+            # Trusted clients stay keyless; any bearer they send is ignored.
+            return None
+        if getattr(settings, "team_mode_enabled", False):
+            untrusted_token = _extract_bearer_token(authorization)
+            if untrusted_token and untrusted_token.startswith(API_KEY_TOKEN_PREFIX):
+                return await _validate_api_key_token(untrusted_token)
+        raise ProxyAuthError("Proxy authentication must be configured before remote access is allowed")
 
     token = _extract_bearer_token(authorization)
     if not token:
@@ -118,11 +128,21 @@ async def validate_usage_api_key(
 
 
 async def validate_dashboard_session(request: Request) -> None:
+    settings = await get_settings_cache().get()
+
+    # Team mode opens the network path to untrusted clients, so the dashboard and every
+    # admin API behind it must be closed to them first — before the DISABLED /
+    # trusted-header short-circuit, which would otherwise let them straight in.
+    if getattr(settings, "team_mode_enabled", False) and not _is_trusted_dashboard_client(request):
+        raise DashboardForbiddenError(
+            "Dashboard is restricted to trusted clients in team mode",
+            code="team_mode_untrusted_client",
+        )
+
     request_auth = get_dashboard_request_auth(request)
     if request_auth is not None:
         return
 
-    settings = await get_settings_cache().get()
     password_required = bool(settings.password_hash)
     requires_auth = password_required or settings.totp_required_on_login
     if get_dashboard_request_auth_mode() == DashboardAuthMode.TRUSTED_HEADER and not requires_auth:
@@ -152,30 +172,23 @@ async def validate_dashboard_session(request: Request) -> None:
 
 
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:
-    from app.core.config.settings import get_settings
-
     return get_settings().dashboard_auth_mode
 
 
-def _is_proxy_unauthenticated_client_allowed(request: HTTPConnection) -> bool:
-    """Return True if the resolved client IP is in the configured unauthenticated CIDR allowlist.
+def _is_trusted_dashboard_client(request: HTTPConnection) -> bool:
+    """True for local clients and for the configured unauthenticated CIDR allowlist.
 
-    Uses the trusted-proxy-aware resolved client IP (honoring X-Forwarded-For only when the
-    socket peer is in ``firewall_trusted_proxy_cidrs``).  This prevents a misconfigured
-    allowlist entry (e.g. 127.0.0.1/32) from accidentally granting access to public traffic
-    arriving through a local reverse proxy such as Tailscale Funnel.
+    Both helpers resolve the client IP through ``resolve_request_client_host``, so a
+    tailnet peer arriving through the trusted local reverse proxy is judged by its own
+    address rather than by the loopback socket peer.
     """
-    client_host = resolve_request_client_host(request)
-    if client_host is None:
-        return False
+    return is_local_request(request) or _is_proxy_unauthenticated_client_allowed(request)
 
-    try:
-        client_ip = ip_address(client_host)
-    except ValueError:
-        return False
 
-    configured_cidrs = get_settings().proxy_unauthenticated_client_cidrs
-    return any(client_ip in ip_network(cidr, strict=False) for cidr in configured_cidrs)
+# Kept under the original private name so existing call sites and the tests that
+# monkeypatch it keep working; the implementation now lives beside the other
+# client-IP helpers in app/core/request_locality.py.
+_is_proxy_unauthenticated_client_allowed = is_unauthenticated_client_allowed
 
 
 # --- Codex usage caller identity auth ---

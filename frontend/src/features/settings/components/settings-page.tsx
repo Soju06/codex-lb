@@ -16,6 +16,7 @@ import { SessionSettings } from "@/features/settings/components/session-settings
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
+import { TeamSettings } from "@/features/team/components/team-settings";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import {
   useSettings,
@@ -164,6 +165,11 @@ export function SettingsPage() {
                   }),
                 )
               }
+            />
+            <TeamSettings
+              settings={settings}
+              busy={busy}
+              onSave={handleSave}
             />
             <FirewallSection />
             <QuotaPlannerSection />

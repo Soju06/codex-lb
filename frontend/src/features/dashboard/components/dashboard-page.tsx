@@ -192,6 +192,9 @@ export function DashboardPage() {
       all: overview.accounts.length,
       openai: 0,
       anthropic: 0,
+      glm: 0,
+      kimi: 0,
+      openrouter: 0,
     };
     for (const account of overview.accounts) {
       counts[account.provider ?? "openai"] += 1;

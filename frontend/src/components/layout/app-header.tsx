@@ -20,6 +20,7 @@ const NAV_ITEMS = [
   { to: "/sessions", label: "Sessions" },
   { to: "/accounts", label: "Accounts" },
   { to: "/apis", label: "APIs" },
+  { to: "/team", label: "Team" },
   { to: "/settings", label: "Settings" },
 ] as const;
 

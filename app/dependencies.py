@@ -44,6 +44,8 @@ from app.modules.sessions.service import SessionsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
+from app.modules.team.repository import TeamRepository
+from app.modules.team.service import TeamService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
@@ -103,6 +105,14 @@ class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
     service: ApiKeysService
+
+
+@dataclass(slots=True)
+class TeamContext:
+    session: AsyncSession
+    repository: TeamRepository
+    service: TeamService
+    api_keys_service: ApiKeysService
 
 
 @dataclass(slots=True)
@@ -291,6 +301,20 @@ def get_api_keys_context(
     usage_repository = UsageRepository(session)
     service = ApiKeysService(repository, usage_repository=usage_repository)
     return ApiKeysContext(session=session, repository=repository, service=service)
+
+
+def get_team_context(
+    session: AsyncSession = Depends(get_session),
+) -> TeamContext:
+    repository = TeamRepository(session)
+    service = TeamService(repository)
+    api_keys_service = ApiKeysService(ApiKeysRepository(session))
+    return TeamContext(
+        session=session,
+        repository=repository,
+        service=service,
+        api_keys_service=api_keys_service,
+    )
 
 
 def get_request_logs_context(

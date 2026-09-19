@@ -175,6 +175,7 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.team.gate import check_member_gate
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -3489,6 +3490,8 @@ async def _enforce_request_limits(
 ) -> ApiKeyUsageReservationData | None:
     if api_key is None:
         return None
+
+    await check_member_gate(api_key, model=request_model)
 
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session))

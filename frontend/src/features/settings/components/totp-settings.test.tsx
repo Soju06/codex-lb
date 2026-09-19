@@ -49,6 +49,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  teamModeEnabled: false,
+  teamPublicBaseUrl: null,
   ...LIMIT_WARMUP_DEFAULTS,
   ...ADDITIONAL_QUOTA_DEFAULTS,
 };

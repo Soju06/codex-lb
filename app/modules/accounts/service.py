@@ -30,10 +30,17 @@ from app.core.providers import (
     get_provider,
     normalize_provider_name,
 )
+from app.core.providers.openrouter import OPENROUTER_DEFAULT_PLAN, OPENROUTER_PROVIDER_NAME
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory
 from app.modules.accounts import probes, reset_credit_cache
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.credits import (
+    CREDITS_USAGE_WINDOW,
+    credits_exhausted,
+    fetch_openrouter_credits,
+    window_from_parts,
+)
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.reset_credit_attempts import ResetCreditAttemptsRepository
@@ -185,6 +192,9 @@ class AccountsService:
         primary_usage = await self._usage_repo.latest_by_account(window="primary") if self._usage_repo else {}
         secondary_usage = await self._usage_repo.latest_by_account(window="secondary") if self._usage_repo else {}
         monthly_usage = await self._usage_repo.latest_by_account(window="monthly") if self._usage_repo else {}
+        credits_usage = (
+            await self._usage_repo.latest_by_account(window=CREDITS_USAGE_WINDOW) if self._usage_repo else {}
+        )
         limit_warmups_by_account = (
             await self._limit_warmup_repo.latest_by_account(account_ids) if self._limit_warmup_repo else {}
         )
@@ -203,6 +213,7 @@ class AccountsService:
             primary_usage=primary_usage,
             secondary_usage=secondary_usage,
             monthly_usage=monthly_usage,
+            credits_usage=credits_usage,
             request_usage_by_account=request_usage_by_account,
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
@@ -449,16 +460,41 @@ class AccountsService:
 
     async def import_api_key_account(self, payload: AccountApiKeyImportRequest) -> AccountImportResponse:
         provider_name = normalize_provider_name(payload.provider)
-        if provider_name != GLM_PROVIDER_NAME:
+        if provider_name not in (GLM_PROVIDER_NAME, OPENROUTER_PROVIDER_NAME):
             raise ValueError(f"Provider {provider_name} does not support API-key account import")
         provider = get_provider(provider_name)
         api_key = payload.api_key.get_secret_value().strip()
         if not api_key:
             raise ValueError("apiKey is required")
         email = payload.email.strip().lower()
-        raw_account_id = (payload.account_id or "zai_glm_coding").strip()
+        alias = payload.alias
+        plan_type_raw = payload.plan_type
+        raw_account_id = (payload.account_id or "").strip()
+        credits_window = None
+        if provider_name == OPENROUTER_PROVIDER_NAME:
+            if email == "glm@z.ai":
+                email = "openrouter@openrouter.ai"
+            if alias == "GLM Coding Plan":
+                alias = "OpenRouter"
+            if plan_type_raw == GLM_DEFAULT_PLAN:
+                plan_type_raw = OPENROUTER_DEFAULT_PLAN
+            if not raw_account_id:
+                raw_account_id = OPENROUTER_PROVIDER_NAME
+            credits_window = window_from_parts(
+                balance=payload.credits_balance,
+                cap=payload.credits_cap,
+                spent=payload.credits_spent,
+            )
+            if credits_window is None:
+                credits_window = await fetch_openrouter_credits(api_key)
+        elif not raw_account_id:
+            raw_account_id = "zai_glm_coding"
         account_id = generate_unique_account_id(raw_account_id, email)
-        plan_type = coerce_account_plan_type(payload.plan_type, GLM_DEFAULT_PLAN)
+        default_plan = OPENROUTER_DEFAULT_PLAN if provider_name == OPENROUTER_PROVIDER_NAME else GLM_DEFAULT_PLAN
+        plan_type = coerce_account_plan_type(plan_type_raw, default_plan)
+        status = AccountStatus.ACTIVE
+        if credits_window is not None and credits_exhausted(credits_window):
+            status = AccountStatus.QUOTA_EXCEEDED
 
         account = Account(
             id=account_id,
@@ -473,15 +509,33 @@ class AccountsService:
             refresh_token_encrypted=self._encryptor.encrypt(api_key),
             id_token_encrypted=None,
             last_refresh=utcnow(),
-            status=AccountStatus.ACTIVE,
+            status=status,
             deactivation_reason=None,
         )
 
         saved = await self._repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
-        if payload.alias is not None:
-            alias = payload.alias.strip() or None
-            await self._repo.update_alias(saved.id, alias)
-            saved.alias = alias
+        if alias is not None:
+            stored_alias = alias.strip() or None
+            await self._repo.update_alias(saved.id, stored_alias)
+            saved.alias = stored_alias
+        if credits_window is not None and self._usage_repo is not None:
+            await self._usage_repo.add_entry(
+                saved.id,
+                0.0,
+                provider=provider.name,
+                window=CREDITS_USAGE_WINDOW,
+                credits_has=True,
+                credits_unlimited=False,
+                credits_balance=credits_window.balance,
+                credits_cap=credits_window.cap,
+                credits_spent=credits_window.spent,
+            )
+        logger.info(
+            "api_key_account_imported provider=%s account_id=%s exhausted=%s",
+            provider.name,
+            saved.id,
+            credits_window is not None and credits_exhausted(credits_window),
+        )
         get_account_selection_cache().invalidate()
         return AccountImportResponse(
             account_id=saved.id,

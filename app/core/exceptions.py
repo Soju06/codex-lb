@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 
 class AppError(Exception):
     """Base exception for all domain errors."""
@@ -42,12 +44,67 @@ class ProxyUpstreamError(AppError):
     error_type = "server_error"
 
 
+# --- Team mode (member gate) errors, OpenAI envelope ---
+
+
+class TeamMemberSuspendedError(AppError):
+    status_code = 403
+    code = "team_member_suspended"
+    error_type = "team_member_suspended"
+
+
+class TeamModelNotAllowedError(AppError):
+    status_code = 403
+    code = "team_model_not_allowed"
+    error_type = "team_model_not_allowed"
+
+
+class TeamMemberOverCapError(AppError):
+    status_code = 429
+    code = "team_member_over_cap"
+    error_type = "team_member_over_cap"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        window: str,
+        reset_at: datetime,
+        code: str | None = None,
+    ) -> None:
+        self.window = window
+        self.reset_at = reset_at
+        super().__init__(message, code=code)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        # Window ends are computed in naive UTC, so stamp the zone before formatting;
+        # without it the isoformat carries no offset and the client cannot tell.
+        reset_at = self.reset_at if self.reset_at.tzinfo is not None else self.reset_at.replace(tzinfo=timezone.utc)
+        return {
+            "X-Team-Window": self.window,
+            "X-Team-Reset": reset_at.isoformat().replace("+00:00", "Z"),
+        }
+
+
 # --- Dashboard-envelope errors ---
 
 
 class DashboardAuthError(AppError):
     status_code = 401
     code = "authentication_required"
+
+
+class DashboardForbiddenError(DashboardAuthError):
+    """A dashboard caller that is authenticated enough, but not allowed from here.
+
+    Subclasses ``DashboardAuthError`` so existing ``except`` clauses keep working, but
+    answers 403 rather than 401 so the frontend does not treat it as a logged-out
+    session and bounce the viewer to the login screen.
+    """
+
+    status_code = 403
+    code = "forbidden"
 
 
 class DashboardNotFoundError(AppError):

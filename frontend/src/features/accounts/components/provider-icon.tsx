@@ -4,6 +4,9 @@ import type { AccountProvider } from "@/features/accounts/schemas";
 const PROVIDER_ICON_URLS: Record<AccountProvider, string> = {
   openai: "/brand/openai.svg",
   anthropic: "/brand/claude.svg",
+  glm: "/brand/openai.svg",
+  kimi: "/brand/openai.svg",
+  openrouter: "/brand/openai.svg",
 };
 
 export function ProviderIcon({

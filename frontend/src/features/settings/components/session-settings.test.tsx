@@ -36,6 +36,8 @@ const baseSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: true,
   apiKeyAuthEnabled: true,
+  teamModeEnabled: false,
+  teamPublicBaseUrl: null,
   ...LIMIT_WARMUP_DEFAULTS,
   ...ADDITIONAL_QUOTA_DEFAULTS,
 };
@@ -74,6 +76,8 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -140,6 +144,8 @@ describe("SessionSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });

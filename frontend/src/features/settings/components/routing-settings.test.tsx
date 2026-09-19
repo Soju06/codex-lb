@@ -47,6 +47,8 @@ const BASE_SETTINGS: DashboardSettings = {
   totpRequiredOnLogin: false,
   totpConfigured: false,
   apiKeyAuthEnabled: true,
+  teamModeEnabled: false,
+  teamPublicBaseUrl: null,
   additionalQuotaRoutingPolicies: {},
   additionalQuotaPolicies: [],
   ...LIMIT_WARMUP_DEFAULTS,
@@ -82,6 +84,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
 
@@ -113,6 +117,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -149,6 +155,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -184,6 +192,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
 
@@ -301,6 +311,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -365,6 +377,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -445,6 +459,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -484,6 +500,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });
@@ -551,6 +569,8 @@ describe("RoutingSettings", () => {
       importWithoutOverwrite: false,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,
+      teamModeEnabled: false,
+      teamPublicBaseUrl: null,
       ...LIMIT_WARMUP_DEFAULTS,
     });
   });

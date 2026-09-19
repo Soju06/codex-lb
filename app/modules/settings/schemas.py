@@ -54,6 +54,8 @@ class DashboardSettingsResponse(DashboardModel):
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    team_mode_enabled: bool = False
+    team_public_base_url: str | None = None
     limit_warmup_enabled: bool
     limit_warmup_windows: str = Field(pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str = Field(min_length=1, max_length=128)
@@ -94,6 +96,8 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     import_without_overwrite: bool | None = None
     totp_required_on_login: bool | None = None
     api_key_auth_enabled: bool | None = None
+    team_mode_enabled: bool | None = None
+    team_public_base_url: str | None = Field(default=None, max_length=512)
     limit_warmup_enabled: bool | None = None
     limit_warmup_windows: str | None = Field(default=None, pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str | None = Field(default=None, min_length=1, max_length=128)

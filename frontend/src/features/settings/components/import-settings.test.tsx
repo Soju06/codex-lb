@@ -81,6 +81,8 @@ describe("ImportSettings", () => {
       importWithoutOverwrite: true,
       totpRequiredOnLogin: settings.totpRequiredOnLogin,
       apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
+      teamModeEnabled: settings.teamModeEnabled,
+      teamPublicBaseUrl: settings.teamPublicBaseUrl,
       limitWarmupEnabled: settings.limitWarmupEnabled,
       limitWarmupWindows: settings.limitWarmupWindows,
       limitWarmupModel: settings.limitWarmupModel,

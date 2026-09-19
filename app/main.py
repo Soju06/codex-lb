@@ -77,6 +77,7 @@ from app.modules.sessions import api as sessions_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
+from app.modules.team import api as team_api
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
@@ -444,6 +445,7 @@ def create_app() -> FastAPI:
     app.include_router(firewall_api.router)
     app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)
+    app.include_router(team_api.router)
     app.include_router(health_api.router)
     app.include_router(federation_api.router)
     app.include_router(federation_api.dashboard_router)

@@ -79,6 +79,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
         key_prefix: str | _Unset = ...,
+        member_id: str | None | _Unset = ...,
         commit: bool = True,
     ) -> ApiKey | None: ...
 
@@ -260,6 +261,7 @@ class ApiKeyCreateData:
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
+    member_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +289,8 @@ class ApiKeyUpdateData:
     limits: list[LimitRuleInput] | None = None
     limits_set: bool = False
     reset_usage: bool = False
+    member_id: str | None = None
+    member_id_set: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +313,7 @@ class ApiKeyData:
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
+    member_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,6 +441,7 @@ class ApiKeysService:
             is_active=True,
             created_at=now,
             last_used_at=None,
+            member_id=payload.member_id,
         )
         try:
             created = await self._repository.create(row, commit=False)
@@ -586,6 +592,7 @@ class ApiKeysService:
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
+                member_id=payload.member_id if payload.member_id_set else _UNSET,
                 commit=False,
             )
             if row is None:
@@ -615,6 +622,7 @@ class ApiKeysService:
             or payload.traffic_class_set
             or payload.expires_at_set
             or payload.is_active_set
+            or payload.member_id_set
         ):
             row = await self._repository.get_by_id(key_id)
             if row is None:
@@ -1477,6 +1485,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         usage_summary=data.usage_summary,
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
         assigned_account_ids=data.assigned_account_ids,
+        member_id=data.member_id,
         key=key,
     )
 
@@ -1508,6 +1517,7 @@ def _to_api_key_data(
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
         pooled_credits=pooled_credits,
+        member_id=getattr(row, "member_id", None),
     )
 
 

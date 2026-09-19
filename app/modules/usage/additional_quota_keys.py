@@ -25,6 +25,7 @@ class AdditionalQuotaDefinition:
     display_label: str
     routing_policy: str = "inherit"
     model_ids: frozenset[str] = frozenset()
+    raw_model_ids: tuple[str, ...] = ()
     applies_to_plans: frozenset[str] | None = None
     quota_key_aliases: frozenset[str] = frozenset()
     limit_name_aliases: frozenset[str] = frozenset()
@@ -90,6 +91,7 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         for normalized in (_normalize_identifier(str(value)) for value in item.get("model_ids", []))
         if normalized is not None
     )
+    raw_model_ids = tuple(text for text in (str(value).strip() for value in item.get("model_ids", [])) if text)
     raw_applies_to_plans = item.get("applies_to_plans")
     applies_to_plans = None
     if raw_applies_to_plans is not None:
@@ -118,6 +120,7 @@ def _definition_from_json(item: AdditionalQuotaRegistryEntry) -> AdditionalQuota
         display_label=display_label,
         routing_policy=_normalize_routing_policy(item.get("routing_policy")),
         model_ids=model_ids,
+        raw_model_ids=raw_model_ids,
         applies_to_plans=applies_to_plans,
         quota_key_aliases=quota_key_aliases,
         limit_name_aliases=limit_name_aliases,
@@ -342,6 +345,13 @@ def get_additional_quota_definition_for_model(model: str | None) -> AdditionalQu
     if normalized is None:
         return None
     return model_to_definition.get(normalized)
+
+
+def raw_model_ids_for_quota_key(quota_key: str | None) -> tuple[str, ...]:
+    definition = get_additional_quota_definition_for_key(quota_key)
+    if definition is None:
+        return ()
+    return definition.raw_model_ids
 
 
 def get_additional_quota_definition(quota_key: str | None) -> AdditionalQuotaDefinition | None:

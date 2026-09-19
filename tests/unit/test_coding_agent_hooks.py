@@ -152,6 +152,15 @@ def test_task_class_falls_back_to_the_routing_table(tmp_path, ledger):
     assert lines(ledger)[-1]["task_class"] == "mechanical"
 
 
+def test_task_class_finds_the_installed_table_without_an_override(tmp_path, ledger):
+    """The hook and the `route` CLI must read the same installed table."""
+    table = tmp_path / ".agent-lb" / "managed" / "coding-agents" / "routing-table.json"
+    table.parent.mkdir(parents=True)
+    table.write_text(json.dumps({"classes": {"verify": {"chain": [{"seat": "codex-verifier"}]}}}))
+    run(SEAT_GUARD, dispatch_payload("codex-verifier", "gpt-5.6-sol-xhigh"), ledger, tmp_path)
+    assert lines(ledger)[-1]["task_class"] == "verify"
+
+
 def test_task_class_is_null_without_a_tag_or_table(tmp_path, ledger):
     run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5"), ledger, tmp_path,
         ROUTING_TABLE=str(tmp_path / "absent.json"))

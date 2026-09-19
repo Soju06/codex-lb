@@ -30,7 +30,12 @@ HOOK_NAMES = ("seat-guard", "subagent-closeout", "routing-pulse")
 # exist. seat-guard reads the table to infer a dispatch's task class, and the
 # launchd job below runs the CLI from its installed path.
 OPTIONAL_FILES = (
-    (Path(".claude/routing-table.json"), "routing-table", Path("routing-table.json"), 0o644),
+    (
+        Path(".agent-lb/managed/coding-agents/routing-table.json"),
+        "routing-table",
+        Path("routing-table.json"),
+        0o644,
+    ),
     (Path(".agent-lb/bin/route"), "route-cli", Path("../../clients/route"), 0o755),
 )
 

@@ -23,7 +23,12 @@ CATCH_ALL = {"general-purpose", "claude", ""}
 FABLE = "fable"
 CLASS_TAG = re.compile(r"^\s*\[class:([a-z0-9_-]+)\]", re.IGNORECASE)
 LEDGER = Path(os.environ.get("DISPATCH_LEDGER") or Path.home() / ".claude" / "logs" / "dispatch.jsonl")
-TABLE = Path(os.environ.get("ROUTING_TABLE") or Path.home() / ".claude" / "routing-table.json")
+# Same installed path the `route` CLI reads (ROUTE_TABLE): one table, two readers.
+TABLE = Path(
+    os.environ.get("ROUTING_TABLE")
+    or os.environ.get("ROUTE_TABLE")
+    or Path.home() / ".agent-lb" / "managed" / "coding-agents" / "routing-table.json"
+)
 
 REASON = (
     "seat-guard: {what}. Fable is the driver and the judge — nothing else runs "

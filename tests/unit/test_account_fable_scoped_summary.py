@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
-from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory
 from app.modules.accounts import mappers
@@ -96,19 +93,8 @@ def test_non_anthropic_account_is_null_even_with_a_marker() -> None:
     assert _summary(_account(provider="openai"), marker).fable_scoped_weekly is None
 
 
-def test_scoped_threshold_reserves_the_last_tenth_of_the_fable_week() -> None:
-    assert Settings().anthropic_fable_scoped_max_used_percent == 90.0
-
-
-def test_account_past_the_reserve_is_not_fable_eligible(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mappers.config_settings, "get_settings", Settings)
-    now = datetime.now(timezone.utc)
-
-    inside = _summary(_account(), _marker(used_percent=89.0, recorded_at=now))
-    past = _summary(_account(), _marker(used_percent=95.0, recorded_at=now))
-
-    assert inside.fable_eligible is True
-    assert past.fable_eligible is False
+# The 90% scoped reserve itself is asserted beside the other eligibility rules
+# in tests/unit/test_account_mappers.py.
 
 
 def test_wire_shape_is_camel_case() -> None:

@@ -77,6 +77,11 @@ class _Repo:
     async def get_by_id(self, account_id: str) -> Account | None:
         return self._accounts.get(account_id)
 
+    async def reload_by_id(self, account_id: str) -> Account | None:
+        # The real repo re-reads the row to catch a token rotated by another
+        # request; nothing rotates here, so the stored account is the reload.
+        return self._accounts.get(account_id)
+
     async def update_status(self, *args: Any, **kwargs: Any) -> bool:
         return True
 

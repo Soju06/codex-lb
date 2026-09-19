@@ -180,10 +180,10 @@ def test_account_to_summary_surfaces_owner_instance(monkeypatch: pytest.MonkeyPa
     mirrored.owner_instance = "other-instance"
 
     owned_summary = mappers._account_to_summary(
-        owned, None, None, None, None, None, None, encryptor, include_auth=False
+        owned, None, None, None, None, None, None, None, encryptor, include_auth=False
     )
     mirrored_summary = mappers._account_to_summary(
-        mirrored, None, None, None, None, None, None, encryptor, include_auth=False
+        mirrored, None, None, None, None, None, None, None, encryptor, include_auth=False
     )
 
     assert owned_summary.owner_instance is None
@@ -204,10 +204,10 @@ def test_account_to_summary_exposes_cached_reset_credits_for_openai_only() -> No
     reset_credit_cache.record_count(anthropic.id, 4)
     try:
         openai_summary = mappers._account_to_summary(
-            openai, None, None, None, None, None, None, encryptor, include_auth=False
+            openai, None, None, None, None, None, None, None, encryptor, include_auth=False
         )
         anthropic_summary = mappers._account_to_summary(
-            anthropic, None, None, None, None, None, None, encryptor, include_auth=False
+            anthropic, None, None, None, None, None, None, None, encryptor, include_auth=False
         )
 
         assert openai_summary.reset_credits_available == 2
@@ -216,7 +216,7 @@ def test_account_to_summary_exposes_cached_reset_credits_for_openai_only() -> No
 
         reset_credit_cache.clear(openai.id)
         unknown_summary = mappers._account_to_summary(
-            openai, None, None, None, None, None, None, encryptor, include_auth=False
+            openai, None, None, None, None, None, None, None, encryptor, include_auth=False
         )
         assert unknown_summary.reset_credits_available is None
     finally:
@@ -229,7 +229,9 @@ def test_account_to_summary_openai_without_primary_usage_has_no_primary_gauge() 
     encryptor = TokenEncryptor()
     openai = _account(AccountStatus.ACTIVE)
     openai.provider = "openai"
-    summary = mappers._account_to_summary(openai, None, None, None, None, None, None, encryptor, include_auth=False)
+    summary = mappers._account_to_summary(
+        openai, None, None, None, None, None, None, None, encryptor, include_auth=False
+    )
     assert summary.usage.primary_remaining_percent is None
     assert summary.usage.secondary_remaining_percent is None
 
@@ -309,6 +311,23 @@ def test_fable_eligible_prefers_fresh_scoped_signal_over_heuristic() -> None:
 
     # No scoped entry at all: unchanged heuristic behavior.
     assert mappers._fable_eligible(anthropic, 62.0, None) is False
+
+
+def test_scoped_threshold_reserves_the_last_tenth_of_the_fable_week(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scoped default stops routed Fable traffic at 90% used, leaving the
+    rest of the vendor window for interactive work.
+
+    Serialization of this same row onto the account payload is covered in
+    tests/unit/test_account_fable_scoped_summary.py.
+    """
+    monkeypatch.setattr(mappers.config_settings, "get_settings", Settings)
+    anthropic = _account(AccountStatus.ACTIVE)
+    anthropic.provider = "anthropic"
+    now = datetime.now(timezone.utc)
+
+    assert Settings().anthropic_fable_scoped_max_used_percent == 90.0
+    assert mappers._fable_eligible(anthropic, 10.0, _fable_scoped_weekly(used_percent=89.0, recorded_at=now)) is True
+    assert mappers._fable_eligible(anthropic, 10.0, _fable_scoped_weekly(used_percent=95.0, recorded_at=now)) is False
 
 
 def test_effective_status_ignores_extra_usage_credits_for_anthropic_accounts() -> None:

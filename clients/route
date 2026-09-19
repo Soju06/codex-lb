@@ -325,6 +325,13 @@ def pools_by_id(document: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return {pool["id"]: pool for pool in pools if isinstance(pool, dict) and isinstance(pool.get("id"), str)}
 
 
+def _percent(value: Any) -> str:
+    """C1 allows a null percent when a pool has no usable account; print it as such."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "-"
+    return f"{float(value):.1f}%"
+
+
 def command_pools(args: argparse.Namespace) -> int:
     document, error = fetch_pools()
     if document is None:
@@ -341,7 +348,7 @@ def command_pools(args: argparse.Namespace) -> int:
         usable = f"{pool.get('eligibleAccounts')}/{pool.get('accounts')}"
         print(
             f"{pool.get('id', '?'):<20} {pool.get('status', '?'):<10} "
-            f"{pool.get('headroomPercent', 0):>8.1f}% {pool.get('aggregateRemainingPercent', 0):>9.1f}% "
+            f"{_percent(pool.get('headroomPercent')):>9} {_percent(pool.get('aggregateRemainingPercent')):>10} "
             f"{usable:>8}  {pool.get('resetAt') or '-'}"
         )
     return EXIT_OK
@@ -663,7 +670,7 @@ def alert_text(state: dict[str, Any]) -> str:
     broken = [f"{probe['name']} ({probe['error']})" for probe in state["probes"] if not probe["ok"]]
     pools = state.get("pools") or {}
     thin = [
-        f"{pool['id']} {pool['headroomPercent']}% ({pool['status']})"
+        f"{pool.get('id')} {_percent(pool.get('headroomPercent'))} ({pool.get('status')})"
         for pool in (pools.get("pools") or [])
         if pool.get("status") in ("low", "exhausted")
     ]

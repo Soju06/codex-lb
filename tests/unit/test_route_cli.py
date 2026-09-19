@@ -259,6 +259,48 @@ def test_pools_falls_back_to_the_accounts_endpoint_when_the_pools_endpoint_is_mi
     assert all(pool["source"] == "accounts_fallback" for pool in document["pools"])
 
 
+def test_pools_passes_a_real_c1_document_through_including_a_null_headroom(home: Path, tmp_path: Path) -> None:
+    fixtures = tmp_path / "fixtures"
+    write_fixture(
+        fixtures,
+        "api_pools.json",
+        {
+            "generatedAt": "2026-09-19T21:00:00Z",
+            "pools": [
+                {
+                    "id": "anthropic-fable",
+                    "provider": "anthropic",
+                    "kind": "fable_scoped",
+                    "accounts": 5,
+                    "eligibleAccounts": 0,
+                    "headroomPercent": None,
+                    "aggregateRemainingPercent": None,
+                    "resetAt": None,
+                    "status": "exhausted",
+                    "source": "scoped_marker",
+                }
+            ],
+        },
+    )
+
+    pretty = run("pools", home=home, fixtures=fixtures)
+    raw = run("pools", "--json", home=home, fixtures=fixtures)
+
+    assert pretty.returncode == 0, pretty.stderr
+    assert "anthropic-fable" in pretty.stdout
+    assert raw.returncode == 0, raw.stderr
+    document = json.loads(raw.stdout)
+    assert document["source"] == "lb"
+    assert document["pools"][0]["source"] == "scoped_marker"
+
+
+def test_pools_exits_one_when_neither_endpoint_answers(home: Path) -> None:
+    result = run("pools", home=home)
+
+    assert result.returncode == 1
+    assert "/api/pools unavailable" in result.stderr
+
+
 def test_doctor_write_against_an_unreachable_lb_exits_one_and_writes_the_alert(home: Path) -> None:
     result = run(
         "doctor",

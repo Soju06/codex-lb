@@ -34,8 +34,12 @@ None.
 
 - `responses-api-compat`: recover HTTP Responses streams from a selected
   account's pre-visible revoked-token event without weakening hard ownership.
+- `account-routing`: exclude accounts whose stored access token is explicitly
+  invalidated or revoked while preserving routability for refresh-token-only
+  warnings.
 
 ## Impact
 
-Streaming retry, account eligibility/cache state, and focused proxy tests only.
-No schema, setting, dependency, dashboard, or deployment contract changes.
+Streaming retry, account eligibility/cache state, routing selection, and
+focused proxy tests only. No schema, setting, dependency, dashboard, or
+deployment contract changes.

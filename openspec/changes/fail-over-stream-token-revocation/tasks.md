@@ -16,6 +16,8 @@
   shared account-neutral replay gate before cross-account retry.
 - [x] 2.4 Preserve the original auth error when replay proof or a replacement
   account is unavailable.
+- [x] 2.5 Keep the load-balancer facade within its architecture budget by
+  placing local routing-quarantine fan-out in the internal helper module.
 
 ## 3. Verification and handoff
 
@@ -25,3 +27,5 @@
 - [x] 3.3 Open the linked upstream PR and verify required GitHub checks.
 - [x] 3.4 Deploy atomically with the existing data volume and verify live
   routing no longer selects known revoked access tokens.
+- [x] 3.5 Record the explicit account-routing exception for revoked or
+  invalidated access tokens while retaining refresh-token-only routability.

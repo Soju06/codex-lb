@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.db.models import Account
 from app.modules.proxy.account_cache import (
+    is_account_locally_routing_unavailable,
     mark_account_routing_unavailable_pending_persist,
     propagate_account_routing_change,
 )
+
+
+def apply_local_routing_quarantine(excluded_ids: set[str], accounts: Collection[Account]) -> None:
+    """Exclude accounts quarantined locally while the routing snapshot catches up."""
+    excluded_ids.update(account.id for account in accounts if is_account_locally_routing_unavailable(account.id))
 
 
 async def quarantine_permanent_failure(load_balancer: Any, account: Account, error_code: str) -> bool:

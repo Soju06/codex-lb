@@ -59,6 +59,7 @@ from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
     record_upstream_burst_rejection,
 )
+from app.modules.proxy._load_balancer.quarantine import quarantine_permanent_failure
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
@@ -87,7 +88,6 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
-from app.modules.proxy.account_cache import mark_account_routing_unavailable_pending_persist
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
@@ -764,11 +764,7 @@ class _StreamingRetryMixin:
                     # Publish a guarded, reason-only quarantine now. The
                     # REAUTH_REQUIRED health/status write remains owned by the
                     # post-settlement path.
-                    quarantine = getattr(proxy._load_balancer, "quarantine_permanent_failure", None)
-                    if callable(quarantine):
-                        await quarantine(failed_account, failed_code)
-                    else:
-                        mark_account_routing_unavailable_pending_persist(failed_account.id)
+                    await quarantine_permanent_failure(proxy._load_balancer, failed_account, failed_code)
                 classified = classify_upstream_failure(
                     error_code=failed_code,
                     error=failed_error,

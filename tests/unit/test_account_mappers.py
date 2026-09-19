@@ -232,6 +232,7 @@ def test_account_to_summary_openai_without_primary_usage_has_no_primary_gauge() 
     summary = mappers._account_to_summary(
         openai, None, None, None, None, None, None, None, encryptor, include_auth=False
     )
+    assert summary.usage is not None
     assert summary.usage.primary_remaining_percent is None
     assert summary.usage.secondary_remaining_percent is None
 

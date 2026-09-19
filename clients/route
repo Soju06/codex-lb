@@ -915,8 +915,10 @@ def command_learn(args: argparse.Namespace) -> int:
         proposal["ts"] = now_iso()
 
     if not found:
-        print(f"No demotions proposed: no (class, seat, model) reached {args.min_closeouts} closeouts below "
-              f"a {args.ok_floor:.0%} ok-rate in {args.days} day(s).")
+        print(
+            f"No demotions proposed: no (class, seat, model) reached {args.min_closeouts} closeouts below "
+            f"a {args.ok_floor:.0%} ok-rate in {args.days} day(s)."
+        )
         return EXIT_OK
 
     table = load_table()
@@ -932,8 +934,10 @@ def command_learn(args: argparse.Namespace) -> int:
         print(f"# route learn — proposed overrides for {table_path()}\n")
         for proposal in found:
             state = "already present" if proposal not in fresh else "new"
-            print(f"+ {proposal['class']}: demote {proposal['demote']['seat']}/{proposal['demote']['model']} "
-                  f"({proposal['reason']}) [{state}]")
+            print(
+                f"+ {proposal['class']}: demote {proposal['demote']['seat']}/{proposal['demote']['model']} "
+                f"({proposal['reason']}) [{state}]"
+            )
         print("\nRun `route learn --apply` to write these into the table's `overrides`.")
         return EXIT_OK
 

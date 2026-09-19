@@ -72,17 +72,22 @@ async def test_forwarded_public_request_without_key_is_rejected_even_with_loopba
 
 
 @pytest.mark.asyncio
-async def test_direct_loopback_request_without_xff_blocked_when_proxy_headers_trusted(
+async def test_direct_loopback_request_without_xff_resolves_to_the_socket_peer(
     app_instance,
     monkeypatch,
 ):
-    """When firewall_trust_proxy_headers=True and loopback is a trusted proxy source,
-    a direct loopback request without any XFF header yields an unresolvable client IP
-    (the system cannot distinguish a legitimate local caller from Funnel traffic that
-    dropped its XFF).  Such requests are conservatively rejected.
+    """A direct loopback request that sends no forwarding header is local tooling.
 
-    Local callers in this config should set trust_proxy_headers=False (default) or
-    send XFF pointing to their actual IP.
+    The trusted proxy in front (Tailscale serve) always sets X-Forwarded-For, so a
+    request carrying no forwarding header at all cannot have arrived through it. The
+    resolved IP is therefore the socket peer, and the loopback entry in
+    proxy_unauthenticated_client_cidrs admits it.
+
+    Previously this resolved to None and was rejected, which locked local tooling on the
+    box out of the proxy and the dashboard once the deployment turned proxy-header trust
+    on. Funnel traffic is unaffected: it carries an XFF and is still judged by the
+    forwarded address (see the test above), and a forwarding header that is present but
+    unusable is still a hard deny.
     """
     _enable_trusted_proxy(
         monkeypatch,
@@ -94,7 +99,29 @@ async def test_direct_loopback_request_without_xff_blocked_when_proxy_headers_tr
         transport = ASGITransport(app=app_instance, client=("127.0.0.1", 443))
         async with AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.get("/v1/models")
-    # trusted proxy with no XFF → resolved IP = None → neither local nor in CIDRs → rejected
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_direct_loopback_request_with_unusable_xff_is_still_blocked(
+    app_instance,
+    monkeypatch,
+):
+    """Present-but-malformed forwarding headers stay a hard deny.
+
+    Something claimed to forward this request and we cannot tell on whose behalf, so the
+    conservative rejection is kept for that case.
+    """
+    _enable_trusted_proxy(
+        monkeypatch,
+        trusted_proxy_cidrs="127.0.0.1/32",
+        unauthenticated_cidrs="127.0.0.1/32",
+    )
+
+    async with app_instance.router.lifespan_context(app_instance):
+        transport = ASGITransport(app=app_instance, client=("127.0.0.1", 443))
+        async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+            response = await client.get("/v1/models", headers={"X-Forwarded-For": "not-an-ip"})
     assert response.status_code == 401
 
 

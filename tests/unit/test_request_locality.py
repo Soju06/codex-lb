@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from ipaddress import ip_network
 from types import SimpleNamespace
 
 import pytest
 from starlette.requests import Request
 
 import app.core.request_locality as request_locality
-from app.core.request_locality import is_local_request
+from app.core.request_locality import is_local_request, resolve_connection_client_ip
 
 
 @pytest.fixture(autouse=True)
@@ -80,3 +81,88 @@ def test_trusted_proxy_mode_accepts_loopback_with_forwarded_hint(monkeypatch: py
     }
     request = Request(scope)
     assert is_local_request(request) is True
+
+
+# ---------------------------------------------------------------------------
+# resolve_connection_client_ip — trusted proxy peer with and without forwarding
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_TRUSTED = (ip_network("127.0.0.1/32"),)
+
+
+def test_trusted_proxy_peer_without_any_forwarding_header_resolves_to_the_socket_ip() -> None:
+    """Local tooling dials loopback directly and sends no forwarding header.
+
+    A trusted proxy always sets one, so a bare request cannot have come through it and
+    the socket peer is the real client. Resolving to None here locked local tooling out
+    of the dashboard and the keyless proxy path.
+    """
+    assert (
+        resolve_connection_client_ip(
+            {},
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        == "127.0.0.1"
+    )
+
+
+def test_trusted_proxy_peer_with_forwarded_for_resolves_to_the_forwarded_ip() -> None:
+    assert (
+        resolve_connection_client_ip(
+            {"x-forwarded-for": "100.64.1.5"},
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        == "100.64.1.5"
+    )
+
+
+def test_untrusted_peer_with_forwarded_for_keeps_the_socket_ip() -> None:
+    assert (
+        resolve_connection_client_ip(
+            {"x-forwarded-for": "127.0.0.1"},
+            "198.51.100.42",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        == "198.51.100.42"
+    )
+
+
+def test_trusted_proxy_peer_with_malformed_forwarded_for_still_denies() -> None:
+    assert (
+        resolve_connection_client_ip(
+            {"x-forwarded-for": "not-an-ip"},
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        is None
+    )
+
+
+def test_trusted_proxy_peer_with_unparseable_forwarded_header_still_denies() -> None:
+    assert (
+        resolve_connection_client_ip(
+            {"forwarded": "for=_hidden"},
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        is None
+    )
+
+
+def test_trusted_proxy_peer_with_invalid_real_ip_still_denies() -> None:
+    assert (
+        resolve_connection_client_ip(
+            {"x-real-ip": "nope"},
+            "127.0.0.1",
+            trust_proxy_headers=True,
+            trusted_proxy_networks=_LOOPBACK_TRUSTED,
+        )
+        is None
+    )

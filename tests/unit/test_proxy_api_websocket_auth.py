@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from starlette.requests import Request
 
 import app.core.auth.dependencies as auth_dependencies
+import app.core.request_locality as request_locality
 import app.modules.proxy.api as proxy_api_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
@@ -174,11 +175,14 @@ async def test_validate_proxy_websocket_request_allows_explicit_socket_peer_when
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: SimpleNamespace(get=fake_dashboard_settings))
-    monkeypatch.setattr(
-        auth_dependencies,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_unauthenticated_client_cidrs=["192.168.65.1/32"]),
+    # The CIDR allowlist is read through request_locality now, so patch it there too.
+    fake_settings = SimpleNamespace(
+        proxy_unauthenticated_client_cidrs=["192.168.65.1/32"],
+        firewall_trust_proxy_headers=False,
+        firewall_trusted_proxy_cidrs=[],
     )
+    monkeypatch.setattr(auth_dependencies, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(request_locality, "get_settings", lambda: fake_settings)
     monkeypatch.setattr(auth_dependencies, "is_local_request", lambda _request: False)
 
     resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(
@@ -202,11 +206,14 @@ async def test_validate_proxy_websocket_request_rejects_remote_socket_peer_outsi
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", fake_denial)
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: SimpleNamespace(get=fake_dashboard_settings))
-    monkeypatch.setattr(
-        auth_dependencies,
-        "get_settings",
-        lambda: SimpleNamespace(proxy_unauthenticated_client_cidrs=["192.168.65.1/32"]),
+    # The CIDR allowlist is read through request_locality now, so patch it there too.
+    fake_settings = SimpleNamespace(
+        proxy_unauthenticated_client_cidrs=["192.168.65.1/32"],
+        firewall_trust_proxy_headers=False,
+        firewall_trusted_proxy_cidrs=[],
     )
+    monkeypatch.setattr(auth_dependencies, "get_settings", lambda: fake_settings)
+    monkeypatch.setattr(request_locality, "get_settings", lambda: fake_settings)
     monkeypatch.setattr(auth_dependencies, "is_local_request", lambda _request: False)
 
     resolved_api_key, response = await proxy_api_module._validate_proxy_websocket_request(

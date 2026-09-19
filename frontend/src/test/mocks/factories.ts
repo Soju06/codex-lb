@@ -440,6 +440,8 @@ export function createDashboardSettings(
 		totpRequiredOnLogin: false,
 		totpConfigured: true,
 		apiKeyAuthEnabled: true,
+		teamModeEnabled: false,
+		teamPublicBaseUrl: null,
 		limitWarmupEnabled: false,
 		limitWarmupWindows: "both",
 		limitWarmupModel: "auto",

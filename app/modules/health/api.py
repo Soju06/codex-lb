@@ -10,6 +10,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
+from app.core.request_locality import is_trusted_client
 from app.core.utils.time import utcnow
 from app.db.models import BridgeRingMember
 from app.db.session import get_session
@@ -90,11 +92,25 @@ async def health_ready() -> HealthCheckResponse:
     raise HTTPException(status_code=503, detail="Service unavailable")
 
 
+async def _require_trusted_drain_client(request: Request) -> None:
+    """Gate the unauthenticated drain endpoints the way team mode gates the dashboard.
+
+    ``_is_internal_client_host`` reads the raw socket peer, which is loopback for every
+    request arriving through the local reverse proxy — so on its own it would let any
+    tailnet peer stop the service. In team mode the caller must also be trusted by
+    resolved IP.
+    """
+    settings = await get_settings_cache().get()
+    if getattr(settings, "team_mode_enabled", False) and not is_trusted_client(request):
+        raise HTTPException(status_code=403, detail="Internal access required")
+
+
 @router.post("/internal/drain/start", include_in_schema=False)
 async def start_internal_drain(request: Request) -> HealthCheckResponse:
     client_host = request.client.host if request.client is not None else None
     if not _is_internal_client_host(client_host):
         raise HTTPException(status_code=403, detail="Internal access required")
+    await _require_trusted_drain_client(request)
 
     import app.core.shutdown as shutdown_state
 
@@ -113,6 +129,7 @@ async def stop_internal_drain(request: Request) -> HealthCheckResponse:
     client_host = request.client.host if request.client is not None else None
     if not _is_internal_client_host(client_host):
         raise HTTPException(status_code=403, detail="Internal access required")
+    await _require_trusted_drain_client(request)
 
     import app.core.shutdown as shutdown_state
 

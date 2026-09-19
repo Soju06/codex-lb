@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -585,6 +586,13 @@ class DashboardSettings(Base):
         default=False,
         nullable=False,
     )
+    team_mode_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    team_public_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: Mapped[int] = mapped_column(
@@ -703,11 +711,56 @@ class ApiFirewallAllowlist(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class TeamMemberStatus(str, Enum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[TeamMemberStatus] = mapped_column(
+        SqlEnum(
+            TeamMemberStatus,
+            name="team_member_status",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=TeamMemberStatus.ACTIVE,
+        server_default=text("'active'"),
+        nullable=False,
+    )
+    cost_cap_day_usd: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
+    cost_cap_week_usd: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
+    cost_cap_month_usd: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
+    token_cap_day: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    token_cap_week: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    token_cap_month: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
+    __table_args__ = (Index("idx_api_keys_member_id", "member_id"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    member_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("team_members.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)

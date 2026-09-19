@@ -125,6 +125,8 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         totp_required_on_login=settings.totp_required_on_login,
         totp_configured=settings.totp_configured,
         api_key_auth_enabled=settings.api_key_auth_enabled,
+        team_mode_enabled=settings.team_mode_enabled,
+        team_public_base_url=settings.team_public_base_url,
         limit_warmup_enabled=settings.limit_warmup_enabled,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
@@ -523,6 +525,14 @@ async def update_settings(
                     if payload.api_key_auth_enabled is not None
                     else current.api_key_auth_enabled
                 ),
+                team_mode_enabled=(
+                    payload.team_mode_enabled if payload.team_mode_enabled is not None else current.team_mode_enabled
+                ),
+                team_public_base_url=(
+                    payload.team_public_base_url
+                    if "team_public_base_url" in payload.model_fields_set
+                    else current.team_public_base_url
+                ),
                 limit_warmup_enabled=(
                     payload.limit_warmup_enabled
                     if payload.limit_warmup_enabled is not None
@@ -577,6 +587,8 @@ async def update_settings(
             "import_without_overwrite",
             "totp_required_on_login",
             "api_key_auth_enabled",
+            "team_mode_enabled",
+            "team_public_base_url",
             "limit_warmup_enabled",
             "limit_warmup_windows",
             "limit_warmup_model",

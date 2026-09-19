@@ -272,6 +272,7 @@ class ApiKeysRepository:
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        member_id: str | None | _Unset = _UNSET,
         commit: bool = True,
     ) -> ApiKey | None:
         row = await self.get_by_id(key_id)
@@ -313,6 +314,9 @@ class ApiKeysRepository:
         if key_prefix is not _UNSET:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
+        if member_id is not _UNSET:
+            assert member_id is None or isinstance(member_id, str)
+            row.member_id = member_id
         if commit:
             await self._session.commit()
         return await self.get_by_id(key_id)

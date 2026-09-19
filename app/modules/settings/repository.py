@@ -39,6 +39,8 @@ class SettingsRepository:
             bootstrap_token_encrypted=None,
             bootstrap_token_hash=None,
             api_key_auth_enabled=False,
+            team_mode_enabled=False,
+            team_public_base_url=None,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
             sticky_reallocation_primary_budget_threshold_pct=95.0,
@@ -89,6 +91,8 @@ class SettingsRepository:
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
         api_key_auth_enabled: bool | None = None,
+        team_mode_enabled: bool | None = None,
+        team_public_base_url: str | None = None,
         limit_warmup_enabled: bool | None = None,
         limit_warmup_windows: str | None = None,
         limit_warmup_model: str | None = None,
@@ -145,6 +149,9 @@ class SettingsRepository:
             settings.totp_required_on_login = totp_required_on_login
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
+        if team_mode_enabled is not None:
+            settings.team_mode_enabled = team_mode_enabled
+        settings.team_public_base_url = team_public_base_url or None
         if limit_warmup_enabled is not None:
             settings.limit_warmup_enabled = limit_warmup_enabled
         if limit_warmup_windows is not None:

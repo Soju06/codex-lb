@@ -27,6 +27,7 @@ from app.modules.proxy._service.support import (
     _WebSocketRequestState,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
+from app.modules.team.gate import check_member_gate
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -93,6 +94,8 @@ class _ApiKeyUsageMixin:
     ) -> ApiKeyUsageReservationData | None:
         if api_key is None:
             return None
+
+        await check_member_gate(api_key, model=request_model)
 
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         with anyio.CancelScope(shield=True):

@@ -26,10 +26,12 @@ AGENT_NAMES = (
     "codex-verifier",
 )
 HOOK_NAMES = ("seat-guard", "subagent-closeout", "routing-pulse")
-# The routing table is lane S3's file; install it only once it exists, because
-# seat-guard reads it to infer a dispatch's task class.
+# The route CLI and its table are lane S3's files; install them only once they
+# exist. seat-guard reads the table to infer a dispatch's task class, and the
+# launchd job below runs the CLI from its installed path.
 OPTIONAL_FILES = (
     (Path(".claude/routing-table.json"), "routing-table", Path("routing-table.json"), 0o644),
+    (Path(".agent-lb/bin/route"), "route-cli", Path("../../clients/route"), 0o755),
 )
 
 

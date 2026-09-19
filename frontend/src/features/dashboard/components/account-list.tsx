@@ -30,9 +30,12 @@ import {
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
 const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 8rem";
+const ACCOUNT_COMPACT_COLUMNS = "minmax(8rem,1fr) 7.75rem 4rem 11.5rem";
 
 type AccountListProps = {
   accounts: AccountSummary[];
+  expanded?: boolean;
+  compact?: boolean;
   readOnly?: boolean;
   sort?: AccountListSort;
   onSortChange?: (sort: AccountListSort) => void;
@@ -65,6 +68,10 @@ const SORTABLE_HEADER_KEY: Record<AccountListSortKey, string> = {
   purchasedCredits: "dashboard.accountList.headers.purchasedCredits",
   warmup: "dashboard.accountList.headers.warmup",
 };
+
+const COMPACT_HEADERS = SORTABLE_HEADERS.filter(({ key }) =>
+  key === "account" || key === "status" || key === "plan" || key === "quota",
+);
 
 function formatWarmupWindow(window: string): string {
   return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
@@ -233,7 +240,7 @@ function SortHeader({
   );
 }
 
-function AccountQuotaCells({ account }: { account: AccountSummary }) {
+function AccountQuotaCells({ account, compact = false }: { account: AccountSummary; compact?: boolean }) {
   const { t } = useTranslation();
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
@@ -251,6 +258,18 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
           quotaLabel("5h", primaryState.percent, account.resetAtPrimary),
           quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary),
         ];
+  if (compact) {
+    return (
+      <div className="grid gap-1 whitespace-nowrap text-xs tabular-nums">
+        {quotas.map((quota) => (
+          <span key={quota.label}>
+            <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)} </span>
+            <span className="font-medium">{quota.percentLabel}</span>
+          </span>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="grid gap-1.5 text-xs">
       {quotas.map((quota) => (
@@ -286,6 +305,8 @@ function QuotaMeter({ percent }: { percent: number | null }) {
 
 export function AccountList({
   accounts,
+  expanded = false,
+  compact = false,
   readOnly = false,
   sort: controlledSort,
   onSortChange,
@@ -295,7 +316,10 @@ export function AccountList({
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const blurred = usePrivacyStore((s) => s.blurred);
   const [uncontrolledSort, setUncontrolledSort] = useState<AccountListSort>(null);
-  const sort = controlledSort === undefined ? uncontrolledSort : controlledSort;
+  const selectedSort = controlledSort === undefined ? uncontrolledSort : controlledSort;
+  const sort = compact && !COMPACT_HEADERS.some(({ key }) => key === selectedSort?.key)
+    ? null
+    : selectedSort;
   const sortedAccounts = useMemo(() => {
     if (!sort) {
       return accounts;
@@ -308,7 +332,7 @@ export function AccountList({
 
   const handleSort = (key: AccountListSortKey) => {
     const nextSort: AccountListSort = sort?.key === key
-      ? { key, direction: sort.direction === "asc" ? "desc" : "asc" }
+      ? sort.direction === "asc" ? { key, direction: "desc" } : null
       : { key, direction: "asc" };
     if (controlledSort === undefined) {
       setUncontrolledSort(nextSort);
@@ -331,14 +355,87 @@ export function AccountList({
     );
   }
 
+  if (compact) {
+    // Keep column membership independent of sort so quota rows stay mounted.
+    const midpoint = Math.ceil(accounts.length / 2);
+    const firstColumnIds = new Set(accounts.slice(0, midpoint).map((account) => account.accountId));
+    const columns = [
+      sortedAccounts.filter((account) => firstColumnIds.has(account.accountId)),
+      sortedAccounts.filter((account) => !firstColumnIds.has(account.accountId)),
+    ].filter((column) => column.length > 0);
+
+    return (
+      <div
+        data-testid="dashboard-account-compact"
+        className={expanded ? undefined : "overflow-x-auto"}
+      >
+        <div
+          className={cn("grid min-w-[36rem] items-start gap-4 xl:grid-cols-2", !expanded && "max-h-[36rem] overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden")}
+        >
+          {columns.map((column, columnIndex) => (
+            <div key={columnIndex} className="min-w-0">
+              <div
+                className="sticky top-0 z-10 grid gap-3 rounded-t-lg border bg-card px-4 py-3 text-[11px] font-medium uppercase tracking-wider"
+                style={{ gridTemplateColumns: ACCOUNT_COMPACT_COLUMNS }}
+              >
+                {COMPACT_HEADERS.map(({ key, label }) => (
+                  <SortHeader
+                    key={key}
+                    label={t(SORTABLE_HEADER_KEY[key], { defaultValue: label })}
+                    sortKey={key}
+                    activeSort={sort}
+                    onSort={handleSort}
+                  />
+                ))}
+              </div>
+              <div className="rounded-b-lg border-x border-b bg-card">
+                {column.map((account) => (
+                  <div
+                    key={account.accountId}
+                    data-testid="account-compact-row"
+                    className="grid h-14 items-center gap-3 border-b px-4 text-xs last:border-b-0"
+                    style={{ gridTemplateColumns: ACCOUNT_COMPACT_COLUMNS }}
+                  >
+                    <button
+                      type="button"
+                      className="min-w-0 text-left hover:underline"
+                      onClick={() => onAction?.(account, "details")}
+                    >
+                      <span className={cn("block truncate font-medium", blurred && "privacy-blur")}>
+                        {accountTitle(account)}
+                      </span>
+                      <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                        {account.displayName && account.displayName !== account.email ? (
+                          <>
+                            <span className={blurred ? "privacy-blur" : undefined}>{account.email}</span>
+                            {account.isEmailDuplicate ? ` | ${formatCompactAccountId(account.accountId)}` : ""}
+                          </>
+                        ) : (
+                          t("dashboard.accountList.idShort", { id: formatCompactAccountId(account.accountId) })
+                        )}
+                      </span>
+                    </button>
+                    <StatusBadge status={normalizeStatus(account.status)} />
+                    <span className="truncate text-muted-foreground">{formatSlug(account.planType)}</span>
+                    <AccountQuotaCells account={account} compact />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="dashboard-account-list"
-      className="overflow-x-auto rounded-lg border bg-card"
+      className={cn("bg-card", expanded ? "min-w-[76rem]" : "overflow-x-auto rounded-lg border")}
     >
       <div
-        className="min-w-[76rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        style={{ maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
+        className={cn("min-w-[76rem] divide-y", !expanded && "overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden")}
+        style={expanded ? undefined : { maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
       >
         <div
           className="sticky top-0 z-10 grid gap-3 border-b bg-card/95 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-card/85"

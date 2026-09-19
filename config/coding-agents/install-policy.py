@@ -15,25 +15,58 @@ START = "<!-- agent-lb:coding-agent-routing:start -->"
 END = "<!-- agent-lb:coding-agent-routing:end -->"
 MODEL = "fable"
 EFFORT_LEVEL = "high"
-MANAGED_AGENTS = (
-    (
-        Path(".claude/agents/frontend-designer.md"),
-        Path(".agent-lb/managed/coding-agents/frontend-designer"),
-        "agent-lb:frontend-designer:v1\n",
-        Path("agents/frontend-designer.md"),
-    ),
-    (
-        Path(".claude/agents/planner.md"),
-        Path(".agent-lb/managed/coding-agents/planner"),
-        "agent-lb:planner:v1\n",
-        Path("agents/planner.md"),
-    ),
-    (
-        Path(".claude/agents/plan-reviewer.md"),
-        Path(".agent-lb/managed/coding-agents/plan-reviewer"),
-        "agent-lb:plan-reviewer:v1\n",
-        Path("agents/plan-reviewer.md"),
-    ),
+AGENT_NAMES = (
+    "frontend-designer",
+    "planner",
+    "plan-reviewer",
+    "opus-seat",
+    "Explore",
+    "verifier",
+    "cursor-seat",
+    "codex-verifier",
+)
+HOOK_NAMES = ("seat-guard", "subagent-closeout", "routing-pulse")
+# The routing table is lane S3's file; install it only once it exists, because
+# seat-guard reads it to infer a dispatch's task class.
+OPTIONAL_FILES = (
+    (Path(".claude/routing-table.json"), "routing-table", Path("routing-table.json"), 0o644),
+)
+
+
+def managed_files() -> tuple:
+    """(destination, ownership marker path, marker text, template, mode) each."""
+    entries = []
+    for name in AGENT_NAMES:
+        entries.append((Path(f".claude/agents/{name}.md"), name, Path(f"agents/{name}.md"), 0o644))
+    for name in HOOK_NAMES:
+        entries.append((Path(f".claude/hooks/{name}.py"), name, Path(f"hooks/{name}.py"), 0o755))
+    entries.extend(OPTIONAL_FILES)
+    return tuple(
+        (
+            destination,
+            Path(f".agent-lb/managed/coding-agents/{key}"),
+            f"agent-lb:{key}:v1\n",
+            template,
+            mode,
+        )
+        for destination, key, template, mode in entries
+    )
+
+
+MANAGED_AGENTS = managed_files()
+# label, plist destination, program arguments (paths resolved against --home)
+LAUNCHD_JOB = (
+    "com.aneyman.route-doctor",
+    Path("Library/LaunchAgents/com.aneyman.route-doctor.plist"),
+    (".agent-lb/bin/route", "doctor", "--write"),
+    1800,
+)
+# Hook entries this installer owns: (event, matcher, hook name, timeout, status).
+# A matcher of None means the event takes no matcher (it always fires).
+MANAGED_HOOKS = (
+    ("PreToolUse", "Agent", "seat-guard", 5, "Seat guard"),
+    ("SubagentStop", None, "subagent-closeout", 5, "Dispatch closeout"),
+    ("UserPromptSubmit", None, "routing-pulse", 3, "Routing pulse"),
 )
 LEGACY_HEADINGS = (
     "Coding-agent routing",
@@ -108,6 +141,64 @@ def is_owned_hook(command: Any) -> bool:
     return isinstance(command, str) and "ccdex-gpt-only.sh" in command
 
 
+def hook_entry(name: str, timeout: int, status: str) -> dict[str, Any]:
+    return {
+        "type": "command",
+        "command": f'/usr/bin/python3 "$HOME/.claude/hooks/{name}.py" 2>/dev/null || true',
+        "timeout": timeout,
+        "statusMessage": status,
+    }
+
+
+def owns(command: Any, name: str) -> bool:
+    return isinstance(command, str) and f".claude/hooks/{name}.py" in command
+
+
+def same_matcher(group: dict[str, Any], matcher: str | None) -> bool:
+    current = str(group.get("matcher") or "").strip()
+    if matcher is None:
+        return current in ("", "*")
+    return current == matcher
+
+
+def reconcile_managed_hooks(hooks: dict[str, Any], uninstall: bool) -> None:
+    """Place each owned hook exactly once, in a group with the right matcher.
+
+    An occurrence already sitting in a correctly-matched group is replaced where
+    it stands, so a converged settings.json does not churn; occurrences anywhere
+    else are removed. Every hook this installer does not own is left untouched.
+    """
+    for event, matcher, name, timeout, status in MANAGED_HOOKS:
+        groups = hooks.get(event) or []
+        entry = hook_entry(name, timeout, status)
+        placed = False
+        for group in groups:
+            kept: list[dict[str, Any]] = []
+            for hook in group.get("hooks") or []:
+                if not owns(hook.get("command"), name):
+                    kept.append(hook)
+                elif not uninstall and not placed and same_matcher(group, matcher):
+                    kept.append(entry)
+                    placed = True
+            group["hooks"] = kept
+        if not uninstall and not placed:
+            for group in groups:
+                if same_matcher(group, matcher):
+                    group["hooks"] = list(group.get("hooks") or []) + [entry]
+                    placed = True
+                    break
+        if not uninstall and not placed:
+            group = {"hooks": [entry]}
+            if matcher is not None:
+                group = {"matcher": matcher, "hooks": [entry]}
+            groups = list(groups) + [group]
+        groups = [group for group in groups if group.get("hooks")]
+        if groups:
+            hooks[event] = groups
+        else:
+            hooks.pop(event, None)
+
+
 def reconcile_settings(settings: dict[str, Any], uninstall: bool) -> dict[str, Any]:
     updated = json.loads(json.dumps(settings))
     hooks = updated.get("hooks", {})
@@ -124,17 +215,43 @@ def reconcile_settings(settings: dict[str, Any], uninstall: bool) -> dict[str, A
             hooks["PreToolUse"] = cleaned
         else:
             hooks.pop("PreToolUse", None)
-        if not hooks:
-            updated.pop("hooks", None)
+    reconcile_managed_hooks(hooks, uninstall)
+    if hooks:
+        updated["hooks"] = hooks
+    else:
+        updated.pop("hooks", None)
     if not uninstall:
         updated["model"] = MODEL
         updated["effortLevel"] = EFFORT_LEVEL
     return updated
 
 
-def write_atomic(path: Path, content: str) -> None:
+def plist_text(home: Path) -> str:
+    label, _, arguments, interval = LAUNCHD_JOB
+    program = [str(home / arguments[0]), *arguments[1:]]
+    rendered = "\n".join(f"    <string>{value}</string>" for value in program)
+    logs = home / ".agent-lb" / "logs"
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        f"  <key>Label</key>\n  <string>{label}</string>\n"
+        f"  <key>ProgramArguments</key>\n  <array>\n{rendered}\n  </array>\n"
+        f"  <key>StartInterval</key>\n  <integer>{interval}</integer>\n"
+        "  <key>RunAtLoad</key>\n  <true/>\n"
+        f"  <key>StandardOutPath</key>\n  <string>{logs / 'route-doctor.log'}</string>\n"
+        f"  <key>StandardErrorPath</key>\n  <string>{logs / 'route-doctor.err'}</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+
+
+def write_atomic(path: Path, content: str, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    if mode is None:
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as handle:
@@ -181,12 +298,17 @@ def main() -> int:
     }
     if desired_settings_text != settings_text:
         changes[settings_path] = desired_settings_text
+    modes: dict[Path, int] = {}
     preserved_agents: list[tuple[str, Path]] = []
-    for relative_path, owner_relative_path, owner_marker, template_relative_path in MANAGED_AGENTS:
+    for relative_path, owner_relative_path, owner_marker, template_relative_path, mode in MANAGED_AGENTS:
+        template_path = source / template_relative_path
+        if not template_path.exists():
+            continue
         agent_path = args.home / relative_path
         owner_path = args.home / owner_relative_path
-        agent_template = (source / template_relative_path).read_text()
+        agent_template = template_path.read_text()
         agent_text = read_text(agent_path)
+        modes[agent_path] = mode
         agent_owned = read_text(owner_path) == owner_marker
         if args.uninstall:
             if agent_owned:
@@ -202,6 +324,16 @@ def main() -> int:
                 changes[agent_path] = agent_template
             if not agent_owned:
                 changes[owner_path] = owner_marker
+
+    # The launchd job that keeps ~/.claude/routing-state.json fresh. The plist
+    # is written, never loaded: loading it is a deploy step, not an install one.
+    plist_path = args.home / LAUNCHD_JOB[1]
+    desired_plist = plist_text(args.home)
+    if args.uninstall:
+        if plist_path.exists():
+            changes[plist_path] = None
+    elif read_text(plist_path) != desired_plist:
+        changes[plist_path] = desired_plist
 
     action = (
         "remove managed routing configuration from" if args.uninstall else "converge managed routing configuration in"
@@ -240,7 +372,7 @@ def main() -> int:
             path.unlink()
             print(f"removed {path}")
         else:
-            write_atomic(path, content)
+            write_atomic(path, content, modes.get(path))
             print(f"updated {path}")
     for reason, path in preserved_agents:
         print(f"preserved {reason} {path}")

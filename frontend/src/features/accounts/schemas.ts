@@ -1,8 +1,14 @@
 import { z } from "zod";
 
-export type AccountProvider = "openai" | "anthropic";
+export type AccountProvider = "openai" | "anthropic" | "glm" | "kimi" | "openrouter";
 
-export const AccountProviderSchema = z.enum(["openai", "anthropic"]).catch("openai");
+export const AccountProviderSchema = z.enum([
+  "openai",
+  "anthropic",
+  "glm",
+  "kimi",
+  "openrouter",
+]);
 
 export const UsageTrendPointSchema = z.object({
   t: z.string().datetime({ offset: true }),

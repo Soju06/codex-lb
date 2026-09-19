@@ -271,6 +271,51 @@ def test_closeout_ignores_a_session_transcript_path(tmp_path, ledger):
     assert lines(ledger)[-1]["match"] == "fallback"
 
 
+def test_a_foreign_digest_does_not_reopen_the_dispatch_it_closed(tmp_path, ledger):
+    """Regression: an unmatched digest must not be written as if it had matched.
+
+    It used to land in the closeout's prompt_sha256, so replaying the ledger
+    resolved that closeout to nothing and left its dispatch open for the next
+    one to close a second time.
+    """
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", "[class:implement] A", name="A"),
+        ledger, tmp_path)
+    foreign = agent_transcript(tmp_path / "subagents" / "foreign.jsonl", "a prompt no dispatch ever had")
+    run(CLOSEOUT, stop_payload("opus-seat", "A done", agent_transcript_path=str(foreign)), ledger, tmp_path)
+    first = lines(ledger)[-1]
+    assert first["match"] == "fallback"
+    assert first["name"] == "A"
+    dispatch_a = next(row for row in lines(ledger) if row["event"] == "dispatch")
+    assert first["prompt_sha256"] == dispatch_a["prompt_sha256"]
+    assert first["digest_seen"] == hashlib.sha256(b"a prompt no dispatch ever had").hexdigest()
+
+    run(CLOSEOUT, stop_payload("opus-seat", "stray stop"), ledger, tmp_path)
+    second = lines(ledger)[-1]
+    assert second["matched"] is False
+    assert second["name"] is None
+
+
+def test_a_hash_match_does_not_close_a_sibling_seat(tmp_path, ledger):
+    """Regression: two seats of one type, the older identified by transcript.
+
+    Per-key stacks diverged here — the hash closed A while the seat stack popped
+    B, so B's own stop closed A again and B was never closed at all.
+    """
+    for name in ("A", "B"):
+        run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", f"[class:implement] {name}", name=name),
+            ledger, tmp_path)
+    transcript = agent_transcript(tmp_path / "subagents" / "a.jsonl", "[class:implement] A")
+    run(CLOSEOUT, stop_payload("opus-seat", "A done", agent_transcript_path=str(transcript)), ledger, tmp_path)
+    run(CLOSEOUT, stop_payload("opus-seat", "B done"), ledger, tmp_path)
+    closeouts = [row for row in lines(ledger) if row["event"] == "closeout"]
+    assert [row["match"] for row in closeouts] == ["prompt_hash", "fallback"]
+    assert [row["name"] for row in closeouts] == ["A", "B"]
+
+    # Every dispatch is now closed exactly once; a third stop finds nothing.
+    run(CLOSEOUT, stop_payload("opus-seat", "stray stop"), ledger, tmp_path)
+    assert lines(ledger)[-1]["matched"] is False
+
+
 def test_closeout_names_the_seat_both_ways(tmp_path, ledger):
     run(SEAT_GUARD, dispatch_payload("codex-verifier", "gpt-5.6-sol-xhigh"), ledger, tmp_path)
     run(CLOSEOUT, stop_payload("codex-verifier"), ledger, tmp_path)

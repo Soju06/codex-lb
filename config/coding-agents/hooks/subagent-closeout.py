@@ -89,42 +89,46 @@ def prompt_hash(payload: dict):
     return None
 
 
+def resolve(open_dispatches: list, digest: str, seat: str, name: str):
+    """One dispatch out of those still open, newest first, and how it was found."""
+    if digest:
+        for record in reversed(open_dispatches):
+            if record.get("prompt_sha256") == digest:
+                return record, "prompt_hash"
+    for key, wanted in (("name", name), ("subagent_type", seat)):
+        if not wanted:
+            continue
+        for record in reversed(open_dispatches):
+            if str(record.get(key) or "").lower() == wanted.lower():
+                return record, "fallback"
+    return None, "fallback"
+
+
 def match(records: list, session_id, agent_type: str, agent_name: str, digest):
     """The dispatch this stop belongs to, and how it was found.
 
-    Every dispatch is pushed onto a stack keyed by its prompt hash, its seat
-    and, when it has one, its caller-given name; a closeout pops the same
-    stacks. What is left on top is a dispatch still in flight. The prompt hash
-    is the real join; seat and name are the fallback when no transcript was
-    readable.
+    Dispatches go on one open list; replaying each past closeout through the
+    same `resolve` removes exactly the dispatch that closeout was attributed to.
+    Separate per-key stacks used to diverge here: a closeout matched by prompt
+    hash still popped the newest dispatch off its seat stack, so a sibling seat
+    was closed twice and its real dispatch never at all.
     """
-    by_hash: dict = {}
-    by_seat: dict = {}
-    by_name: dict = {}
+    open_dispatches: list = []
     for record in records:
         if record.get("session_id") != session_id:
             continue
-        stacks = []
-        digest_key = str(record.get("prompt_sha256") or "")
-        seat = str(record.get("subagent_type") or record.get("agent_type") or "").lower()
-        name = str(record.get("name") or "").lower()
-        if digest_key:
-            stacks.append(by_hash.setdefault(digest_key, []))
-        if seat:
-            stacks.append(by_seat.setdefault(seat, []))
-        if name:
-            stacks.append(by_name.setdefault(name, []))
-        for stack in stacks:
-            if record.get("event") == "dispatch" and not record.get("denied"):
-                stack.append(record)
-            elif record.get("event") == "closeout" and stack:
-                stack.pop()
-    if digest and by_hash.get(digest):
-        return by_hash[digest][-1], "prompt_hash"
-    if agent_name and by_name.get(agent_name.lower()):
-        return by_name[agent_name.lower()][-1], "fallback"
-    stack = by_seat.get(agent_type.lower()) or []
-    return (stack[-1], "fallback") if stack else (None, "fallback")
+        if record.get("event") == "dispatch" and not record.get("denied"):
+            open_dispatches.append(record)
+        elif record.get("event") == "closeout":
+            closed, _ = resolve(
+                open_dispatches,
+                str(record.get("prompt_sha256") or ""),
+                str(record.get("subagent_type") or record.get("agent_type") or ""),
+                str(record.get("name") or ""),
+            )
+            if closed is not None:
+                open_dispatches.remove(closed)
+    return resolve(open_dispatches, digest or "", agent_type, agent_name)
 
 
 def duration(dispatch) -> float:
@@ -165,7 +169,11 @@ def main() -> None:
         "agent_id": payload.get("agent_id"),
         "task_class": (dispatch or {}).get("task_class"),
         "model": (dispatch or {}).get("model"),
-        "prompt_sha256": digest or (dispatch or {}).get("prompt_sha256"),
+        # The hash of the dispatch this closeout was ATTRIBUTED to, so replaying
+        # the ledger resolves it back to the same row. A digest that matched
+        # nothing is kept separately rather than written here as if it had.
+        "prompt_sha256": digest if how == "prompt_hash" else (dispatch or {}).get("prompt_sha256"),
+        "digest_seen": digest if (digest and how != "prompt_hash") else None,
         "duration_s": duration(dispatch),
         "ok": ok,
         "error": None if ok else (last.strip()[:300] or "no final message"),

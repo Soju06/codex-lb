@@ -220,7 +220,9 @@ class Settings(BaseSettings):
     # Threshold against Anthropic's own dedicated Fable-scoped weekly percent
     # (authoritative when fresh) — distinct from the overall-weekly heuristic
     # threshold above, which stays the fallback when no fresh scoped data exists.
-    anthropic_fable_scoped_max_used_percent: float = Field(default=100.0, ge=0, le=100)
+    # Default 90, not 100: routed Fable traffic stops one tenth of the week
+    # early so interactive Fable work still has budget at the end of it.
+    anthropic_fable_scoped_max_used_percent: float = Field(default=90.0, ge=0, le=100)
     # Fable-class traffic never stamps burn_first, so a budget-pressured pin with
     # no burn-first target would otherwise ride to the 429 wall; this lets it
     # rebind to a budget-safe account one window early (anti-thrash guard still

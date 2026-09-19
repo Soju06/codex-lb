@@ -89,8 +89,8 @@ Measured the same day:
 Path `~/.claude/logs/dispatch.jsonl`, one JSON object per line, append-only:
 
 ```json
-{"ts":"2026-09-19T21:00:00Z","event":"dispatch","session_id":"...","subagent_type":"opus-seat","model":"claude-opus-5","name":"lb-limits-scout","task_class":"explore","cwd":"/..."}
-{"ts":"2026-09-19T21:04:00Z","event":"closeout","session_id":"...","subagent_type":"opus-seat","name":"lb-limits-scout","duration_s":240,"ok":true,"error":null}
+{"ts":"2026-09-19T21:00:00Z","event":"dispatch","session_id":"...","subagent_type":"opus-seat","model":"claude-opus-5","name":"lb-limits-scout","task_class":"explore","cwd":"/...","prompt_sha256":"<sha256 of the Agent prompt>","fork":false}
+{"ts":"2026-09-19T21:04:00Z","event":"closeout","session_id":"...","agent_type":"opus-seat","subagent_type":"opus-seat","prompt_sha256":"<recomputed from the subagent transcript>","match":"prompt_hash","duration_s":240,"ok":true,"error":null}
 ```
 
 - `dispatch` is written by the PreToolUse Agent hook (seat-guard), whether or
@@ -128,7 +128,10 @@ Path `~/.claude/logs/dispatch.jsonl`, one JSON object per line, append-only:
 - `route pools [--json]`: C1, pretty or raw.
 - `route pick <class> [--author-vendor V] [--json]`: first chain entry whose
   seat is up (per `~/.claude/routing-state.json`) and whose pool is not
-  `exhausted`, honoring `cross_vendor` and `overrides`. Prints
+  `exhausted`, honoring `cross_vendor` and `overrides`. When pool state is
+  unreachable (no LB, no cache) the pool counts as `unknown` and is not
+  skipped: a router that refuses because its telemetry is down is worse than
+  one that routes and says so; the pick records `pool_status: "unknown"`. Prints
   `{seat, model, pool, reason, fallbacks}`. Exit 2 when nothing is routable.
 - `route doctor [--write]`: probes LB `/api/health`, `/api/pools`,
   `cursor-agent status`, `codex-companion.mjs status`, and one minimal LB

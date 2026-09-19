@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260918_000000_add_team_members"
-down_revision = "20260909_120000_add_reset_credit_attempts"
+down_revision = "20260918_000000_add_usage_credits_window"
 branch_labels = None
 depends_on = None
 

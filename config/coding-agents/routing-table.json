@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "classes": {
+    "plan": {"driver": true},
+    "review": {"chain": [{"seat": "plan-reviewer", "model": "claude-planner"}]},
+    "explore": {"chain": [{"seat": "Explore", "model": "claude-sonnet-5"}, {"seat": "cursor-seat", "model": "cursor-grok-4.6-low-fast"}, {"seat": "opus-seat", "model": "claude-opus-5"}]},
+    "implement": {"chain": [{"seat": "opus-seat", "model": "claude-opus-5"}, {"seat": "implementer", "model": "gpt-6-astra"}, {"seat": "cursor-seat", "model": "gpt-5.6-sol-high"}]},
+    "mechanical": {"chain": [{"seat": "cursor-seat", "model": "cursor-grok-4.6-medium-fast"}, {"seat": "opus-seat", "model": "claude-opus-5"}]},
+    "verify": {"cross_vendor": true, "chain": [{"seat": "verifier", "model": "claude-opus-5", "vendor": "anthropic"}, {"seat": "codex-verifier", "model": "gpt-5.6-sol-xhigh", "vendor": "openai"}, {"seat": "cursor-seat", "model": "gpt-5.6-sol-xhigh", "vendor": "cursor"}]},
+    "computer": {"chain": [{"seat": "computer-use", "model": "gpt-6-astra"}]}
+  },
+  "pools": {
+    "claude-opus-5": "anthropic-general",
+    "claude-sonnet-5": "anthropic-general",
+    "claude-planner": "anthropic-fable",
+    "gpt-6-astra": "openai-codex",
+    "gpt-5.6-sol-high": "openai-codex",
+    "gpt-5.6-sol-xhigh": "openai-codex",
+    "cursor-*": "cursor",
+    "kimi-*": "kimi",
+    "glm-*": "glm"
+  },
+  "overrides": []
+}

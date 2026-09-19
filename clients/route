@@ -1,0 +1,978 @@
+#!/usr/bin/env python3
+# route — pick the live seat for a task class, and keep the routing state honest.
+#
+# Contract C4 of docs/router-program.md. Stdlib only, same style family as
+# clients/opus-runtime-doctor and clients/codex-routing-guard.
+#
+# Commands:
+#   route pools  [--json]                        pool headroom (C1, or an accounts approximation)
+#   route pick   <class> [--author-vendor V]     first routable chain entry for a class
+#   route doctor [--write]                       probe seats and pools; write routing-state.json
+#   route report [--days N]                      dispatch ledger joined with LB session cost
+#   route learn  [--apply]                       propose (or write) chain demotions from outcomes
+#
+# Env:
+#   AGENT_LB_URL       LB base URL (default http://127.0.0.1:2455)
+#   ROUTE_TABLE        routing table path (default ~/.agent-lb/managed/coding-agents/routing-table.json,
+#                      falling back to config/coding-agents/routing-table.json beside this script)
+#   ROUTE_STATE        routing state path (default ~/.claude/routing-state.json)
+#   ROUTE_ALERT        alert path (default ~/.claude/routing-ALERT)
+#   ROUTE_LEDGER       dispatch ledger path (default ~/.claude/logs/dispatch.jsonl)
+#   ROUTE_CURSOR_CMD   cursor probe command (default "cursor-agent status")
+#   ROUTE_CODEX_CMD    codex probe command (default "node <codex-companion.mjs> status")
+#   ROUTE_FIXTURE_DIR  TEST ONLY — serve HTTP reads from files in this directory instead of the
+#                      network. A request to /api/pools reads api_pools.json; a missing file is a
+#                      404. Never set this outside tests.
+#
+# Exit codes:
+#   0  success
+#   1  degraded (doctor: a probe failed) or operational failure
+#   2  nothing routable / usage error
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import secrets
+import shlex
+import statistics
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+DEFAULT_BASE_URL = "http://127.0.0.1:2455"
+DEFAULT_CODEX_COMPANION = "~/.agent-lb/plugins/codex-plugin-cc/plugins/codex/scripts/codex-companion.mjs"
+
+EXIT_OK = 0
+EXIT_DEGRADED = 1
+EXIT_UNROUTABLE = 2
+
+POOL_OK_HEADROOM = 25.0
+POOL_LOW_HEADROOM = 5.0
+
+DOCTOR_BUDGET_SECONDS = 55.0
+CURSOR_TIMEOUT_SECONDS = 10.0
+CODEX_TIMEOUT_SECONDS = 15.0
+MODEL_PROBE_TIMEOUT_SECONDS = 10.0
+READ_TIMEOUT_SECONDS = 5.0
+
+# cursor-seat forwards to cursor-agent whatever model id it carries, so its health is the
+# forwarder's health and not the health of the model's home vendor.
+SEAT_PROBE = {"cursor-seat": "cursor-agent"}
+
+ANALYTICS_SESSION_CAP = 20
+
+
+# --- paths and configuration -------------------------------------------------
+
+
+def base_url() -> str:
+    return (os.environ.get("AGENT_LB_URL") or DEFAULT_BASE_URL).rstrip("/")
+
+
+def _env_path(name: str, default: Path) -> Path:
+    value = (os.environ.get(name) or "").strip()
+    return Path(value).expanduser() if value else default
+
+
+def table_path() -> Path:
+    managed = Path.home() / ".agent-lb" / "managed" / "coding-agents" / "routing-table.json"
+    repo = Path(__file__).resolve().parent.parent / "config" / "coding-agents" / "routing-table.json"
+    configured = (os.environ.get("ROUTE_TABLE") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return managed if managed.is_file() else repo
+
+
+def state_path() -> Path:
+    return _env_path("ROUTE_STATE", Path.home() / ".claude" / "routing-state.json")
+
+
+def alert_path() -> Path:
+    return _env_path("ROUTE_ALERT", Path.home() / ".claude" / "routing-ALERT")
+
+
+def ledger_path() -> Path:
+    return _env_path("ROUTE_LEDGER", Path.home() / ".claude" / "logs" / "dispatch.jsonl")
+
+
+def cursor_command() -> list[str]:
+    return shlex.split(os.environ.get("ROUTE_CURSOR_CMD") or "cursor-agent status")
+
+
+def codex_command() -> list[str]:
+    configured = os.environ.get("ROUTE_CODEX_CMD")
+    if configured:
+        return shlex.split(configured)
+    return ["node", str(Path(DEFAULT_CODEX_COMPANION).expanduser()), "status"]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_table() -> dict[str, Any]:
+    path = table_path()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        fail(f"routing table not found at {path}")
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"routing table at {path} is unreadable: {error}")
+    if not isinstance(value, dict):
+        fail(f"routing table at {path} is not an object")
+    return value
+
+
+def fail(message: str) -> Any:
+    print(f"route: {message}", file=sys.stderr)
+    raise SystemExit(EXIT_UNROUTABLE)
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+# --- HTTP --------------------------------------------------------------------
+
+
+class HttpResult:
+    """One HTTP call: transport success, the status, and the decoded body."""
+
+    def __init__(self, *, ok: bool, status: int | None, body: Any, error: str | None) -> None:
+        self.ok = ok
+        self.status = status
+        self.body = body
+        self.error = error
+
+    @property
+    def json_ok(self) -> bool:
+        return self.ok and self.status == 200 and self.body is not None
+
+
+def _fixture_file(path: str) -> Path | None:
+    directory = (os.environ.get("ROUTE_FIXTURE_DIR") or "").strip()
+    if not directory:
+        return None
+    slug = path.strip("/").replace("/", "_") or "root"
+    return Path(directory).expanduser() / f"{slug}.json"
+
+
+def _fixture_result(path: str) -> HttpResult:
+    fixture = _fixture_file(path)
+    assert fixture is not None
+    try:
+        body = json.loads(fixture.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return HttpResult(ok=False, status=404, body=None, error="HTTP 404 (fixture missing)")
+    except (OSError, json.JSONDecodeError) as error:
+        return HttpResult(ok=False, status=None, body=None, error=f"fixture unreadable: {error}")
+    return HttpResult(ok=True, status=200, body=body, error=None)
+
+
+def _request(method: str, path: str, *, payload: dict[str, Any] | None, timeout: float) -> HttpResult:
+    if _fixture_file(path) is not None:
+        return _fixture_result(path)
+    headers = {"accept": "application/json"}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["content-type"] = "application/json"
+        headers["anthropic-version"] = "2023-06-01"
+    request = urllib.request.Request(f"{base_url()}{path}", data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - operator-set base URL
+            raw = response.read().decode("utf-8", errors="replace")
+            status = response.status
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", errors="replace")
+        body = _decode(raw)
+        return HttpResult(ok=False, status=error.code, body=body, error=f"HTTP {error.code}")
+    except (OSError, urllib.error.URLError) as error:
+        reason = getattr(error, "reason", error)
+        return HttpResult(ok=False, status=None, body=None, error=f"{type(error).__name__}: {reason}")
+    return HttpResult(ok=True, status=status, body=_decode(raw), error=None)
+
+
+def _decode(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def http_get(path: str, *, timeout: float = READ_TIMEOUT_SECONDS) -> HttpResult:
+    return _request("GET", path, payload=None, timeout=timeout)
+
+
+def http_post(path: str, payload: dict[str, Any], *, timeout: float) -> HttpResult:
+    return _request("POST", path, payload=payload, timeout=timeout)
+
+
+# --- pools -------------------------------------------------------------------
+
+
+def pool_status(headroom: float) -> str:
+    if headroom >= POOL_OK_HEADROOM:
+        return "ok"
+    if headroom >= POOL_LOW_HEADROOM:
+        return "low"
+    return "exhausted"
+
+
+def _remaining(account: dict[str, Any]) -> float:
+    usage = account.get("usage")
+    value = usage.get("secondaryRemainingPercent") if isinstance(usage, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
+def _pool_ids(account: dict[str, Any]) -> list[str]:
+    provider = account.get("provider")
+    if provider == "anthropic":
+        ids = ["anthropic-general"]
+        if account.get("fableEligible"):
+            ids.append("anthropic-fable")
+        return ids
+    if provider == "openai":
+        return ["openai-codex"]
+    if isinstance(provider, str) and provider:
+        return [provider]
+    return []
+
+
+def pools_from_accounts(body: Any) -> dict[str, Any]:
+    """Approximate C1 from /api/accounts while /api/pools is not deployed yet."""
+    accounts = body.get("accounts") if isinstance(body, dict) else body
+    if not isinstance(accounts, list):
+        accounts = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        for pool_id in _pool_ids(account):
+            grouped.setdefault(pool_id, []).append(account)
+
+    pools = []
+    for pool_id, members in sorted(grouped.items()):
+        usable = [account for account in members if account.get("status") == "active"]
+        remaining = [_remaining(account) for account in usable]
+        headroom = max(remaining) if remaining else 0.0
+        aggregate = statistics.fmean(remaining) if remaining else 0.0
+        resets = sorted(
+            value
+            for value in (account.get("resetAtSecondary") for account in (usable or members))
+            if isinstance(value, str) and value
+        )
+        provider = members[0].get("provider") if members else None
+        pools.append(
+            {
+                "id": pool_id,
+                "provider": provider,
+                "kind": "fable_scoped" if pool_id == "anthropic-fable" else "weekly",
+                "accounts": len(members),
+                "eligibleAccounts": len(usable),
+                "headroomPercent": round(headroom, 1),
+                "aggregateRemainingPercent": round(aggregate, 1),
+                "resetAt": resets[0] if resets else None,
+                "status": pool_status(headroom),
+                "source": "accounts_fallback",
+            }
+        )
+    return {"generatedAt": now_iso(), "pools": pools, "source": "accounts_fallback"}
+
+
+def fetch_pools(*, timeout: float = READ_TIMEOUT_SECONDS) -> tuple[dict[str, Any] | None, str | None]:
+    """C1 from the LB, else an approximation from /api/accounts, else an error string."""
+    direct = http_get("/api/pools", timeout=timeout)
+    if direct.json_ok and isinstance(direct.body, dict) and isinstance(direct.body.get("pools"), list):
+        document = dict(direct.body)
+        document.setdefault("source", "lb")
+        return document, None
+    accounts = http_get("/api/accounts", timeout=timeout)
+    if accounts.json_ok:
+        return pools_from_accounts(accounts.body), None
+    reason = direct.error or f"HTTP {direct.status}"
+    return None, f"/api/pools unavailable ({reason}); /api/accounts unavailable ({accounts.error})"
+
+
+def pools_by_id(document: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(document, dict):
+        return {}
+    pools = document.get("pools")
+    if not isinstance(pools, list):
+        return {}
+    return {pool["id"]: pool for pool in pools if isinstance(pool, dict) and isinstance(pool.get("id"), str)}
+
+
+def command_pools(args: argparse.Namespace) -> int:
+    document, error = fetch_pools()
+    if document is None:
+        print(f"route: {error}", file=sys.stderr)
+        return EXIT_DEGRADED
+    if args.json:
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return EXIT_OK
+    print(f"pools at {document.get('generatedAt')} (source: {document.get('source')})")
+    header = f"{'pool':<20} {'status':<10} {'headroom':>9} {'aggregate':>10} {'usable':>8}  reset"
+    print(header)
+    print("-" * len(header))
+    for pool in document.get("pools", []):
+        usable = f"{pool.get('eligibleAccounts')}/{pool.get('accounts')}"
+        print(
+            f"{pool.get('id', '?'):<20} {pool.get('status', '?'):<10} "
+            f"{pool.get('headroomPercent', 0):>8.1f}% {pool.get('aggregateRemainingPercent', 0):>9.1f}% "
+            f"{usable:>8}  {pool.get('resetAt') or '-'}"
+        )
+    return EXIT_OK
+
+
+# --- pick --------------------------------------------------------------------
+
+
+def pool_for_model(table: dict[str, Any], model: str) -> str | None:
+    pools = table.get("pools")
+    if not isinstance(pools, dict):
+        return None
+    exact = pools.get(model)
+    if isinstance(exact, str):
+        return exact
+    for key, value in pools.items():
+        if key.endswith("*") and model.startswith(key[:-1]) and isinstance(value, str):
+            return value
+    return None
+
+
+def vendor_for(entry: dict[str, Any], pool: str | None) -> str | None:
+    declared = entry.get("vendor")
+    if isinstance(declared, str) and declared:
+        return declared
+    if pool:
+        return pool.split("-")[0]
+    return None
+
+
+def read_state() -> dict[str, Any]:
+    try:
+        value = json.loads(state_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def seat_is_up(state: dict[str, Any], seat: str) -> bool:
+    """A seat with no recorded state is treated as up; only a recorded failure takes it out."""
+    seats = state.get("seats")
+    if not isinstance(seats, dict):
+        return True
+    record = seats.get(seat)
+    if not isinstance(record, dict):
+        return True
+    return record.get("ok") is not False
+
+
+def _override_matches(override: Any, class_name: str, entry: dict[str, Any]) -> bool:
+    if not isinstance(override, dict) or override.get("class") != class_name:
+        return False
+    demote = override.get("demote")
+    if not isinstance(demote, dict):
+        return False
+    if demote.get("seat") != entry.get("seat"):
+        return False
+    model = demote.get("model")
+    return model is None or model == entry.get("model")
+
+
+def apply_overrides(chain: list[dict[str, Any]], overrides: Any, class_name: str) -> list[dict[str, Any]]:
+    if not isinstance(overrides, list) or not overrides:
+        return list(chain)
+    kept: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    for entry in chain:
+        target = demoted if any(_override_matches(o, class_name, entry) for o in overrides) else kept
+        target.append(entry)
+    return kept + demoted
+
+
+def command_pick(args: argparse.Namespace) -> int:
+    table = load_table()
+    classes = table.get("classes")
+    if not isinstance(classes, dict) or args.task_class not in classes:
+        known = ", ".join(sorted(classes)) if isinstance(classes, dict) else "none"
+        fail(f"unknown class {args.task_class!r}; known classes: {known}")
+    spec = classes[args.task_class]
+    if not isinstance(spec, dict):
+        fail(f"class {args.task_class!r} is malformed")
+
+    if spec.get("driver"):
+        result = {
+            "class": args.task_class,
+            "seat": "driver",
+            "model": None,
+            "pool": None,
+            "reason": "driver class: stays on the Fable driver session, no subagent",
+            "fallbacks": [],
+        }
+        _print_pick(result, as_json=args.json)
+        return EXIT_OK
+
+    cross_vendor = bool(spec.get("cross_vendor"))
+    if cross_vendor and not args.author_vendor:
+        fail(f"class {args.task_class!r} is cross_vendor: pass --author-vendor <vendor> so the author's vendor is excluded")
+
+    chain = spec.get("chain")
+    if not isinstance(chain, list) or not chain:
+        fail(f"class {args.task_class!r} has no chain")
+
+    document, pools_error = fetch_pools(timeout=3.0)
+    if document is None:
+        document = read_state().get("pools") if isinstance(read_state().get("pools"), dict) else None
+    pools = pools_by_id(document)
+    state = read_state()
+
+    ordered = apply_overrides([entry for entry in chain if isinstance(entry, dict)], table.get("overrides"), args.task_class)
+    routable: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for entry in ordered:
+        seat = entry.get("seat")
+        model = entry.get("model")
+        if not isinstance(seat, str) or not isinstance(model, str):
+            continue
+        pool = pool_for_model(table, model)
+        vendor = vendor_for(entry, pool)
+        if cross_vendor and vendor == args.author_vendor:
+            skipped.append(f"{seat} (same vendor as author: {vendor})")
+            continue
+        if not seat_is_up(state, seat):
+            skipped.append(f"{seat} (seat down per routing-state.json)")
+            continue
+        status = pools.get(pool, {}).get("status") if pool else None
+        if status == "exhausted":
+            skipped.append(f"{seat} (pool {pool} exhausted)")
+            continue
+        routable.append({"seat": seat, "model": model, "pool": pool, "vendor": vendor, "poolStatus": status})
+
+    if not routable:
+        detail = "; ".join(skipped) if skipped else "no chain entry survived filtering"
+        print(f"route: nothing routable for class {args.task_class!r}: {detail}", file=sys.stderr)
+        return EXIT_UNROUTABLE
+
+    chosen = routable[0]
+    reasons = ["first chain entry with the seat up and its pool not exhausted"]
+    if cross_vendor:
+        reasons.append(f"cross_vendor: excluded author vendor {args.author_vendor}")
+    if skipped:
+        reasons.append("skipped " + "; ".join(skipped))
+    if pools_error:
+        reasons.append(f"pool status unknown ({pools_error})")
+    result = {
+        "class": args.task_class,
+        "seat": chosen["seat"],
+        "model": chosen["model"],
+        "pool": chosen["pool"],
+        "reason": "; ".join(reasons),
+        "fallbacks": [
+            {"seat": entry["seat"], "model": entry["model"], "pool": entry["pool"]} for entry in routable[1:]
+        ],
+    }
+    _print_pick(result, as_json=args.json)
+    return EXIT_OK
+
+
+def _print_pick(result: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    print(f"seat      {result['seat']}")
+    print(f"model     {result['model'] or '-'}")
+    print(f"pool      {result['pool'] or '-'}")
+    print(f"reason    {result['reason']}")
+    fallbacks = ", ".join(f"{entry['seat']}/{entry['model']}" for entry in result["fallbacks"]) or "none"
+    print(f"fallbacks {fallbacks}")
+
+
+# --- doctor ------------------------------------------------------------------
+
+
+def _probe(name: str, started: float, *, ok: bool, error: str | None, **detail: Any) -> dict[str, Any]:
+    record = {"name": name, "ok": ok, "latency_ms": int((time.monotonic() - started) * 1000), "error": error}
+    record.update(detail)
+    return record
+
+
+def probe_lb_health() -> dict[str, Any]:
+    started = time.monotonic()
+    result = http_get("/api/health", timeout=4.0)
+    path = "/api/health"
+    if result.status == 404:
+        result = http_get("/health", timeout=4.0)
+        path = "/health"
+    ok = result.ok and result.status == 200
+    error = None if ok else (result.error or f"HTTP {result.status}")
+    return _probe("lb-health", started, ok=ok, error=error, path=path)
+
+
+def probe_pools() -> tuple[dict[str, Any], dict[str, Any] | None]:
+    started = time.monotonic()
+    document, error = fetch_pools()
+    ok = document is not None
+    record = _probe(
+        "lb-pools",
+        started,
+        ok=ok,
+        error=error,
+        source=document.get("source") if document else None,
+    )
+    return record, document
+
+
+def probe_command(name: str, command: list[str], timeout: float) -> dict[str, Any]:
+    started = time.monotonic()
+    if not command:
+        return _probe(name, started, ok=False, error="probe command is empty")
+    try:
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            text=True,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _probe(name, started, ok=False, error=f"timeout after {timeout:.0f}s")
+    except OSError as error:
+        return _probe(name, started, ok=False, error=f"{type(error).__name__}: {error}")
+    ok = completed.returncode == 0
+    error = None if ok else f"exit {completed.returncode}"
+    return _probe(name, started, ok=ok, error=error)
+
+
+def probe_model(model: str) -> dict[str, Any]:
+    """One minimal LB request. Local /v1/messages needs no credential; on 401/403 fall back to /api/models."""
+    started = time.monotonic()
+    payload = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}
+    result = http_post("/v1/messages", payload, timeout=MODEL_PROBE_TIMEOUT_SECONDS)
+    if result.status in (401, 403):
+        presence = http_get("/api/models", timeout=4.0)
+        ok = presence.ok and presence.status == 200
+        return _probe(
+            f"model:{model}",
+            started,
+            ok=ok,
+            error=None if ok else (presence.error or f"HTTP {presence.status}"),
+            method="api_models_presence",
+            note="/v1/messages needs a credential this probe does not hold; probed /api/models instead",
+        )
+    ok = result.ok and result.status == 200
+    error = None
+    if not ok:
+        error = f"HTTP {result.status}" if result.status else (result.error or "request failed")
+        if result.status == 429:
+            error = "HTTP 429 (no account selectable; pool exhausted or in cooldown)"
+    return _probe(f"model:{model}", started, ok=ok, error=error, method="messages")
+
+
+def probed_models(table: dict[str, Any]) -> list[str]:
+    """Distinct non-Fable Claude models in the table, in first-seen order."""
+    seen: list[str] = []
+    classes = table.get("classes")
+    if not isinstance(classes, dict):
+        return seen
+    for spec in classes.values():
+        if not isinstance(spec, dict):
+            continue
+        for entry in spec.get("chain") or []:
+            model = entry.get("model") if isinstance(entry, dict) else None
+            if not isinstance(model, str) or not model.startswith("claude-"):
+                continue
+            if "fable" in model or pool_for_model(table, model) == "anthropic-fable":
+                continue
+            if model not in seen:
+                seen.append(model)
+    return seen
+
+
+def backing_probe(table: dict[str, Any], seat: str, model: str, models: list[str]) -> str:
+    if seat in SEAT_PROBE:
+        return SEAT_PROBE[seat]
+    if model.startswith("cursor-"):
+        return "cursor-agent"
+    if model.startswith("gpt-"):
+        return "codex-companion"
+    if model in models:
+        return f"model:{model}"
+    return "lb-health"
+
+
+def seat_states(table: dict[str, Any], probes: dict[str, dict[str, Any]], models: list[str]) -> dict[str, Any]:
+    seats: dict[str, Any] = {}
+    classes = table.get("classes")
+    if not isinstance(classes, dict):
+        return seats
+    for spec in classes.values():
+        if not isinstance(spec, dict):
+            continue
+        for entry in spec.get("chain") or []:
+            if not isinstance(entry, dict):
+                continue
+            seat, model = entry.get("seat"), entry.get("model")
+            if not isinstance(seat, str) or not isinstance(model, str):
+                continue
+            probe = probes.get(backing_probe(table, seat, model, models))
+            if probe is None:
+                continue
+            current = seats.get(seat)
+            if current is None:
+                seats[seat] = {"ok": probe["ok"], "latency_ms": probe["latency_ms"], "error": probe["error"]}
+                continue
+            if current["ok"] and not probe["ok"]:
+                seats[seat] = {"ok": False, "latency_ms": probe["latency_ms"], "error": probe["error"]}
+            else:
+                current["latency_ms"] = max(current["latency_ms"], probe["latency_ms"])
+    return seats
+
+
+def alert_text(state: dict[str, Any]) -> str:
+    down = [f"{name} ({record['error']})" for name, record in sorted(state["seats"].items()) if not record["ok"]]
+    broken = [f"{probe['name']} ({probe['error']})" for probe in state["probes"] if not probe["ok"]]
+    pools = state.get("pools") or {}
+    thin = [
+        f"{pool['id']} {pool['headroomPercent']}% ({pool['status']})"
+        for pool in (pools.get("pools") or [])
+        if pool.get("status") in ("low", "exhausted")
+    ]
+    lines = [
+        f"ROUTING DEGRADED at {state['ts']}",
+        f"failed probes : {', '.join(broken) or 'none'}",
+        f"seats down    : {', '.join(down) or 'none'}",
+        f"pools thin    : {', '.join(thin) or 'none'}",
+        "",
+        "`route pick <class>` already routes around this. Re-run `route doctor --write` to clear.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    table = load_table()
+    probes: list[dict[str, Any]] = [probe_lb_health()]
+    pools_probe, pools_document = probe_pools()
+    probes.append(pools_probe)
+    probes.append(probe_command("cursor-agent", cursor_command(), CURSOR_TIMEOUT_SECONDS))
+    probes.append(probe_command("codex-companion", codex_command(), CODEX_TIMEOUT_SECONDS))
+    for model in probed_models(table):
+        if time.monotonic() - started > DOCTOR_BUDGET_SECONDS - MODEL_PROBE_TIMEOUT_SECONDS:
+            probes.append(
+                {
+                    "name": f"model:{model}",
+                    "ok": False,
+                    "latency_ms": 0,
+                    "error": "skipped: 55s doctor budget spent",
+                }
+            )
+            continue
+        probes.append(probe_model(model))
+
+    by_name = {probe["name"]: probe for probe in probes}
+    state = {
+        "ts": now_iso(),
+        "seats": seat_states(table, by_name, probed_models(table)),
+        "pools": pools_document,
+        "probes": probes,
+        "auth": "loopback_unauthenticated",
+        "elapsed_s": round(time.monotonic() - started, 2),
+    }
+    degraded = any(not probe["ok"] for probe in probes)
+
+    if args.write:
+        atomic_write(state_path(), json.dumps(state, indent=2, sort_keys=True) + "\n")
+        if degraded:
+            atomic_write(alert_path(), alert_text(state))
+        else:
+            try:
+                alert_path().unlink()
+            except FileNotFoundError:
+                pass
+        print(f"route doctor: {'DEGRADED' if degraded else 'ok'} -> {state_path()}")
+    else:
+        print(json.dumps(state, indent=2, sort_keys=True))
+    return EXIT_DEGRADED if degraded else EXIT_OK
+
+
+# --- ledger, report, learn ---------------------------------------------------
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def read_ledger(since: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    dispatches: list[dict[str, Any]] = []
+    closeouts: list[dict[str, Any]] = []
+    try:
+        lines = ledger_path().read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        return dispatches, closeouts
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        stamp = _parse_ts(record.get("ts"))
+        if stamp is None or stamp < since:
+            continue
+        if record.get("event") == "dispatch":
+            dispatches.append(record)
+        elif record.get("event") == "closeout":
+            closeouts.append(record)
+    return dispatches, closeouts
+
+
+def aggregate(dispatches: list[dict[str, Any]], closeouts: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Join closeouts to dispatches by (session_id, name), oldest unmatched dispatch first."""
+    pending: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    rows: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def row_for(record: dict[str, Any]) -> dict[str, Any]:
+        key = (
+            str(record.get("task_class") or "unknown"),
+            str(record.get("subagent_type") or "unknown"),
+            str(record.get("model") or "unknown"),
+        )
+        return rows.setdefault(
+            key,
+            {
+                "class": key[0],
+                "seat": key[1],
+                "model": key[2],
+                "dispatches": 0,
+                "denied": 0,
+                "closeouts": 0,
+                "ok": 0,
+                "durations": [],
+                "sessions": set(),
+            },
+        )
+
+    for record in dispatches:
+        row = row_for(record)
+        if record.get("denied"):
+            row["denied"] += 1
+            continue
+        row["dispatches"] += 1
+        if record.get("session_id"):
+            row["sessions"].add(record["session_id"])
+        pending.setdefault((record.get("session_id"), record.get("name")), []).append(record)
+
+    for record in closeouts:
+        key = (record.get("session_id"), record.get("name"))
+        queue = pending.get(key) or []
+        origin = queue.pop(0) if queue else None
+        merged = dict(record)
+        if origin is not None:
+            merged.setdefault("task_class", origin.get("task_class"))
+            merged.setdefault("model", origin.get("model"))
+            merged.setdefault("subagent_type", origin.get("subagent_type"))
+        row = row_for(merged)
+        row["closeouts"] += 1
+        if merged.get("ok") is True:
+            row["ok"] += 1
+        duration = merged.get("duration_s")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            row["durations"].append(float(duration))
+        if merged.get("session_id"):
+            row["sessions"].add(merged["session_id"])
+    return rows
+
+
+def session_costs(session_ids: set[str]) -> dict[str, float]:
+    costs: dict[str, float] = {}
+    for session_id in sorted(session_ids)[:ANALYTICS_SESSION_CAP]:
+        result = http_get(f"/api/sessions/{session_id}/analytics", timeout=4.0)
+        if not result.json_ok or not isinstance(result.body, dict):
+            continue
+        session = result.body.get("session")
+        cost = session.get("costUsd") if isinstance(session, dict) else None
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            costs[session_id] = float(cost)
+    return costs
+
+
+def ok_rate(row: dict[str, Any]) -> float | None:
+    return row["ok"] / row["closeouts"] if row["closeouts"] else None
+
+
+def command_report(args: argparse.Namespace) -> int:
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    dispatches, closeouts = read_ledger(since)
+    rows = aggregate(dispatches, closeouts)
+    if not rows:
+        print(f"No dispatches in {ledger_path()} within {args.days} day(s).")
+        return EXIT_OK
+    every_session: set[str] = set()
+    for row in rows.values():
+        every_session |= row["sessions"]
+    costs = session_costs(every_session)
+
+    print(f"# route report — {args.days} day(s) to {now_iso()}\n")
+    print(f"Ledger: `{ledger_path()}` · {len(dispatches)} dispatches · {len(closeouts)} closeouts\n")
+    print("| class | seat | model | dispatches | denied | closeouts | ok-rate | median s | sessions | session cost |")
+    print("|---|---|---|---|---:|---:|---:|---:|---:|---:|")
+    for key in sorted(rows):
+        row = rows[key]
+        rate = ok_rate(row)
+        median = f"{statistics.median(row['durations']):.0f}" if row["durations"] else "-"
+        cost = sum(costs.get(session, 0.0) for session in row["sessions"])
+        cost_text = f"${cost:.2f}" if cost else "-"
+        print(
+            f"| {row['class']} | {row['seat']} | {row['model']} | {row['dispatches']} | {row['denied']} | "
+            f"{row['closeouts']} | {'-' if rate is None else f'{rate:.0%}'} | {median} | "
+            f"{len(row['sessions'])} | {cost_text} |"
+        )
+    if costs:
+        print("\nSession cost is the whole LB session's spend; a session shared by several rows is counted in each.")
+    elif every_session:
+        print("\nSession cost unavailable: the LB session analytics endpoint did not answer.")
+    return EXIT_OK
+
+
+def proposals(rows: dict[tuple[str, str, str], dict[str, Any]], *, minimum: int, floor: float) -> list[dict[str, Any]]:
+    found = []
+    for key in sorted(rows):
+        row = rows[key]
+        rate = ok_rate(row)
+        if row["closeouts"] < minimum or rate is None or rate >= floor:
+            continue
+        found.append(
+            {
+                "class": row["class"],
+                "demote": {"seat": row["seat"], "model": row["model"]},
+                "reason": f"ok-rate {rate:.0%} over {row['closeouts']} closeouts, below the {floor:.0%} floor",
+                "evidence": {
+                    "closeouts": row["closeouts"],
+                    "ok": row["ok"],
+                    "okRate": round(rate, 3),
+                    "windowDays": None,
+                    "ledger": str(ledger_path()),
+                },
+            }
+        )
+    return found
+
+
+def command_learn(args: argparse.Namespace) -> int:
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    dispatches, closeouts = read_ledger(since)
+    rows = aggregate(dispatches, closeouts)
+    found = proposals(rows, minimum=args.min_closeouts, floor=args.ok_floor)
+    for proposal in found:
+        proposal["evidence"]["windowDays"] = args.days
+        proposal["ts"] = now_iso()
+
+    if not found:
+        print(f"No demotions proposed: no (class, seat, model) reached {args.min_closeouts} closeouts below "
+              f"a {args.ok_floor:.0%} ok-rate in {args.days} day(s).")
+        return EXIT_OK
+
+    table = load_table()
+    existing = table.get("overrides")
+    existing = existing if isinstance(existing, list) else []
+    fresh = [
+        proposal
+        for proposal in found
+        if not any(_override_matches(current, proposal["class"], proposal["demote"]) for current in existing)
+    ]
+
+    if not args.apply:
+        print(f"# route learn — proposed overrides for {table_path()}\n")
+        for proposal in found:
+            state = "already present" if proposal not in fresh else "new"
+            print(f"+ {proposal['class']}: demote {proposal['demote']['seat']}/{proposal['demote']['model']} "
+                  f"({proposal['reason']}) [{state}]")
+        print("\nRun `route learn --apply` to write these into the table's `overrides`.")
+        return EXIT_OK
+
+    if not fresh:
+        print("All proposed demotions are already recorded in the table; nothing written.")
+        return EXIT_OK
+    table["overrides"] = existing + fresh
+    atomic_write(table_path(), json.dumps(table, indent=2) + "\n")
+    for proposal in fresh:
+        print(f"wrote override: {proposal['class']} demotes {proposal['demote']['seat']}/{proposal['demote']['model']}")
+    print(f"table: {table_path()}")
+    return EXIT_OK
+
+
+# --- entry point -------------------------------------------------------------
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="route", description="Route a task class to a live seat.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    pools = sub.add_parser("pools", help="pool headroom from the LB")
+    pools.add_argument("--json", action="store_true")
+    pools.set_defaults(handler=command_pools)
+
+    pick = sub.add_parser("pick", help="first routable seat for a class")
+    pick.add_argument("task_class", metavar="class")
+    pick.add_argument("--author-vendor", default=None, help="required for cross_vendor classes")
+    pick.add_argument("--json", action="store_true")
+    pick.set_defaults(handler=command_pick)
+
+    doctor = sub.add_parser("doctor", help="probe seats and pools")
+    doctor.add_argument("--write", action="store_true", help="write routing-state.json and the alert")
+    doctor.set_defaults(handler=command_doctor)
+
+    report = sub.add_parser("report", help="dispatch ledger joined with LB session cost")
+    report.add_argument("--days", type=int, default=7)
+    report.set_defaults(handler=command_report)
+
+    learn = sub.add_parser("learn", help="propose chain demotions from recorded outcomes")
+    learn.add_argument("--apply", action="store_true", help="write the overrides into the routing table")
+    learn.add_argument("--days", type=int, default=14)
+    learn.add_argument("--min-closeouts", type=int, default=10, dest="min_closeouts")
+    learn.add_argument("--ok-floor", type=float, default=0.6, dest="ok_floor")
+    learn.set_defaults(handler=command_learn)
+
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    return int(args.handler(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

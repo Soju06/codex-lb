@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -213,18 +214,81 @@ def stop_payload(agent_type: str, message: str = "Done, tests pass.", **extra) -
     }
 
 
-def agent_transcript(path: Path, prompt: str) -> Path:
-    """A subagent transcript: its first user entry is the Agent prompt verbatim.
+def agent_transcript(path: Path, prompt: str, teammate: str = "") -> Path:
+    """A subagent transcript, in the shape the live files have (2026-09-19).
 
-    Shape taken from a real file under
-    ``~/.claude/projects/<slug>/<session>/subagents/agent-*.jsonl`` (2026-09-19).
+    `attachment` rows carry no role and no content and are interleaved with the
+    user rows. A dispatch given a `name` is delivered as a teammate, so its
+    prompt arrives inside a `<teammate-message>` envelope.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"type": "user", "isSidechain": True, "message": {"role": "user", "content": prompt}}) + "\n"
-        + json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "working"}}) + "\n"
-    )
+    if teammate:
+        prompt = f'<teammate-message teammate_id="team-lead" summary="{teammate}">\n{prompt}\n</teammate-message>'
+    rows = [
+        {"type": "attachment", "uuid": "att-0"},
+        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": prompt}},
+        {"type": "attachment", "uuid": "att-1"},
+        {"type": "user", "isSidechain": True, "message": {"role": "user", "content": "<system-reminder>…"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": "working"}},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return path
+
+
+def test_closeout_matches_a_named_teammate_dispatch(tmp_path, ledger):
+    """The live shape: agent_type carries the NAME, the prompt is enveloped.
+
+    Rebuilt from a real 2026-09-19 closeout where `agent_type` arrived as
+    "opus-liveness-probe" for a dispatch whose subagent_type was "opus-seat",
+    and the transcript's first user row held the prompt inside a
+    `<teammate-message>` envelope after a leading `attachment` row.
+    """
+    prompt = '[class:explore] Reply with exactly one line: "OK opus " followed by the model id.'
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "", prompt, name="opus-liveness-probe"), ledger, tmp_path)
+    transcript = agent_transcript(
+        tmp_path / "subagents" / "agent-aopus-liveness-probe-784eeadbc01e22a7.jsonl",
+        prompt,
+        teammate="Probe Opus routability post-deploy",
+    )
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": SESSION,
+        "agent_id": "aopus-liveness-probe-784eeadbc01e22a7",
+        "agent_type": "opus-liveness-probe",
+        "agent_transcript_path": str(transcript),
+        "last_assistant_message": "OK opus claude-opus-5",
+    }
+    run(CLOSEOUT, payload, ledger, tmp_path)
+    record = lines(ledger)[-1]
+    assert record["match"] == "prompt_hash"
+    assert record["agent_type"] == "opus-liveness-probe"
+    assert record["subagent_type"] == "opus-seat"
+    assert record["name"] == "opus-liveness-probe"
+    assert record["task_class"] == "explore"
+    assert record["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert record["digest_seen"] is None
+    assert record["ok"] is True
+
+
+def test_closeout_matches_on_the_name_in_agent_type(tmp_path, ledger):
+    """No readable transcript, so the name in agent_type is what is left."""
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "", "[class:explore] probe", name="opus-liveness-probe"),
+        ledger, tmp_path)
+    run(SEAT_GUARD, dispatch_payload("opus-seat", "", "[class:implement] other", name="other-seat"),
+        ledger, tmp_path)
+    run(CLOSEOUT, stop_payload("opus-liveness-probe", "OK opus claude-opus-5"), ledger, tmp_path)
+    record = lines(ledger)[-1]
+    assert record["match"] == "name"
+    assert record["subagent_type"] == "opus-seat"
+    assert record["name"] == "opus-liveness-probe"
+    assert record["task_class"] == "explore"
+
+
+def test_closeout_never_emits_a_null_match(tmp_path, ledger):
+    run(CLOSEOUT, stop_payload("opus-seat"), ledger, tmp_path)
+    record = lines(ledger)[-1]
+    assert record["match"] == "none"
+    assert record["matched"] is False
 
 
 def test_closeout_joins_on_the_prompt_hash(tmp_path, ledger):
@@ -248,7 +312,7 @@ def test_closeout_falls_back_when_the_transcript_is_unreadable(tmp_path, ledger)
         ledger, tmp_path)
     missing = tmp_path / "subagents" / "gone.jsonl"
     run(CLOSEOUT, stop_payload("opus-seat", agent_transcript_path=str(missing)), ledger, tmp_path)
-    assert lines(ledger)[-1]["match"] == "fallback"
+    assert lines(ledger)[-1]["match"] == "seat"
     assert lines(ledger)[-1]["name"] == "builder"
 
 
@@ -259,7 +323,7 @@ def test_closeout_falls_back_when_the_transcript_is_garbage(tmp_path, ledger):
     broken.parent.mkdir(parents=True, exist_ok=True)
     broken.write_text("{not json\n")
     run(CLOSEOUT, stop_payload("opus-seat", agent_transcript_path=str(broken)), ledger, tmp_path)
-    assert lines(ledger)[-1]["match"] == "fallback"
+    assert lines(ledger)[-1]["match"] == "seat"
 
 
 def test_closeout_ignores_a_session_transcript_path(tmp_path, ledger):
@@ -268,7 +332,7 @@ def test_closeout_ignores_a_session_transcript_path(tmp_path, ledger):
     run(SEAT_GUARD, dispatch_payload("opus-seat", "claude-opus-5", prompt, name="scout"), ledger, tmp_path)
     session_file = agent_transcript(tmp_path / "projects" / "session.jsonl", prompt)
     run(CLOSEOUT, stop_payload("opus-seat", transcript_path=str(session_file)), ledger, tmp_path)
-    assert lines(ledger)[-1]["match"] == "fallback"
+    assert lines(ledger)[-1]["match"] == "seat"
 
 
 def test_a_foreign_digest_does_not_reopen_the_dispatch_it_closed(tmp_path, ledger):
@@ -283,7 +347,7 @@ def test_a_foreign_digest_does_not_reopen_the_dispatch_it_closed(tmp_path, ledge
     foreign = agent_transcript(tmp_path / "subagents" / "foreign.jsonl", "a prompt no dispatch ever had")
     run(CLOSEOUT, stop_payload("opus-seat", "A done", agent_transcript_path=str(foreign)), ledger, tmp_path)
     first = lines(ledger)[-1]
-    assert first["match"] == "fallback"
+    assert first["match"] == "seat"
     assert first["name"] == "A"
     dispatch_a = next(row for row in lines(ledger) if row["event"] == "dispatch")
     assert first["prompt_sha256"] == dispatch_a["prompt_sha256"]
@@ -308,7 +372,7 @@ def test_a_hash_match_does_not_close_a_sibling_seat(tmp_path, ledger):
     run(CLOSEOUT, stop_payload("opus-seat", "A done", agent_transcript_path=str(transcript)), ledger, tmp_path)
     run(CLOSEOUT, stop_payload("opus-seat", "B done"), ledger, tmp_path)
     closeouts = [row for row in lines(ledger) if row["event"] == "closeout"]
-    assert [row["match"] for row in closeouts] == ["prompt_hash", "fallback"]
+    assert [row["match"] for row in closeouts] == ["prompt_hash", "seat"]
     assert [row["name"] for row in closeouts] == ["A", "B"]
 
     # Every dispatch is now closed exactly once; a third stop finds nothing.
@@ -553,11 +617,37 @@ def test_installer_backs_up_a_file_it_adopts(tmp_path):
     assert "claude-sonnet-5" in explore.read_text()
     assert "prompt_sha256" in guard.read_text()
 
-    # Adopting is a one-off: converged, and no second backup even if re-run.
-    assert "already converged" in install()
+    # Adopting is a one-off. Asserted on the backups rather than on the whole
+    # run being converged: this installs `clients/route` too, which another lane
+    # edits, and a mid-test write there is not this test's business.
+    assert "backed up" not in install()
     (home / ".agent-lb" / "managed" / "coding-agents" / "Explore").unlink()
-    install()
-    assert len(sorted(home.glob(".claude/*/*.pre-router-*"))) == len(backups)
+    assert "backed up" not in install()
+    assert sorted(home.glob(".claude/*/*.pre-router-*")) == backups
+
+
+def test_the_doctor_job_runs_with_a_path_that_finds_its_probes(tmp_path):
+    """launchd starts a job with a minimal environment.
+
+    The first live run probed cursor-agent and codex-companion with no PATH to
+    find them and called every seat down (2026-09-19).
+    """
+    installer = HOOKS.parent / "install-policy.py"
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text("{}\n")
+    subprocess.run(
+        [sys.executable, str(installer), "--home", str(home)],
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    plist = home / "Library" / "LaunchAgents" / "com.aneyman.route-doctor.plist"
+    text = plist.read_text()
+    assert "<key>EnvironmentVariables</key>" in text
+    assert f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" in text
+    assert f"<key>HOME</key>\n    <string>{home}</string>" in text
+    assert "http://127.0.0.1:2455" in text
+    if shutil.which("plutil"):
+        subprocess.run(["plutil", "-lint", str(plist)], capture_output=True, check=True, timeout=30)
 
 
 def test_pulse_ignores_a_short_session_id(tmp_path, ledger):

@@ -238,6 +238,23 @@ def plist_text(home: Path) -> str:
     program = [str(home / arguments[0]), *arguments[1:]]
     rendered = "\n".join(f"    <string>{value}</string>" for value in program)
     logs = home / ".agent-lb" / "logs"
+    # launchd starts a job with a minimal environment, so `route doctor` probed
+    # cursor-agent and codex-companion with no PATH to find them and reported
+    # every seat down on its first run (2026-09-19).
+    environment = {
+        "PATH": ":".join([
+            str(home / ".local" / "bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]),
+        "HOME": str(home),
+        "AGENT_LB_URL": "http://127.0.0.1:2455",
+    }
+    env_rendered = "\n".join(
+        f"    <key>{key}</key>\n    <string>{value}</string>" for key, value in environment.items()
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -246,6 +263,7 @@ def plist_text(home: Path) -> str:
         "<dict>\n"
         f"  <key>Label</key>\n  <string>{label}</string>\n"
         f"  <key>ProgramArguments</key>\n  <array>\n{rendered}\n  </array>\n"
+        f"  <key>EnvironmentVariables</key>\n  <dict>\n{env_rendered}\n  </dict>\n"
         f"  <key>StartInterval</key>\n  <integer>{interval}</integer>\n"
         "  <key>RunAtLoad</key>\n  <true/>\n"
         f"  <key>StandardOutPath</key>\n  <string>{logs / 'route-doctor.log'}</string>\n"

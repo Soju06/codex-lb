@@ -58,6 +58,7 @@ from app.modules.federation.scheduler import build_federation_mirror_scheduler
 from app.modules.firewall import api as firewall_api
 from app.modules.health import api as health_api
 from app.modules.oauth import api as oauth_api
+from app.modules.pools import api as pools_api
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
@@ -435,6 +436,7 @@ def create_app() -> FastAPI:
     app.include_router(request_logs_api.router)
     app.include_router(sessions_api.router)
     app.include_router(sessions_api.short_link_router)
+    app.include_router(pools_api.router)
     app.include_router(quota_planner_api.router)
     app.include_router(reports_api.router)
     app.include_router(conversation_archive_api.router)

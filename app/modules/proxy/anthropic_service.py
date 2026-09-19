@@ -8,6 +8,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -47,6 +48,7 @@ from app.modules.accounts.credits import (
 )
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _request_log_useragent_fields
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.claude_codex_bridge import estimate_claude_input_tokens
 from app.modules.proxy.load_balancer import LoadBalancer, selectable_accounts
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -218,6 +220,7 @@ class AnthropicProxyService:
         request_id = ensure_request_id(_request_id_from_headers(inbound_headers))
         started_at = time.monotonic()
         selected_account_ids: set[str] = set()
+        auth_retried_account_ids: set[str] = set()
         media_type = "text/event-stream" if payload.stream else "application/json"
         provider_name = _messages_provider_name(payload)
         quota_key = _messages_quota_key(payload, provider_name=provider_name)
@@ -278,7 +281,7 @@ class AnthropicProxyService:
                     # _MAX_SELECTION_ATTEMPTS bounds one wake; every hold
                     # re-arms the full budget once the pool may have reset.
                     for attempt in range(_MAX_SELECTION_ATTEMPTS):
-                        if attempt == 0 and account_override is not None:
+                        if account_override is not None:
                             account = account_override
                             account_override = None
                         else:
@@ -330,7 +333,24 @@ class AnthropicProxyService:
                             ) as resp:
                                 if resp.status in {401, 403}:
                                     error_message = await _read_error_message(resp)
-                                    await self._load_balancer.mark_permanent_failure(account, "invalid_api_key")
+                                    error_code = f"upstream_{resp.status}"
+                                    if provider_name == ANTHROPIC_PROVIDER_NAME:
+                                        if resp.status == 401 and account.id not in auth_retried_account_ids:
+                                            auth_retried_account_ids.add(account.id)
+                                            try:
+                                                await self._fresh_access_token(
+                                                    account, rejected_access_token=access_token
+                                                )
+                                            except AnthropicProxyError as exc:
+                                                error_code = exc.code or error_code
+                                                error_message = exc.message
+                                            else:
+                                                account_override = account
+                                                continue
+                                        await self._load_balancer.record_error(account)
+                                    else:
+                                        error_code = "invalid_api_key"
+                                        await self._load_balancer.mark_permanent_failure(account, error_code)
                                     await self._persist_request_log(
                                         account=account,
                                         provider_name=provider_name,
@@ -338,7 +358,7 @@ class AnthropicProxyService:
                                         model=payload.model,
                                         started_at=started_at,
                                         status="error",
-                                        error_code="invalid_api_key",
+                                        error_code=error_code,
                                         error_message=error_message,
                                         api_key=api_key,
                                         session_id=session_id,
@@ -1223,19 +1243,30 @@ class AnthropicProxyService:
                 exc_info=True,
             )
 
-    async def _fresh_access_token(self, account: Account) -> str:
+    async def _fresh_access_token(self, account: Account, *, rejected_access_token: str | None = None) -> str:
+        @asynccontextmanager
+        async def refresh_repo_factory():
+            async with self._repo_factory() as repos:
+                yield repos.accounts
+
         try:
             async with self._repo_factory() as repos:
                 latest = await repos.accounts.get_by_id(account.id)
                 if latest is None:
                     raise AnthropicProxyError(503, "Selected Anthropic account no longer exists")
-                manager = AuthManager(repos.accounts)
-                fresh = await manager.ensure_fresh(latest)
+                manager = AuthManager(repos.accounts, refresh_repo_factory=refresh_repo_factory)
+                force = (
+                    rejected_access_token is not None
+                    and self._encryptor.decrypt(latest.access_token_encrypted) == rejected_access_token
+                )
+                fresh = await manager.ensure_fresh(latest, force=force)
                 return self._encryptor.decrypt(fresh.access_token_encrypted)
         except RefreshError as exc:
+            # AuthManager already conditionally persists permanent failures against
+            # the exchanged token version. Repeating that write here can disable a
+            # concurrently reauthorized account using this request's stale snapshot.
             if exc.is_permanent or classify_refresh_error(exc.code):
-                exc.is_permanent = True
-                await self._load_balancer.mark_permanent_failure(account, exc.code)
+                get_account_selection_cache().invalidate()
             raise AnthropicProxyError(401, exc.message, code=exc.code) from exc
 
     async def _persist_request_log(

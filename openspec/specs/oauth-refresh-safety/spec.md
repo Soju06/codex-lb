@@ -34,3 +34,9 @@ The system MUST NOT persist pending stale account mutations when a conditional t
 #### Scenario: Session-bound stale account loses compare-and-swap
 - **WHEN** a conditional token update matches no row while the session contains pending mutations for the stale account entity
 - **THEN** the system SHALL roll back those mutations before loading the current account state
+
+### Requirement: Delayed refresh callers do not replay rotated tokens
+The system SHALL reload stored credentials before a refresh exchange. If another caller already rotated the refresh token, the delayed caller SHALL use the stored credentials without exchanging the stale token again.
+
+### Requirement: Proxy refresh failures preserve conditional auth decisions
+The Messages proxy SHALL NOT repeat an unconditional account-status write after AuthManager has handled a permanent refresh failure. Detached refresh tasks SHALL own their database session so cancellation of a requesting client cannot interrupt token persistence.

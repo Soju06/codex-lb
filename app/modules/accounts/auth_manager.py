@@ -256,6 +256,15 @@ class AuthManager:
             raise RefreshError("unsupported_provider", str(exc), True) from exc
 
         expected_refresh_token_encrypted = account.refresh_token_encrypted
+        latest = await self._repo.reload_by_id(account.id)
+        if latest is not None and _refresh_token_material_changed(
+            self._encryptor, latest.refresh_token_encrypted, expected_refresh_token_encrypted
+        ):
+            # A delayed caller must not replay a token already rotated by another request.
+            return latest
+        if latest is not None:
+            account = latest
+            expected_refresh_token_encrypted = latest.refresh_token_encrypted
         refresh_token = self._encryptor.decrypt(expected_refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account, provider=provider)
@@ -291,6 +300,12 @@ class AuthManager:
                     raise
                 account.status = status
                 account.deactivation_reason = reason
+                logger.warning(
+                    "OAuth refresh requires reauthentication account_id=%s provider=%s code=%s",
+                    account.id,
+                    account.provider,
+                    exc.code,
+                )
             raise
 
         account.access_token_encrypted = self._encryptor.encrypt(result.access_token)

@@ -776,7 +776,7 @@ async def test_ensure_fresh_does_not_reuse_failure_after_refresh_token_changes(m
 @pytest.mark.asyncio
 async def test_refresh_account_does_not_deactivate_when_repo_has_newer_refresh_token(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
-        raise RefreshError("invalid_grant", "refresh failed", True)
+        pytest.fail("must not exchange an already rotated refresh token")
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
 
@@ -861,12 +861,13 @@ async def test_refresh_account_preserves_token_rotated_after_permanent_failure_r
     assert result is winning_account
     assert result.status == AccountStatus.ACTIVE
     assert encryptor.decrypt(result.refresh_token_encrypted) == "refresh-winning"
-    assert repo.reload_calls == 2
+    assert repo.reload_calls == 3
 
 
 @pytest.mark.asyncio
 async def test_refresh_account_preserves_newer_tokens_when_conditional_write_loses(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        repo.accounts_by_id[account.id] = latest_account
         return TokenRefreshResult(
             access_token="losing-access",
             refresh_token="losing-refresh",
@@ -899,7 +900,6 @@ async def test_refresh_account_preserves_newer_tokens_when_conditional_write_los
 
     repo = _DummyRepo()
     repo.tokens_update_result = False
-    repo.accounts_by_id[account.id] = latest_account
     manager = AuthManager(cast(AccountsRepositoryPort, repo))
 
     result = await manager.refresh_account(account)
@@ -908,7 +908,7 @@ async def test_refresh_account_preserves_newer_tokens_when_conditional_write_los
     assert encryptor.decrypt(result.refresh_token_encrypted) == "winning-refresh"
     assert repo.tokens_payload is not None
     assert repo.tokens_payload["expected_refresh_token_encrypted"] == expected_refresh_token_encrypted
-    assert repo.reload_calls == 1
+    assert repo.reload_calls == 2
 
 
 @pytest.mark.asyncio

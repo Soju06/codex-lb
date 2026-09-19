@@ -35,3 +35,9 @@ The service MUST preserve Anthropic server-tool streaming and non-streaming resp
 
 - **WHEN** Anthropic returns server-tool use and web-search result events for an accepted request
 - **THEN** the downstream client receives those events unchanged and in upstream order
+
+### Requirement: Authentication recovery is bounded and does not misclassify permission failures
+On an Anthropic Messages HTTP 401, the proxy SHALL attempt credential recovery once per account before failing over. If another request already replaced the rejected access token, it SHALL reuse the newer token without forcing another refresh. HTTP 403 and repeated access-token rejection SHALL NOT alone permanently disable OAuth credentials. Permanent refresh failures remain authoritative.
+
+### Requirement: Exhausted pools return errors by default
+Streaming requests to an exhausted Anthropic pool SHALL return a structured error with available reset timing by default. Holding a stream open for quota recovery SHALL require explicit operator opt-in through `anthropic_pool_exhausted_wait_enabled`.

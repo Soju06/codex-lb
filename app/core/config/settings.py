@@ -232,10 +232,9 @@ class Settings(BaseSettings):
     # excluded even at pool exhaustion, when true they become last-resort
     # candidates only.
     anthropic_route_to_extra_usage: bool = False
-    # When the whole Anthropic pool is cooling down with a known earliest
-    # reset, streaming requests hold open (SSE keepalives) and re-attempt
-    # selection after the reset instead of failing agent sessions with a 429.
-    anthropic_pool_exhausted_wait_enabled: bool = True
+    # Opt-in only: holding an exhausted pool open hides the error from clients
+    # for hours. By default return the quota error and reset headers immediately.
+    anthropic_pool_exhausted_wait_enabled: bool = False
     anthropic_pool_exhausted_wait_max_seconds: float = Field(default=21600.0, gt=0)
     account_pulse_enabled: bool = True
     account_pulse_interval_seconds: int = Field(default=21600, gt=0)

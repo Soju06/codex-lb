@@ -1322,6 +1322,12 @@ async def test_anthropic_messages_fails_over_when_refresh_invalid_grant_before_u
     async def fake_ensure_fresh(self, account, *, force=False):
         del self, force
         if account.id == "anthropic-stale":
+            from app.modules.accounts.repository import AccountsRepository
+
+            async with SessionLocal() as session:
+                await AccountsRepository(session).update_status(
+                    account.id, AccountStatus.REAUTH_REQUIRED, "Refresh token grant invalid - re-login required"
+                )
             raise anthropic_proxy_module.RefreshError(
                 "auth_refresh_invalid_grant",
                 "Refresh token not found or invalid",
@@ -3476,6 +3482,10 @@ async def test_credit_billing_response_trips_cooldown_and_rotates_next_request(a
 async def test_pool_exhausted_streaming_request_waits_for_reset_and_serves(async_client, monkeypatch):
     """Agent session survives pool-wide exhaustion: the stream holds, the
     window resets, and the request is served on the freed account."""
+    from app.core.config.settings import get_settings
+
+    monkeypatch.setenv("AGENT_LB_ANTHROPIC_POOL_EXHAUSTED_WAIT_ENABLED", "true")
+    get_settings.cache_clear()
     await _insert_account(
         account_id="anthropic-waiting",
         provider="anthropic",
@@ -3546,6 +3556,7 @@ async def test_pool_exhausted_streaming_request_waits_for_reset_and_serves(async
 async def test_pool_exhausted_wait_cap_expiry_emits_structured_rate_limit_error(async_client, monkeypatch):
     from app.core.config.settings import get_settings
 
+    monkeypatch.setenv("AGENT_LB_ANTHROPIC_POOL_EXHAUSTED_WAIT_ENABLED", "true")
     monkeypatch.setenv("AGENT_LB_ANTHROPIC_POOL_EXHAUSTED_WAIT_MAX_SECONDS", "400")
     get_settings.cache_clear()
 
@@ -3599,8 +3610,11 @@ async def test_pool_exhausted_wait_cap_expiry_emits_structured_rate_limit_error(
 
 
 @pytest.mark.asyncio
-async def test_pool_exhausted_wait_disabled_returns_immediate_envelope(async_client, monkeypatch):
-    _disable_pool_exhausted_wait(monkeypatch)
+async def test_pool_exhausted_wait_defaults_to_immediate_envelope(async_client, monkeypatch):
+    from app.core.config.settings import get_settings
+
+    monkeypatch.delenv("AGENT_LB_ANTHROPIC_POOL_EXHAUSTED_WAIT_ENABLED", raising=False)
+    get_settings.cache_clear()
     await _insert_account(
         account_id="anthropic-no-wait",
         provider="anthropic",

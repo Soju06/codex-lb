@@ -153,18 +153,39 @@ def test_pick_skips_a_seat_whose_pool_is_exhausted(home: Path, tmp_path: Path) -
     assert "anthropic-general exhausted" in picked["reason"]
 
 
-def test_pick_skips_a_seat_recorded_down_in_routing_state(home: Path, tmp_path: Path) -> None:
-    fixtures = tmp_path / "fixtures"
-    pools_fixture(fixtures, {"anthropic-general": "ok", "openai-codex": "ok"})
+def routing_state(home: Path, *, age_seconds: float, seats: dict[str, object]) -> None:
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     (home / ".claude" / "routing-state.json").write_text(
-        json.dumps({"ts": "2026-09-19T21:00:00Z", "seats": {"opus-seat": {"ok": False, "error": "HTTP 429"}}}),
+        json.dumps({"ts": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"), "seats": seats}),
         encoding="utf-8",
     )
+
+
+def test_pick_skips_a_seat_recorded_down_in_fresh_routing_state(home: Path, tmp_path: Path) -> None:
+    fixtures = tmp_path / "fixtures"
+    pools_fixture(fixtures, {"anthropic-general": "ok", "openai-codex": "ok"})
+    routing_state(home, age_seconds=60, seats={"opus-seat": {"ok": False, "error": "HTTP 500"}})
 
     result = run("pick", "implement", "--json", home=home, fixtures=fixtures)
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["seat"] == "implementer"
+    picked = json.loads(result.stdout)
+    assert picked["seat"] == "implementer"
+    assert picked["state_age_s"] < 7200
+
+
+def test_pick_ignores_a_routing_state_older_than_two_hours(home: Path, tmp_path: Path) -> None:
+    fixtures = tmp_path / "fixtures"
+    pools_fixture(fixtures, {"anthropic-general": "ok", "openai-codex": "ok"})
+    routing_state(home, age_seconds=3 * 3600, seats={"opus-seat": {"ok": False, "error": "HTTP 500"}})
+
+    result = run("pick", "implement", "--json", home=home, fixtures=fixtures)
+
+    assert result.returncode == 0, result.stderr
+    picked = json.loads(result.stdout)
+    assert picked["seat"] == "opus-seat", "a two-hour-old verdict must not keep routing around a seat"
+    assert picked["state_age_s"] > 7200
+    assert "ignored routing-state.json" in picked["reason"]
 
 
 def test_pick_moves_an_overridden_entry_to_the_end_of_its_chain(home: Path, tmp_path: Path) -> None:
@@ -299,6 +320,169 @@ def test_pools_exits_one_when_neither_endpoint_answers(home: Path) -> None:
 
     assert result.returncode == 1
     assert "/api/pools unavailable" in result.stderr
+
+
+FAST_PROBES = {"ROUTE_CURSOR_CMD": "/bin/echo cursor-ok", "ROUTE_CODEX_CMD": "/bin/echo codex-ok"}
+
+BUSY_429 = {
+    "__status": 429,
+    "__body": {
+        "error": {
+            "type": "rate_limit_error",
+            "message": (
+                "5 Anthropic accounts exist, but none are selectable for claude-opus-5/anthropic_top; "
+                "statuses: active=5. Model quota: anthropic_top cooldown excluded 2 accounts until "
+                "2026-09-20T16:59:59; 3 accounts remained after the anthropic_top prefilter."
+            ),
+        }
+    },
+}
+
+
+def doctor_fixtures(tmp_path: Path, *, name: str, pools: dict[str, str], messages: object, sessions: object) -> Path:
+    fixtures = tmp_path / name
+    pools_fixture(fixtures, pools)
+    write_fixture(fixtures, "api_health.json", {"status": "ok"})
+    write_fixture(fixtures, "v1_messages.json", messages)
+    write_fixture(fixtures, "api_sessions.json", sessions)
+    return fixtures
+
+
+def seat_record(home: Path, seat: str) -> dict[str, object]:
+    state = json.loads((home / ".claude" / "routing-state.json").read_text(encoding="utf-8"))
+    return state["seats"][seat]
+
+
+def test_doctor_keeps_a_seat_up_when_a_429_probe_meets_recent_real_traffic(home: Path, tmp_path: Path) -> None:
+    """The live false negative: a fresh-selection 429 while real Opus traffic was succeeding."""
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="busy-but-working",
+        pools={"anthropic-general": "ok", "openai-codex": "ok"},
+        messages=BUSY_429,
+        sessions={
+            "sessions": [
+                {
+                    "sessionId": "live-session",
+                    "models": [
+                        {"model": "claude-opus-5", "requests": 155},
+                        {"model": "claude-sonnet-5", "requests": 9},
+                    ],
+                    "requests": 164,
+                    "errors": 0,
+                    "lastSeen": "2026-09-19T22:26:44Z",
+                }
+            ]
+        },
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seat_record(home, "opus-seat")["ok"] is True
+    assert seat_record(home, "opus-seat")["evidence"] == "recent_success"
+    assert seat_record(home, "Explore")["ok"] is True
+    assert not (home / ".claude" / "routing-ALERT").exists()
+    picked = run("pick", "implement", "--json", home=home, fixtures=fixtures)
+    assert json.loads(picked.stdout)["seat"] == "opus-seat"
+
+
+def test_doctor_counts_traffic_as_proof_even_when_the_session_logged_some_errors(home: Path, tmp_path: Path) -> None:
+    """`errors` is session-level and cannot be pinned on one model; 155 requests beat 3 errors."""
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="working-with-errors",
+        pools={"anthropic-general": "ok", "openai-codex": "ok"},
+        messages=BUSY_429,
+        sessions={
+            "sessions": [
+                {
+                    "sessionId": "live-session",
+                    "models": [{"model": "claude-opus-5", "requests": 155}],
+                    "errors": 3,
+                    "lastSeen": "2026-09-19T22:26:44Z",
+                }
+            ]
+        },
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert seat_record(home, "opus-seat")["ok"] is True
+    assert seat_record(home, "opus-seat")["evidence"] == "recent_success_with_errors"
+    assert result.returncode in (0, 1)
+
+
+def test_doctor_keeps_a_seat_up_on_a_429_with_no_traffic_when_the_pool_has_capacity(home: Path, tmp_path: Path) -> None:
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="quiet-but-fine",
+        pools={"anthropic-general": "low", "openai-codex": "ok"},
+        messages=BUSY_429,
+        sessions={"sessions": []},
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    record = seat_record(home, "opus-seat")
+    assert record["ok"] is True
+    assert record["evidence"] == "pool_status"
+    assert "fresh selection 429" in record["note"]
+
+
+def test_doctor_marks_a_seat_down_on_a_429_with_no_traffic_and_an_exhausted_pool(home: Path, tmp_path: Path) -> None:
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="genuinely-empty",
+        pools={"anthropic-general": "exhausted", "openai-codex": "ok"},
+        messages=BUSY_429,
+        sessions={"sessions": []},
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert result.returncode == 1
+    record = seat_record(home, "opus-seat")
+    assert record["ok"] is False
+    assert record["evidence"] == "pool_status"
+    assert "exhausted" in record["error"]
+
+
+def test_doctor_marks_a_seat_down_on_a_server_error(home: Path, tmp_path: Path) -> None:
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="lb-broken",
+        pools={"anthropic-general": "ok", "openai-codex": "ok"},
+        messages={"__status": 503, "__body": {"error": {"message": "upstream unavailable"}}},
+        sessions={"sessions": []},
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert result.returncode == 1
+    record = seat_record(home, "opus-seat")
+    assert record["ok"] is False
+    assert record["evidence"] == "probe_failure"
+    assert "503" in record["error"]
+
+
+def test_doctor_marks_a_seat_down_when_the_lb_does_not_know_the_model(home: Path, tmp_path: Path) -> None:
+    fixtures = doctor_fixtures(
+        tmp_path,
+        name="unknown-model",
+        pools={"anthropic-general": "ok", "openai-codex": "ok"},
+        messages={"__status": 404, "__body": {"error": {"message": "model claude-opus-5 is not configured"}}},
+        sessions={"sessions": []},
+    )
+
+    result = run("doctor", "--write", home=home, fixtures=fixtures, extra=FAST_PROBES)
+
+    assert result.returncode == 1
+    record = seat_record(home, "opus-seat")
+    assert record["ok"] is False
+    assert record["evidence"] == "unknown_model"
+    assert "not configured" in record["error"]
 
 
 def test_doctor_write_against_an_unreachable_lb_exits_one_and_writes_the_alert(home: Path) -> None:

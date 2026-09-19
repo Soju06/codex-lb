@@ -59,8 +59,17 @@ POOL_LOW_HEADROOM = 5.0
 DOCTOR_BUDGET_SECONDS = 55.0
 CURSOR_TIMEOUT_SECONDS = 10.0
 CODEX_TIMEOUT_SECONDS = 15.0
-MODEL_PROBE_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 5.0
+
+# The 1-token probe is a secondary signal behind real session traffic, so it gets a short
+# leash: over this, it is dropped for the rest of the run and pool status decides instead.
+PROBE_BUDGET_SECONDS = 2.0
+SESSION_WINDOW_MINUTES = 30
+MESSAGE_HEAD_CHARS = 160
+
+# A routing state older than this is not evidence about anything; `pick` ignores it entirely
+# rather than routing around seats that were down two hours ago.
+STATE_MAX_AGE_SECONDS = 7200
 
 # cursor-seat forwards to cursor-agent whatever model id it carries, so its health is the
 # forwarder's health and not the health of the model's home vendor.
@@ -173,7 +182,7 @@ def _fixture_file(path: str) -> Path | None:
     directory = (os.environ.get("ROUTE_FIXTURE_DIR") or "").strip()
     if not directory:
         return None
-    slug = path.strip("/").replace("/", "_") or "root"
+    slug = path.split("?", 1)[0].strip("/").replace("/", "_") or "root"
     return Path(directory).expanduser() / f"{slug}.json"
 
 
@@ -186,6 +195,9 @@ def _fixture_result(path: str) -> HttpResult:
         return HttpResult(ok=False, status=404, body=None, error="HTTP 404 (fixture missing)")
     except (OSError, json.JSONDecodeError) as error:
         return HttpResult(ok=False, status=None, body=None, error=f"fixture unreadable: {error}")
+    if isinstance(body, dict) and "__status" in body:
+        status = body["__status"]
+        return HttpResult(ok=status == 200, status=status, body=body.get("__body"), error=f"HTTP {status}")
     return HttpResult(ok=True, status=200, body=body, error=None)
 
 
@@ -207,8 +219,12 @@ def _request(method: str, path: str, *, payload: dict[str, Any] | None, timeout:
         raw = error.read().decode("utf-8", errors="replace")
         body = _decode(raw)
         return HttpResult(ok=False, status=error.code, body=body, error=f"HTTP {error.code}")
+    except TimeoutError:
+        return HttpResult(ok=False, status=None, body=None, error="timeout")
     except (OSError, urllib.error.URLError) as error:
         reason = getattr(error, "reason", error)
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            return HttpResult(ok=False, status=None, body=None, error="timeout")
         return HttpResult(ok=False, status=None, body=None, error=f"{type(error).__name__}: {reason}")
     return HttpResult(ok=True, status=status, body=_decode(raw), error=None)
 
@@ -387,9 +403,17 @@ def read_state() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def seat_is_up(state: dict[str, Any], seat: str) -> bool:
+def state_age_seconds(state: dict[str, Any]) -> float | None:
+    if not state:
+        return None
+    stamp = _parse_ts(state.get("ts"))
+    if stamp is None:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def seat_is_up(seats: Any, seat: str) -> bool:
     """A seat with no recorded state is treated as up; only a recorded failure takes it out."""
-    seats = state.get("seats")
     if not isinstance(seats, dict):
         return True
     record = seats.get(seat)
@@ -434,6 +458,7 @@ def command_pick(args: argparse.Namespace) -> int:
     if spec.get("driver"):
         result = {
             "class": args.task_class,
+            "state_age_s": None,
             "seat": "driver",
             "model": None,
             "pool": None,
@@ -454,11 +479,15 @@ def command_pick(args: argparse.Namespace) -> int:
     if not isinstance(chain, list) or not chain:
         fail(f"class {args.task_class!r} has no chain")
 
-    document, pools_error = fetch_pools(timeout=3.0)
-    if document is None:
-        document = read_state().get("pools") if isinstance(read_state().get("pools"), dict) else None
-    pools = pools_by_id(document)
     state = read_state()
+    age = state_age_seconds(state)
+    stale = bool(state) and (age is None or age > STATE_MAX_AGE_SECONDS)
+    seats = None if stale else state.get("seats")
+
+    document, pools_error = fetch_pools(timeout=3.0)
+    if document is None and isinstance(state.get("pools"), dict):
+        document = state["pools"]
+    pools = pools_by_id(document)
 
     entries = [entry for entry in chain if isinstance(entry, dict)]
     ordered = apply_overrides(entries, table.get("overrides"), args.task_class)
@@ -474,7 +503,7 @@ def command_pick(args: argparse.Namespace) -> int:
         if cross_vendor and vendor == args.author_vendor:
             skipped.append(f"{seat} (same vendor as author: {vendor})")
             continue
-        if not seat_is_up(state, seat):
+        if not seat_is_up(seats, seat):
             skipped.append(f"{seat} (seat down per routing-state.json)")
             continue
         status = pools.get(pool, {}).get("status") if pool else None
@@ -492,12 +521,17 @@ def command_pick(args: argparse.Namespace) -> int:
     reasons = ["first chain entry with the seat up and its pool not exhausted"]
     if cross_vendor:
         reasons.append(f"cross_vendor: excluded author vendor {args.author_vendor}")
+    if stale:
+        reasons.append(
+            f"ignored routing-state.json: {age and round(age)}s old, over the {STATE_MAX_AGE_SECONDS}s limit"
+        )
     if skipped:
         reasons.append("skipped " + "; ".join(skipped))
     if pools_error:
         reasons.append(f"pool status unknown ({pools_error})")
     result = {
         "class": args.task_class,
+        "state_age_s": None if age is None else round(age, 1),
         "seat": chosen["seat"],
         "model": chosen["model"],
         "pool": chosen["pool"],
@@ -517,6 +551,8 @@ def _print_pick(result: dict[str, Any], *, as_json: bool) -> None:
     print(f"seat      {result['seat']}")
     print(f"model     {result['model'] or '-'}")
     print(f"pool      {result['pool'] or '-'}")
+    age = result.get("state_age_s")
+    print(f"state age {'no state file' if age is None else f'{age}s'}")
     print(f"reason    {result['reason']}")
     fallbacks = ", ".join(f"{entry['seat']}/{entry['model']}" for entry in result["fallbacks"]) or "none"
     print(f"fallbacks {fallbacks}")
@@ -580,29 +616,146 @@ def probe_command(name: str, command: list[str], timeout: float) -> dict[str, An
     return _probe(name, started, ok=ok, error=error)
 
 
-def probe_model(model: str) -> dict[str, Any]:
-    """One minimal LB request. Local /v1/messages needs no credential; on 401/403 fall back to /api/models."""
+def _message_head(body: Any) -> str | None:
+    """The LB's own error text, collapsed and truncated. It carries no credential."""
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return " ".join(message.split())[:MESSAGE_HEAD_CHARS]
+
+
+def recent_model_traffic(*, window: int = SESSION_WINDOW_MINUTES) -> dict[str, dict[str, Any]]:
+    """Ground truth per model: did real traffic get through in the window?
+
+    Real sessions beat a synthetic probe. The probe takes a fresh selection decision, which
+    a per-model cooldown can refuse while established traffic keeps flowing; a 429 there says
+    nothing about whether the seat works. `errors` is a session-level count and cannot be
+    attributed to one model, so a session that logged more requests for the model than it
+    logged errors still proves the model answers — recorded with a weaker evidence tag.
+    """
+    result = http_get(f"/api/sessions?windowMinutes={window}&limit=200", timeout=4.0)
+    traffic: dict[str, dict[str, Any]] = {}
+    if not result.json_ok or not isinstance(result.body, dict):
+        return traffic
+    for session in result.body.get("sessions") or []:
+        if not isinstance(session, dict):
+            continue
+        errors = session.get("errors")
+        errors = int(errors) if isinstance(errors, (int, float)) and not isinstance(errors, bool) else 0
+        for entry in session.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            model, requests = entry.get("model"), entry.get("requests")
+            if not isinstance(model, str) or isinstance(requests, bool) or not isinstance(requests, (int, float)):
+                continue
+            requests = int(requests)
+            if requests <= 0 or requests <= errors:
+                continue
+            candidate = {
+                "requests": requests,
+                "errors": errors,
+                "clean": errors == 0,
+                "lastSeen": session.get("lastSeen"),
+            }
+            current = traffic.get(model)
+            if current is None or (candidate["clean"] and not current["clean"]) or requests > current["requests"]:
+                traffic[model] = candidate
+    return traffic
+
+
+def _pool_verdict(
+    model: str, table: dict[str, Any], pools: dict[str, Any], *, note: str, latency_ms: int | None
+) -> dict[str, Any]:
+    """No probe signal worth trusting: fall back to whether the model's pool has capacity."""
+    pool = pool_for_model(table, model)
+    status = pools.get(pool, {}).get("status") if pool else None
+    ok = status != "exhausted"
+    return {
+        "name": f"model:{model}",
+        "ok": ok,
+        "latency_ms": latency_ms,
+        "error": f"pool {pool} exhausted" if not ok else None,
+        "evidence": "pool_status",
+        "note": note,
+        "pool": pool,
+        "poolStatus": status,
+    }
+
+
+def probe_model(
+    model: str,
+    *,
+    table: dict[str, Any],
+    traffic: dict[str, dict[str, Any]],
+    pools: dict[str, Any],
+    allow_probe: bool = True,
+) -> dict[str, Any]:
+    """Decide whether a Claude seat is up. Down means broken, never merely busy."""
+    name = f"model:{model}"
+    recent = traffic.get(model)
+    if recent is not None:
+        return {
+            "name": name,
+            "ok": True,
+            "latency_ms": None,
+            "error": None,
+            "evidence": "recent_success" if recent["clean"] else "recent_success_with_errors",
+            "note": (
+                f"{recent['requests']} request(s) on {model} in the last {SESSION_WINDOW_MINUTES}m"
+                f", {recent['errors']} session error(s), last seen {recent['lastSeen']}"
+            ),
+        }
+    if not allow_probe:
+        return _pool_verdict(
+            model, table, pools, note="no recent traffic; probe dropped after the 2s budget", latency_ms=None
+        )
+
     started = time.monotonic()
     payload = {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}
-    result = http_post("/v1/messages", payload, timeout=MODEL_PROBE_TIMEOUT_SECONDS)
-    if result.status in (401, 403):
+    result = http_post("/v1/messages", payload, timeout=PROBE_BUDGET_SECONDS)
+    latency = int((time.monotonic() - started) * 1000)
+    status = result.status
+    head = _message_head(result.body)
+
+    if result.ok and status == 200:
+        return {"name": name, "ok": True, "latency_ms": latency, "error": None, "evidence": "probe_success"}
+    if status in (401, 403):
         presence = http_get("/api/models", timeout=4.0)
         ok = presence.ok and presence.status == 200
-        return _probe(
-            f"model:{model}",
-            started,
-            ok=ok,
-            error=None if ok else (presence.error or f"HTTP {presence.status}"),
-            method="api_models_presence",
-            note="/v1/messages needs a credential this probe does not hold; probed /api/models instead",
+        return {
+            "name": name,
+            "ok": ok,
+            "latency_ms": latency,
+            "error": None if ok else (presence.error or f"HTTP {presence.status}"),
+            "evidence": "api_models_presence",
+            "note": "/v1/messages needs a credential this probe does not hold; probed /api/models instead",
+        }
+    if status in (400, 404):
+        return {
+            "name": name,
+            "ok": False,
+            "latency_ms": latency,
+            "error": f"HTTP {status}: {head or 'model not recognised by the LB'}",
+            "evidence": "unknown_model",
+        }
+    if status == 429:
+        return _pool_verdict(
+            model, table, pools, note=f"fresh selection 429: {head or 'no account selectable'}", latency_ms=latency
         )
-    ok = result.ok and result.status == 200
-    error = None
-    if not ok:
-        error = f"HTTP {result.status}" if result.status else (result.error or "request failed")
-        if result.status == 429:
-            error = "HTTP 429 (no account selectable; pool exhausted or in cooldown)"
-    return _probe(f"model:{model}", started, ok=ok, error=error, method="messages")
+    if result.error == "timeout":
+        return _pool_verdict(
+            model, table, pools, note=f"probe exceeded the {PROBE_BUDGET_SECONDS:.0f}s budget", latency_ms=latency
+        )
+    return {
+        "name": name,
+        "ok": False,
+        "latency_ms": latency,
+        "error": f"HTTP {status}" if status else (result.error or "request failed"),
+        "evidence": "probe_failure",
+    }
 
 
 def probed_models(table: dict[str, Any]) -> list[str]:
@@ -654,14 +807,20 @@ def seat_states(table: dict[str, Any], probes: dict[str, dict[str, Any]], models
             probe = probes.get(backing_probe(table, seat, model, models))
             if probe is None:
                 continue
+            record = {
+                "ok": probe["ok"],
+                "latency_ms": probe.get("latency_ms"),
+                "error": probe.get("error"),
+                "evidence": probe.get("evidence", "probe"),
+            }
+            if probe.get("note"):
+                record["note"] = probe["note"]
             current = seats.get(seat)
-            if current is None:
-                seats[seat] = {"ok": probe["ok"], "latency_ms": probe["latency_ms"], "error": probe["error"]}
-                continue
-            if current["ok"] and not probe["ok"]:
-                seats[seat] = {"ok": False, "latency_ms": probe["latency_ms"], "error": probe["error"]}
-            else:
-                current["latency_ms"] = max(current["latency_ms"], probe["latency_ms"])
+            if current is None or (current["ok"] and not probe["ok"]):
+                seats[seat] = record
+            elif current["ok"] == probe["ok"]:
+                latencies = [value for value in (current["latency_ms"], probe.get("latency_ms")) if value is not None]
+                current["latency_ms"] = max(latencies) if latencies else None
     return seats
 
 
@@ -693,25 +852,26 @@ def command_doctor(args: argparse.Namespace) -> int:
     probes.append(pools_probe)
     probes.append(probe_command("cursor-agent", cursor_command(), CURSOR_TIMEOUT_SECONDS))
     probes.append(probe_command("codex-companion", codex_command(), CODEX_TIMEOUT_SECONDS))
-    for model in probed_models(table):
-        if time.monotonic() - started > DOCTOR_BUDGET_SECONDS - MODEL_PROBE_TIMEOUT_SECONDS:
-            probes.append(
-                {
-                    "name": f"model:{model}",
-                    "ok": False,
-                    "latency_ms": 0,
-                    "error": "skipped: 55s doctor budget spent",
-                }
-            )
-            continue
-        probes.append(probe_model(model))
+
+    traffic = recent_model_traffic()
+    pools = pools_by_id(pools_document)
+    allow_probe = True
+    models = probed_models(table)
+    for model in models:
+        if time.monotonic() - started > DOCTOR_BUDGET_SECONDS - PROBE_BUDGET_SECONDS:
+            allow_probe = False
+        probe = probe_model(model, table=table, traffic=traffic, pools=pools, allow_probe=allow_probe)
+        if probe.get("evidence") == "pool_status" and "budget" in (probe.get("note") or ""):
+            allow_probe = False
+        probes.append(probe)
 
     by_name = {probe["name"]: probe for probe in probes}
     state = {
         "ts": now_iso(),
-        "seats": seat_states(table, by_name, probed_models(table)),
+        "seats": seat_states(table, by_name, models),
         "pools": pools_document,
         "probes": probes,
+        "trafficWindowMinutes": SESSION_WINDOW_MINUTES,
         "auth": "loopback_unauthenticated",
         "elapsed_s": round(time.monotonic() - started, 2),
     }

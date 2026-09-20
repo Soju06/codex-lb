@@ -201,26 +201,28 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
             row.pop(column)
     assert merged_settings == expected_settings
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
-    assert merged["pins"] == (before["pins"] if before["pins"] is not None else [])
     assert merged["retry"] == before["retry"]
+    # The overflow branch's schema does not reach head: the feature was
+    # withdrawn (#2123) and 20260914_000000_drop_subscription_overflow_schema
+    # removes the pin table and both settings columns. The transport branch is
+    # untouched, which is what makes this a fact about the merge and not about
+    # the withdrawal.
+    assert merged["pins"] is None
+    assert "subscription_overflow_source_id" not in merged["settings"][0]
     assert check_schema_drift(database.url) == ()
 
-    # Populate the newly created overflow schema too, so every starting state
-    # tests direct downgrade with retained settings and non-empty pins.
-    if _OVERFLOW not in database.starting_revisions:
-        with database.engine.begin() as connection:
-            _seed_overflow(connection)
-    populated = _state(database.engine)
-    assert len(populated["pins"]) == 2
-    assert populated["settings"][0]["subscription_overflow_source_id"] == "retained-source"
-
-    # Step back to the merge first: revisions after it own their own schema
-    # (and their own drift against the ORM), while the merge itself must stay a
-    # no-op in both directions.
+    # Everything below is asserted at the merge, the last revision where both
+    # branches' schema coexists. Stepping back there re-creates the overflow
+    # schema empty, so seed it in every starting state and the direct-downgrade
+    # cases all run with retained settings and non-empty pins.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
     assert _revisions(database.engine) == (_MERGE,)
+    with database.engine.begin() as connection:
+        _seed_overflow(connection)
     at_merge = _state(database.engine)
     merge_drift = check_schema_drift(database.url)
+    assert len(at_merge["pins"]) == 2
+    assert at_merge["settings"][0]["subscription_overflow_source_id"] == "retained-source"
 
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
@@ -231,8 +233,19 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 
-        result = run_upgrade(database.url, "head", bootstrap_legacy=False)
-        assert result.current_revision == head
-        assert _revisions(database.engine) == (head,)
-        assert _state(database.engine) == populated
-        assert check_schema_drift(database.url) == ()
+        command.upgrade(_build_alembic_config(database.url), _MERGE)
+        assert _revisions(database.engine) == (_MERGE,)
+        assert _state(database.engine) == at_merge
+        assert check_schema_drift(database.url) == merge_drift
+
+    # Walking the seeded merge state on to head runs the withdrawal: the pins
+    # and the designation go, the transport branch's rows stay.
+    result = run_upgrade(database.url, "head", bootstrap_legacy=False)
+    assert result.current_revision == head
+    assert _revisions(database.engine) == (head,)
+    final = _state(database.engine)
+    assert final["pins"] is None
+    assert "subscription_overflow_source_id" not in final["settings"][0]
+    assert [row["upstream_stream_transport"] for row in final["settings"]] == ["auto", "http", "websocket", "auto"]
+    assert final["retry"] == before["retry"]
+    assert check_schema_drift(database.url) == ()

@@ -131,6 +131,8 @@ from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
 from app.modules.role_mappings import api as role_mappings_api
 from app.modules.runtime import api as runtime_api
+from app.modules.scim import api as scim_api
+from app.modules.scim import management_api as scim_tokens_api
 from app.modules.settings import api as settings_api
 from app.modules.settings.service import warn_environment_shadowed_by_dashboard
 from app.modules.sticky_sessions import api as sticky_sessions_api
@@ -1054,6 +1056,8 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_roles_api.router)
     app.include_router(auth_providers_api.router)
     app.include_router(role_mappings_api.router)
+    app.include_router(scim_api.router)
+    app.include_router(scim_tokens_api.router)
     app.include_router(settings_api.router)
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)
@@ -1069,7 +1073,11 @@ def create_app() -> FastAPI:
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
-    excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    # ``scim/`` is here for a reason the others are not: an identity provider
+    # probes for resources this release does not implement (Groups,
+    # ServiceProviderConfig), and answering those with index.html and a 200
+    # tells it they are supported. They must be a SCIM 404.
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "health", "scim/")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

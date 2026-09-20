@@ -496,6 +496,27 @@ class DashboardUsersRepository:
                 return "email"
         return None
 
+    async def delete_invite(self, user_id: str) -> bool:
+        """Delete the account's invite row and keep the account (no commit); ``False`` = there was none.
+
+        The one primitive nothing else offers. A human revoke on an account
+        that never accepted deletes the account too, and the lazy purge does
+        the same; a back-channel deactivation must leave the row behind,
+        because the caller has to keep finding that person afterwards. The
+        DELETE is not conditional on the invite still being live: an account
+        moving out of ``invited`` has no use for a spent one either, and
+        leaving it would strand a row the purge — which only looks at
+        ``invited`` accounts — would never reach again.
+        """
+
+        deleted = await self._session.execute(
+            delete(DashboardUserInvite)
+            .where(DashboardUserInvite.user_id == user_id)
+            .returning(DashboardUserInvite.id)
+            .execution_options(synchronize_session=False)
+        )
+        return deleted.scalar_one_or_none() is not None
+
     async def purge_expired_invited_users(self, now: datetime) -> int:
         """Delete ``invited`` accounts whose invite expired (row + invite); returns how many.
 

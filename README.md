@@ -124,6 +124,7 @@ for access guidance):
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
 - [Codex LB Status](https://github.com/VictorStatko/codex-lb-status) — read-only Ubuntu tray monitor for pooled quota, account health, reset credits, and update state
 - [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) — read-only Linux/Omarchy Quattro bar plugin for account quotas, usage totals, reset times, and optional desktop alerts
+- [Codex-LB Rates](https://github.com/uniskela/codex-lb-rates) — Home Assistant integration for pool and per-account quota remaining sensors (5h / weekly / monthly)
 
 ## Development
 
@@ -332,6 +333,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/Abaddollyon"><img src="https://avatars.githubusercontent.com/u/31712865?v=4?s=100" width="100px;" alt="Abaddollyon"/><br /><sub><b>Abaddollyon</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=Abaddollyon" title="Tests">⚠️</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjakl"><img src="https://avatars.githubusercontent.com/u/40384?v=4?s=100" width="100px;" alt="Markus Jakl"/><br /><sub><b>Markus Jakl</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=mjakl" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/issues?q=author%3Amjakl" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/uniskela"><img src="https://avatars.githubusercontent.com/u/104075208?v=4?s=100" width="100px;" alt="Uniskela"/><br /><sub><b>Uniskela</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=uniskela" title="Documentation">📖</a></td>
     </tr>
   </tbody>
 </table>

@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   armedByTestLogin,
   breakGlassDesignations,
+  canManageAccountsAutomatically,
   companyLoginLabel,
+  companyLoginProvider,
   isConnected,
   hasCompanyLogin,
+  hasScimTokens,
   isLocalLoginRestricted,
   isOrganisationConfigured,
   isQualifyingBreakGlass,
@@ -34,6 +37,7 @@ import {
   createDefaultRefusedSignIns,
   createRefusedSignIn,
   createRoleMapping,
+  PASSWORD_PROVIDER_ID,
   PRESET_ROLE_IDS, LOCAL_SIGN_IN_PROVIDER } from "@/test/mocks/factories";
 
 describe("isOrganisationConfigured", () => {
@@ -59,6 +63,42 @@ describe("isOrganisationConfigured", () => {
     expect(isOrganisationConfigured(null)).toBe(false);
     expect(isLocalLoginRestricted(null)).toBe(false);
     expect(hasCompanyLogin(null)).toBe(false);
+  });
+});
+
+describe("automatic account management", () => {
+  /** The local sign-in row every install carries; it is never a company login. */
+  const passwordRow = () => createAuthProvider({ id: PASSWORD_PROVIDER_ID, kind: "password", label: "Password" });
+
+  it("counts one credential as configured, whatever else is off", () => {
+    const summary = createAccessSummary({ scimTokens: 1 });
+    expect(hasScimTokens(summary)).toBe(true);
+    expect(isOrganisationConfigured(summary)).toBe(true);
+    // Nothing else is on, so the summary line may not claim either of the others.
+    expect(hasCompanyLogin(summary)).toBe(false);
+    expect(isLocalLoginRestricted(summary)).toBe(false);
+  });
+
+  it("fails closed when the summary is withheld", () => {
+    expect(hasScimTokens(null)).toBe(false);
+  });
+
+  it("is usable only once a sign-in method other than the password is on", () => {
+    expect(canManageAccountsAutomatically(undefined)).toBe(false);
+    expect(canManageAccountsAutomatically([passwordRow()])).toBe(false);
+    // Stored but switched off: provisioning people into an install they
+    // cannot then sign in to is exactly what the gate prevents.
+    expect(canManageAccountsAutomatically([passwordRow(), createOidcAuthProvider({ enabled: false })])).toBe(false);
+    expect(canManageAccountsAutomatically([passwordRow(), createOidcAuthProvider({ enabled: true })])).toBe(true);
+    // The reverse proxy is a company sign-in too; this does not need an
+    // identity provider specifically.
+    expect(canManageAccountsAutomatically([createAuthProvider({ enabled: true })])).toBe(true);
+  });
+
+  it("names the provider whose people it would be following", () => {
+    const oidc = createOidcAuthProvider({ enabled: true });
+    expect(companyLoginProvider([passwordRow(), oidc])?.id).toBe(oidc.id);
+    expect(companyLoginProvider([passwordRow()])).toBeNull();
   });
 });
 

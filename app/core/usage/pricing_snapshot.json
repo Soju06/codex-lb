@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-13T06:45:31.411709+00:00",
+  "updated_at": "2026-09-15T06:47:03.622218+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -331,7 +331,10 @@
       "cached_input_per_1m": 0.125,
       "priority_input_per_1m": 2.5,
       "priority_output_per_1m": 20.0,
-      "priority_cached_input_per_1m": 0.25
+      "priority_cached_input_per_1m": 0.25,
+      "flex_input_per_1m": 0.625,
+      "flex_output_per_1m": 5.0,
+      "flex_cached_input_per_1m": 0.0625
     },
     "gpt-5.1-2025-11-13": {
       "input_per_1m": 1.25,
@@ -339,7 +342,10 @@
       "cached_input_per_1m": 0.125,
       "priority_input_per_1m": 2.5,
       "priority_output_per_1m": 20.0,
-      "priority_cached_input_per_1m": 0.25
+      "priority_cached_input_per_1m": 0.25,
+      "flex_input_per_1m": 0.625,
+      "flex_output_per_1m": 5.0,
+      "flex_cached_input_per_1m": 0.0625
     },
     "gpt-5.1-chat-latest": {
       "input_per_1m": 1.25,
@@ -355,7 +361,10 @@
       "cached_input_per_1m": 0.175,
       "priority_input_per_1m": 3.5,
       "priority_output_per_1m": 28.0,
-      "priority_cached_input_per_1m": 0.35
+      "priority_cached_input_per_1m": 0.35,
+      "flex_input_per_1m": 0.875,
+      "flex_output_per_1m": 7.0,
+      "flex_cached_input_per_1m": 0.0875
     },
     "gpt-5.2-2025-12-11": {
       "input_per_1m": 1.75,
@@ -363,7 +372,10 @@
       "cached_input_per_1m": 0.175,
       "priority_input_per_1m": 3.5,
       "priority_output_per_1m": 28.0,
-      "priority_cached_input_per_1m": 0.35
+      "priority_cached_input_per_1m": 0.35,
+      "flex_input_per_1m": 0.875,
+      "flex_output_per_1m": 7.0,
+      "flex_cached_input_per_1m": 0.0875
     },
     "gpt-5.2-chat-latest": {
       "input_per_1m": 1.75,
@@ -512,6 +524,11 @@
       "flex_long_context_output_per_1m": 22.5,
       "flex_long_context_cached_input_per_1m": 0.5
     },
+    "gpt-5.5-cyber": {
+      "input_per_1m": 12.5,
+      "output_per_1m": 75.0,
+      "cached_input_per_1m": 1.25
+    },
     "gpt-5.5-pro": {
       "input_per_1m": 30.0,
       "output_per_1m": 180.0,
@@ -612,6 +629,11 @@
       "flex_long_context_output_per_1m": 37.5,
       "flex_long_context_cached_input_per_1m": 1.0
     },
+    "gpt-rosalind-research": {
+      "input_per_1m": 5.0,
+      "output_per_1m": 25.0,
+      "cached_input_per_1m": 0.5
+    },
     "o1": {
       "input_per_1m": 15.0,
       "output_per_1m": 60.0,
@@ -671,7 +693,7 @@
       "priority_cached_input_per_1m": 0.5,
       "flex_input_per_1m": 0.55,
       "flex_output_per_1m": 2.2,
-      "flex_cached_input_per_1m": 0.1375
+      "flex_cached_input_per_1m": 0.13799999999999998
     },
     "o4-mini-2025-04-16": {
       "input_per_1m": 1.1,
@@ -682,7 +704,7 @@
       "priority_cached_input_per_1m": 0.5,
       "flex_input_per_1m": 0.55,
       "flex_output_per_1m": 2.2,
-      "flex_cached_input_per_1m": 0.1375
+      "flex_cached_input_per_1m": 0.13799999999999998
     },
     "text-embedding-3-large": {
       "input_per_1m": 0.13,

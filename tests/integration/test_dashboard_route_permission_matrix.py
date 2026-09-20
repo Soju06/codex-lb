@@ -27,6 +27,7 @@ import app.core.auth.dependencies as auth_dependencies
 from app.core.auth.dashboard_access import STEP_UP_PERMISSIONS, Permission, Scope
 from app.core.auth.dependencies import DashboardPermissionDependency, PermissionRequirement
 from app.core.middleware.dashboard_csrf import CROSS_SITE_REQUEST_REJECTED_CODE
+from app.modules.scim.dependencies import validate_scim_token
 
 pytestmark = pytest.mark.integration
 
@@ -160,6 +161,13 @@ STEP_UP_GATED: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/dashboard-auth/guest/password"),
         ("DELETE", "/api/dashboard-auth/guest/password"),
         ("POST", "/api/dashboard-auth/guest/logout-all"),
+        # Issuing a credential that can disable accounts is a sign-in change
+        # like the rest of this group; revoking one is the narrowing direction
+        # and carries no extra gate beyond the step-up every ``security:write``
+        # mutation already inherits.
+        ("POST", "/api/scim-tokens"),
+        ("POST", "/api/scim-tokens/{token_id}/rotate"),
+        ("DELETE", "/api/scim-tokens/{token_id}"),
     }
 )
 
@@ -272,6 +280,39 @@ def test_step_up_gated_mutations_are_exactly_the_declared_set(app_instance: Fast
         and any(r.permission in STEP_UP_PERMISSIONS for r in _route_auth(route).requirements)
     }
     assert actual == STEP_UP_GATED
+
+
+def test_every_scim_route_carries_the_bearer_and_no_dashboard_authority(app_instance: FastAPI) -> None:
+    """The mirror of the matrix above for ``/scim/v2``, which is outside it.
+
+    This is the only mechanical proof that a SCIM token grants SCIM and nothing
+    else: a route added to that router with no dependency, or with a dashboard
+    one, would otherwise ship silently. The negative half matters as much as
+    the positive — a dashboard permission dependency here would hand a machine
+    credential a session's authority.
+    """
+
+    scim_routes = [
+        (method, route)
+        for route in app_instance.routes
+        if isinstance(route, APIRoute) and route.path.startswith("/scim/")
+        for method in sorted(route.methods or ())
+    ]
+    assert scim_routes, "the SCIM router is not registered"
+
+    unauthenticated = [
+        f"{method} {route.path}"
+        for method, route in scim_routes
+        if validate_scim_token not in set(_walk(route.dependant))
+    ]
+    assert unauthenticated == [], f"SCIM routes without the bearer dependency: {unauthenticated}"
+
+    dashboard_authority = [
+        f"{method} {route.path}"
+        for method, route in scim_routes
+        if _route_auth(route).session_validated or _route_auth(route).requirements
+    ]
+    assert dashboard_authority == [], f"SCIM routes carrying dashboard authority: {dashboard_authority}"
 
 
 def test_read_only_permission_set_matches_vocabulary() -> None:

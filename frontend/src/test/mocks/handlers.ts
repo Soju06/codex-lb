@@ -2867,7 +2867,7 @@ export const handlers = [
     const created = createApiKeyCreateResponse({
       ...createApiKey({
         id: `key_${sequence}`,
-        name: payload.name,
+        ...(payload.name !== undefined ? { name: payload.name } : {}),
         accountAssignmentScopeEnabled:
           (payload.assignedAccountIds?.length ?? 0) > 0,
         sourceAssignmentScopeEnabled:

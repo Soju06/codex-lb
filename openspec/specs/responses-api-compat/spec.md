@@ -3049,6 +3049,8 @@ the failed account, exclude it from the current request, and retry the unary
 operation on the fallback account. The proxy MUST NOT fail over strict
 account-owner requests whose upstream resource is bound to the selected account.
 
+For account-routed file operations, the client and service MUST preserve typed transport phase and replay eligibility. Confirmed pre-dispatch connection failures MUST use the existing account failover policy even when the credential-safe message contains no transient-error phrase. Typed transport errors MUST NOT gain replay eligibility from message text. TLS verification failures, ambiguous request failures, response-body failures, and process-wide network failures MUST NOT cause cross-account file retries.
+
 #### Scenario: Unary refresh transport failure uses another account
 
 - **GIVEN** at least two accounts are eligible for a Codex thread-goal, Codex
@@ -3070,6 +3072,19 @@ account-owner requests whose upstream resource is bound to the selected account.
 - **THEN** the proxy fails the request with an upstream-unavailable error
 - **AND** the proxy does not send the file-finalize operation through another
   account
+
+#### Scenario: Routed file connection refusal uses another account
+
+- **GIVEN** an unpinned file-create request with another eligible account
+- **WHEN** the routed transport proves that the selected account's proxy connection failed before dispatch
+- **THEN** the proxy excludes that account and completes the file-create request through the eligible fallback within the existing budget
+
+#### Scenario: Routed file replay is denied without safe provenance
+
+- **GIVEN** a routed file request with another eligible account
+- **WHEN** the transport reports a TLS verification failure, ambiguous request failure, response-body failure, or process-wide network failure
+- **THEN** the proxy returns the transport error without invoking the file operation through another account
+- **AND** transient-looking text in the sanitized message does not permit replay
 
 ### Requirement: Responses input images bypass the HTTP bridge
 

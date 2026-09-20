@@ -3806,6 +3806,7 @@ async def test_stream_responses_returns_before_first_upstream_event(monkeypatch)
 
     context = SimpleNamespace(
         service=SimpleNamespace(
+            _enforce_api_key_usage_share=MagicMock(),
             rate_limit_headers=AsyncMock(return_value={}),
             stream_responses=stream_responses,
         )
@@ -3846,6 +3847,7 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
 
     context = SimpleNamespace(
         service=SimpleNamespace(
+            _enforce_api_key_usage_share=MagicMock(),
             rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
             stream_responses=stream_responses,
         )

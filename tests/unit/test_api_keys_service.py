@@ -724,7 +724,7 @@ async def test_usage_share_snapshot_expires_with_routable_reauth_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = utcnow()
-    token_expires_at = now.timestamp() + 30
+    token_expires_at = now.replace(tzinfo=timezone.utc).timestamp() + 30
     repo = _FakeApiKeysRepository()
     repo._accounts = {
         "reauth": Account(id="reauth", plan_type="plus", status=AccountStatus.REAUTH_REQUIRED),

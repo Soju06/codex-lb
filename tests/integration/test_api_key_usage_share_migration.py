@@ -12,12 +12,51 @@ from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrad
 
 pytestmark = pytest.mark.integration
 
-_BASE = "20260914_000001_drop_subscription_overflow_schema"
+_RELEASED_RETIREMENT = "20260914_000000_drop_subscription_overflow_schema"
+_GUARDED_RETIREMENT = "20260914_000001_drop_subscription_overflow_schema"
+_BASE = "20260914_000002_merge_overflow_retirement_heads"
 _REVISION = "20260918_000000_add_api_key_usage_share_percent"
 _COLUMN = "usage_share_percent"
 _CONSTRAINT = "ck_api_keys_usage_share_percent"
 _ROLLUP_TABLE = "request_demand_quarter_rollups"
 _ROLLUP_INDEX = "idx_request_demand_account_slot"
+
+
+@pytest.mark.parametrize("retirement_revision", [_RELEASED_RETIREMENT, _GUARDED_RETIREMENT])
+def test_retirement_branch_stamps_converge_to_usage_share_head(
+    tmp_path: Path,
+    retirement_revision: str,
+) -> None:
+    path = tmp_path / f"{retirement_revision}.sqlite"
+    url = f"sqlite+aiosqlite:///{path}"
+    assert run_upgrade(url, retirement_revision, bootstrap_legacy=False).current_revision == retirement_revision
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active)
+                    VALUES ('branch-key', 'Branch key', 'branch-hash', 'sk-branch', 1)
+                    """
+                )
+            )
+
+        assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _REVISION
+        script = ScriptDirectory.from_config(_build_alembic_config(url))
+        assert script.get_heads() == [_REVISION]
+        merge_revision = script.get_revision(_BASE)
+        assert merge_revision is not None
+        merge_parents = merge_revision.down_revision
+        assert isinstance(merge_parents, tuple)
+        assert set(merge_parents) == {_RELEASED_RETIREMENT, _GUARDED_RETIREMENT}
+        with engine.connect() as connection:
+            assert (
+                connection.execute(text("SELECT name FROM api_keys WHERE id='branch-key'")).scalar_one() == "Branch key"
+            )
+        assert check_schema_drift(url) == ()
+    finally:
+        engine.dispose()
 
 
 def test_usage_share_migration_is_reversible_and_preserves_keys(tmp_path: Path) -> None:

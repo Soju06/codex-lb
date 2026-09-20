@@ -383,6 +383,7 @@ async def _add_log(
     request_kind: str = "normal",
     service_tier: str | None = None,
     api_key_id: str | None = None,
+    model_source_id: str | None = None,
     model: str = "gpt-5.1-codex",
     conversation_id: str | None = None,
 ):
@@ -402,6 +403,7 @@ async def _add_log(
         request_kind=request_kind,
         service_tier=service_tier,
         api_key_id=api_key_id,
+        model_source_id=model_source_id,
         conversation_id=conversation_id,
     )
 
@@ -1688,6 +1690,26 @@ async def test_usage_share_demand_combines_folded_and_raw_account_traffic(db_set
                 cost_usd=0.0,
                 api_key_id=api_key_id,
                 request_kind=request_kind,
+            )
+        # Model-source dispatch is mutually exclusive with account attribution;
+        # source rows therefore fold under the NULL-account sentinel and cannot
+        # join this account's folded demand. The raw filter independently
+        # excludes the still-live source row.
+        for request_id, requested_at in (
+            ("folded-source", folded_at + timedelta(minutes=5)),
+            ("raw-source", raw_at + timedelta(minutes=5)),
+        ):
+            await _add_log(
+                logs,
+                account_id=None,
+                model_source_id="source_usage_share",
+                request_id=request_id,
+                requested_at=requested_at,
+                input_tokens=1_000_000,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cost_usd=0.0,
+                api_key_id=key_id,
             )
         for request_id, requested_at, model, request_kind in (
             ("folded-file", folded_at + timedelta(minutes=2), "files-create", "normal"),

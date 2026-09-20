@@ -41,3 +41,18 @@
   `tests/integration/test_migrations.py` +
   `test_migration_merge_overflow_transport.py` on SQLite and on a throwaway
   PostgreSQL 17 (every PostgreSQL-only test actually executed, 0 skipped).
+- [x] Restore the already-merged
+  `20260914_000000_drop_subscription_overflow_schema` byte-for-byte, retain the
+  SCIM-anchored guarded successor, and join both branches through a no-op merge
+  revision before the usage-share migration.
+- [x] Add migration lifecycle coverage proving databases stamped at either
+  retirement revision upgrade through the merge to the single head while
+  preserving application rows; grandfather only the exact merged timestamp
+  collision in the author-time topology guard.
+- [x] Repair the stale HTTP response service mocks and realtime request-kind
+  assertions that block the unit and `integration-core-3` CI shards.
+- [x] Make the API-key MSW create/update handlers return 422 on invalid payloads
+  and add regression coverage proving model-source traffic remains excluded
+  from both folded and raw usage-share demand.
+- [x] Re-run focused backend/frontend tests, migration topology and lifecycle
+  checks, strict OpenSpec validation, lint, formatting, and type checks.

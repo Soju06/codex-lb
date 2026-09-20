@@ -418,6 +418,11 @@ class ApiKeysRepository:
             cost_usd=RequestDemandQuarterRollup.cost_usd,
             request_count=RequestDemandQuarterRollup.request_count,
         )
+        # Model-source dispatch rows are never account-bound: the request-log
+        # repository rejects mixed attribution, and both source writers pass
+        # account_id=None. The fold encodes that NULL as the dimension sentinel,
+        # so this pool-account join excludes source demand without changing the
+        # quota planner's shared rollup grain.
         folded_source = RequestDemandQuarterRollup.__table__.join(
             account_windows,
             and_(

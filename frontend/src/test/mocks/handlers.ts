@@ -2857,19 +2857,25 @@ export const handlers = [
 
   http.post("/api/api-keys/", async ({ request }) => {
     const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid payload" } },
+        { status: 422 },
+      );
+    }
     const sequence = state.apiKeys.length + 1;
     const created = createApiKeyCreateResponse({
       ...createApiKey({
         id: `key_${sequence}`,
-        name: payload?.name ?? `API Key ${sequence}`,
+        name: payload.name,
         accountAssignmentScopeEnabled:
-          (payload?.assignedAccountIds?.length ?? 0) > 0,
+          (payload.assignedAccountIds?.length ?? 0) > 0,
         sourceAssignmentScopeEnabled:
-          (payload?.assignedSourceIds?.length ?? 0) > 0,
-        assignedAccountIds: payload?.assignedAccountIds ?? [],
-        assignedSourceIds: payload?.assignedSourceIds ?? [],
-        trafficClass: payload?.trafficClass ?? "foreground",
-        usageSharePercent: payload?.usageSharePercent ?? null,
+          (payload.assignedSourceIds?.length ?? 0) > 0,
+        assignedAccountIds: payload.assignedAccountIds ?? [],
+        assignedSourceIds: payload.assignedSourceIds ?? [],
+        trafficClass: payload.trafficClass ?? "foreground",
+        usageSharePercent: payload.usageSharePercent ?? null,
       }),
       key: `sk-test-generated-${sequence}`,
     });
@@ -2888,7 +2894,10 @@ export const handlers = [
     }
     const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
     if (!payload) {
-      return HttpResponse.json(existing);
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid payload" } },
+        { status: 422 },
+      );
     }
 
     // Build override with converted limits (create format → response format)

@@ -74,6 +74,10 @@ def _sse_event(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def _allow_usage_share(*_args: object, **_kwargs: object) -> None:
+    """Synchronous no-op matching the service's admission hook."""
+
+
 def _extract_first_event(lines: list[str]) -> dict:
     """Return the first non-synthesized SSE event payload. Skips the
     synthesized ``response.created`` envelope that the public-stream
@@ -1917,7 +1921,7 @@ async def test_codex_realtime_call_failure_request_log_is_content_free_for_publi
         public_log = matching_logs[0]
 
         assert public_log["requestId"] == request_id
-        assert public_log["requestKind"] == "normal"
+        assert public_log["requestKind"] == "codex_control_realtime_calls"
         assert public_log["status"] == "error"
         assert public_log["transport"] == "http"
         assert public_log["apiKeyId"] == api_key.id
@@ -1949,7 +1953,7 @@ async def test_codex_realtime_call_failure_request_log_is_content_free_for_publi
             ).scalar_one()
 
         assert persisted.status == "error"
-        assert persisted.request_kind == "normal"
+        assert persisted.request_kind == "codex_control_realtime_calls"
         assert persisted.transport == "http"
         assert persisted.api_key_id == api_key.id
         assert persisted.account_id is None
@@ -2732,6 +2736,8 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
     seen_client_ip: list[str | None] = []
 
     class _FakeService:
+        _enforce_api_key_usage_share = staticmethod(_allow_usage_share)
+
         async def rate_limit_headers(self):
             return {}
 
@@ -2815,6 +2821,8 @@ async def test_stream_responses_keepalive_interval_honours_dashboard_value_over_
     )
 
     class _FakeService:
+        _enforce_api_key_usage_share = staticmethod(_allow_usage_share)
+
         async def rate_limit_headers(self):
             return {}
 
@@ -3745,6 +3753,8 @@ async def test_compact_responses_passes_client_ip_to_service(monkeypatch):
     seen_client_ip: list[str | None] = []
 
     class _FakeService:
+        _enforce_api_key_usage_share = staticmethod(_allow_usage_share)
+
         async def rate_limit_headers(self):
             return {}
 
@@ -3789,6 +3799,8 @@ async def test_codex_route_stream_responses_starts_event_keepalive_before_first_
     release_upstream = asyncio.Event()
 
     class _FakeService:
+        _enforce_api_key_usage_share = staticmethod(_allow_usage_share)
+
         async def rate_limit_headers(self):
             return {}
 
@@ -3847,6 +3859,8 @@ async def test_codex_route_stream_responses_keeps_client_alive_while_bridge_cool
     release_upstream = asyncio.Event()
 
     class _FakeService:
+        _enforce_api_key_usage_share = staticmethod(_allow_usage_share)
+
         async def rate_limit_headers(self):
             return {}
 

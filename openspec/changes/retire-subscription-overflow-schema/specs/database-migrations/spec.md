@@ -49,15 +49,17 @@ taken to promise that the parents' rows survive to `head`.
 
 ### Requirement: Withdrawn overflow storage is retired without stranding an intermediate install
 
+The released `20260914_000000_drop_subscription_overflow_schema` and guarded
 `20260914_000001_drop_subscription_overflow_schema` MUST remove the storage the
 withdrawn subscription-exhaustion overflow feature left behind: the
 `model_source_pins` table with both of its indexes, and the
 `dashboard_settings` columns `subscription_overflow_source_id` and
-`subscription_overflow_drain_until`. The revisions that built them
-(`20260908_000000_add_subscription_overflow`,
-`20260911_000000_model_source_pins_kind_expires_index`) MUST remain in the
-graph unchanged, because an install stopped below them upgrades through them
-before reaching this one, and the graph MUST keep a single head.
+`subscription_overflow_drain_until`. The released revision and the revisions
+that built the retired storage (`20260908_000000_add_subscription_overflow`,
+`20260911_000000_model_source_pins_kind_expires_index`) MUST remain in the graph
+unchanged. A no-op merge revision MUST join the released retirement branch and
+the SCIM-anchored guarded successor so an install stamped on either branch can
+upgrade to one head without losing its recorded migration state.
 
 Dropping stored pins is authorized and MUST NOT be backfilled or exported. A
 pin was routing state — which model source a conversation or API key had been
@@ -99,12 +101,31 @@ started while the drop is in flight.
   both settings columns
 - **AND** the final schema MUST match the current ORM metadata with no drift
 
+#### Scenario: Released retirement stamp remains upgradeable
+
+- **GIVEN** a database stamped at the released
+  `20260914_000000_drop_subscription_overflow_schema` revision
+- **WHEN** the runner upgrades to `head`
+- **THEN** the graph MUST retain and recognize that exact revision
+- **AND** it MUST apply the SCIM branch, guarded successor, no-op merge, and
+  later revisions without losing application rows
+- **AND** the database MUST finish at the single head
+
+#### Scenario: Guarded successor stamp remains upgradeable
+
+- **GIVEN** a database stamped at
+  `20260914_000001_drop_subscription_overflow_schema`
+- **WHEN** the runner upgrades to `head`
+- **THEN** the graph MUST apply the released retirement branch and no-op merge
+- **AND** the database MUST finish at the single head without repeating an
+  unguarded schema operation
+
 #### Scenario: Missing objects do not fail the upgrade
 
-- **GIVEN** a database at the retirement revision's parent that is missing
+- **GIVEN** a database at either retirement revision's parent that is missing
   `model_source_pins`, or is missing either settings column
 - **WHEN** the runner upgrades to `head`
-- **THEN** the revision MUST skip the absent object and apply the rest
+- **THEN** each retirement revision MUST skip absent objects and apply the rest
 - **AND** the upgrade MUST NOT raise
 
 #### Scenario: Downgrade rebuilds the retired schema

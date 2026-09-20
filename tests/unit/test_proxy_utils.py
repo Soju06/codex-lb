@@ -3806,6 +3806,7 @@ async def test_stream_responses_returns_before_first_upstream_event(monkeypatch)
 
     context = SimpleNamespace(
         service=SimpleNamespace(
+            _enforce_api_key_usage_share=MagicMock(),
             rate_limit_headers=AsyncMock(return_value={}),
             stream_responses=stream_responses,
         )
@@ -3846,6 +3847,7 @@ async def test_stream_responses_streams_post_startup_proxy_error_as_sse(monkeypa
 
     context = SimpleNamespace(
         service=SimpleNamespace(
+            _enforce_api_key_usage_share=MagicMock(),
             rate_limit_headers=AsyncMock(return_value={"X-RateLimit-Limit": "1"}),
             stream_responses=stream_responses,
         )
@@ -7398,6 +7400,7 @@ async def test_thread_goal_request_persists_conversation_id_and_passes_dashboard
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-thread-goal"
+    assert request_logs.calls[0]["request_kind"] == "thread_goal_set"
 
 
 @pytest.mark.asyncio
@@ -7574,6 +7577,7 @@ async def test_codex_control_request_persists_conversation_id_and_passes_dashboa
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-control"
+    assert request_logs.calls[0]["request_kind"] == "codex_control_control"
 
 
 class _JsonCompactResponse:
@@ -26069,7 +26073,7 @@ async def test_prepare_websocket_response_create_request_logs_affinity_metadata(
 
 
 @pytest.mark.asyncio
-async def test_prepare_websocket_response_create_request_releases_reservation_on_payload_too_large(monkeypatch):
+async def test_prepare_websocket_response_create_request_rejects_payload_before_reservation(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     reservation = SimpleNamespace(reservation_id="res_large_ws", model="gpt-5.1")
@@ -26115,7 +26119,8 @@ async def test_prepare_websocket_response_create_request_releases_reservation_on
         )
 
     assert exc_info.value.status_code == 400
-    release_usage.assert_awaited_once_with(reservation)
+    reserve_usage.assert_not_awaited()
+    release_usage.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -27371,6 +27376,7 @@ async def test_prepare_websocket_full_replay_rejects_oversized_unslimmable_paylo
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.payload["error"]["code"] == "payload_too_large"
+    reserve_usage.assert_not_awaited()
 
 
 def test_websocket_continuity_state_reuses_codex_session_scope():
@@ -44912,7 +44918,6 @@ async def test_transcribe_selection_budget_exhaustion_returns_request_timeout(mo
     ],
 )
 async def test_auxiliary_proxy_routes_log_local_selection_failure_metadata(monkeypatch, route, invoke):
-    del route
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -44938,6 +44943,8 @@ async def test_auxiliary_proxy_routes_log_local_selection_failure_metadata(monke
     assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["upstream_error_code"] == "no_accounts"
     assert request_logs.calls[0]["upstream_status_code"] is None
+    if route == "files":
+        assert request_logs.calls[0]["request_kind"] == "files-create"
 
 
 @pytest.mark.asyncio

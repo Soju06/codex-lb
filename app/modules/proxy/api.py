@@ -2357,18 +2357,44 @@ def _responses_cleanup_scheduler(service: object) -> _ResponsesCleanupScheduler 
     return None
 
 
-async def _guard_chat_bridge_reservation(
-    stream: AsyncIterator[str],
-    *,
-    reservation: ApiKeyUsageReservationData | None,
+def _responses_reservation_cleanup(
     service: object,
-) -> AsyncIterator[str]:
-    cleanup = _ResponsesReservationCleanup(
-        owns_reservation=True,
+    reservation: ApiKeyUsageReservationData | None,
+    *,
+    owns_reservation: bool = True,
+) -> _ResponsesReservationCleanup:
+    return _ResponsesReservationCleanup(
+        owns_reservation=owns_reservation,
         reservation=reservation,
         scheduler=_responses_cleanup_scheduler(service),
         request_id=ensure_request_id(),
     )
+
+
+async def _usage_share_admission_denial(
+    request: Request,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    cleanup: _ResponsesReservationCleanup,
+    *,
+    kind: str,
+    headers: Mapping[str, str],
+) -> JSONResponse | None:
+    try:
+        context.service._enforce_api_key_usage_share(api_key, cleanup.request_id, kind)
+    except BaseException as exc:
+        await cleanup.release(action=f"{kind} usage-share admission")
+        if not isinstance(exc, ProxyResponseError):
+            raise
+        return _stream_startup_error_response(request, exc, headers=headers)
+    return None
+
+
+async def _guard_chat_bridge_reservation(
+    stream: AsyncIterator[str],
+    *,
+    cleanup: _ResponsesReservationCleanup,
+) -> AsyncIterator[str]:
     ready, dispatched, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     @contextmanager
@@ -3354,6 +3380,25 @@ async def _proxy_images_generation_request(
             headers=rate_limit_headers,
         )
 
+    usage_share_denial = await _usage_share_admission_denial(
+        request,
+        context,
+        api_key,
+        _responses_reservation_cleanup(context.service, reservation),
+        kind="images",
+        headers=rate_limit_headers,
+    )
+    if usage_share_denial is not None:
+        record_images_route_observability(
+            route=route,
+            model=public_model,
+            stream=stream_requested,
+            status=usage_share_denial.status_code,
+            outcome="rate_limited",
+            started_at=started_at,
+        )
+        return usage_share_denial
+
     # We always need an upstream stream because tool_usage.image_gen only
     # appears on response.completed. For non-streaming clients we drain the
     # stream and translate to a JSON envelope.
@@ -3670,6 +3715,25 @@ async def _proxy_images_edit_request(
             images_service_module.make_invalid_request_error(str(exc)),
             headers=rate_limit_headers,
         )
+
+    usage_share_denial = await _usage_share_admission_denial(
+        request,
+        context,
+        api_key,
+        _responses_reservation_cleanup(context.service, reservation),
+        kind="images",
+        headers=rate_limit_headers,
+    )
+    if usage_share_denial is not None:
+        record_images_route_observability(
+            route=route,
+            model=public_model,
+            stream=stream_requested,
+            status=usage_share_denial.status_code,
+            outcome="rate_limited",
+            started_at=started_at,
+        )
+        return usage_share_denial
 
     # See ``_proxy_images_generation_request`` for why we pass
     # ``api_key_reservation=None`` and finalize via
@@ -4533,6 +4597,17 @@ async def v1_chat_completions(
             rate_limit_headers=rate_limit_headers,
             prohibit_fast_mode=prohibit_fast_mode,
         )
+    reservation_cleanup = _responses_reservation_cleanup(context.service, reservation)
+    usage_share_denial = await _usage_share_admission_denial(
+        request,
+        context,
+        api_key,
+        reservation_cleanup,
+        kind="chat",
+        headers=rate_limit_headers,
+    )
+    if usage_share_denial is not None:
+        return usage_share_denial
     responses_payload.stream = True
     if bridge_active:
         downstream_turn_state = proxy_affinity_module.ensure_http_downstream_turn_state(request.headers)
@@ -4553,7 +4628,7 @@ async def v1_chat_completions(
             downstream_turn_state=downstream_turn_state,
             http_bridge_active=True,
         )
-        stream = _guard_chat_bridge_reservation(stream, reservation=reservation, service=context.service)
+        stream = _guard_chat_bridge_reservation(stream, cleanup=reservation_cleanup)
     else:
         stream = context.service.stream_responses(
             responses_payload,
@@ -6386,37 +6461,6 @@ async def _stream_responses(
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
         return admission_denial
-    owns_reservation = api_key_reservation_override is None
-    reservation = (
-        api_key_reservation_override
-        if skip_limit_enforcement
-        else await _enforce_request_limits(
-            api_key,
-            request_model=payload.model,
-            request_service_tier=payload.service_tier,
-            request_usage_budget=estimate_api_key_request_usage(payload),
-        )
-    )
-    reservation_cleanup = _ResponsesReservationCleanup(
-        owns_reservation=owns_reservation,
-        reservation=reservation,
-        scheduler=_responses_cleanup_scheduler(context.service),
-        request_id=ensure_request_id(),
-    )
-    responses_service_cleanup_ready_event = asyncio.Event()
-    responses_owner_forward_dispatched_event = asyncio.Event()
-    responses_owner_forward_rejected_event = asyncio.Event()
-
-    rate_limit_headers = (
-        await _rate_limit_headers_with_reservation_cleanup(
-            context,
-            api_key,
-            reservation if owns_reservation else None,
-            reservation_cleanup=reservation_cleanup if owns_reservation else None,
-        )
-        if include_rate_limit_headers
-        else {}
-    )
     effective_headers = forwarded_headers or request.headers
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(effective_headers)
     bridge_active = await _http_bridge_active_for_request(
@@ -6439,6 +6483,47 @@ async def _stream_responses(
         if downstream_turn_state is not None
         else {}
     )
+    owns_reservation = api_key_reservation_override is None
+    reservation = (
+        api_key_reservation_override
+        if skip_limit_enforcement
+        else await _enforce_request_limits(
+            api_key,
+            request_model=payload.model,
+            request_service_tier=payload.service_tier,
+            request_usage_budget=estimate_api_key_request_usage(payload),
+        )
+    )
+    reservation_cleanup = _responses_reservation_cleanup(
+        context.service,
+        reservation,
+        owns_reservation=owns_reservation,
+    )
+    responses_service_cleanup_ready_event = asyncio.Event()
+    responses_owner_forward_dispatched_event = asyncio.Event()
+    responses_owner_forward_rejected_event = asyncio.Event()
+
+    rate_limit_headers = (
+        await _rate_limit_headers_with_reservation_cleanup(
+            context,
+            api_key,
+            reservation if owns_reservation else None,
+            reservation_cleanup=reservation_cleanup if owns_reservation else None,
+        )
+        if include_rate_limit_headers
+        else {}
+    )
+    if not forwarded_request:
+        usage_share_denial = await _usage_share_admission_denial(
+            request,
+            context,
+            api_key,
+            reservation_cleanup,
+            kind="responses",
+            headers=rate_limit_headers,
+        )
+        if usage_share_denial is not None:
+            return usage_share_denial
     if compact_payload is not None:
         responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
             responses_service_cleanup_ready_event
@@ -6803,28 +6888,6 @@ async def _collect_responses(
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
         return admission_denial
-    reservation = await _enforce_request_limits(
-        api_key,
-        request_model=payload.model,
-        request_service_tier=payload.service_tier,
-        request_usage_budget=estimate_api_key_request_usage(payload),
-    )
-    reservation_cleanup = _ResponsesReservationCleanup(
-        owns_reservation=True,
-        reservation=reservation,
-        scheduler=_responses_cleanup_scheduler(context.service),
-        request_id=ensure_request_id(),
-    )
-    responses_service_cleanup_ready_event = asyncio.Event()
-    responses_owner_forward_dispatched_event = asyncio.Event()
-    responses_owner_forward_rejected_event = asyncio.Event()
-
-    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
-        context,
-        api_key,
-        reservation,
-        reservation_cleanup=reservation_cleanup,
-    )
     bridge_active = await _http_bridge_active_for_request(
         payload,
         request.headers,
@@ -6840,6 +6903,33 @@ async def _collect_responses(
         if downstream_turn_state is not None
         else {}
     )
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+        request_usage_budget=estimate_api_key_request_usage(payload),
+    )
+    reservation_cleanup = _responses_reservation_cleanup(context.service, reservation)
+    responses_service_cleanup_ready_event = asyncio.Event()
+    responses_owner_forward_dispatched_event = asyncio.Event()
+    responses_owner_forward_rejected_event = asyncio.Event()
+
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
+        context,
+        api_key,
+        reservation,
+        reservation_cleanup=reservation_cleanup,
+    )
+    usage_share_denial = await _usage_share_admission_denial(
+        request,
+        context,
+        api_key,
+        reservation_cleanup,
+        kind="responses",
+        headers=rate_limit_headers,
+    )
+    if usage_share_denial is not None:
+        return usage_share_denial
     upstream_stream_false = preserve_upstream_stream_mode and payload.stream is False
     if not preserve_upstream_stream_mode:
         payload.stream = True
@@ -7048,12 +7138,7 @@ async def _compact_responses(
         request_usage_budget=request_usage_budget,
     )
 
-    reservation_cleanup = _ResponsesReservationCleanup(
-        owns_reservation=True,
-        reservation=reservation,
-        scheduler=_responses_cleanup_scheduler(context.service),
-        request_id=ensure_request_id(),
-    )
+    reservation_cleanup = _responses_reservation_cleanup(context.service, reservation)
     responses_service_cleanup_ready_event = asyncio.Event()
     rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
         context,
@@ -7061,6 +7146,16 @@ async def _compact_responses(
         reservation,
         reservation_cleanup=reservation_cleanup,
     )
+    usage_share_denial = await _usage_share_admission_denial(
+        request,
+        context,
+        api_key,
+        reservation_cleanup,
+        kind="compact",
+        headers=rate_limit_headers,
+    )
+    if usage_share_denial is not None:
+        return usage_share_denial
     responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
         responses_service_cleanup_ready_event
     )
@@ -7293,6 +7388,7 @@ async def _transcribe_request(
         return cancellation_deferred
 
     try:
+        context.service._enforce_api_key_usage_share(api_key, ensure_request_id(), "transcribe")
         result = await context.service.transcribe(
             audio_bytes=multipart.audio_bytes,
             filename=multipart.filename,
@@ -8281,6 +8377,7 @@ async def _stream_response_error_events(
             error.type if error and error.type else "server_error",
             response_id=response_id,
             error_param=error.param_state if error else None,
+            resets_at=error.resets_at if error else None,
         )
         if not local_refusal and error_code in {
             "stream_incomplete",

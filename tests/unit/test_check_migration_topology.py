@@ -139,6 +139,28 @@ def test_timestamp_prefix_collision_on_different_parents_reports_the_fork(checke
     assert "MultipleHeads" in message
 
 
+def test_exact_merged_timestamp_collision_is_grandfathered(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    scim = "20260914_000000_add_scim_tokens"
+    retirement = "20260914_000000_drop_subscription_overflow_schema"
+    successor = "20260914_000001_drop_subscription_overflow_schema"
+    merge = "20260914_000002_merge_overflow_retirement_heads"
+    _write_revision(versions, scim, head)
+    _write_revision(versions, retirement, head)
+    _write_revision(versions, successor, scim)
+    _write_revision(versions, merge, (retirement, successor))
+
+    reports, _ = checker.run_all(versions_dir=versions, base_ref="")
+    assert not any(message.startswith("alembic_timestamp_prefix_collision") for message in _errors(reports))
+    assert checker.graph_heads(checker.load_graph(versions)) == (merge,)
+
+    # The exemption is the exact shipped pair, not the timestamp slot.
+    _write_revision(versions, "20260914_000000_third_revision", head)
+    reports, _ = checker.run_all(versions_dir=versions, base_ref="")
+    assert any(message.startswith("alembic_timestamp_prefix_collision") for message in _errors(reports))
+
+
 def test_timestamp_prefix_collision_when_chained_reports_lost_ordering(checker: ModuleType, tmp_path: Path) -> None:
     versions = tmp_path / "versions"
     head = _linear_fixture(checker, versions)

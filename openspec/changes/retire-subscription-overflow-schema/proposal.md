@@ -44,15 +44,19 @@ removed one revision earlier.
   the merge revision rather than at `head`. The merge-and-parents constraints
   are unchanged; only the target of the walk is named explicitly, so the
   requirement keeps stating a fact that stays true as the graph grows past it.
-- A new requirement states the retirement contract: what
-  `20260914_000000_drop_subscription_overflow_schema` MUST drop, that the pin
+- A new requirement states the retirement contract: what the released
+  `20260914_000000_drop_subscription_overflow_schema` and its guarded successor
+  `20260914_000001_drop_subscription_overflow_schema` MUST drop, that the pin
   rows are discarded routing state, that every step MUST be guarded so an
   install missing either object still upgrades, and that the downgrade MUST
   restore the schema built by
   `20260908_000000_add_subscription_overflow` and
   `20260911_000000_model_source_pins_kind_expires_index` — including both
   indexes, reflected independently of the table, so a downgrade interrupted
-  between the table and its indexes still converges.
+  between the table and its indexes still converges. The released retirement
+  revision remains byte-for-byte unchanged; a no-op merge revision joins it
+  with the SCIM-anchored successor so databases stamped on either branch reach
+  one head.
 - No code change beyond the revision itself: the ORM models and the settings
   columns were removed in the same PR, and `check_schema_drift` at head reports
   no difference against live metadata.
@@ -79,9 +83,12 @@ None.
   `dashboard_settings.subscription_overflow_source_id` and
   `subscription_overflow_drain_until` dropped. Production row counts before the
   drop: 0, 0, 0.
-- The three historical revisions stay in the graph unchanged. An install
-  stopped below them still upgrades through them and then past them, so their
-  own tests keep asserting what each revision builds at its own point.
+- The historical revisions stay in the graph unchanged. In particular,
+  `20260914_000000_drop_subscription_overflow_schema`, already merged on main,
+  is restored byte-for-byte rather than renamed or reordered. An install
+  stopped below either retirement branch upgrades through the guarded drop and
+  the no-op merge, so each revision's tests keep asserting what it builds at
+  its own point.
 - **This upgrade is not rolling-safe, and the window opens on the way up, not
   only on rollback.** Every release below this one maps both settings columns
   and loads the settings row as one entity — `SettingsRepository.get_or_create()`

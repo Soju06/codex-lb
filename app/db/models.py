@@ -410,6 +410,7 @@ class RequestDemandQuarterRollup(Base):
     """
 
     __tablename__ = "request_demand_quarter_rollups"
+    __table_args__ = (Index("idx_request_demand_account_slot", "account_id", "slot_epoch"),)
 
     slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1734,6 +1735,10 @@ class ApiKey(Base):
             "allowed_reasoning_efforts IS NULL OR enforced_reasoning_effort IS NULL",
             name="ck_api_keys_reasoning_policy_exclusive",
         ),
+        CheckConstraint(
+            "usage_share_percent IS NULL OR (usage_share_percent >= 1 AND usage_share_percent <= 100)",
+            name="ck_api_keys_usage_share_percent",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1778,6 +1783,7 @@ class ApiKey(Base):
         default="upstream_limits,account_pool_usage",
         server_default="upstream_limits,account_pool_usage",
     )
+    usage_share_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Ownership (per-user accounts). NULL owner = shared/service key. Populated

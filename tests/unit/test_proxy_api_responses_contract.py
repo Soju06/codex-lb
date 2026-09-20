@@ -588,7 +588,7 @@ async def test_collect_responses_preserves_captured_turn_state_when_stream_raise
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
     from app.core.clients.proxy import ProxyResponseError
     from app.core.openai.requests import ResponsesRequest
@@ -600,7 +600,10 @@ async def test_collect_responses_preserves_captured_turn_state_when_stream_raise
             {"error": {"code": "upstream_error", "message": "failed", "type": "server_error"}},
         )
 
-    service = SimpleNamespace(stream_responses=lambda *_args, **_kwargs: failing_stream())
+    service = SimpleNamespace(
+        _enforce_api_key_usage_share=MagicMock(),
+        stream_responses=lambda *_args, **_kwargs: failing_stream(),
+    )
     context = SimpleNamespace(service=service)
     request = SimpleNamespace(
         headers={},

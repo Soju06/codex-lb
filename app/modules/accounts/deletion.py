@@ -59,8 +59,6 @@ from dataclasses import dataclass, field
 from sqlalchemy import Select, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth.api_key_cache import get_api_key_cache
-from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
@@ -430,12 +428,8 @@ async def _invalidate_account_caches() -> None:
     survive the account row's removal.
     """
     get_account_selection_cache().invalidate()
-    get_api_key_cache().clear()
     await get_upstream_route_cache().invalidate()
     await propagate_account_routing_change()
-    poller = get_cache_invalidation_poller()
-    if poller is not None:
-        await poller.bump(NAMESPACE_API_KEY)
 
 
 @dataclass(slots=True)

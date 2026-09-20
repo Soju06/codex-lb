@@ -203,8 +203,8 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     assert [row["upstream_stream_transport"] for row in merged["settings"]] == ["auto", "http", "websocket", "auto"]
     assert merged["retry"] == before["retry"]
     # The overflow branch's schema does not reach head: the feature was
-    # withdrawn (#2123) and 20260914_000000_drop_subscription_overflow_schema
-    # removes the pin table and both settings columns. The transport branch is
+    # withdrawn (#2123) and the converged overflow-retirement branches remove
+    # the pin table and both settings columns. The transport branch is
     # untouched, which is what makes this a fact about the merge and not about
     # the withdrawal.
     assert merged["pins"] is None

@@ -31,7 +31,9 @@ Checks:
    fingerprint of the incident: two authors picking the same slot means either
    the graph forks (different parents) or filename order no longer implies
    graph order (chained). The message names both revisions with their
-   ``down_revision``s so the fork is visible without opening the files.
+   ``down_revision``s so the fork is visible without opening the files. The one
+   exact collision that reached ``main`` despite this guard is immutable and
+   explicitly grandfathered after its branches converge through a merge.
 3. A revision's id matches its filename stem and the shared revision-id format
    (error, whole history). Mirrors the runtime policy's
    ``alembic_revision_filename_mismatch`` / ``alembic_revision_id_format_invalid``
@@ -88,6 +90,21 @@ TIMESTAMP_PREFIX_PATTERN = re.compile(r"^(\d{8}_\d{6})_")
 # enforced side by construction. Verified at 20260911_010000 (the incident's
 # merge revision): zero violations at or after the cutoff.
 RATCHET_PREFIX = "20260911_000000"
+
+# Both revisions reached main independently and may already be stamped in
+# deployed databases. Renaming either would violate Alembic history; the exact
+# pair is joined by 20260914_000002_merge_overflow_retirement_heads. A third
+# revision in the slot still fails because only this complete id set is exempt.
+MERGED_TIMESTAMP_PREFIX_COLLISIONS = frozenset(
+    {
+        frozenset(
+            {
+                "20260914_000000_add_scim_tokens",
+                "20260914_000000_drop_subscription_overflow_schema",
+            }
+        )
+    }
+)
 
 _FAILURE_PREFIX = "check_migration_topology"
 
@@ -366,6 +383,8 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
         group = sorted(group, key=lambda item: item.revision)
+        if frozenset(revision.revision for revision in group) in MERGED_TIMESTAMP_PREFIX_COLLISIONS:
+            continue
         described = "; ".join(revision.describe() for revision in group)
         forked = not _group_is_chained(group, parents)
         consequence = (

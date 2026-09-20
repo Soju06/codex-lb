@@ -74,6 +74,7 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.name).toBe("Renamed key");
     expect(payload.applyToCodexModel).toBe(false);
     expect("assignedAccountIds" in payload).toBe(false);
+    expect("usageSharePercent" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
   });
 
@@ -105,6 +106,44 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.isActive).toBe(false);
     expect("assignedAccountIds" in payload).toBe(false);
     expect("limits" in payload).toBe(false);
+  });
+
+  it("updates and clears the estimated usage-share percentage", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ usageSharePercent: 20 })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const input = screen.getByLabelText("Estimated pool allocation (%)");
+    expect(input).toHaveValue(20);
+    await user.clear(input);
+    await user.type(input, "30");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].usageSharePercent).toBe(30);
+
+    onSubmit.mockClear();
+    rerender(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ id: "key_clear_share", usageSharePercent: 20 })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    const clearInput = screen.getByLabelText("Estimated pool allocation (%)");
+    await user.clear(clearInput);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].usageSharePercent).toBeNull();
   });
 
   it("renders and clears the transport policy override", async () => {

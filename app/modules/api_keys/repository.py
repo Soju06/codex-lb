@@ -6,7 +6,26 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, text, true, update
+from sqlalchemy import (
+    BigInteger,
+    Integer,
+    and_,
+    case,
+    cast,
+    column,
+    delete,
+    false,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    text,
+    true,
+    union_all,
+    update,
+    values,
+)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
@@ -15,6 +34,7 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
     AccountStatus,
+    AccountUsageRollupState,
     ApiKey,
     ApiKeyAccountAssignment,
     ApiKeyDeactivatedReason,
@@ -28,14 +48,38 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     ModelSource,
+    RequestDemandQuarterRollup,
     RequestLog,
     RequestUsageHourlyRollup,
 )
 from app.db.session import sqlite_writer_section
-from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
-from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
-from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
+from app.modules.accounts.usage_rollup import _STATE_ROW_ID, api_key_usage_aggregate_stmt, read_api_key_rollup_state
+from app.modules.accounts.usage_time_rollup import (
+    HOURLY_BUCKET_SECONDS,
+    QUARTER_SLOT_SECONDS,
+    WARMUP_REQUEST_KINDS,
+    _dimension_expr,
+    to_dimension,
+)
+from app.modules.accounts.usage_time_rollup_read import (
+    RawWindow,
+    ceil_to_grid,
+    datetime_epoch_expr,
+    demand_units_sql_expr,
+    floor_to_grid,
+    raw_demand_grain_stmt,
+    raw_windows_clause,
+    read_hourly_window,
+)
 from app.modules.api_keys.limit_windows import advance_limit_reset
+from app.modules.api_keys.usage_share import UsageShareDemand, UsageShareDemandWindow
+
+# These durable log dimensions identify work that bypasses usage-share admission.
+# The empty model covers metadata/control rows written before semantic kinds were persisted.
+_USAGE_SHARE_NON_GENERATION_MODELS = ("", "files-create", "files-finalize")
+# Synthetic generation contributes to pool demand but is never attributed to
+# the API key that happened to carry the probe.
+_USAGE_SHARE_UNATTRIBUTED_REQUEST_KINDS = (*WARMUP_REQUEST_KINDS, "prewarm")
 
 
 class ApiKeyOwnerDisabledError(ValueError):
@@ -229,7 +273,9 @@ class ApiKeysRepository:
             return []
         result = await self._session.execute(
             select(Account)
-            .options(load_only(Account.id, Account.plan_type, Account.status))
+            .options(
+                load_only(Account.id, Account.plan_type, Account.status, Account.delete_requested_at, raiseload=True)
+            )
             .where(Account.id.in_(account_ids))
             # An account marked for background deletion is already deleted
             # from the operator's point of view: assignment validation must
@@ -238,6 +284,19 @@ class ApiKeysRepository:
             .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
+
+    async def encrypted_access_tokens_by_account_id(self, account_ids: list[str]) -> dict[str, bytes]:
+        """Load only the credential needed to classify reauth routing eligibility."""
+        if not account_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(Account.id, Account.access_token_encrypted)
+                .where(Account.id.in_(account_ids))
+                .where(Account.delete_requested_at.is_(None))
+            )
+        ).all()
+        return {str(account_id): encrypted_token for account_id, encrypted_token in rows}
 
     async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]:
         if not source_ids:
@@ -248,7 +307,9 @@ class ApiKeysRepository:
     async def list_all_accounts(self) -> list[Account]:
         result = await self._session.execute(
             select(Account)
-            .options(load_only(Account.id, Account.plan_type, Account.status))
+            .options(
+                load_only(Account.id, Account.plan_type, Account.status, Account.delete_requested_at, raiseload=True)
+            )
             .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             # Status alone is not enough: an unfenced pre-upgrade replica can
             # briefly replace a marked account's terminal status during a
@@ -310,6 +371,160 @@ class ApiKeysRepository:
             ApiKeyUsageSummary(request_count=0, total_tokens=0, cached_input_tokens=0, total_cost_usd=0.0),
         )
 
+    async def usage_share_demand_by_account(
+        self,
+        key_id: str,
+        window_by_account: dict[str, UsageShareDemandWindow],
+    ) -> dict[str, UsageShareDemand]:
+        """Return key and pool demand through each account's usage observation."""
+        if not window_by_account:
+            return {}
+
+        dialect = self._session.get_bind().dialect.name
+        account_windows = (
+            values(
+                column("account_id", RequestLog.account_id.type),
+                column("started_at", RequestLog.requested_at.type),
+                column("observed_at", RequestLog.requested_at.type),
+                column("leading_edge_end", RequestLog.requested_at.type),
+                column("trailing_edge_start", RequestLog.requested_at.type),
+            )
+            .data(
+                [
+                    (
+                        account_id,
+                        window.started_at,
+                        window.observed_at,
+                        ceil_to_grid(window.started_at, QUARTER_SLOT_SECONDS),
+                        floor_to_grid(window.observed_at, QUARTER_SLOT_SECONDS),
+                    )
+                    for account_id, window in window_by_account.items()
+                ]
+            )
+            .cte("usage_share_windows")
+        )
+        watermark = (
+            select(AccountUsageRollupState.hourly_folded_through)
+            .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+            .scalar_subquery()
+        )
+        watermark_epoch = datetime_epoch_expr(self._session, watermark)
+
+        folded_units = demand_units_sql_expr(
+            dialect=dialect,
+            input_tokens=RequestDemandQuarterRollup.input_tokens,
+            cached_input_tokens=RequestDemandQuarterRollup.cached_input_tokens,
+            output_tokens=RequestDemandQuarterRollup.output_or_reasoning_tokens,
+            cost_usd=RequestDemandQuarterRollup.cost_usd,
+            request_count=RequestDemandQuarterRollup.request_count,
+        )
+        # Model-source dispatch rows are never account-bound: the request-log
+        # repository rejects mixed attribution, and both source writers pass
+        # account_id=None. The fold encodes that NULL as the dimension sentinel,
+        # so this pool-account join excludes source demand without changing the
+        # quota planner's shared rollup grain.
+        folded_source = RequestDemandQuarterRollup.__table__.join(
+            account_windows,
+            and_(
+                RequestDemandQuarterRollup.account_id == _dimension_expr(account_windows.c.account_id),
+                RequestDemandQuarterRollup.slot_epoch
+                >= datetime_epoch_expr(self._session, account_windows.c.leading_edge_end),
+                RequestDemandQuarterRollup.slot_epoch
+                < datetime_epoch_expr(self._session, account_windows.c.trailing_edge_start),
+            ),
+        )
+        folded = (
+            select(
+                account_windows.c.account_id.label("account_id"),
+                func.sum(folded_units).label("total_units"),
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                RequestDemandQuarterRollup.api_key_id == to_dimension(key_id),
+                                RequestDemandQuarterRollup.request_kind.not_in(_USAGE_SHARE_UNATTRIBUTED_REQUEST_KINDS),
+                            ),
+                            folded_units,
+                        ),
+                        else_=0.0,
+                    )
+                ).label("key_units"),
+            )
+            .select_from(folded_source)
+            .where(
+                RequestDemandQuarterRollup.slot_epoch < watermark_epoch,
+                RequestDemandQuarterRollup.is_deleted.is_(false()),
+                RequestDemandQuarterRollup.model.not_in(_USAGE_SHARE_NON_GENERATION_MODELS),
+            )
+            .group_by(account_windows.c.account_id)
+        )
+
+        raw_source = RequestLog.__table__.join(
+            account_windows,
+            and_(
+                RequestLog.account_id == account_windows.c.account_id,
+                RequestLog.requested_at >= account_windows.c.started_at,
+                RequestLog.requested_at <= account_windows.c.observed_at,
+                or_(
+                    watermark.is_(None),
+                    RequestLog.requested_at < account_windows.c.leading_edge_end,
+                    RequestLog.requested_at >= watermark,
+                    RequestLog.requested_at >= account_windows.c.trailing_edge_start,
+                ),
+            ),
+        )
+        raw_grain = raw_demand_grain_stmt(
+            self._session,
+            QUARTER_SLOT_SECONDS,
+            from_clause=raw_source,
+            filters=(
+                RequestLog.model_source_id.is_(None),
+                RequestLog.model.not_in(_USAGE_SHARE_NON_GENERATION_MODELS),
+            ),
+        ).subquery("usage_share_raw_grain")
+        raw_units = demand_units_sql_expr(
+            dialect=dialect,
+            input_tokens=raw_grain.c.input_tokens,
+            cached_input_tokens=raw_grain.c.cached_input_tokens,
+            output_tokens=raw_grain.c.output_tokens,
+            cost_usd=raw_grain.c.cost_usd,
+            request_count=raw_grain.c.request_count,
+        )
+        raw = select(
+            raw_grain.c.account_id,
+            func.sum(raw_units).label("total_units"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            raw_grain.c.api_key_id == key_id,
+                            raw_grain.c.request_kind.not_in(_USAGE_SHARE_UNATTRIBUTED_REQUEST_KINDS),
+                        ),
+                        raw_units,
+                    ),
+                    else_=0.0,
+                )
+            ).label("key_units"),
+        ).group_by(raw_grain.c.account_id)
+
+        combined = union_all(folded, raw).subquery("usage_share_demand")
+        rows = (
+            await self._session.execute(
+                select(
+                    combined.c.account_id,
+                    func.sum(combined.c.total_units),
+                    func.sum(combined.c.key_units),
+                ).group_by(combined.c.account_id)
+            )
+        ).all()
+        return {
+            str(account_id): UsageShareDemand(
+                total_units=float(total_units or 0.0),
+                key_units=float(key_units or 0.0),
+            )
+            for account_id, total_units, key_units in rows
+        }
+
     async def get_limit_usage_value(
         self,
         key_id: str,
@@ -366,6 +581,7 @@ class ApiKeysRepository:
         transport_policy_override: str | None | _Unset = _UNSET,
         thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
+        usage_share_percent: int | None | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
@@ -410,6 +626,9 @@ class ApiKeysRepository:
         if usage_sections is not _UNSET:
             assert isinstance(usage_sections, str)
             row.usage_sections = usage_sections
+        if usage_share_percent is not _UNSET:
+            assert usage_share_percent is None or isinstance(usage_share_percent, int)
+            row.usage_share_percent = usage_share_percent
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled

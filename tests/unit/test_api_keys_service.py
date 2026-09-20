@@ -11,6 +11,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+import app.modules.api_keys.service as api_keys_service_module
 from app.core.usage import pricing_catalog
 from app.core.usage.pricing import DEFAULT_PRICING_MODELS
 from app.core.utils.time import utcnow
@@ -50,6 +51,7 @@ from app.modules.api_keys.service import (
     _hash_key,
     _normalize_usage_sections,
 )
+from app.modules.api_keys.usage_share import UsageShareDemand, UsageShareDemandWindow
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.unit
@@ -78,11 +80,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self._account_assignments: dict[str, list[ApiKeyAccountAssignment]] = {}
         self._source_assignments: dict[str, list[ApiKeyModelSourceAssignment]] = {}
         self._accounts: dict[str, Account] = {}
+        self._encrypted_access_tokens: dict[str, bytes] = {}
         self._model_sources: dict[str, ModelSource] = {}
         self._limit_id_seq = 0
         self._reservations: dict[str, UsageReservationData] = {}
         self.list_all_accounts_calls = 0
         self.list_accounts_by_ids_calls: list[list[str]] = []
+        self.encrypted_access_token_calls: list[list[str]] = []
+        self.usage_share_demand_calls: list[tuple[str, dict[str, UsageShareDemandWindow]]] = []
         self.commit_calls = 0
         self.rollback_calls = 0
         self.commit_count = 0
@@ -128,6 +133,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self.list_accounts_by_ids_calls.append(list(account_ids))
         return [self._accounts[account_id] for account_id in account_ids if account_id in self._accounts]
 
+    async def encrypted_access_tokens_by_account_id(self, account_ids: list[str]) -> dict[str, bytes]:
+        self.encrypted_access_token_calls.append(list(account_ids))
+        return {
+            account_id: self._encrypted_access_tokens[account_id]
+            for account_id in account_ids
+            if account_id in self._encrypted_access_tokens
+        }
+
     async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]:
         return [self._model_sources[source_id] for source_id in source_ids if source_id in self._model_sources]
 
@@ -136,6 +149,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         return list(self._accounts.values())
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+        return {}
+
+    async def usage_share_demand_by_account(
+        self,
+        key_id: str,
+        window_by_account: dict[str, UsageShareDemandWindow],
+    ) -> dict[str, UsageShareDemand]:
+        self.usage_share_demand_calls.append((key_id, dict(window_by_account)))
         return {}
 
     async def get_limit_usage_value(
@@ -165,6 +186,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         transport_policy_override: str | None | _Unset = _UNSET,
         thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
+        usage_share_percent: int | None | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
@@ -189,6 +211,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "transport_policy_override": transport_policy_override,
             "thread_cache_identity_override": thread_cache_identity_override,
             "usage_sections": usage_sections,
+            "usage_share_percent": usage_share_percent,
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "source_assignment_scope_enabled": source_assignment_scope_enabled,
             "expires_at": expires_at,
@@ -487,9 +510,11 @@ class _FakeUsageRepository(UsageRepository):
         *,
         primary: dict[str, UsageHistory],
         secondary: dict[str, UsageHistory],
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
+        self._monthly = monthly or {}
         self.calls: list[tuple[str | None, list[str] | None]] = []
 
     async def latest_by_account(
@@ -499,7 +524,12 @@ class _FakeUsageRepository(UsageRepository):
         account_ids: Collection[str] | None = None,
     ) -> dict[str, UsageHistory]:
         self.calls.append((window, None if account_ids is None else list(account_ids)))
-        source = self._secondary if window == "secondary" else self._primary
+        assert window is not None
+        source = {
+            "primary": self._primary,
+            "secondary": self._secondary,
+            "monthly": self._monthly,
+        }[window]
         rows = dict(source)
         if account_ids is not None:
             allowed = set(account_ids)
@@ -578,6 +608,20 @@ async def _async_noop(*args, **kwargs) -> None:
     del args, kwargs
 
 
+def _make_usage_share_key() -> ApiKey:
+    row = ApiKey(
+        id="key-share",
+        name="share",
+        key_hash="hash",
+        key_prefix="sk-share",
+        usage_share_percent=20,
+        account_assignment_scope_enabled=False,
+        is_active=True,
+    )
+    row.account_assignments = []
+    return row
+
+
 def _make_usage_history(
     account_id: str,
     *,
@@ -593,6 +637,182 @@ def _make_usage_history(
         window_minutes=window_minutes,
         recorded_at=recorded_at or utcnow(),
     )
+
+
+@pytest.mark.asyncio
+async def test_usage_share_reads_monthly_history_only_for_monthly_capacity_accounts() -> None:
+    now = utcnow()
+    reset_at = int((now + timedelta(days=3)).timestamp())
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "paid": Account(id="paid", plan_type="plus", status=AccountStatus.ACTIVE),
+        "monthly": Account(id="monthly", plan_type="free", status=AccountStatus.ACTIVE),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={},
+        secondary={
+            "paid": _make_usage_history(
+                "paid",
+                used_percent=10.0,
+                reset_at=reset_at,
+                window_minutes=10_080,
+                recorded_at=now,
+            )
+        },
+        monthly={
+            "monthly": _make_usage_history(
+                "monthly",
+                used_percent=20.0,
+                reset_at=int((now + timedelta(days=20)).timestamp()),
+                window_minutes=43_200,
+                recorded_at=now,
+            )
+        },
+    )
+    row = _make_usage_share_key()
+
+    estimate, unavailable = await ApiKeysService(repo, usage_repo)._usage_share_state(row, now=now)
+
+    assert estimate is not None
+    assert unavailable == ()
+    assert usage_repo.calls == [
+        ("primary", ["paid", "monthly"]),
+        ("secondary", ["paid", "monthly"]),
+        ("monthly", ["monthly"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usage_share_accepts_evidence_written_during_policy_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_at = utcnow()
+    evidence_time = started_at + timedelta(seconds=1)
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "paid": Account(id="paid", plan_type="plus", status=AccountStatus.ACTIVE),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={},
+        secondary={
+            "paid": _make_usage_history(
+                "paid",
+                used_percent=10.0,
+                reset_at=int((started_at + timedelta(days=3)).timestamp()),
+                window_minutes=10_080,
+                recorded_at=evidence_time,
+            )
+        },
+    )
+    monkeypatch.setattr(api_keys_service_module, "utcnow", lambda: evidence_time + timedelta(seconds=1))
+
+    estimate, unavailable = await ApiKeysService(repo, usage_repo)._usage_share_state(
+        _make_usage_share_key(),
+        now=started_at,
+    )
+
+    assert estimate is not None
+    assert unavailable == ()
+    assert len(repo.usage_share_demand_calls) == 1
+    key_id, windows = repo.usage_share_demand_calls[0]
+    assert key_id == "key-share"
+    assert windows["paid"].observed_at == evidence_time
+
+
+@pytest.mark.asyncio
+async def test_usage_share_snapshot_expires_with_routable_reauth_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = utcnow()
+    token_expires_at = now.replace(tzinfo=timezone.utc).timestamp() + 30
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "reauth": Account(id="reauth", plan_type="plus", status=AccountStatus.REAUTH_REQUIRED),
+    }
+    repo._encrypted_access_tokens = {"reauth": b"expiring-token"}
+    usage_repo = _FakeUsageRepository(
+        primary={},
+        secondary={
+            "reauth": _make_usage_history(
+                "reauth",
+                used_percent=10.0,
+                reset_at=int((now + timedelta(days=3)).timestamp()),
+                window_minutes=10_080,
+                recorded_at=now,
+            )
+        },
+    )
+    monkeypatch.setattr(api_keys_service_module, "TokenEncryptor", lambda: object())
+    monkeypatch.setattr(
+        api_keys_service_module,
+        "stored_access_token_expires_at",
+        lambda _token, _encryptor: token_expires_at,
+    )
+    monkeypatch.setattr(api_keys_service_module, "utcnow", lambda: now + timedelta(seconds=1))
+
+    estimate, unavailable = await ApiKeysService(repo, usage_repo)._usage_share_state(
+        _make_usage_share_key(),
+        now=now,
+    )
+
+    assert unavailable == ()
+    assert estimate is not None
+    assert estimate.capacity_credits == 7_560
+    assert estimate.routing_expires_at == int(token_expires_at)
+    assert estimate.snapshot_expires_at == int(token_expires_at)
+
+
+@pytest.mark.asyncio
+async def test_usage_share_pool_excludes_only_known_expired_reauth_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = utcnow()
+    reset_at = int((now + timedelta(days=3)).timestamp())
+    repo = _FakeApiKeysRepository()
+    repo._accounts = {
+        "active": Account(id="active", plan_type="plus", status=AccountStatus.ACTIVE),
+        "expired": Account(id="expired", plan_type="plus", status=AccountStatus.REAUTH_REQUIRED),
+        "unknown": Account(id="unknown", plan_type="plus", status=AccountStatus.REAUTH_REQUIRED),
+    }
+    usage_repo = _FakeUsageRepository(
+        primary={},
+        secondary={
+            account_id: _make_usage_history(
+                account_id,
+                used_percent=10.0,
+                reset_at=reset_at,
+                window_minutes=10_080,
+                recorded_at=now,
+            )
+            for account_id in ("active", "unknown")
+        },
+    )
+    row = _make_usage_share_key()
+    repo._encrypted_access_tokens = {
+        "expired": b"expired-token",
+        "unknown": b"unknown-expiry-token",
+    }
+    inspected_tokens: list[bytes] = []
+
+    def access_token_expires_at(encrypted_token: bytes, _encryptor: object) -> float | None:
+        inspected_tokens.append(encrypted_token)
+        return now.timestamp() + 1 if encrypted_token == b"expired-token" else None
+
+    monkeypatch.setattr(api_keys_service_module, "TokenEncryptor", lambda: object())
+    monkeypatch.setattr(api_keys_service_module, "stored_access_token_expires_at", access_token_expires_at)
+    monkeypatch.setattr(api_keys_service_module, "utcnow", lambda: now + timedelta(seconds=2))
+
+    estimate, unavailable = await ApiKeysService(repo, usage_repo)._usage_share_state(row, now=now)
+
+    assert repo.encrypted_access_token_calls == [["expired", "unknown"]]
+    assert inspected_tokens == [b"expired-token", b"unknown-expiry-token"]
+    assert estimate is not None
+    assert estimate.capacity_credits == 15_120
+    assert unavailable == ()
+    assert usage_repo.calls == [
+        ("primary", ["active", "unknown"]),
+        ("secondary", ["active", "unknown"]),
+    ]
 
 
 @pytest.mark.asyncio

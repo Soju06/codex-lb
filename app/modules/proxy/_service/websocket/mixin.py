@@ -891,6 +891,21 @@ def _refine_websocket_request_kind_from_completion(
         request_state.request_kind = "prewarm"
 
 
+def _admit_websocket_usage_share(
+    proxy: _WebSocketServiceProtocol,
+    request_state: _WebSocketRequestState,
+    api_key: ApiKeyData | None,
+) -> None:
+    if request_state.request_stage == "reattach" or request_state.usage_share_admitted:
+        return
+    proxy._enforce_api_key_usage_share(
+        api_key,
+        request_state.request_log_id or request_state.request_id,
+        "websocket",
+    )
+    request_state.usage_share_admitted = True
+
+
 def _track_websocket_owned_task(
     proxy: _WebSocketServiceProtocol,
     task: asyncio.Task[Any],
@@ -1942,11 +1957,11 @@ class _WebSocketMixin:
                                     )
                                     await proxy._release_websocket_request_state_reservation(request_state)
                                     # The prepared request already owns a request-log row; without
-                                    # this the row is never finalized, so the same logical failure
-                                    # is only visible in request logs when it happens on the first
-                                    # turn (where the connect path writes it).
+                                    # this the row is never finalized. Keep it accountless: the
+                                    # source-owned turn never used the open subscription account,
+                                    # and attributing it there would contaminate subscription demand.
                                     await proxy._write_websocket_connect_failure(
-                                        account_id=account.id,
+                                        account_id=None,
                                         api_key=request_state.api_key or api_key,
                                         request_state=request_state,
                                         error_code="model_source_requires_http_transport",
@@ -2403,6 +2418,12 @@ class _WebSocketMixin:
                 if request_state is not None and not request_state_registered:
                     response_create_request_state = request_state
                     try:
+                        if upstream is not None and account is not None:
+                            _admit_websocket_usage_share(
+                                proxy,
+                                response_create_request_state,
+                                response_create_request_state.api_key or api_key,
+                            )
                         proxy._start_request_state_api_key_reservation_heartbeat(
                             response_create_request_state,
                             api_key=response_create_request_state.api_key or api_key,
@@ -2447,9 +2468,13 @@ class _WebSocketMixin:
                         error_type = error.type if error and error.type else "server_error"
                         error_param = error.param_state if error else None
                         await proxy._release_websocket_request_state_reservation(response_create_request_state)
+                        # A local refusal on a reused socket never consumed the
+                        # open account. Attributing it there feeds the refusal
+                        # back into usage-share demand.
+                        failure_account_id = None if exc.local_pre_dispatch_refusal or account is None else account.id
                         await proxy._write_websocket_connect_failure(
-                            account_id=account.id if account else None,
-                            api_key=api_key,
+                            account_id=failure_account_id,
+                            api_key=response_create_request_state.api_key or api_key,
                             request_state=response_create_request_state,
                             error_code=error_code or "upstream_error",
                             error_message=error_message,
@@ -3343,29 +3368,17 @@ class _WebSocketMixin:
                 client_metadata=client_metadata,
             ),
         )
-        reservation = await proxy._reserve_websocket_api_key_usage(
-            refreshed_api_key,
-            request_model=responses_payload.model,
-            request_service_tier=_facade()._normalize_service_tier_value(
-                dict(responses_payload.to_payload()).get("service_tier")
-            ),
-            request_usage_budget=estimate_api_key_request_usage(responses_payload),
+        request_state, text_data = proxy._prepare_response_bridge_request_state(
+            responses_payload,
+            api_key=refreshed_api_key,
+            api_key_reservation=None,
+            include_type_field=True,
+            attach_event_queue=False,
+            transport=_REQUEST_TRANSPORT_WEBSOCKET,
+            client_metadata=client_metadata,
+            headers=headers,
+            session_id=session_id,
         )
-        try:
-            request_state, text_data = proxy._prepare_response_bridge_request_state(
-                responses_payload,
-                api_key=refreshed_api_key,
-                api_key_reservation=reservation,
-                include_type_field=True,
-                attach_event_queue=False,
-                transport=_REQUEST_TRANSPORT_WEBSOCKET,
-                client_metadata=client_metadata,
-                headers=headers,
-                session_id=session_id,
-            )
-        except ProxyResponseError:
-            await proxy._release_websocket_reservation(reservation)
-            raise
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
@@ -3463,7 +3476,7 @@ class _WebSocketMixin:
             openai_cache_affinity=openai_cache_affinity,
             openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=sticky_threads_enabled,
-            api_key=api_key,
+            api_key=refreshed_api_key,
             synthesized_turn_state=synthesized_turn_state,
         )
         affinity_observation = AffinityObservation.from_policy(
@@ -3516,11 +3529,19 @@ class _WebSocketMixin:
             request_state.fresh_upstream_request_is_retry_safe = True
             request_state.fresh_upstream_request_responses_lite_model = next_responses_lite_model
 
-        return _PreparedWebSocketRequest(
+        prepared = _PreparedWebSocketRequest(
             text_data=text_data,
             request_state=request_state,
             affinity_policy=affinity_policy,
         )
+        request_state.api_key_reservation = await proxy._reserve_websocket_api_key_usage(
+            refreshed_api_key,
+            request_model=responses_payload.model,
+            request_service_tier=request_state.requested_service_tier,
+            request_usage_budget=estimate_api_key_request_usage(responses_payload),
+        )
+        request_state.api_key_reservation_last_touch_at = clock_for(proxy).monotonic()
+        return prepared
 
     async def _revalidate_open_websocket_account(
         self,
@@ -3574,6 +3595,7 @@ class _WebSocketMixin:
     ) -> tuple[Account | None, UpstreamWebSocket | None]:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        request_api_key = request_state.api_key or api_key
 
         async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
             if request_state.api_key_reservation is not None:
@@ -3632,7 +3654,7 @@ class _WebSocketMixin:
             and request_state.previous_response_owner_account_id is None
             and await responses_model_is_source_owned(
                 model,
-                request_state.api_key or api_key,
+                request_api_key,
                 # ``model`` is the session loop's post-enforcement
                 # ``request_state.model``; the raw client alias captured at
                 # preparation is what an alias-only source is registered under.
@@ -3649,13 +3671,13 @@ class _WebSocketMixin:
                 request_state.request_log_id or request_state.request_id,
                 model,
                 request_state.raw_source_model,
-                (request_state.api_key or api_key) is not None,
+                request_api_key is not None,
             )
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
                 account_id=None,
-                api_key=request_state.api_key or api_key,
+                api_key=request_api_key,
                 request_state=request_state,
                 # 503 (not 4xx) is deliberate: Codex clients only fall back to
                 # the HTTP transport when a WebSocket connect fails at the
@@ -3669,6 +3691,26 @@ class _WebSocketMixin:
                 ),
                 error_code="model_source_requires_http_transport",
                 error_message=message,
+            )
+            return None, None
+        try:
+            _admit_websocket_usage_share(proxy, request_state, request_api_key)
+        except ProxyResponseError as exc:
+            error = _parse_openai_error(exc.payload)
+            await proxy._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=request_api_key,
+                request_state=request_state,
+                status_code=exc.status_code,
+                payload=exc.payload,
+                error_code=_normalize_error_code(
+                    error.code if error else None,
+                    error.type if error else None,
+                )
+                or "upstream_error",
+                error_message=error.message if error and error.message else "Upstream error",
             )
             return None, None
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
@@ -3703,7 +3745,7 @@ class _WebSocketMixin:
                     routing_strategy=routing_strategy,
                     model=model,
                     request_state=request_state,
-                    api_key=api_key,
+                    api_key=request_api_key,
                     client_send_lock=client_send_lock,
                     websocket=websocket,
                     downstream_activity=downstream_activity,
@@ -3731,7 +3773,7 @@ class _WebSocketMixin:
                         websocket=websocket,
                         client_send_lock=client_send_lock,
                         account_id=None,
-                        api_key=api_key,
+                        api_key=request_api_key,
                         request_state=request_state,
                     )
                     return None, None
@@ -3758,7 +3800,7 @@ class _WebSocketMixin:
                     account,
                     headers,
                     deadline=deadline,
-                    api_key=api_key,
+                    api_key=request_api_key,
                     request_state=request_state,
                     client_send_lock=client_send_lock,
                     websocket=websocket,
@@ -3804,7 +3846,7 @@ class _WebSocketMixin:
                         websocket,
                         client_send_lock=client_send_lock,
                         account_id=account.id,
-                        api_key=api_key,
+                        api_key=request_api_key,
                         request_state=request_state,
                         status_code=refresh_failure.status_code,
                         payload=refresh_failure.payload,
@@ -3870,7 +3912,7 @@ class _WebSocketMixin:
                     websocket,
                     client_send_lock=client_send_lock,
                     account_id=account.id,
-                    api_key=api_key,
+                    api_key=request_api_key,
                     request_state=request_state,
                     status_code=exc.status_code,
                     payload=exc.payload,
@@ -3897,7 +3939,7 @@ class _WebSocketMixin:
                 websocket,
                 client_send_lock=client_send_lock,
                 account_id=last_failover_account.id,
-                api_key=api_key,
+                api_key=request_api_key,
                 request_state=request_state,
                 status_code=last_failover_exc.status_code,
                 payload=last_failover_exc.payload,
@@ -4821,7 +4863,7 @@ class _WebSocketMixin:
 
         with anyio.CancelScope(shield=True):
             async with proxy._repo_factory() as repos:
-                service = ApiKeysService(repos.api_keys)
+                service = ApiKeysService(repos.api_keys, usage_repository=repos.usage)
                 try:
                     return await service.get_key_by_id(api_key.id)
                 except ApiKeyInvalidError as exc:

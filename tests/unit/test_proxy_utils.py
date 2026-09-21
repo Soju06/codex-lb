@@ -6,6 +6,7 @@ import gc
 import hashlib
 import json
 import logging
+import re
 import socket
 import ssl
 import sys
@@ -9927,7 +9928,7 @@ async def test_native_codex_stream_preserves_missing_terminal_without_synthesis(
 
 
 @pytest.mark.asyncio
-async def test_native_codex_stream_suppresses_marked_synthetic_transport_terminal() -> None:
+async def test_native_codex_stream_translates_marked_synthetic_transport_terminal() -> None:
     async def synthetic_failure_stream() -> AsyncIterator[str]:
         yield (
             'data: {"type":"response.failed","_codex_lb_synthetic_transport_failure":true,'
@@ -9936,19 +9937,34 @@ async def test_native_codex_stream_suppresses_marked_synthetic_transport_termina
         )
         yield "data: [DONE]\n\n"
 
-    with pytest.raises(proxy_module.ProxyResponseError):
-        _ = [
-            event_block
-            async for event_block in proxy_api._normalize_public_responses_stream(
-                synthetic_failure_stream(),
-                enforce_openai_sdk_contract=False,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
+    events = [
+        event_block
+        async for event_block in proxy_api._normalize_public_responses_stream(
+            synthetic_failure_stream(),
+            enforce_openai_sdk_contract=False,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    # codex-lb has already given up: rather than re-raising (which would
+    # close the already-200'd stream with zero bytes), it must emit exactly
+    # one terminal ``response.failed`` naming a retryable code, then end the
+    # stream (the ``data: [DONE]`` upstream sent after the marked event is
+    # never reached/forwarded).
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "rate_limit_exceeded"
+    error_message = cast(str, error["message"])
+    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert "upstream_request_timeout" in error_message
 
 
 @pytest.mark.asyncio
-async def test_native_codex_stream_suppresses_marked_incomplete_terminal_as_eof() -> None:
+async def test_native_codex_stream_translates_marked_incomplete_terminal() -> None:
     async def synthetic_failure_stream() -> AsyncIterator[str]:
         yield (
             'data: {"type":"response.failed","_codex_lb_synthetic_transport_failure":true,'
@@ -9957,15 +9973,65 @@ async def test_native_codex_stream_suppresses_marked_incomplete_terminal_as_eof(
         )
         yield "data: [DONE]\n\n"
 
-    with pytest.raises(proxy_module.ProxyResponseError):
-        _ = [
-            event_block
-            async for event_block in proxy_api._normalize_public_responses_stream(
-                synthetic_failure_stream(),
-                enforce_openai_sdk_contract=False,
-                preserve_native_failure_lifecycle=True,
+    events = [
+        event_block
+        async for event_block in proxy_api._normalize_public_responses_stream(
+            synthetic_failure_stream(),
+            enforce_openai_sdk_contract=False,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "rate_limit_exceeded"
+    error_message = cast(str, error["message"])
+    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert "stream_incomplete" in error_message
+
+
+@pytest.mark.asyncio
+async def test_native_giveup_closes_the_inner_stream_chain() -> None:
+    class ClosableStream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._blocks = iter(
+                [
+                    'data: {"type":"response.failed","_codex_lb_synthetic_transport_failure":true,'
+                    '"response":{"status":"failed","error":{"code":"stream_incomplete",'
+                    '"message":"Native upstream transport ended before a terminal event"}}}\n\n',
+                    "data: [DONE]\n\n",
+                ]
             )
-        ]
+
+        def __aiter__(self) -> "ClosableStream":
+            return self
+
+        async def __anext__(self) -> str:
+            try:
+                return next(self._blocks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    source = ClosableStream()
+    events = [
+        event_block
+        async for event_block in proxy_api._normalize_public_responses_stream(
+            source,
+            enforce_openai_sdk_contract=False,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    assert source.closed is True
 
 
 @pytest.mark.asyncio
@@ -9991,26 +10057,118 @@ async def test_non_native_stream_emits_synthetic_transport_terminal_without_inte
 
 
 @pytest.mark.asyncio
-async def test_native_codex_stream_reraises_transport_failure_without_terminal_event() -> None:
+async def test_native_codex_stream_emits_retryable_terminal_event_instead_of_reraising() -> None:
+    class FailingClosableStream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __aiter__(self) -> "FailingClosableStream":
+            return self
+
+        async def __anext__(self) -> str:
+            raise proxy_module.ProxyResponseError(
+                502,
+                openai_error("upstream_request_timeout", "timed out; try again in 99s"),
+                retry_after_seconds=7,
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    failed_stream = FailingClosableStream()
+
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream,
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    # Starlette has already sent the 200 by the time codex-lb gives up here,
+    # so a bare re-raise used to close the stream with zero bytes (the
+    # "Stream disconnected before completion" symptom). It must instead
+    # surface exactly one named, retryable terminal event.
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "rate_limit_exceeded"
+    error_message = cast(str, error["message"])
+    assert "upstream_request_timeout" in error_message
+    assert "timed out; try again in 99s" in error_message
+    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert match is not None
+    assert match.group(1) == "7"
+    assert failed_stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_error_events_default_retry_delay_when_unknown() -> None:
     async def failed_stream() -> AsyncIterator[str]:
         raise proxy_module.ProxyResponseError(
             502,
-            openai_error("upstream_request_timeout", "timed out"),
+            openai_error("stream_idle_timeout", "idle too long"),
         )
         yield ""  # pragma: no cover
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        _ = [
-            event
-            async for event in proxy_api._stream_response_error_events(
-                failed_stream(),
-                owns_reservation=False,
-                reservation=None,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
 
-    assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "rate_limit_exceeded"
+    error_message = cast(str, error["message"])
+    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert match is not None
+    assert match.group(1) == "5"
+
+
+@pytest.mark.asyncio
+async def test_native_codex_stream_error_events_unaffected_for_non_giveup_codes() -> None:
+    """Errors outside the overload/transport-failure set are untouched by
+    this patch: they keep going through the pre-existing terminal-event path
+    with their own code (not relabeled to rate_limit_exceeded, and not
+    re-raised -- only the four give-up codes are special-cased for native
+    clients)."""
+
+    async def failed_stream() -> AsyncIterator[str]:
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("bridge_continuity_persistence_failed", "retry the request"),
+        )
+        yield ""  # pragma: no cover
+
+    events = [
+        event
+        async for event in proxy_api._stream_response_error_events(
+            failed_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = parse_sse_data_json(events[0])
+    assert payload is not None
+    response = cast(dict[str, JsonValue], payload["response"])
+    error = cast(dict[str, JsonValue], response["error"])
+    assert error["code"] == "bridge_continuity_persistence_failed"
 
 
 @pytest.mark.asyncio
@@ -10021,8 +10179,8 @@ async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmark
     ``stream_incomplete``, which is also how an upstream transport failure ends,
     so without the provenance flag the native lifecycle aborted the committed
     body and the client received nothing at all. The terminal must also stay
-    unmarked — ``_normalize_public_responses_stream`` turns a terminal marked as
-    a synthetic transport failure back into an abort for native clients.
+    unmarked — proxy-owned refusals must not be relabeled as exhausted upstream
+    transport.
     """
 
     def _refusal(*, local_pre_dispatch_refusal: bool) -> proxy_module.ProxyResponseError:
@@ -10062,20 +10220,24 @@ async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmark
         raise _refusal(local_pre_dispatch_refusal=False)
         yield ""  # pragma: no cover
 
-    # The same error without the provenance flag still ends the native stream
-    # without a terminal: the flag is the whole of the new behaviour.
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        _ = [
-            event
-            async for event in proxy_api._stream_response_error_events(
-                unflagged_stream(),
-                owns_reservation=False,
-                reservation=None,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
-
-    assert _proxy_error_code(exc_info.value) == "stream_incomplete"
+    # An observed upstream transport failure now gets the same named terminal
+    # even without the local-refusal provenance flag. The flag still matters
+    # because it keeps a proxy-owned refusal on the original public code and
+    # prevents synthetic transport marking.
+    unflagged_events = [
+        parse_sse_data_json(event)
+        async for event in proxy_api._stream_response_error_events(
+            unflagged_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+    assert len(unflagged_events) == 1
+    assert unflagged_events[0] is not None
+    unflagged_response = cast(dict[str, JsonValue], unflagged_events[0]["response"])
+    unflagged_error = cast(dict[str, JsonValue], unflagged_response["error"])
+    assert unflagged_error["code"] == "rate_limit_exceeded"
 
 
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
@@ -20729,6 +20891,70 @@ async def test_stream_with_retry_finalizes_generated_terminal_failure_before_dow
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     settle_stream_usage.assert_awaited_once()
     record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_stream_with_retry_keeps_exhausted_transport_marker(monkeypatch):
+    """A native committed stream must hand transport provenance to the API edge."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_native_retry_generated_terminal")
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_native_retry_generated_terminal",
+        key_id="key_native_retry_generated_terminal",
+        model="gpt-5.1",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    settle_stream_usage = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_stream_usage)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_stream_once(*args: object, **kwargs: object):
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        settlement.downstream_visible = True
+        settlement.response_id = "resp_native_retry_generated_terminal"
+        yield (
+            'data: {"type":"response.created","response":{"id":"resp_native_retry_generated_terminal",'
+            '"status":"in_progress","output":[]}}\n\n'
+        )
+        raise streaming_retry_module._TransientStreamError(
+            "upstream_unavailable",
+            {"message": "transport exploded after first event"},
+        )
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_with_retry(
+        payload,
+        {"originator": "codex_exec"},
+        codex_session_affinity=False,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=reservation,
+        suppress_text_done_events=False,
+        request_transport="http",
+        upstream_stream_transport_override="http",
+        enforce_openai_sdk_contract=False,
+    )
+
+    first_chunk = await anext(stream)
+    terminal_chunk = await anext(stream)
+    assert "response.created" in first_chunk
+    terminal = json.loads(terminal_chunk.split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal[SYNTHETIC_TRANSPORT_FAILURE_MARKER] is True
+    assert terminal["response"]["error"]["code"] == "upstream_unavailable"
+    await cast(Any, stream).aclose()
+    settle_stream_usage.assert_awaited_once()
 
 
 @pytest.mark.asyncio

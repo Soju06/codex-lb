@@ -14760,6 +14760,39 @@ def test_backend_responses_websocket_retries_anchored_precreated_model_rejection
 
 
 @pytest.mark.parametrize(("status", "error"), _PRECREATED_MODEL_REJECTIONS)
+def test_backend_responses_websocket_preserves_exhausted_precreated_model_rejection(
+    app_instance,
+    monkeypatch,
+    status,
+    error,
+):
+    """Exhausted movable model replay returns the rejected account's envelope.
+
+    The first rejection may move to one sibling account, but when that account
+    rejects the same model too, the client must see the original upstream
+    status/code/message instead of the synthetic no-owner connection failure.
+    """
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[_ws_event({"type": "error", "status": status, "error": error})]],
+    )
+    second_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[[_ws_event({"type": "error", "status": status, "error": error})]],
+    )
+    failover = _TwoAccountWebSocketFailover(first_upstream, second_upstream)
+    failover.install(monkeypatch)
+
+    events, disconnect = failover.run(app_instance)
+
+    assert disconnect is None
+    assert events == [{"type": "error", "status": status, "error": error}]
+    assert failover.connect_accounts == [failover.FIRST_ACCOUNT_ID, failover.SECOND_ACCOUNT_ID]
+    assert len(first_upstream.sent_text) == 1
+    assert len(second_upstream.sent_text) == 1
+
+
+@pytest.mark.parametrize(("status", "error"), _PRECREATED_MODEL_REJECTIONS)
 def test_backend_responses_websocket_surfaces_a_turn_state_owner_precreated_model_rejection(
     app_instance,
     monkeypatch,

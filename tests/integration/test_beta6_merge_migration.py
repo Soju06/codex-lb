@@ -49,7 +49,9 @@ def _verify_beta6_upgrade(url: str, starting_revision: str | None) -> None:
         assert inspect(engine).has_table("request_report_hourly_rollups")
         assert "ix_api_keys_usage_group" in {index["name"] for index in inspect(engine).get_indexes("api_keys")}
         with engine.connect() as conn:
-            assert conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == [_MERGED_HEAD]
+            assert conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all() == [
+                ScriptDirectory.from_config(_build_alembic_config(url)).get_current_head()
+            ]
             if starting_revision is not None:
                 row = conn.execute(text("SELECT id, name, usage_group FROM api_keys")).one()
                 assert tuple(row) == ("existing", "Existing", "team-a" if starting_revision == _GROUP_HEAD else None)
@@ -81,7 +83,8 @@ def _verify_beta6_upgrade(url: str, starting_revision: str | None) -> None:
 def test_beta6_merge_keeps_deployed_group_parent_and_one_head(tmp_path: Path) -> None:
     config = _build_alembic_config(f"sqlite+aiosqlite:///{tmp_path / 'graph.db'}")
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == [_MERGED_HEAD]
+    assert len(scripts.get_heads()) == 1
+    assert _MERGED_HEAD in {revision.revision for revision in scripts.walk_revisions()}
     group = scripts.get_revision(_GROUP_HEAD)
     assert group is not None
     assert group.down_revision == "20260830_000000_add_quota_warmup_claim_expiry"

@@ -76,3 +76,17 @@ If overview, projections, and request-log options return successfully while the 
 ### Testing notes
 
 The product-boundary regression renders the real `/dashboard` App route with the production query retry policy and MSW handlers. It counts each request family, seeds unique values for a statistic, quota surface, projection metric, and account control, focuses and keyboard-activates native Retry, holds the recovered listing response pending long enough to assert all healthy surfaces remain mounted, and then verifies the recovered row.
+
+## Reset-credit reconciliation
+
+Reset mutations update the selected account through the authenticated account-summary endpoint and merge it by id into Accounts and dashboard caches. Account-specific trends and both reset-credit details queries are invalidated exactly; mutations do not reload the complete list. Dashboard quota windows/totals use the updated account values; overlapping aggregate projection refreshes share the active request.
+
+A missing snapshot has null freshness and is shown as pending after redemption. Up to four targeted reads reconcile it; failure never retries the consume. Confirmed reset, a redeemed credit with no reset, and an unknown result have distinct messages. For example, redeeming X preserves Y's Reset count, current selection, and scroll; X can move if its new value changes the active sort. Normal periodic polling remains the fallback after bounded reconciliation.
+
+See the [frontend requirements](spec.md) and [reset-credit operational context](../rate-limit-reset-credits/context.md) for timing, replica behavior, and recovery limits.
+
+Reset reconciliation state is scoped to the QueryClient, so ordinary account/dashboard query replacement cannot remove the pending flag. Query generations reject responses started before a newer targeted merge, and snapshot timestamps reject older reset-credit fields. Fresh polls remain authoritative for health, policy, usage and identity; a paused/ineligible account with intentionally null snapshot freshness cannot be replaced by the old active summary. A later fresh poll clears pending state for its account. Deleting an account clears its reconciliation state.
+
+Targeted dashboard quota totals exclude entries with no usage sample, matching backend summary eligibility. For example, a restored 100-credit account plus an unsampled 100-credit plan remains 100/100 (100%), rather than 100/200. Polls that only resolve reset freshness retain their server-provided aggregate data.
+
+Unresolved manual request IDs also live in the QueryClient scope, surviving dialog dismissal or page/dialog remounting within the same client session. A terminal result releases the ID; errors and unknown outcomes retain it. This keeps ordinary dialog retries compatible with backend credit-level conflict protection and prevents a new request from consuming a different credit during recovery.

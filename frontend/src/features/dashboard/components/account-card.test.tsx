@@ -212,3 +212,9 @@ describe("AccountCard", () => {
     expect(onAction).not.toHaveBeenCalledWith(account, "reset-credit");
   });
 });
+
+
+it("keeps a disabled pending reset visible while its snapshot is missing", () => {
+  render(<AccountCard account={createAccountSummary({ availableResetCredits: 0, resetCreditRefreshPending: true })} />);
+  expect(screen.getByRole("button", { name: "Reset pending…" })).toBeDisabled();
+});

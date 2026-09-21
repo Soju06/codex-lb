@@ -41,7 +41,7 @@ from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
-from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
+from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends, duplicate_detection_key
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
@@ -139,6 +139,13 @@ class AccountsService:
         )
         if not accounts:
             return []
+        duplicate_account_ids: set[str] | None = None
+        if account_ids is not None:
+            duplicate_account_ids = set()
+            for account in accounts:
+                identity = duplicate_detection_key(account)
+                if identity is not None and await self._repo.has_duplicate_identity(account.id, identity):
+                    duplicate_account_ids.add(account.id)
         visible_account_ids = [account.id for account in accounts]
         account_id_set = set(visible_account_ids)
         usage_account_ids = visible_account_ids if account_ids is not None else None
@@ -231,6 +238,7 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
+            duplicate_account_ids=duplicate_account_ids,
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:

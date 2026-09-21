@@ -578,9 +578,11 @@ async def lifespan(app: FastAPI):
     # The route resolver also reads the dashboard settings row (routing enabled
     # + default pool id), so settings bumps clear resolved routes as well.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_upstream_route_cache().clear)
-    # The bus carries no payload, so a peer redeem clears this replica's whole
-    # reset-credits store; the refresh scheduler repopulates it on its next tick.
-    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, get_rate_limit_reset_credits_store().invalidate)
+    from app.modules.rate_limit_reset_credits.invalidation import ResetCreditInvalidationTracker
+
+    reset_credit_tracker = ResetCreditInvalidationTracker(get_rate_limit_reset_credits_store())
+    await reset_credit_tracker.initialize()
+    cache_poller.on_invalidation(NAMESPACE_RESET_CREDITS, reset_credit_tracker.reconcile)
     if settings.model_registry_enabled:
         from app.core.openai.model_registry_store import reconcile_model_registry_from_store
 

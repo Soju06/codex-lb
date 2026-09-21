@@ -25,6 +25,7 @@ class RateLimitResetCreditsStore:
         self._lock = anyio.Lock()
         self._clear_generation = 0
         self._account_generations: dict[str, int] = {}
+        self._observed_revisions: dict[str, int] = {}
 
     async def set(self, account_id: str, snapshot: RateLimitResetCreditsSnapshot) -> None:
         async with self._lock:
@@ -61,7 +62,10 @@ class RateLimitResetCreditsStore:
             updated_credits, matched = _mark_credit_redeemed(snapshot.credits, credit_id, redeemed_at=redeemed_at)
             if not matched:
                 return
-            available_count = sum(1 for credit in updated_credits if credit.status == "available")
+            available_count = min(
+                snapshot.available_count,
+                sum(1 for credit in updated_credits if credit.status == "available"),
+            )
             self._snapshots[account_id] = snapshot.model_copy(
                 update={
                     "available_count": available_count,
@@ -74,10 +78,24 @@ class RateLimitResetCreditsStore:
     def get(self, account_id: str) -> RateLimitResetCreditsSnapshot | None:
         return self._snapshots.get(account_id)
 
+    async def acknowledge_revision(self, account_id: str, revision: int | None) -> None:
+        if revision is not None:
+            async with self._lock:
+                self._observed_revisions[account_id] = max(revision, self._observed_revisions.get(account_id, 0))
+
+    async def invalidate_revision(self, account_id: str, revision: int) -> None:
+        async with self._lock:
+            if revision <= self._observed_revisions.get(account_id, 0):
+                return
+            self._observed_revisions[account_id] = revision
+            self._snapshots.pop(account_id, None)
+            self._bump_account_generation(account_id)
+
     async def invalidate(self, account_id: str | None = None) -> None:
         async with self._lock:
             if account_id is None:
                 self._snapshots.clear()
+                self._observed_revisions.clear()
                 self._clear_generation += 1
                 return
             self._snapshots.pop(account_id, None)

@@ -977,6 +977,7 @@ async def test_v1_reset_credit_post_refreshes_account_before_consuming_credit(
         chatgpt_account_id: str,
         credit_id: str,
         *,
+        redeem_request_id: str | None = None,
         route: object | None = None,
         allow_direct_egress: bool = False,
     ):
@@ -1161,6 +1162,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         chatgpt_account_id: str,
         credit_id: str,
         *,
+        redeem_request_id: str | None = None,
         route: object | None = None,
         allow_direct_egress: bool = False,
     ):
@@ -1285,6 +1287,7 @@ async def test_v1_reset_credit_post_preserves_success_when_post_redeem_usage_ref
         chatgpt_account_id: str,
         credit_id: str,
         *,
+        redeem_request_id: str | None = None,
         route: object | None = None,
         allow_direct_egress: bool = False,
     ):

@@ -72,8 +72,9 @@ export function AccountActions({
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
   const availableResetCredits = account.availableResetCredits ?? 0;
-  const hasResetCredits = availableResetCredits > 0;
+  const hasResetCredits = availableResetCredits > 0 || account.resetCreditRefreshPending;
   const resetCreditDisabled =
+    account.resetCreditRefreshPending ||
     busy ||
     readOnly ||
     account.status === "paused" ||
@@ -220,7 +221,7 @@ export function AccountActions({
             disabled={resetCreditDisabled}
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            {t("accounts.actions.resetWithCount", { count: availableResetCredits })}
+            {account.resetCreditRefreshPending ? t("accounts.actions.resetPending") : t("accounts.actions.resetWithCount", { count: availableResetCredits })}
             {resetCountdown ? (
               <span
                 aria-hidden="true"

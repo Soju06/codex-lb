@@ -241,6 +241,24 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def has_duplicate_identity(self, account_id: str, identity: tuple[str, str, str | None]) -> bool:
+        email, chatgpt_account_id, workspace_key = identity
+        workspace = func.coalesce(func.nullif(Account.workspace_id, ""), Account.workspace_label)
+        return (
+            await self._session.scalar(
+                select(Account.id)
+                .where(
+                    Account.id != account_id,
+                    Account.delete_requested_at.is_(None),
+                    Account.email == email,
+                    Account.chatgpt_account_id == chatgpt_account_id,
+                    workspace == workspace_key,
+                )
+                .limit(1)
+            )
+            is not None
+        )
+
     async def list_request_usage_summary_by_account(
         self,
         account_ids: list[str] | None = None,

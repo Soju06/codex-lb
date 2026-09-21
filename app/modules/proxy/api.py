@@ -45,7 +45,6 @@ from app.core.auth.dependencies import (
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
@@ -339,8 +338,11 @@ from app.modules.proxy.types import (
     RateLimitStatusPayloadData,
     RateLimitWindowSnapshotData,
 )
+from app.modules.rate_limit_reset_credits import outcomes as reset_credit_outcomes
 from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_redeem
-from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
+from app.modules.rate_limit_reset_credits.invalidation import publish_reset_credit_invalidation
+from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError, pin_redeem_request
+from app.modules.rate_limit_reset_credits.settlement import settle_received_result
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.mappers import usage_history_to_window_row
@@ -1976,23 +1978,45 @@ async def v1_redeem_reset_credit(
             )
             if credit is None:
                 raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+            previous = await reset_credit_outcomes.find_credit_request(account_id, credit.id)
+            if previous is not None and previous.outcome in {"confirmed_reset", "no_reset", "expired"}:
+                raise HTTPException(status_code=409, detail="Requested reset credit is unavailable")
+            request_id = previous.redeem_request_id if previous else uuid4().hex
+            await pin_redeem_request(account_id, request_id, credit.id)
+            await reset_credit_outcomes.begin_attempt(
+                account_id,
+                request_id,
+                expires_at=credit.expires_at,
+                automatic=False,
+            )
             try:
                 result = await consume_reset_credit(
                     access_token,
                     redeem_credentials.chatgpt_account_id,
                     credit.id,
+                    redeem_request_id=request_id,
                     route=route,
                     allow_direct_egress=route is None,
                 )
             except ConsumeResetCreditError as exc:
+                await reset_credit_outcomes.finish_attempt(account_id, request_id, "unknown")
                 if _should_invalidate_v1_reset_credit_snapshot_on_consume_error(exc):
                     await get_rate_limit_reset_credits_store().invalidate(account_id)
-                    await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
+                    await publish_reset_credit_invalidation(account_id)
                 raise _translate_v1_reset_credit_consume_error(exc) from exc
-            await get_rate_limit_reset_credits_store().invalidate(account_id)
-            await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
+            status = reset_credit_outcomes.classify(result, credit.id)
+            await settle_received_result(
+                account_id,
+                request_id,
+                status,
+                result=result,
+                store=get_rate_limit_reset_credits_store(),
+                actor_ip=request.client.host if request.client else None,
+            )
             try:
-                await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+                if status == "confirmed_reset":
+                    await _refresh_usage_after_v1_reset_credit_redeem(account_id)
+                    await reset_credit_outcomes.mark_usage_verified(account_id, request_id)
             except Exception:
                 logger.warning(
                     "V1 reset credit consume succeeded but usage refresh failed account_id=%s",
@@ -2034,10 +2058,7 @@ async def _refresh_usage_after_v1_reset_credit_redeem(account_id: str) -> None:
     if refreshed:
         get_account_selection_cache().invalidate()
         return
-    logger.warning(
-        "V1 reset credit consume succeeded but usage refresh returned no update account_id=%s",
-        account_id,
-    )
+    raise RuntimeError(f"Reset credit usage refresh returned no update for account {account_id}")
 
 
 async def _run_v1_warmup(

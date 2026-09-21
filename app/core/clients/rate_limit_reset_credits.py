@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiohttp
 from aiohttp_retry import RetryClient
@@ -96,6 +96,7 @@ class RateLimitResetCreditsSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     available_count: int = 0
     nearest_expires_at: datetime | None = None
     credits: list[ResetCreditItem] = Field(default_factory=list)

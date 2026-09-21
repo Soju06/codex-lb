@@ -756,6 +756,23 @@ class ResetCreditRedeemRequest(Base):
     redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
     credit_id: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    credit_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    origin: Mapped[str] = mapped_column(String, nullable=False, default="legacy", server_default="legacy")
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="unknown", server_default="unknown")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    upstream_code: Mapped[str | None] = mapped_column(String)
+    windows_reset: Mapped[int | None] = mapped_column(Integer)
+    redeemed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    usage_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+
+
+class ResetCreditSnapshotRevision(Base):
+    __tablename__ = "reset_credit_snapshot_revisions"
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
 
 
 class ResetCreditRedeemClaim(Base):

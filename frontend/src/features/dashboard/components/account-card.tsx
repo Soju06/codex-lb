@@ -123,13 +123,14 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
     ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
-  const hasResetCredits = availableResetCredits > 0;
+  const hasResetCredits = availableResetCredits > 0 || account.resetCreditRefreshPending;
   const resetCreditDisabled =
+    account.resetCreditRefreshPending ||
     readOnly || status === "paused" || status === "reauth" || status === "deactivated";
   const resetCountdown = account.resetCreditNearestExpiresAt
     ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
     : null;
-  const resetButtonTitle = resetCreditDisabled
+  const resetButtonTitle = account.resetCreditRefreshPending ? t("accounts.actions.resetPending") : resetCreditDisabled
     ? status === "paused"
       ? t("dashboard.accounts.resetCreditTitles.resumeRequired")
       : status === "reauth" || status === "deactivated"
@@ -239,7 +240,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             onClick={() => onAction?.(account, "reset-credit")}
           >
             <RotateCcw className="h-3 w-3" />
-            {t("dashboard.accounts.resetWithCount", { count: availableResetCredits })}
+            {account.resetCreditRefreshPending ? t("accounts.actions.resetPending") : t("dashboard.accounts.resetWithCount", { count: availableResetCredits })}
             {resetCountdown ? (
               <span
                 aria-hidden="true"

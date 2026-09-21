@@ -1,12 +1,13 @@
 import { HttpResponse, http } from "msw";
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { createAccountSummary } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { formatDateTimeInline } from "@/utils/formatters";
 
@@ -19,6 +20,7 @@ vi.mock("sonner", () => ({
   toast: {
     success: toastSuccess,
     error: toastError,
+    info: vi.fn(),
   },
 }));
 
@@ -60,8 +62,49 @@ function snapshotResponse() {
 }
 
 describe("ResetCreditConfirmDialog", () => {
+  it("retains unresolved request identity across closing and remounting the dialog", async () => {
+    const user = userEvent.setup();
+    const bodies: Array<{ redeemRequestId: string }> = [];
+    server.use(
+      http.get(SNAPSHOT_URL, snapshotResponse),
+      http.post(CONSUME_URL, async ({ request }) => {
+        bodies.push(await request.json() as { redeemRequestId: string });
+        if (bodies.length === 1) {
+          return HttpResponse.json({ error: { code: "temporary_upstream_error", message: "Temporary failure" } }, { status: 503 });
+        }
+        return HttpResponse.json({ code: "reset", outcome: "confirmed_reset", windowsReset: 1, redeemedAt: null });
+      }),
+    );
+    function Harness() {
+      const [open, setOpen] = useState(true);
+      return <>
+        <button onClick={() => setOpen(true)}>Open reset</button>
+        {open && <ResetCreditConfirmDialog open onOpenChange={setOpen} accountId="acc_primary" />}
+      </>;
+    }
+    renderWithClient(<Harness />);
+    await screen.findByText("1 free rate limit reset");
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Redeem credit" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open reset" }));
+    await screen.findByText("1 free rate limit reset");
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].redeemRequestId).toBe(bodies[0].redeemRequestId);
+    // A confirmed receipt releases identity for the next intentional reset.
+    await user.click(screen.getByRole("button", { name: "Open reset" }));
+    await screen.findByText("1 free rate limit reset");
+    await user.click(screen.getByRole("button", { name: "Redeem credit" }));
+    await waitFor(() => expect(bodies).toHaveLength(3));
+    expect(bodies[2].redeemRequestId).not.toBe(bodies[0].redeemRequestId);
+  });
+
   beforeEach(() => {
     useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+    server.use(http.get("/api/accounts/acc_primary/summary", () => HttpResponse.json(createAccountSummary({ accountId: "acc_primary", resetCreditFetchedAt: "2026-09-21T00:00:00Z" }))));
   });
 
   it("confirms and consumes the soonest reset credit, then invalidates queries", async () => {
@@ -73,7 +116,8 @@ describe("ResetCreditConfirmDialog", () => {
       http.post(CONSUME_URL, () => {
         consumeCalled();
         return HttpResponse.json({
-          code: "rate_limit_reset",
+          code: "reset",
+          outcome: "confirmed_reset",
           windowsReset: 1,
           redeemedAt: "2026-01-01T12:00:00.000Z",
         });
@@ -111,10 +155,11 @@ describe("ResetCreditConfirmDialog", () => {
     await vi.waitFor(() =>
       expect(toastSuccess).toHaveBeenCalledWith("Rate-limit window reset (1)"),
     );
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
+    await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["accounts", "list"] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["accounts", "trends", "acc_primary"], exact: true });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "overview"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["dashboard", "projections"] });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
@@ -178,7 +223,8 @@ describe("ResetCreditConfirmDialog", () => {
           );
         }
         return HttpResponse.json({
-          code: "rate_limit_reset",
+          code: "reset",
+          outcome: "confirmed_reset",
           windowsReset: 1,
           redeemedAt: "2026-01-01T12:00:00.000Z",
         });
@@ -298,7 +344,8 @@ describe("ResetCreditConfirmDialog", () => {
       http.post(CONSUME_URL, () => {
         consumeCalled();
         return HttpResponse.json({
-          code: "rate_limit_reset",
+          code: "reset",
+          outcome: "confirmed_reset",
           windowsReset: 1,
           redeemedAt: "2026-01-01T12:00:00.000Z",
         });

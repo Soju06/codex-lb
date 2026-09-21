@@ -5,6 +5,7 @@ from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Request
@@ -99,7 +100,13 @@ def fake_redeem_ledger(monkeypatch: pytest.MonkeyPatch) -> dict[tuple[str, str],
     The real DB-backed ledger is covered by
     tests/integration/test_reset_credits_replica_safety.py.
     """
+    monkeypatch.setattr(
+        "app.modules.rate_limit_reset_credits.settlement.publish_reset_credit_invalidation",
+        AsyncMock(return_value=None),
+    )
     ledger: dict[tuple[str, str], str] = {}
+    for name in ("get_request", "find_credit_request", "begin_attempt", "finish_attempt", "mark_usage_verified"):
+        monkeypatch.setattr(reset_credits_api.outcomes, name, AsyncMock(return_value=None))
 
     async def get_pinned(account_id: str, redeem_request_id: str) -> str | None:
         return ledger.get((account_id, redeem_request_id))
@@ -446,7 +453,7 @@ async def test_redeem_retries_same_request_id_after_local_credit_vanishes_with_d
     assert result.response.code == "already_redeemed"
     assert result.available_count_before == 0
     assert result.available_count_after == 0
-    assert store.get("acc_1") is None
+    assert store.get("acc_1") is not None
     # The pre-existing durable pin is preserved.
     assert fake_redeem_ledger == {("acc_1", "retry-id"): "cached"}
 
@@ -523,7 +530,7 @@ async def test_redeem_retries_same_request_id_after_local_credit_vanishes(
         "redeem_request_id": "retry-id",
     }
     assert result.response.code == "already_redeemed"
-    assert store.get("acc_1") is None
+    assert store.get("acc_1") is not None
 
 
 @pytest.mark.asyncio
@@ -659,7 +666,7 @@ async def test_redeem_consumes_fresh_available_credit_when_cached_credit_disappe
     }
     assert result.available_count_before == 1
     assert result.available_count_after == 0
-    assert store.get("acc_1") is None
+    assert store.get("acc_1") is not None
 
 
 @pytest.mark.asyncio
@@ -698,7 +705,7 @@ async def test_redeem_expected_credit_id_does_not_retarget_other_fresh_credit(
             expected_credit_expires_at=datetime(2026, 7, 12),
         )
 
-    assert excinfo.value.code == "no_available_reset_credit"
+    assert excinfo.value.code == "target_reset_credit_changed"
     assert consume_calls == []
     assert fake_redeem_ledger == {}
     snapshot = store.get("acc_1")
@@ -797,7 +804,7 @@ async def test_redeem_reselects_soonest_available_credit_from_fresh_fetch() -> N
     }
     assert result.available_count_before == 2
     assert result.available_count_after == 1
-    assert store.get("acc_1") is None
+    assert store.get("acc_1") is not None
 
 
 @pytest.mark.asyncio
@@ -858,7 +865,7 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
     }
     # Successful redemption invalidates the in-memory snapshot so the next
     # dashboard refresh repulls upstream state instead of serving a local edit.
-    assert store.get("acc_1") is None
+    assert store.get("acc_1") is not None
     assert result.available_count_before == 2
     assert result.available_count_after == 1
     assert isinstance(result.response, ConsumeResetCreditResponseSchema)
@@ -1386,7 +1393,7 @@ async def test_consume_handler_returns_404_when_account_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consume_handler_audits_live_available_count_before_when_cache_missing(
+async def test_consume_handler_passes_actor_to_shared_outcome_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = RateLimitResetCreditsStore()
@@ -1398,11 +1405,8 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
 
     logged: dict[str, Any] = {}
 
-    def _log_async(event: str, **kwargs: Any) -> None:
-        logged["event"] = event
-        logged.update(kwargs)
-
     async def _redeem(**kwargs: Any) -> Any:
+        logged.update(kwargs)
         return reset_credits_api._RedeemResetCreditOutcome(
             response=ConsumeResetCreditResponseSchema(code="reset", windows_reset=1, redeemed_at=None),
             available_count_before=3,
@@ -1410,7 +1414,6 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
         )
 
     monkeypatch.setattr(reset_credits_api, "_redeem_soonest_reset_credit", _redeem)
-    monkeypatch.setattr(reset_credits_api.AuditService, "log_async", _log_async)
 
     fake_context = SimpleNamespace(
         repository=_Repo(),
@@ -1424,9 +1427,7 @@ async def test_consume_handler_audits_live_available_count_before_when_cache_mis
     )
 
     assert response.code == "reset"
-    assert logged["event"] == "account_rate_limit_reset_credit_consumed"
-    assert logged["details"]["available_reset_credits_before"] == 3
-    assert logged["details"]["available_reset_credits_after"] == 2
+    assert logged["actor_ip"] == "127.0.0.1"
 
 
 @pytest.mark.asyncio

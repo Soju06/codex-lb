@@ -26,7 +26,7 @@ describe("ResetCreditSettings", () => {
     expect(screen.getByRole("switch", { name: "Auto-redeem reset credits before expiry" })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: "Show reset action expiry" })).toBeChecked();
     expect(
-      screen.getByText("Attempts to redeem the soonest reset credit about 5 minutes before it expires."),
+      screen.getByText("Attempts to redeem the soonest reset credit when it has at most 1 hour remaining."),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("switch").map((toggle) => toggle.getAttribute("aria-label"))).toEqual([
       "Show reset-credit badges",

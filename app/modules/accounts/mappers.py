@@ -46,6 +46,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
     reset_credits_store: RateLimitResetCreditsStore | None = None,
+    duplicate_account_ids: set[str] | None = None,
 ) -> list[AccountSummary]:
     store = reset_credits_store or get_rate_limit_reset_credits_store()
     duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
@@ -60,7 +61,11 @@ def build_account_summaries(
             limit_warmups_by_account.get(account.id) if limit_warmups_by_account else None,
             encryptor,
             include_auth=include_auth,
-            is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
+            is_email_duplicate=(
+                account.id in duplicate_account_ids
+                if duplicate_account_ids is not None
+                else duplicate_detection_key(account) in duplicate_keys
+            ),
             reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
         )
         for account in accounts
@@ -78,14 +83,14 @@ def _duplicate_detection_keys_appearing_more_than_once(accounts: list[Account]) 
     """
     counts: dict[tuple[str, str, str | None], int] = {}
     for account in accounts:
-        key = _duplicate_detection_key(account)
+        key = duplicate_detection_key(account)
         if key is None:
             continue
         counts[key] = counts.get(key, 0) + 1
     return {key for key, count in counts.items() if count > 1}
 
 
-def _duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | None:
+def duplicate_detection_key(account: Account) -> tuple[str, str, str | None] | None:
     email = account.email
     chatgpt_account_id = account.chatgpt_account_id
     if not _is_duplicate_detection_email(email) or not chatgpt_account_id:
@@ -294,6 +299,7 @@ def _account_to_summary(
         limit_warmup=_limit_warmup_to_status(limit_warmup),
         is_email_duplicate=is_email_duplicate,
         available_reset_credits=reset_credits_snapshot.available_count if reset_credits_snapshot else 0,
+        reset_credit_fetched_at=reset_credits_snapshot.fetched_at if reset_credits_snapshot else None,
         reset_credit_nearest_expires_at=(reset_credits_snapshot.nearest_expires_at if reset_credits_snapshot else None),
     )
 

@@ -386,3 +386,36 @@ test("login", async ({ page }) => {
     waitFor: 'input[type="password"]',
   });
 });
+
+test("redeem one account keeps the list and shows pending reconciliation", async ({ page }) => {
+  await applyTheme(page, "light");
+  await interceptApi(page);
+  let listRequests = 0;
+  let consumes = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/accounts") listRequests += 1;
+  });
+  await page.route("**/api/accounts/acc_01/rate-limit-reset-credits/consume", async (route) => {
+    consumes += 1;
+    await fulfill(route, { code: "reset", outcome: "confirmed_reset", windowsReset: 2, redeemedAt: new Date().toISOString() });
+  });
+  await page.route("**/api/accounts/acc_01/summary", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await fulfill(route, { ...accounts[0], availableResetCredits: 2, resetCreditFetchedAt: new Date().toISOString() });
+  });
+  await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
+  const before = listRequests;
+  const reset = page.getByRole("button", { name: /^Reset \(3\)/ });
+  await reset.scrollIntoViewIfNeeded();
+  const selectedUrl = page.url();
+  const listScroll = await page.getByTestId("account-list-scroll-region").evaluate((node) => node.scrollTop);
+  await reset.click();
+  await page.getByRole("button", { name: "Redeem credit", exact: true }).click();
+  await expect(page.locator("button").filter({ hasText: "Reset pending…" })).toBeDisabled();
+  await expect(page.getByRole("alertdialog")).toBeHidden();
+  await expect(page.getByRole("button", { name: /^Reset \(2\)/ }).first()).toBeVisible();
+  expect(listRequests).toBe(before);
+  expect(consumes).toBe(1);
+  expect(page.url()).toBe(selectedUrl);
+  expect(await page.getByTestId("account-list-scroll-region").evaluate((node) => node.scrollTop)).toBe(listScroll);
+});

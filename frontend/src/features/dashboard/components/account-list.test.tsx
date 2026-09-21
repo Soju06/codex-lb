@@ -361,3 +361,14 @@ describe("AccountList", () => {
     expect(screen.getByRole("link", { name: "Add accounts" })).toHaveAttribute("href", "/accounts");
   });
 });
+
+
+it("keeps the target pending action and the unrelated reset action visible", () => {
+  render(<AccountList accounts={[
+    createAccountSummary({ accountId: "pending", displayName: "Pending", availableResetCredits: 0, resetCreditRefreshPending: true }),
+    createAccountSummary({ accountId: "other", displayName: "Other", availableResetCredits: 2 }),
+  ]} />);
+  expect(screen.getByRole("button", { name: "Redeem reset credit for Pending" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Redeem reset credit for Pending" })).toHaveAttribute("title", "Reset pending…");
+  expect(screen.getByRole("button", { name: "Redeem reset credit for Other" })).toBeEnabled();
+});

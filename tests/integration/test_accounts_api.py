@@ -659,7 +659,7 @@ async def test_set_and_clear_account_alias(async_client):
 
 
 @pytest.mark.asyncio
-async def test_list_accounts_flags_email_duplicates(async_client):
+async def test_list_accounts_flags_email_duplicates(async_client, monkeypatch):
     """Pin codex-lb #787 (B): after a token-invalidation cascade, the
     re-add OAuth flow creates a second account row with the same email
     but a fresh accountId for the same ChatGPT account identity and workspace
@@ -717,3 +717,13 @@ async def test_list_accounts_flags_email_duplicates(async_client):
     assert accounts_by_id["placeholder-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-a"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-b"]["isEmailDuplicate"] is False
+
+    async def forbidden_full_list(*args, **kwargs):
+        raise AssertionError("Targeted summaries must not enumerate accounts")
+
+    monkeypatch.setattr(AccountsRepository, "list_accounts", forbidden_full_list)
+    for account_id, listed in accounts_by_id.items():
+        for suffix in ("summary", "summary/"):
+            summary = await async_client.get(f"/api/accounts/{account_id}/{suffix}")
+            assert summary.status_code == 200
+            assert summary.json()["isEmailDuplicate"] == listed["isEmailDuplicate"]

@@ -28,6 +28,15 @@ from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStor
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def enabled_auto_setting(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module,
+        "SettingsRepository",
+        lambda _: _FakeSettingsRepository(auto_redeem_reset_credits_before_expiry=True),
+    )
+
+
 class StubEncryptor(TokenEncryptor):
     def __init__(self) -> None:
         # Skip key-file I/O; tests only exercise decrypt().
@@ -453,7 +462,7 @@ async def test_refresh_once_uses_consume_route_for_auto_redeem(monkeypatch: pyte
     assert captured["resolve_route"] is scheduler_module._resolve_reset_credits_refresh_route
     assert captured["auto_redeem_resolve_route"] is scheduler_module._resolve_reset_credits_consume_route
     assert captured["auto_redeem_before_expiry"] is True
-    assert captured["auto_redeem_window_seconds"] == 300.0
+    assert captured["auto_redeem_window_seconds"] == 3600.0
 
 
 @pytest.mark.asyncio
@@ -536,10 +545,10 @@ async def test_auto_redeem_uses_existing_helper_for_soonest_expiring_credit(
     assert redeem_calls[0]["lock_session"] is lock_session
     assert isinstance(redeem_calls[0]["redeem_request_id"], str)
     assert redeem_calls[0]["redeem_request_id"].startswith("auto-reset-credit:")
-    assert redeem_calls[0]["skip_if_redeem_request_pinned"] is True
+    assert redeem_calls[0]["automatic"] is True
     assert redeem_calls[0]["expected_credit_id"] == "c1"
     assert redeem_calls[0]["expected_credit_expires_at"] == store.get(account.id).credits[0].expires_at
-    assert callable(redeem_calls[0]["refresh_usage"])
+    assert redeem_calls[0]["refresh_usage"] is None
 
 
 @pytest.mark.asyncio
@@ -925,3 +934,242 @@ def test_build_scheduler_wires_enabled_setting(monkeypatch: pytest.MonkeyPatch) 
 
     assert scheduler.enabled is False
     assert scheduler.interval_seconds == 123
+
+
+@pytest.mark.asyncio
+async def test_generation_conflict_still_schedules_deadline() -> None:
+    store = RateLimitResetCreditsStore()
+    account = _make_account("generation")
+    scheduled = []
+
+    async def fetch(*args, **kwargs):
+        await store.invalidate(account.id)
+        return _response_expiring_in(60)
+
+    await refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=StubEncryptor(),
+        store=store,
+        fetch_fn=fetch,
+        on_snapshot=lambda target, snapshot: scheduled.append((target.id, snapshot)),
+    )
+    assert store.get(account.id) is None
+    assert scheduled[0][0] == account.id
+
+
+@pytest.mark.asyncio
+async def test_discovery_is_bounded_and_deadlines_bypass_blocked_scan(monkeypatch) -> None:
+    active = 0
+    peak = 0
+    blocked = asyncio.Event()
+    started = asyncio.Event()
+    redeemed = asyncio.Event()
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+
+    async def fetch(*args, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == 3:
+            started.set()
+        try:
+            await blocked.wait()
+            return _response(available_count=0)
+        finally:
+            active -= 1
+
+    async def redeem(*args, **kwargs):
+        redeemed.set()
+        return True
+
+    monkeypatch.setattr(scheduler_module, "_auto_redeem_reset_credit", redeem)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", StubEncryptor)
+    scan = asyncio.create_task(
+        refresh_reset_credits_for_accounts(
+            accounts=[_make_account(str(i)) for i in range(1200)],
+            encryptor=StubEncryptor(),
+            store=RateLimitResetCreditsStore(),
+            fetch_fn=fetch,
+        )
+    )
+    worker = asyncio.create_task(scheduler._run_deadlines())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        scheduler._schedule_snapshot(
+            _make_account("urgent"), scheduler_module.build_snapshot(_response_expiring_in(30))
+        )
+        await asyncio.wait_for(redeemed.wait(), 2)
+        assert not scan.done()
+        assert peak == 3
+    finally:
+        scan.cancel()
+        worker.cancel()
+        await asyncio.gather(scan, worker, return_exceptions=True)
+    assert active == 0
+
+
+def test_automatic_request_identity_tracks_credit_and_exact_expiry() -> None:
+    account = _make_account("identity")
+    first = scheduler_module.build_snapshot(_response_expiring_in(60))
+    second = first.model_copy(deep=True)
+    second.credits[0].id = "other"
+    assert scheduler_module._auto_redeem_request_id(account, first) != scheduler_module._auto_redeem_request_id(
+        account, second
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replica_count", [1, 3])
+async def test_hundred_simultaneous_five_minute_deadlines_complete_with_slow_quota_refresh(
+    monkeypatch, record_property, replica_count
+) -> None:
+    """Accelerated real scheduling: 10s consume cost; quota verification stalls.
+
+    Four deadline slots complete 100 accounts in 25 batches, within 300s.
+    The initial serial implementation cannot fit even 31 such consumes.
+    """
+    import time
+
+    base_time = datetime.now(UTC)
+    started = time.monotonic()
+    scale = 100
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return base_time + timedelta(seconds=(time.monotonic() - started) * scale)
+
+    monkeypatch.setattr(scheduler_module, "datetime", Clock)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", StubEncryptor)
+    schedulers = [RateLimitResetCreditsRefreshScheduler(interval_seconds=60) for _ in range(replica_count)]
+    completed = {}
+    locks = {}
+    active = 0
+    peak = 0
+    fetch_active = 0
+    fetch_peak = 0
+    fetch_count = 0
+    all_done = asyncio.Event()
+    quota_started = asyncio.Event()
+
+    async def redeem(account, *, on_confirmed, **kwargs):
+        nonlocal active, peak
+        async with locks.setdefault(account.id, asyncio.Lock()):
+            if account.id not in completed:
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(10 / scale)
+                    completed[account.id] = (Clock.now(UTC) - base_time).total_seconds()
+                finally:
+                    active -= 1
+            on_confirmed(account, f"request-{account.id}")
+            if len(completed) == 100:
+                all_done.set()
+            return True
+
+    async def fetch(*args, **kwargs):
+        nonlocal fetch_active, fetch_peak, fetch_count
+        fetch_active += 1
+        fetch_count += 1
+        fetch_peak = max(fetch_peak, fetch_active)
+        try:
+            await asyncio.sleep(1 / scale)
+            if fetch_count % 100 == 0:
+                raise ResetCreditFetchError(504, "simulated timeout")
+            return _response(available_count=0)
+        finally:
+            fetch_active -= 1
+
+    async def slow_quota(account):
+        quota_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(scheduler_module, "_auto_redeem_reset_credit", redeem)
+    monkeypatch.setattr(scheduler_module, "_refresh_usage_after_auto_redeem", slow_quota)
+    tasks = []
+    for scheduler in schedulers:
+        for index in range(100):
+            snapshot = scheduler_module.build_snapshot(_response(expires_at=base_time + timedelta(seconds=300)))
+            scheduler._schedule_snapshot(_make_account(f"burst-{index}"), snapshot)
+        tasks.extend(
+            [
+                asyncio.create_task(scheduler._run_deadlines()),
+                asyncio.create_task(scheduler._deadline_worker(verification=True)),
+            ]
+        )
+    scans = [
+        asyncio.create_task(
+            refresh_reset_credits_for_accounts(
+                accounts=[_make_account(f"inventory-{index}") for index in range(1200)],
+                encryptor=StubEncryptor(),
+                store=RateLimitResetCreditsStore(),
+                fetch_fn=fetch,
+            )
+        )
+        for _ in schedulers
+    ]
+    try:
+        await asyncio.wait_for(all_done.wait(), timeout=4)
+        assert quota_started.is_set()
+        assert len(completed) == 100
+        assert not all(scan.done() for scan in scans)
+        record_property("burst_last_completion_seconds", max(completed.values()))
+        record_property("burst_accounts", len(completed))
+        record_property("replicas", replica_count)
+        assert max(completed.values()) < 300
+        assert peak <= 4 * replica_count
+        assert fetch_peak == 3 * replica_count
+        await asyncio.wait_for(asyncio.gather(*scans), timeout=5)
+        record_property("discovery_elapsed_seconds", (Clock.now(UTC) - base_time).total_seconds())
+        record_property("discovery_requests", fetch_count)
+        assert fetch_count == 1200 * replica_count
+    finally:
+        for task in [*tasks, *scans]:
+            task.cancel()
+        await asyncio.gather(*tasks, *scans, return_exceptions=True)
+    assert active == fetch_active == 0
+
+
+@pytest.mark.asyncio
+async def test_due_retry_keeps_expiry_priority_and_waiting_credit_enters_window(monkeypatch) -> None:
+    now = datetime.now(UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(scheduler_module, "datetime", Clock)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", StubEncryptor)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    scheduler._schedule_snapshot(
+        _make_account("later"),
+        scheduler_module.build_snapshot(
+            _response(
+                expires_at=now + timedelta(minutes=61),
+            )
+        ),
+    )
+    assert scheduler._deadlines["later"].due_at > now
+    now += timedelta(minutes=2)
+    scheduler._schedule_snapshot(
+        _make_account("urgent-retry"),
+        scheduler_module.build_snapshot(
+            _response(
+                expires_at=now + timedelta(seconds=15),
+            )
+        ),
+    )
+    scheduler._deadlines["urgent-retry"].due_at = now
+    visited = []
+
+    async def redeem(account, **kwargs):
+        visited.append(account.id)
+        if len(visited) == 2:
+            scheduler._stop.set()
+        return True
+
+    monkeypatch.setattr(scheduler_module, "_auto_redeem_reset_credit", redeem)
+    await scheduler._deadline_worker()
+    assert visited == ["urgent-retry", "later"]

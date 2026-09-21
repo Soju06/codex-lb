@@ -9,6 +9,7 @@ import {
   deleteAccount,
   exportAccountAuth,
   getAccountTrends,
+  getAccountSummary,
   getAccountUsageResetCredits,
   getRateLimitResetCredits,
   importAccount,
@@ -23,8 +24,17 @@ import {
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountSummary,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
+import {
+  forgetResetReconciliation,
+  finishResetRedeemRequest,
+  mergeResetAccount,
+  reconcileAccountsQuery,
+  resetReconciliationGeneration,
+  resetRedeemRequestId,
+} from "@/features/accounts/reset-reconciliation";
 
 async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   const invalidations = [
@@ -41,6 +51,7 @@ async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof us
   }
   await Promise.all(invalidations);
 }
+
 
 function usageResetToastMessage(data: AccountUsageResetConsumeResponse, t: ReturnType<typeof useTranslation>["t"]): string {
   const changed =
@@ -127,7 +138,8 @@ export function useAccountMutations() {
   const deleteMutation = useMutation({
     mutationFn: ({ accountId, deleteHistory }: { accountId: string; deleteHistory: boolean }) =>
       deleteAccount(accountId, deleteHistory),
-    onSuccess: () => {
+    onSuccess: (_data, { accountId }) => {
+      forgetResetReconciliation(queryClient, accountId);
       toast.success(t("accounts.toasts.deleted"));
       void invalidateAccountRelatedQueries(queryClient);
     },
@@ -162,7 +174,18 @@ export function useAccountMutations() {
     },
     onSuccess: async (data, variables) => {
       usageResetRedeemRequestRef.current = null;
-      await invalidateAccountRelatedQueries(queryClient, variables.accountId);
+      try {
+        const summary = await getAccountSummary(variables.accountId);
+        mergeResetAccount(queryClient, variables.accountId, summary, false);
+      } catch {
+        toast.info(t("accounts.toasts.resetCreditRefreshPending"));
+      }
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"], exact: true }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "trends", variables.accountId], exact: true }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits", variables.accountId], exact: true }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits", variables.accountId], exact: true }),
+      ]);
       toast.success(usageResetToastMessage(data, t));
     },
     onError: (error: Error) => {
@@ -225,17 +248,44 @@ export function useAccountMutations() {
 
   const resetCreditConsumeMutation = useMutation({
     mutationFn: ({ accountId, redeemRequestId }: { accountId: string; redeemRequestId?: string }) =>
-      consumeRateLimitResetCredit(accountId, redeemRequestId ? { redeemRequestId } : undefined),
-    onSuccess: (data) => {
-      const resetCount = data.windowsReset ?? 0;
-      toast.success(
-        t("accounts.toasts.rateLimitWindowsReset", { count: resetCount }),
-      );
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
-      void queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+      consumeRateLimitResetCredit(accountId, { redeemRequestId: resetRedeemRequestId(queryClient, accountId, redeemRequestId) }),
+    onSuccess: async (data, { accountId }) => {
+      if (data.outcome === "confirmed_reset" || data.outcome === "no_reset" || data.outcome === "expired") {
+        finishResetRedeemRequest(queryClient, accountId);
+      }
+      if (data.outcome === "confirmed_reset") {
+        toast.success(t("accounts.toasts.rateLimitWindowsReset", { count: data.windowsReset ?? 0 }));
+      } else if (data.outcome === "no_reset") {
+        toast.info(t("accounts.toasts.resetCreditNoReset"));
+      } else {
+        toast.info(t("accounts.toasts.resetCreditUnconfirmed"));
+      }
+      const merge = (summary: AccountSummary | null, pending: boolean) =>
+        mergeResetAccount(queryClient, accountId, summary, pending);
+      merge(null, true);
+      // Keep the mutation pending while bounded, target-only reconciliation runs.
+      // An error here must never retry the irreversible consume mutation.
+      let refreshed = false;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        try {
+          const summary = await getAccountSummary(accountId);
+          if (summary.resetCreditFetchedAt != null) {
+            merge(summary, false);
+            refreshed = true;
+            break;
+          }
+        } catch {
+          // The periodic account query remains the fallback after these reads.
+        }
+      }
+      if (!refreshed) toast.info(t("accounts.toasts.resetCreditRefreshPending"));
+      await Promise.allSettled([
+        queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"], exact: true }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "trends", accountId], exact: true }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits", accountId], exact: true }),
+        queryClient.invalidateQueries({ queryKey: ["accounts", "usage-reset-credits", accountId], exact: true }),
+      ]);
     },
     onError: (error: Error) => {
       toast.error(error.message || t("accounts.toasts.resetCreditRedeemFailed"));
@@ -291,9 +341,13 @@ export function useAccountUsageResetCredits(accountId: string | null) {
 }
 
 export function useAccounts() {
+  const queryClient = useQueryClient();
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["accounts", "list"],
-    queryFn: listAccounts,
+    queryFn: async () => {
+      const generation = resetReconciliationGeneration(queryClient);
+      return reconcileAccountsQuery(queryClient, await listAccounts(), generation);
+    },
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

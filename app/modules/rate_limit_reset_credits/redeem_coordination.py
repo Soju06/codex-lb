@@ -25,6 +25,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import ResetCreditRedeemClaim, ResetCreditRedeemRequest
 from app.db.session import SessionLocal, close_session
@@ -36,6 +38,21 @@ REDEEM_CLAIM_RENEW_INTERVAL_SECONDS = 10.0
 REDEEM_CLAIM_RETRY_INTERVAL_SECONDS = 0.1
 REDEEM_CLAIM_TIMEOUT_SECONDS = 15.0
 REDEEM_REQUEST_TTL = timedelta(hours=24)
+
+
+def redeem_credit_is_live(now: datetime) -> ColumnElement[bool]:
+    """Retain canonical receipts while any alias for the credit remains live."""
+    live_pin = aliased(ResetCreditRedeemRequest)
+    return (
+        select(live_pin.account_id)
+        .where(
+            live_pin.account_id == ResetCreditRedeemRequest.account_id,
+            live_pin.credit_id == ResetCreditRedeemRequest.credit_id,
+            live_pin.created_at >= now - REDEEM_REQUEST_TTL,
+        )
+        .correlate(ResetCreditRedeemRequest)
+        .exists()
+    )
 
 
 class RedeemClaimTimeoutError(Exception):
@@ -190,8 +207,9 @@ async def release_redeem_claim(account_id: str, holder_id: str) -> None:
 async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -> str | None:
     """Read the credit pinned to this redeem_request_id by any replica.
 
-    Rows older than the 24h TTL are ignored (the read TTL matches the purge
-    TTL applied by ``pin_redeem_request``), so an expired pin reads as absent.
+    Credit groups with no pin inside the 24h TTL are ignored (the read TTL
+    matches the purge rule applied by ``pin_redeem_request``). A live alias
+    retains its canonical pin and receipt even if that original row is older.
     The caller then re-selects a fresh credit and re-pins it via
     ``pin_redeem_request`` instead of forwarding the redemption for a stale
     credit id that the purge path would otherwise drop.
@@ -203,20 +221,20 @@ async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -
             select(ResetCreditRedeemRequest.credit_id).where(
                 ResetCreditRedeemRequest.account_id == account_id,
                 ResetCreditRedeemRequest.redeem_request_id == redeem_request_id,
-                ResetCreditRedeemRequest.created_at >= now - REDEEM_REQUEST_TTL,
+                redeem_credit_is_live(now),
             )
         )
     finally:
         await close_session(session)
 
 
-async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id: str) -> str:
+async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id: str, *, alias: bool = False) -> str:
     """Durably pin the selected credit to this redeem request; first writer wins.
 
     Returns the authoritative credit id (the previously pinned one on
-    conflict). Rows older than the 24h TTL for this account are purged in the
+    conflict). Credit groups without a live 24h pin for this account are purged in the
     same transaction BEFORE the insert, so a ``redeem_request_id`` reused after
-    its prior row has aged past the TTL is re-pinned to the new credit instead
+    its entire prior credit group has aged past the TTL is re-pinned to the new credit instead
     of colliding with the stale row via ``ON CONFLICT DO NOTHING`` and losing
     the new pin.
     """
@@ -228,6 +246,7 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
             "redeem_request_id": redeem_request_id,
             "credit_id": credit_id,
             "created_at": now,
+            "origin": "alias" if alias else "legacy",
         }
         # Purge expired rows first: an expired row for the SAME
         # (account_id, redeem_request_id) would otherwise absorb the insert
@@ -236,7 +255,7 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
         await session.execute(
             delete(ResetCreditRedeemRequest).where(
                 ResetCreditRedeemRequest.account_id == account_id,
-                ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+                ~redeem_credit_is_live(now),
             )
         )
         dialect = session.get_bind().dialect.name

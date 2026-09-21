@@ -129,6 +129,7 @@ class AccountSummary(DashboardModel):
     # otherwise the latest persisted primary usage_history count from /wham/usage.
     available_reset_credits: int = 0
     reset_credit_nearest_expires_at: datetime | None = None
+    reset_credit_fetched_at: datetime | None = None
 
 
 class AccountsResponse(DashboardModel):

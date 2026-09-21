@@ -1795,7 +1795,7 @@ inside the Usage resets row when reset-credit availability is shown. The action
 SHALL require operator confirmation, SHALL consume one upstream usage reset
 credit for the selected account, SHALL force-fetch upstream usage after a
 successful or idempotently successful consume without sending model probe
-traffic, and SHALL refresh account-related dashboard queries after success. The
+traffic, and SHALL reconcile the selected account summary and invalidate only that account's usage, trend, and reset-credit queries after success. It SHALL NOT trigger a full account-list or dashboard-overview refetch. The
 dashboard SHALL NOT reduce or add permanent polling intervals to make this
 reset appear sooner. When the selected account summary exposes
 `reset_credit_nearest_expires_at`, the Usage resets row SHALL show the earliest
@@ -1809,8 +1809,7 @@ compact remaining-time label.
 - **AND** confirms the dialog
 - **THEN** the dashboard sends a usage reset consume request for the selected account
 - **AND** codex-lb does not send a model probe request
-- **AND** account-related usage, trend, reset-credit, and dashboard summary
-  queries are invalidated after success
+- **AND** the selected account summary is merged into existing list/dashboard caches and only that account's usage, trend, and reset-credit queries are invalidated
 - **AND** no reset-credit availability query is configured with a permanent
   refetch interval
 
@@ -2195,7 +2194,7 @@ and route compatibility.
 
 ### Requirement: Accounts page exposes a reset-credits redeem action
 
-The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0`. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and refresh account data on success. The compact remaining-time label pinned to the reset action SHALL be controlled by the dashboard setting `show_reset_credit_expiry_badge`, defaulting to enabled.
+The Accounts page per-account action bar SHALL render a `Reset (N)` button next to the existing Export button with matching button styling whenever the account reports `available_reset_credits > 0`, where `N` is the available reset-credit count for that account. The button SHALL be hidden when `available_reset_credits` is `0` and no post-redeem reconciliation is pending. During pending reconciliation, a disabled pending indicator SHALL distinguish a temporarily missing snapshot from a fresh zero count. Activating the button SHALL open a confirmation dialog that describes redeeming the soonest-expiring banked reset credit for that account and, when credit details are available, shows the soonest credit's expiry in local time using `YYYY-MM-DD HH:MM:SS`. Confirming SHALL submit a redeem request for that account and reconcile only the target account summary, trends, and reset-credit details. The mutation SHALL NOT invalidate or refetch the complete account list or unrelated accounts' queries. Confirmed reset, explicit no-reset, and pending/unknown outcomes SHALL be displayed distinctly; a successful HTTP response alone SHALL NOT produce a reset-success message. The compact remaining-time label pinned to the reset action SHALL be controlled by the dashboard setting `show_reset_credit_expiry_badge`, defaulting to enabled.
 
 #### Scenario: Reset button mirrors Export styling and placement
 - **WHEN** the Accounts page renders the per-account action bar for an account with `available_reset_credits > 0`
@@ -2203,7 +2202,7 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 - **AND** the button uses the same size, variant, and class as the Export button
 
 #### Scenario: Reset button hidden when no credits available
-- **WHEN** an account reports `available_reset_credits: 0`
+- **WHEN** an account reports `available_reset_credits: 0` and no post-redeem reconciliation is pending
 - **THEN** the per-account action bar renders no "Reset" button
 
 #### Scenario: Confirmation required before redeem
@@ -2221,6 +2220,22 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 - **WHEN** the Accounts page renders the per-account action bar
 - **THEN** the `Reset (N)` button remains visible
 - **AND** the compact remaining-time label is not rendered on that button
+
+#### Scenario: One reset updates one account
+- **GIVEN** account X is selected and account Y also has a Reset button
+- **WHEN** X is successfully redeemed
+- **THEN** targeted authoritative data is merged into X's existing cached entry
+- **AND** Y's data and button remain visible without a full-list refetch
+- **AND** selection, filters, pagination, and scroll are preserved
+
+#### Scenario: Temporarily absent snapshot is pending
+- **WHEN** targeted reconciliation returns a null reset-credit freshness timestamp
+- **THEN** the dashboard shows pending refresh instead of treating the missing snapshot as authoritative zero credits
+- **AND** it performs bounded targeted reconciliation without another consume
+
+#### Scenario: Unconfirmed result has no success toast
+- **WHEN** consume returns an explicit no-reset or unknown result
+- **THEN** the dashboard displays that outcome without claiming quota was restored
 
 ### Requirement: AccountListItem displays a reset-credits count badge
 
@@ -2260,7 +2275,9 @@ The Accounts page sort selector SHALL offer a "Most reset credits" option and SH
 
 ### Requirement: Dashboard accounts section exposes a reset-credits redeem action
 
-The Dashboard Accounts section SHALL render a reset action next to the existing Details action in both the table and grid views for any account with `available_reset_credits > 0`. The grid view label SHALL read `Reset (N)`. The table view MAY remain icon-only, but its tooltip/title SHALL include the available reset-credit count. The action SHALL be absent when `available_reset_credits` is `0`. Activating the action SHALL open the same confirmation flow as the Accounts page reset action.
+The Dashboard Accounts section SHALL render a reset action next to the existing Details action in both the table and grid views for any account with `available_reset_credits > 0`. The grid view label SHALL read `Reset (N)`. The table view MAY remain icon-only, but its tooltip/title SHALL include the available reset-credit count. The action SHALL be absent when `available_reset_credits` is `0` and no post-redeem reconciliation is pending; pending reconciliation SHALL use the same disabled pending indicator as the Accounts page. Activating the action SHALL open the same confirmation flow as the Accounts page reset action.
+
+The Dashboard table and grid SHALL share targeted post-redeem reconciliation with the Accounts page. Aggregate totals SHALL reflect the changed account without replacing the complete account collection. Any aggregate-only refresh SHALL be coalesced and SHALL NOT invalidate the account list.
 
 #### Scenario: Table view shows reset next to details
 - **WHEN** the Dashboard Accounts section renders in table view for an account with `available_reset_credits > 0`
@@ -2271,8 +2288,13 @@ The Dashboard Accounts section SHALL render a reset action next to the existing 
 - **THEN** a `Reset (N)` button appears next to the Details button on the account card
 
 #### Scenario: Reset action absent when no credits
-- **WHEN** an account reports `available_reset_credits: 0`
+- **WHEN** an account reports `available_reset_credits: 0` and no post-redeem reconciliation is pending
 - **THEN** the Dashboard Accounts section renders no "Reset" action for that account in either view
+
+#### Scenario: Dashboard reset preserves unrelated rows
+- **WHEN** an operator redeems account X from either the dashboard table or grid
+- **THEN** only X's summary and account-specific queries are reconciled
+- **AND** unrelated cards, counts, and Reset buttons remain populated
 
 ### Requirement: Dashboard header shows the total available reset-credit count
 
@@ -4181,7 +4203,7 @@ The dashboard conversations query (`useConversations`) SHALL request the convers
 
 ### Requirement: Settings page exposes reset-credit controls
 
-The Settings page SHALL expose a Reset credits section. The section SHALL allow operators to update `show_reset_credit_badges`, `auto_redeem_reset_credits_before_expiry`, and `show_reset_credit_expiry_badge` through the settings API. `show_reset_credit_badges` and `show_reset_credit_expiry_badge` SHALL default to enabled. `auto_redeem_reset_credits_before_expiry` SHALL default to disabled so upgraded deployments preserve the current manual-only redemption behavior. The automatic redemption control SHALL describe that the system attempts to redeem the soonest reset credit about five minutes before it expires. Changes to any of these three settings SHALL be included in the `settings_changed` audit entry's `changed_fields` list.
+The Settings page SHALL expose a Reset credits section. The section SHALL allow operators to update `show_reset_credit_badges`, `auto_redeem_reset_credits_before_expiry`, and `show_reset_credit_expiry_badge` through the settings API. `show_reset_credit_badges` and `show_reset_credit_expiry_badge` SHALL default to enabled. `auto_redeem_reset_credits_before_expiry` SHALL default to disabled so upgraded deployments preserve the current manual-only redemption behavior. The automatic redemption control SHALL describe that the system attempts to redeem the soonest reset credit when it has at most one hour remaining, subject to account eligibility and upstream availability. Changes to any of these three settings SHALL be included in the `settings_changed` audit entry's `changed_fields` list.
 
 #### Scenario: Reset-credit display settings save through settings API
 
@@ -4192,6 +4214,11 @@ The Settings page SHALL expose a Reset credits section. The section SHALL allow 
 
 - **WHEN** an operator toggles automatic reset-credit redemption
 - **THEN** the dashboard sends `autoRedeemResetCreditsBeforeExpiry` through the settings API
+
+#### Scenario: Auto-redeem description matches scheduling boundary
+- **WHEN** the Settings page renders the automatic redemption control
+- **THEN** its description states the one-hour window
+- **AND** the control remains disabled by default for new settings rows
 
 ### Requirement: Conversation detail URLs preserve opaque identifiers
 
@@ -4242,3 +4269,29 @@ model-source models without assuming one global effort vocabulary.
   so the operator can save a valid initial configuration
 - **AND** the operator MUST still be able to replace that seed with arbitrary
   effort slugs before saving.
+
+### Requirement: Reset reconciliation preserves aggregate eligibility
+Targeted reset updates SHALL calculate dashboard aggregate capacity using the same usage-sample eligibility as the backend summary.
+
+#### Scenario: Another account has no usage sample
+- **WHEN** one account returns to full quota while another account has plan capacity but no usage sample
+- **THEN** the unsampled account SHALL NOT enter the aggregate denominator
+
+### Requirement: Pending reset reconciliation survives polling
+Account and dashboard query replacement SHALL preserve pending reset reconciliation until a snapshot fetched after the consume is available. A stale poll SHALL NOT erase pending state or overwrite a newer targeted reset summary.
+
+#### Scenario: Periodic query during unresolved reconciliation
+- **WHEN** targeted summary retries are exhausted and the ordinary query returns null reset snapshot freshness
+- **THEN** the pending reset indicator SHALL remain visible without another consume
+
+#### Scenario: Fresh periodic query resolves pending state
+- **WHEN** an ordinary query returns a snapshot fetched after the consume
+- **THEN** pending state SHALL clear for that account only
+
+### Requirement: Manual reset retries survive dialog dismissal
+The dashboard SHALL retain unresolved reset request identity per account in the client session across dialog dismissal and remounting. A terminal confirmed, no-reset or expired outcome SHALL release that identity for a new intentional reset.
+
+#### Scenario: Retry after closing a failed reset dialog
+- **WHEN** a consume fails and the operator closes and reopens the dialog for the same account
+- **THEN** the next confirmation SHALL reuse the original request ID
+- **AND** it SHALL NOT reuse that request ID for another account

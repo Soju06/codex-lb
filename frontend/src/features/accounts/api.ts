@@ -10,6 +10,7 @@ import {
   AccountLimitWarmupUpdateResponseSchema,
   AccountUpdateRequestSchema,
   AccountsResponseSchema,
+  AccountSummarySchema,
   AccountRoutingPolicyUpdateRequestSchema,
   AccountRoutingPolicyUpdateResponseSchema,
   AccountUsageResetConsumeRequestSchema,
@@ -39,6 +40,10 @@ const OAUTH_BASE_PATH = "/api/oauth";
 
 export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+}
+
+export function getAccountSummary(accountId: string) {
+  return get(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/summary`, AccountSummarySchema);
 }
 
 export function importAccount(file: File) {

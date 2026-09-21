@@ -13,14 +13,12 @@ from pydantic import Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.service import AuditService
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ConsumeResetCreditResponse,
@@ -47,6 +45,7 @@ from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.schemas import AccountUsageResetConsumeRequest
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.rate_limit_reset_credits import outcomes
 from app.modules.rate_limit_reset_credits.redeem_coordination import (
     RedeemClaimTimeoutError,
     acquire_redeem_claim,
@@ -56,6 +55,7 @@ from app.modules.rate_limit_reset_credits.redeem_coordination import (
     release_redeem_claim,
     renew_redeem_claim_periodically,
 )
+from app.modules.rate_limit_reset_credits.settlement import settle_received_result
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
@@ -101,6 +101,7 @@ class RateLimitResetCreditsSnapshotResponse(DashboardModel):
 
 
 class ConsumeResetCreditResponseSchema(DashboardModel):
+    outcome: outcomes.RedeemOutcome | None = None
     code: str | None = None
     windows_reset: int | None = None
     redeemed_at: datetime | None = None
@@ -111,6 +112,7 @@ class _RedeemResetCreditOutcome:
     response: ConsumeResetCreditResponseSchema
     available_count_before: int
     available_count_after: int
+    redeem_request_id: str | None = None
 
 
 class ResetCreditRedeemRequestAlreadyPinned(Exception):
@@ -177,6 +179,7 @@ async def consume_rate_limit_reset_credit(
             refresh_usage=_build_refresh_usage_callback(context),
             resolve_route=_resolve_reset_credit_route,
             redeem_request_id=payload.redeem_request_id if payload is not None else None,
+            actor_ip=request.client.host if request.client else None,
         )
     except RefreshError as exc:
         if exc.is_permanent:
@@ -191,17 +194,6 @@ async def consume_rate_limit_reset_credit(
             code="account_reset_credit_upstream_route_unavailable",
         ) from exc
 
-    AuditService.log_async(
-        "account_rate_limit_reset_credit_consumed",
-        actor_ip=request.client.host if request.client else None,
-        details={
-            "account_id": account_id,
-            "consume_code": outcome.response.code,
-            "windows_reset": outcome.response.windows_reset,
-            "available_reset_credits_before": outcome.available_count_before,
-            "available_reset_credits_after": outcome.available_count_after,
-        },
-    )
     return outcome.response
 
 
@@ -218,10 +210,14 @@ async def _redeem_soonest_reset_credit(
     resolve_route: ResolveRouteFn | None = None,
     redeem_request_id: str | None = None,
     skip_if_redeem_request_pinned: bool = False,
+    automatic: bool = False,
+    actor_ip: str | None = None,
     expected_credit_id: str | None = None,
     expected_credit_expires_at: datetime | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
+    if auth_manager is not None:
+        account = await auth_manager.ensure_fresh(account, force=False)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
     effective_consume_fn = consume_fn or consume_reset_credit
 
@@ -238,6 +234,8 @@ async def _redeem_soonest_reset_credit(
                 resolve_route=resolve_route,
                 redeem_request_id=redeem_request_id,
                 skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
+                automatic=automatic,
+                actor_ip=actor_ip,
                 expected_credit_id=expected_credit_id,
                 expected_credit_expires_at=expected_credit_expires_at,
             )
@@ -319,12 +317,12 @@ async def _redeem_soonest_reset_credit_locked(
     resolve_route: ResolveRouteFn | None,
     redeem_request_id: str | None,
     skip_if_redeem_request_pinned: bool,
+    automatic: bool,
+    actor_ip: str | None,
     expected_credit_id: str | None,
     expected_credit_expires_at: datetime | None,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
-    if auth_manager is not None:
-        redeem_account = await auth_manager.ensure_fresh(account, force=False)
 
     # Every accepted consume MUST participate in the durable ledger. When the
     # caller supplies no redeem_request_id (the still-supported no-body dashboard
@@ -337,6 +335,42 @@ async def _redeem_soonest_reset_credit_locked(
     if redeem_request_id is None:
         redeem_request_id = uuid.uuid4().hex
 
+    receipt = await outcomes.get_request(account.id, redeem_request_id) if client_supplied_id else None
+    if receipt is not None:
+        # Several client IDs can pin the same unresolved credit (for example
+        # after a browser reload). A non-alias pin owns the upstream request.
+        original = await outcomes.find_credit_request(account.id, receipt.credit_id)
+        if original is not None:
+            receipt = original
+            redeem_request_id = original.redeem_request_id
+    if automatic and expected_credit_id is not None and receipt is None:
+        receipt = await outcomes.find_credit_request(account.id, expected_credit_id)
+        if receipt is not None:
+            redeem_request_id = receipt.redeem_request_id
+            client_supplied_id = True
+    if receipt is not None and receipt.outcome in {"confirmed_reset", "no_reset", "expired"}:
+        if receipt.outcome == "confirmed_reset" and not receipt.usage_verified:
+            await _refresh_redeemed_usage(redeem_account, redeem_request_id, refresh_usage)
+        snapshot = store.get(account.id)
+        count = snapshot.available_count if snapshot is not None else 0
+        return _RedeemResetCreditOutcome(
+            response=ConsumeResetCreditResponseSchema(
+                code=receipt.upstream_code,
+                windows_reset=receipt.windows_reset,
+                redeemed_at=receipt.redeemed_at,
+                outcome=receipt.outcome,
+            ),
+            available_count_before=count,
+            available_count_after=count,
+            redeem_request_id=redeem_request_id,
+        )
+    if automatic and receipt is not None and receipt.next_retry_at is not None:
+        if outcomes.utc(receipt.next_retry_at) > datetime.now(timezone.utc):
+            raise DashboardConflictError("Reset credit retry is not due", code="reset_credit_retry_pending")
+    if automatic and receipt is not None and receipt.credit_expires_at is not None:
+        if not _same_credit_expiry(receipt.credit_expires_at, expected_credit_expires_at):
+            raise DashboardConflictError("Target reset credit expiry changed", code="target_reset_credit_changed")
+
     cached_snapshot = store.get(account.id)
     cached_credit = _select_soonest_available_credit(cached_snapshot)
     pending_credit_id = await get_pinned_redeem_credit_id(account.id, redeem_request_id) if client_supplied_id else None
@@ -346,7 +380,7 @@ async def _redeem_soonest_reset_credit_locked(
             redeem_request_id=redeem_request_id,
             credit_id=pending_credit_id,
         )
-    if cached_credit is None and pending_credit_id is None:
+    if cached_credit is None and pending_credit_id is None and expected_credit_id is None:
         raise DashboardConflictError("No available reset credit", code="no_available_reset_credit")
 
     access_token = encryptor.decrypt(redeem_account.access_token_encrypted)
@@ -369,6 +403,14 @@ async def _redeem_soonest_reset_credit_locked(
         if expected_credit_id is not None
         else _select_soonest_available_credit_from_response(credits_response)
     )
+    if expected_credit_id is not None and (
+        credit is None
+        or not _same_credit_expiry(credit.expires_at, expected_credit_expires_at)
+        or (pending_credit_id is not None and pending_credit_id != expected_credit_id)
+        or (credit.expires_at is not None and outcomes.utc(credit.expires_at) <= datetime.now(timezone.utc))
+    ):
+        await store.set(account.id, build_snapshot(credits_response))
+        raise DashboardConflictError("Target reset credit changed or expired", code="target_reset_credit_changed")
     if pending_credit_id is not None:
         credit_id = pending_credit_id
     elif credit is None:
@@ -388,11 +430,54 @@ async def _redeem_soonest_reset_credit_locked(
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("Target reset credit changed", code="target_reset_credit_changed")
     else:
+        # A new dashboard request ID must not bypass evidence for the same
+        # selected credit when upstream's list is temporarily stale.
+        previous = await outcomes.find_credit_request(account.id, credit.id)
+        if previous is not None:
+            if previous.outcome in {"pending", "retryable", "unknown"}:
+                # Bind a new client ID before recovery so retrying it later
+                # cannot select C2 after C1's confirmation. Only the original
+                # pin owns attempts and outcomes; aliases resolve above.
+                if client_supplied_id:
+                    await pin_redeem_request(account.id, redeem_request_id, credit.id, alias=True)
+                receipt = previous
+                redeem_request_id = previous.redeem_request_id
+            else:
+                raise DashboardConflictError(
+                    "Selected reset credit already has a redemption request; retry the original request",
+                    code="reset_credit_unavailable",
+                )
         # Pin the selected credit before the consume: a synthesized or
         # client-supplied id is now always recorded, so a lost consume response
         # leaves a durable pin any replica can reuse.
         credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
 
+    if automatic:
+        # Re-read after the network fetch, immediately before the irreversible POST.
+        from app.db.session import get_background_session
+        from app.modules.settings.repository import SettingsRepository
+
+        async with get_background_session() as check_session:
+            latest = await check_session.get(Account, account.id)
+            setting = await SettingsRepository(check_session).get_or_create()
+            if latest is None or not setting.auto_redeem_reset_credits_before_expiry:
+                raise DashboardConflictError("Automatic reset disabled", code="automatic_reset_disabled")
+            _assert_account_can_redeem_reset_credit(latest)
+        if expected_credit_expires_at is None or outcomes.utc(expected_credit_expires_at) <= datetime.now(timezone.utc):
+            raise DashboardConflictError("Target reset credit expired", code="target_reset_credit_changed")
+
+    await outcomes.begin_attempt(
+        account.id,
+        redeem_request_id,
+        expires_at=(
+            receipt.credit_expires_at
+            if receipt is not None and receipt.credit_expires_at is not None
+            else credit.expires_at
+            if credit is not None and credit.id == credit_id
+            else None
+        ),
+        automatic=automatic,
+    )
     try:
         result = await effective_consume_fn(
             access_token,
@@ -403,44 +488,68 @@ async def _redeem_soonest_reset_credit_locked(
             allow_direct_egress=route is None,
         )
     except ConsumeResetCreditError as exc:
+        await outcomes.finish_attempt(
+            account.id,
+            redeem_request_id,
+            "retryable" if exc.status_code == 429 else "unknown",
+            actor_ip=actor_ip,
+        )
         raise _translate_consume_error(exc) from exc
+    except Exception:
+        await outcomes.finish_attempt(account.id, redeem_request_id, "unknown", actor_ip=actor_ip)
+        raise
 
-    redeemed_at = result.credit.redeemed_at if result.credit else None
-    available_count_after = max(0, credits_response.available_count - 1)
-    await store.invalidate(account.id)
-    await bump_cache_invalidation_local(NAMESPACE_RESET_CREDITS)
+    status = outcomes.classify(result, credit_id)
+    await settle_received_result(account.id, redeem_request_id, status, result=result, store=store, actor_ip=actor_ip)
+    consumed = result.credit.id == credit_id and result.credit.status == "redeemed"
+    available_count_after = max(0, credits_response.available_count - int(consumed))
 
-    if refresh_usage is not None:
-        try:
-            await refresh_usage(redeem_account)
-        except Exception:
-            logger.warning(
-                "Reset credit consume succeeded but usage refresh failed account_id=%s",
-                account.id,
-                exc_info=True,
-            )
-            await _try_restore_reset_credits_snapshot_after_consume(
-                account=account,
-                redeem_account=redeem_account,
-                encryptor=encryptor,
-                store=store,
-                fetch_fn=effective_fetch_fn,
-                resolve_route=resolve_route,
-            )
-
+    if status == "confirmed_reset":
+        await _refresh_redeemed_usage(redeem_account, redeem_request_id, refresh_usage)
+    if not automatic:
+        await _try_restore_reset_credits_snapshot_after_consume(
+            account=account,
+            redeem_account=redeem_account,
+            encryptor=encryptor,
+            store=store,
+            fetch_fn=effective_fetch_fn,
+            resolve_route=resolve_route,
+        )
+        if consumed:
+            await store.mark_credit_redeemed(account.id, credit_id, redeemed_at=result.credit.redeemed_at)
     return _RedeemResetCreditOutcome(
         response=ConsumeResetCreditResponseSchema(
             code=result.code,
             windows_reset=result.windows_reset,
-            redeemed_at=redeemed_at,
+            redeemed_at=result.credit.redeemed_at,
+            outcome=status,
         ),
         available_count_before=credits_response.available_count,
         available_count_after=available_count_after,
+        redeem_request_id=redeem_request_id,
     )
 
 
+async def _refresh_redeemed_usage(
+    account: Account,
+    request_id: str,
+    refresh_usage: RefreshUsageFn | None,
+) -> None:
+    if refresh_usage is None:
+        return
+    try:
+        await refresh_usage(account)
+        await outcomes.mark_usage_verified(account.id, request_id)
+    except Exception:
+        logger.warning("Reset confirmed but usage verification pending account_id=%s", account.id, exc_info=True)
+
+
 def _assert_account_can_redeem_reset_credit(account: Account) -> None:
-    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+    if (
+        account.delete_requested_at is not None
+        or account.status in _NON_REDEEMABLE_STATUSES
+        or not account.chatgpt_account_id
+    ):
         msg = (
             f"Account is {account.status.value} and cannot redeem a reset credit"
             if account.status in _NON_REDEEMABLE_STATUSES
@@ -479,7 +588,8 @@ async def _try_restore_reset_credits_snapshot_after_consume(
     fetch_fn: FetchFn,
     resolve_route: ResolveRouteFn | None,
 ) -> None:
-    """Best-effort cache repopulation when usage refresh fails after a successful consume."""
+    """Reconcile only the consumed account without overwriting a newer invalidation."""
+    generation = store.generation(account.id)
     try:
         access_token = encryptor.decrypt(redeem_account.access_token_encrypted)
         route: ResolvedUpstreamRoute | None = None
@@ -498,7 +608,7 @@ async def _try_restore_reset_credits_snapshot_after_consume(
             exc_info=True,
         )
         return
-    await store.set(account.id, build_snapshot(credits_response))
+    await store.set_if_generation(account.id, build_snapshot(credits_response), generation)
 
 
 async def get_reset_credit_redeem_lock(account_id: str) -> asyncio.Lock:

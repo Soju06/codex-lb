@@ -368,14 +368,15 @@ export function AccountList({
 	            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
 	            : t("accounts.listItem.noAttempts");
           const availableResetCredits = account.availableResetCredits ?? 0;
-          const hasResetCredits = availableResetCredits > 0;
+          const hasResetCredits = availableResetCredits > 0 || account.resetCreditRefreshPending;
           const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
           const resetCreditDisabled =
+            account.resetCreditRefreshPending ||
             readOnly || status === "paused" || status === "reauth" || status === "deactivated";
           const resetCountdown = account.resetCreditNearestExpiresAt
             ? formatSingleUnitRemaining(account.resetCreditNearestExpiresAt)
             : null;
-	          const resetButtonTitle = resetCreditDisabled
+	          const resetButtonTitle = account.resetCreditRefreshPending ? t("accounts.actions.resetPending") : resetCreditDisabled
 	            ? status === "paused"
 	              ? t("dashboard.accountList.resumeToRedeem")
 	              : status === "reauth" || status === "deactivated"

@@ -39,6 +39,7 @@ from app.modules.accounts.schemas import (
     AccountRoutingPolicyUpdateRequest,
     AccountRoutingPolicyUpdateResponse,
     AccountsResponse,
+    AccountSummary,
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
@@ -101,6 +102,22 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.get("/{account_id}/summary/", response_model=AccountSummary, include_in_schema=False)
+@router.get("/{account_id}/summary", response_model=AccountSummary)
+async def get_account_summary(
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountSummary:
+    from app.modules.rate_limit_reset_credits.invalidation import reconcile_account_revision
+    from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+
+    await reconcile_account_revision(account_id, get_rate_limit_reset_credits_store())
+    summaries = await context.service.list_accounts(account_ids=[account_id])
+    if not summaries:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return summaries[0]
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)

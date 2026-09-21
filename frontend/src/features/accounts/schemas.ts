@@ -101,6 +101,8 @@ export const AccountSummarySchema = z.object({
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
   isEmailDuplicate: z.boolean().optional(),
   availableResetCredits: z.number().nullable().optional(),
+  resetCreditRefreshPending: z.boolean().optional(),
+  resetCreditFetchedAt: z.iso.datetime({ offset: true }).nullable().optional(),
   resetCreditNearestExpiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
 });
 
@@ -123,6 +125,7 @@ export const RateLimitResetCreditsSnapshotSchema = z.object({
 });
 
 export const ConsumeRateLimitResetCreditResponseSchema = z.object({
+  outcome: z.enum(["pending", "retryable", "unknown", "confirmed_reset", "no_reset", "expired"]).nullable().optional(),
   code: z.string().nullable().optional(),
   windowsReset: z.number().nullable().optional(),
   redeemedAt: z.iso.datetime({ offset: true }).nullable(),

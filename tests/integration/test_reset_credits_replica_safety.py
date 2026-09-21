@@ -187,7 +187,7 @@ async def test_dashboard_redeem_retry_on_second_replica_reuses_pinned_credit(asy
 
     assert retry.status_code == 200, retry.text
     # The retry re-targets the originally pinned credit; credit-2 stays unburned.
-    assert consume_calls == ["credit-1", "credit-1"]
+    assert consume_calls == ["credit-1"]
 
     async with SessionLocal() as session:
         rows = (
@@ -775,3 +775,97 @@ async def test_peer_replica_store_is_cleared_after_consume_via_invalidation_bus(
     # Replica B converges within one poll tick instead of waiting for its next
     # (up to 60s) refresh tick.
     assert replica_b_store.get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_scoped_invalidation_coalesces_targets_and_preserves_unrelated(async_client) -> None:
+    from app.modules.rate_limit_reset_credits.invalidation import (
+        ResetCreditInvalidationTracker,
+        publish_reset_credit_invalidation,
+    )
+
+    ids = [
+        await _import_account(async_client, email=f"scope-{n}@example.com", account_id=f"scope-{n}") for n in range(3)
+    ]
+    stores = [RateLimitResetCreditsStore(), RateLimitResetCreditsStore()]
+    trackers = [ResetCreditInvalidationTracker(store) for store in stores]
+    for tracker in trackers:
+        await tracker.initialize()
+    for store in stores:
+        for account_id in ids:
+            await store.set(account_id, _snapshot([_credit("one")]))
+    old_generation = stores[1].generation(ids[0])
+    await publish_reset_credit_invalidation(ids[0])
+    await publish_reset_credit_invalidation(ids[1])
+    for tracker in trackers:
+        await tracker.reconcile()
+        assert tracker.store.get(ids[0]) is None
+        assert tracker.store.get(ids[1]) is None
+        snapshot = tracker.store.get(ids[2])
+        assert snapshot is not None and snapshot.available_count == 1
+    assert not await stores[1].set_if_generation(ids[0], _snapshot([_credit("one")]), old_generation)
+
+
+@pytest.mark.asyncio
+async def test_scoped_invalidation_detects_legacy_unscoped_writer(async_client) -> None:
+    from app.modules.rate_limit_reset_credits.invalidation import ResetCreditInvalidationTracker
+
+    account_id = await _import_account(async_client, email="legacy-writer@example.com", account_id="legacy-writer")
+    store = RateLimitResetCreditsStore()
+    tracker = ResetCreditInvalidationTracker(store)
+    await tracker.initialize()
+    await store.set(account_id, _snapshot([_credit("one")]))
+    poller = CacheInvalidationPoller(SessionLocal)
+    await poller.bump(NAMESPACE_RESET_CREDITS)
+    await tracker.reconcile()
+    assert store.get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_scoped_invalidation_self_ack_restart_and_deleted_history(async_client) -> None:
+    from sqlalchemy import delete
+
+    from app.db.models import ResetCreditSnapshotRevision
+    from app.modules.rate_limit_reset_credits.invalidation import (
+        ResetCreditInvalidationTracker,
+        publish_reset_credit_invalidation,
+    )
+
+    account_id = await _import_account(async_client, email="revision@example.com", account_id="revision")
+    store = RateLimitResetCreditsStore()
+    tracker = ResetCreditInvalidationTracker(store)
+    await tracker.initialize()
+    revision = await publish_reset_credit_invalidation(account_id)
+    await store.acknowledge_revision(account_id, revision)
+    refreshed = _snapshot([_credit("later")])
+    await store.set(account_id, refreshed)
+    await tracker.reconcile()
+    assert store.get(account_id) is refreshed
+    restarted = ResetCreditInvalidationTracker(store)
+    await restarted.initialize()
+    await restarted.reconcile()
+    assert store.get(account_id) is refreshed
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(ResetCreditSnapshotRevision).where(
+                ResetCreditSnapshotRevision.account_id == account_id,
+            )
+        )
+        await session.commit()
+    await restarted.reconcile()
+    assert store.get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_scoped_write_retries_then_uses_legacy_wakeup(async_client, monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    from app.modules.rate_limit_reset_credits import invalidation
+
+    broken_session = Mock(side_effect=RuntimeError("database unavailable"))
+    monkeypatch.setattr(invalidation, "SessionLocal", broken_session)
+    fallback = AsyncMock()
+    monkeypatch.setattr(invalidation, "bump_cache_invalidation", fallback)
+    assert await invalidation.publish_reset_credit_invalidation("missing") is None
+    assert broken_session.call_count == 3
+    fallback.assert_awaited_once_with(NAMESPACE_RESET_CREDITS)

@@ -10031,7 +10031,7 @@ async def test_native_giveup_closes_the_inner_stream_chain() -> None:
     payload = parse_sse_data_json(event)
     assert payload is not None
     assert payload["type"] == "response.failed"
-    await iterator.aclose()
+    await cast(Any, iterator).aclose()
     assert source.closed is True
 
 

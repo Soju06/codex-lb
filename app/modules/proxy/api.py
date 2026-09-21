@@ -9197,8 +9197,13 @@ async def _normalize_public_responses_stream(
                     "server_error",
                     response_id=response_id,
                 )
-                yield format_sse_event(giveup_event)
-                await _close_responses_stream_best_effort(stream, action="native give-up")
+                try:
+                    yield format_sse_event(giveup_event)
+                finally:
+                    # A downstream consumer may close this generator immediately
+                    # after receiving the terminal event. Keep cleanup on the
+                    # suspended-generator path as well as the normal return path.
+                    await _close_responses_stream_best_effort(stream, action="native give-up")
                 return
         raw_event_type = payload.get("type")
         if (

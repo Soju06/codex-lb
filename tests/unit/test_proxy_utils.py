@@ -9959,7 +9959,7 @@ async def test_native_codex_stream_translates_marked_synthetic_transport_termina
     error = cast(dict[str, JsonValue], response["error"])
     assert error["code"] == "rate_limit_exceeded"
     error_message = cast(str, error["message"])
-    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert re.match(r"^Please try again in 5s\. ", error_message)
     assert "upstream_request_timeout" in error_message
 
 
@@ -9990,7 +9990,7 @@ async def test_native_codex_stream_translates_marked_incomplete_terminal() -> No
     error = cast(dict[str, JsonValue], response["error"])
     assert error["code"] == "rate_limit_exceeded"
     error_message = cast(str, error["message"])
-    assert re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
+    assert re.match(r"^Please try again in 5s\. ", error_message)
     assert "stream_incomplete" in error_message
 
 
@@ -10021,16 +10021,17 @@ async def test_native_giveup_closes_the_inner_stream_chain() -> None:
             self.closed = True
 
     source = ClosableStream()
-    events = [
-        event_block
-        async for event_block in proxy_api._normalize_public_responses_stream(
-            source,
-            enforce_openai_sdk_contract=False,
-            preserve_native_failure_lifecycle=True,
-        )
-    ]
+    iterator = proxy_api._normalize_public_responses_stream(
+        source,
+        enforce_openai_sdk_contract=False,
+        preserve_native_failure_lifecycle=True,
+    )
 
-    assert len(events) == 1
+    event = await iterator.__anext__()
+    payload = parse_sse_data_json(event)
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    await iterator.aclose()
     assert source.closed is True
 
 
@@ -10101,9 +10102,7 @@ async def test_native_codex_stream_emits_retryable_terminal_event_instead_of_rer
     error_message = cast(str, error["message"])
     assert "upstream_request_timeout" in error_message
     assert "timed out; try again in 99s" in error_message
-    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
-    assert match is not None
-    assert match.group(1) == "7"
+    assert re.match(r"^Please try again in 7s\. ", error_message)
     assert failed_stream.closed is True
 
 
@@ -10133,9 +10132,7 @@ async def test_native_codex_stream_error_events_default_retry_delay_when_unknown
     error = cast(dict[str, JsonValue], response["error"])
     assert error["code"] == "rate_limit_exceeded"
     error_message = cast(str, error["message"])
-    match = re.search(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)", error_message)
-    assert match is not None
-    assert match.group(1) == "5"
+    assert re.match(r"^Please try again in 5s\. ", error_message)
 
 
 @pytest.mark.asyncio

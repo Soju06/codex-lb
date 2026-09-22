@@ -58,6 +58,9 @@ SQLITE_LOCK_RETRY_DELAYS_SECONDS = (0.05, 0.1, 0.2)
 # that surfaces the extended result-code name instead of the prose. All of
 # them mean "another writer holds the slot, try again", so every site treats
 # the whole set alike rather than each keeping its own subset.
+#: MySQL/MariaDB transient contention: 1213 deadlock, 1205 lock wait timeout.
+_MYSQL_CONTENTION_CODES = frozenset({1205, 1213})
+
 _SQLITE_LOCK_MESSAGE_FRAGMENTS = (
     "database is locked",
     "database is busy",
@@ -80,8 +83,21 @@ def is_sqlite_lock_error(exc: BaseException) -> bool:
     """
     if not isinstance(exc, OperationalError) or exc.orig is None:
         return False
+    if _mysql_contention_code(exc) is not None:
+        # MySQL reports contention as a deadlock or a lock-wait timeout; both
+        # are transient and retried exactly like SQLite's writer lock.
+        return True
     message = str(exc.orig).lower()
     return any(fragment in message for fragment in _SQLITE_LOCK_MESSAGE_FRAGMENTS)
+
+
+def _mysql_contention_code(exc: BaseException) -> int | None:
+    """The MySQL/MariaDB contention errno on a driver exception, if any."""
+    driver_exc = exc.orig if isinstance(exc, OperationalError) else exc
+    args = getattr(driver_exc, "args", None) or ()
+    if args and isinstance(args[0], int) and args[0] in _MYSQL_CONTENTION_CODES:
+        return args[0]
+    return None
 
 
 def sqlite_error_name(exc: BaseException) -> str | None:
@@ -91,6 +107,9 @@ def sqlite_error_name(exc: BaseException) -> str | None:
     itself, so a constructed ``OperationalError`` has no such attribute:
     read it defensively rather than with ``hasattr``-guarded access.
     """
+    code = _mysql_contention_code(exc)
+    if code is not None:
+        return "mysql_deadlock" if code == 1213 else "mysql_lock_wait_timeout"
     driver_exc = exc.orig if isinstance(exc, OperationalError) else exc
     return getattr(driver_exc, "sqlite_errorname", None)
 

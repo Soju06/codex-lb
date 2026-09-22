@@ -29,6 +29,7 @@ from app.core.usage.types import (
 )
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import epoch_seconds, is_mysql
 from app.db.models import (
     Account,
     AccountUsageRollupState,
@@ -237,8 +238,8 @@ class RequestLogsRepository:
 
     def _conversation_cached_expr(self) -> ColumnElement:
         dialect = self._session.get_bind().dialect.name
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.least if (dialect == "postgresql" or is_mysql(dialect)) else func.min
+        greatest = func.greatest if (dialect == "postgresql" or is_mysql(dialect)) else func.max
         return case(
             (RequestLog.cached_input_tokens.is_(None), None),
             (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
@@ -503,8 +504,13 @@ class RequestLogsRepository:
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
             return func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+        if is_mysql(dialect):
+            # MySQL's CAST(<decimal> AS SIGNED) ROUNDS instead of truncating,
+            # so :30+ rows would land in the next hour bucket; floor the
+            # division explicitly (SQLite and PostgreSQL truncate).
+            return func.floor(cast(epoch_seconds(RequestLog.requested_at), Integer) / bucket_seconds) * bucket_seconds
         # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
-        epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+        epoch_col = cast(epoch_seconds(RequestLog.requested_at), Integer)
         return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
@@ -842,8 +848,8 @@ class RequestLogsRepository:
         dialect = self._session.get_bind().dialect.name
         # SQLite's two-argument min()/max() scalar functions are its
         # least()/greatest().
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.least if (dialect == "postgresql" or is_mysql(dialect)) else func.min
+        greatest = func.greatest if (dialect == "postgresql" or is_mysql(dialect)) else func.max
 
         window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
         output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -1605,9 +1611,9 @@ class RequestLogsRepository:
         """(leading, second) facet: skip-scan the leading column, then per
         value probe a `(value, NULL)` pair and skip-scan the non-NULL second
         values. NULL pair placement follows the backend's ORDER BY ASC NULL
-        ordering (SQLite: first, PostgreSQL: last) so results match the
-        legacy DISTINCT path exactly."""
-        nulls_first = self._session.get_bind().dialect.name == "sqlite"
+        ordering (SQLite: first, MySQL/MariaDB: first, PostgreSQL: last) so
+        results match the legacy DISTINCT path exactly."""
+        nulls_first = self._session.get_bind().dialect.name in ("sqlite", "mysql", "mariadb")
         pairs: list[tuple[str, str | None]] = []
         for value in await self._distinct_skip_scan(leading, conditions):
             if not value:

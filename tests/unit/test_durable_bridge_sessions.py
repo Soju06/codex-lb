@@ -3863,3 +3863,57 @@ async def test_reclaimed_detached_row_fences_prior_generation_operations(
         request_text='{"model":"gpt-5.4","input":"new turn"}',
     )
     assert accepted is not None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_cooldown_uses_the_pre_update_failure_count(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """The strike that crosses the threshold must cool down for exactly that count.
+
+    MySQL and MariaDB evaluate ``ON DUPLICATE KEY UPDATE`` assignments left to
+    right, so an incrementing assignment placed ahead of the cooldown ``CASE`` made
+    that ``CASE`` read the already-incremented count: the circuit then cooled down
+    for one failure more than the row held (``base_backoff * 2`` instead of
+    ``base_backoff`` at the threshold).
+    """
+    threshold = 3
+    base_backoff = 60.0
+    key = "key-cooldown"
+    common = {
+        "session_key_kind": "session_header",
+        "api_key_id": key,
+        "last_detail": "stream_incomplete",
+        "failure_threshold": threshold,
+        "base_backoff_seconds": base_backoff,
+        "max_backoff_seconds": 600.0,
+    }
+
+    # Two strikes below the threshold, then the strike that crosses it. The
+    # crossing write carries the base it loaded; without that it is a stale write
+    # and is dropped by design.
+    await coordinator.persist_retry_circuit(
+        session_key_value="sid-cooldown-crossing",
+        consecutive_failures=threshold - 1,
+        cooldown_until_epoch=0.0,
+        updated_at_epoch=1200.0,
+        **common,
+    )
+    await coordinator.persist_retry_circuit(
+        session_key_value="sid-cooldown-crossing",
+        consecutive_failures=threshold,
+        cooldown_until_epoch=0.0,
+        updated_at_epoch=1260.0,
+        base_updated_at_epoch=1200.0,
+        **common,
+    )
+    crossed = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header", session_key_value="sid-cooldown-crossing", api_key_id=key
+    )
+
+    assert crossed is not None
+    assert crossed.consecutive_failures == threshold
+    # The row holds `threshold` failures, so the cooldown is the threshold backoff
+    # measured from the observation that wrote it.
+    assert crossed.cooldown_until_epoch == 1260.0 + base_backoff
+    assert crossed.cooldown_until_epoch != 1260.0 + (base_backoff * 2.0)

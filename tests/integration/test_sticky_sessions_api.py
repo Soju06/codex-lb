@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import column, func, insert, select, table, text
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
@@ -19,6 +19,17 @@ from app.modules.settings.repository import SettingsRepository
 from app.modules.sticky_sessions.cleanup_scheduler import StickySessionCleanupScheduler
 
 pytestmark = pytest.mark.integration
+
+# ``key`` is a reserved word on MySQL, so the seeding inserts go through Core:
+# each dialect's identifier preparer quotes the column where it must be quoted.
+_STICKY_SESSIONS = table(
+    "sticky_sessions",
+    column("key"),
+    column("account_id"),
+    column("kind"),
+    column("created_at"),
+    column("updated_at"),
+)
 
 
 async def _create_accounts() -> list[Account]:
@@ -73,18 +84,13 @@ async def _insert_sticky_session(
     timestamp = utcnow() - timedelta(seconds=updated_at_offset_seconds)
     async with SessionLocal() as session:
         await session.execute(
-            text(
-                """
-                INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
-                VALUES (:key, :account_id, :kind, :timestamp, :timestamp)
-                """
-            ),
-            {
-                "key": key,
-                "account_id": account_id,
-                "kind": kind.value,
-                "timestamp": timestamp,
-            },
+            insert(_STICKY_SESSIONS).values(
+                key=key,
+                account_id=account_id,
+                kind=kind.value,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
         )
         await session.commit()
 
@@ -385,8 +391,7 @@ async def test_sticky_sessions_api_hides_and_protects_reserved_live_bindings(asy
         remaining_reserved = set(
             (
                 await session.execute(
-                    text("SELECT key FROM sticky_sessions WHERE key LIKE :prefix"),
-                    {"prefix": "\ncodex_live_call:%"},
+                    select(_STICKY_SESSIONS.c.key).where(_STICKY_SESSIONS.c.key.like("\ncodex_live_call:%")),
                 )
             ).scalars()
         )
@@ -814,7 +819,10 @@ async def test_sticky_sessions_cleanup_scheduler_removes_stale_prompt_cache_and_
 
     async with SessionLocal() as session:
         remaining = {
-            row[0] for row in (await session.execute(text("SELECT key FROM sticky_sessions ORDER BY key"))).fetchall()
+            row[0]
+            for row in (
+                await session.execute(select(_STICKY_SESSIONS.c.key).order_by(_STICKY_SESSIONS.c.key))
+            ).fetchall()
         }
         bridge_remaining = {
             row[0]
@@ -901,19 +909,15 @@ async def test_sticky_sessions_api_deletes_filtered_chunks_large_match_set(async
     bulk_count = 600
     async with SessionLocal() as session:
         for i in range(bulk_count):
+            timestamp = utcnow() - timedelta(seconds=i)
             await session.execute(
-                text(
-                    """
-                    INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
-                    VALUES (:key, :account_id, :kind, :timestamp, :timestamp)
-                    """
-                ),
-                {
-                    "key": f"bulk-delete-{i:04d}",
-                    "account_id": accounts[0].id,
-                    "kind": StickySessionKind.STICKY_THREAD.value,
-                    "timestamp": utcnow() - timedelta(seconds=i),
-                },
+                insert(_STICKY_SESSIONS).values(
+                    key=f"bulk-delete-{i:04d}",
+                    account_id=accounts[0].id,
+                    kind=StickySessionKind.STICKY_THREAD.value,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
             )
         await session.commit()
 
@@ -927,9 +931,7 @@ async def test_sticky_sessions_api_deletes_filtered_chunks_large_match_set(async
     async with SessionLocal() as session:
         remaining = (
             await session.execute(
-                text(
-                    "SELECT COUNT(*) FROM sticky_sessions WHERE key LIKE 'bulk-delete-%'",
-                )
+                select(func.count()).select_from(_STICKY_SESSIONS).where(_STICKY_SESSIONS.c.key.like("bulk-delete-%"))
             )
         ).scalar_one()
     assert remaining == 0

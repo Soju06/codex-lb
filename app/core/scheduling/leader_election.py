@@ -10,6 +10,7 @@ from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.db.dialect_sql import is_mysql
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
@@ -169,7 +170,80 @@ _SQLITE_RENEW_SQL = text(
 ).bindparams(bindparam("ttl", type_=Float))
 
 
+# MySQL has no ``ON CONFLICT ... RETURNING``; the acquire is emulated with an
+# InnoDB row lock (``FOR UPDATE``) plus explicit INSERT/UPDATE, and the renewed
+# or acquired remaining lease is read on the database's own clock afterwards —
+# the same value the PostgreSQL/SQLite ``RETURNING`` forms yield.
+_MYSQL_REMAINING_SQL = text("SELECT TIMESTAMPDIFF(MICROSECOND, NOW(6), expires_at) FROM scheduler_leader WHERE id = 1")
+
+
+def _mysql_ttl_microseconds(ttl: float) -> int:
+    return max(1, int(round(float(ttl) * 1_000_000)))
+
+
+async def _mysql_acquire_remaining(session: AsyncSession, *, leader_id: str, ttl: float) -> float | None:
+    ttl_us = _mysql_ttl_microseconds(ttl)
+    # Single-statement conditional upsert: the guard lives inside the IF()
+    # assignments, so there is no SELECT ... FOR UPDATE followed by INSERT
+    # (gap lock + insert intention) deadlock window under concurrent replicas.
+    await session.execute(
+        text(
+            "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) "
+            f"VALUES (1, :leader_id, NOW(6), NOW(6) + INTERVAL {ttl_us} MICROSECOND) AS new "
+            "ON DUPLICATE KEY UPDATE "
+            "leader_id = IF(scheduler_leader.expires_at < NOW(6) "
+            "OR scheduler_leader.leader_id = :leader_id, new.leader_id, scheduler_leader.leader_id), "
+            "acquired_at = IF(scheduler_leader.expires_at < NOW(6) "
+            "OR scheduler_leader.leader_id = :leader_id, new.acquired_at, scheduler_leader.acquired_at), "
+            "expires_at = IF(scheduler_leader.expires_at < NOW(6) "
+            "OR scheduler_leader.leader_id = :leader_id, new.expires_at, scheduler_leader.expires_at)"
+        ),
+        {"leader_id": leader_id},
+    )
+    row = (
+        await session.execute(
+            text(
+                "SELECT leader_id, TIMESTAMPDIFF(MICROSECOND, NOW(6), expires_at) AS remaining_us "
+                "FROM scheduler_leader WHERE id = 1"
+            )
+        )
+    ).first()
+    if row is None or str(row.leader_id) != str(leader_id):
+        # Another replica owns a live lease: the upsert left the row alone.
+        return None
+    return None if row.remaining_us is None else float(row.remaining_us) / 1_000_000.0
+
+
+async def _mysql_renew_remaining(session: AsyncSession, *, leader_id: str, ttl: float) -> float | None:
+    ttl_us = _mysql_ttl_microseconds(ttl)
+    result = await session.execute(
+        text(
+            "UPDATE scheduler_leader SET expires_at = NOW(6) + "
+            f"INTERVAL {ttl_us} MICROSECOND "
+            "WHERE id = 1 AND leader_id = :leader_id AND expires_at > NOW(6)"
+        ),
+        {"leader_id": leader_id},
+    )
+    if not result.rowcount:
+        return None
+    remaining = (await session.execute(_MYSQL_REMAINING_SQL)).scalar_one_or_none()
+    return None if remaining is None else float(remaining) / 1_000_000.0
+
+
+class _EmulatedRemaining:
+    """Result adapter so an emulated path reads like a RETURNING one."""
+
+    __slots__ = ("_remaining",)
+
+    def __init__(self, remaining: float | None) -> None:
+        self._remaining = remaining
+
+    def first(self) -> tuple[float] | None:
+        return None if self._remaining is None else (self._remaining,)
+
+
 def _dialect_name(session: AsyncSession) -> str:
+
     return session.get_bind().dialect.name
 
 
@@ -243,11 +317,17 @@ class LeaderElection:
         loop = asyncio.get_running_loop()
         try:
             async with get_background_session() as session:
-                acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
-                result = await session.execute(
-                    acquire_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
-                )
+                dialect = _dialect_name(session)
+                if is_mysql(dialect):
+                    result = _EmulatedRemaining(
+                        await _mysql_acquire_remaining(session, leader_id=self._leader_id, ttl=ttl)
+                    )
+                else:
+                    acquire_sql = _SQLITE_ACQUIRE_SQL if dialect == "sqlite" else _POSTGRES_ACQUIRE_SQL
+                    result = await session.execute(
+                        acquire_sql,
+                        {"leader_id": self._leader_id, "ttl": ttl},
+                    )
                 # The statement RETURNS the lease still remaining, measured on
                 # the database's OWN clock (``expires_at`` minus ``db_now`` in
                 # the same statement), or nothing when another replica owns the
@@ -343,11 +423,15 @@ class LeaderElection:
             # rows instead of resurrecting a row whose ``expires_at`` has already
             # passed but no follower has yet claimed. A no-match RETURNS no row
             # and falls through to the lease-loss demotion below.
-            renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
-            result = await session.execute(
-                renew_sql,
-                {"leader_id": self._leader_id, "ttl": ttl},
-            )
+            dialect = _dialect_name(session)
+            if is_mysql(dialect):
+                result = _EmulatedRemaining(await _mysql_renew_remaining(session, leader_id=self._leader_id, ttl=ttl))
+            else:
+                renew_sql = _SQLITE_RENEW_SQL if dialect == "sqlite" else _POSTGRES_RENEW_SQL
+                result = await session.execute(
+                    renew_sql,
+                    {"leader_id": self._leader_id, "ttl": ttl},
+                )
             # The statement RETURNS the renewed lease's remaining (on the
             # database's OWN clock) or nothing. Read it BEFORE the commit: a
             # no-match means another replica now owns the lease (or the row had
@@ -935,11 +1019,17 @@ class LeaderElection:
                 # Guard the renewal on the lease still being unexpired at the
                 # database's execution-time clock so a shutdown/drain renewal can
                 # never resurrect a row whose ``expires_at`` has already passed.
-                renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
-                result = await session.execute(
-                    renew_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
-                )
+                dialect = _dialect_name(session)
+                if is_mysql(dialect):
+                    result = _EmulatedRemaining(
+                        await _mysql_renew_remaining(session, leader_id=self._leader_id, ttl=ttl)
+                    )
+                else:
+                    renew_sql = _SQLITE_RENEW_SQL if dialect == "sqlite" else _POSTGRES_RENEW_SQL
+                    result = await session.execute(
+                        renew_sql,
+                        {"leader_id": self._leader_id, "ttl": ttl},
+                    )
                 # A RETURNING row means the guarded UPDATE extended the row; no
                 # row means it was expired/taken over (a harmless no-op here).
                 # The drain path holds no locally tracked deadline to re-anchor.

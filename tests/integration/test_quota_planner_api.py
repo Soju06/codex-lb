@@ -133,18 +133,35 @@ async def test_quota_planner_repository_persists_naive_utc_decision_datetimes(mo
     # exact values the repository binds to the timezone-naive columns. asyncpg/Postgres
     # raises "can't subtract offset-naive and offset-aware datetimes" if these are aware,
     # so the repository MUST sanitize them before persistence.
+    # The repository reaches the database differently per dialect: SQLite and
+    # PostgreSQL read ``INSERT ... ON CONFLICT DO NOTHING ... RETURNING`` through
+    # ``AsyncSession.scalar``, while MySQL has no RETURNING and issues its insert
+    # with ``execute``; ``update_decision_status`` follows the same split. Both
+    # entry points are hooked so the bound values are inspected on every dialect.
     bound_scheduled: list[object] = []
-    original_insert_scalar = AsyncSession.scalar
+    bound_executed: list[object] = []
+    watched = {"scheduled_at": bound_scheduled, "executed_at": bound_executed}
+    original_execute = AsyncSession.execute
+    original_scalar = AsyncSession.scalar
 
-    async def capture_insert_scalar(self, statement, *args, **kwargs):
+    def capture(statement: object) -> None:
         values = getattr(statement, "_values", None)
         if values:
             for col, bind in values.items():
-                if getattr(col, "name", None) == "scheduled_at":
-                    bound_scheduled.append(getattr(bind, "value", bind))
-        return await original_insert_scalar(self, statement, *args, **kwargs)
+                sink = watched.get(getattr(col, "name", None))
+                if sink is not None:
+                    sink.append(getattr(bind, "value", bind))
 
-    monkeypatch.setattr(AsyncSession, "scalar", capture_insert_scalar)
+    async def capture_execute(self, statement, *args, **kwargs):
+        capture(statement)
+        return await original_execute(self, statement, *args, **kwargs)
+
+    async def capture_scalar(self, statement, *args, **kwargs):
+        capture(statement)
+        return await original_scalar(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", capture_execute)
+    monkeypatch.setattr(AsyncSession, "scalar", capture_scalar)
 
     async with SessionLocal() as session:
         repo = QuotaPlannerRepository(session)
@@ -167,22 +184,8 @@ async def test_quota_planner_repository_persists_naive_utc_decision_datetimes(mo
     # The absolute instant must be preserved (converted to UTC).
     assert bound_value == aware_scheduled.replace(tzinfo=None)
 
-    monkeypatch.undo()
-
-    # update_decision_status binds executed_at via an UPDATE ... values() statement.
-    # Capture the bound value from the compiled statement parameters.
-    bound_executed: list[object] = []
-    original_scalar = AsyncSession.scalar
-
-    async def capture_scalar(self, statement, *args, **kwargs):
-        values = getattr(statement, "_values", None)
-        if values:
-            for col, bind in values.items():
-                if getattr(col, "name", None) == "executed_at":
-                    bound_executed.append(getattr(bind, "value", bind))
-        return await original_scalar(self, statement, *args, **kwargs)
-
-    monkeypatch.setattr(AsyncSession, "scalar", capture_scalar)
+    # update_decision_status binds executed_at via an UPDATE ... values() statement;
+    # the same capture hook above collects it for either dialect's statement.
 
     async with SessionLocal() as session:
         repo = QuotaPlannerRepository(session)

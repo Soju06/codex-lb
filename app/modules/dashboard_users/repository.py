@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.auth.dashboard_access import PRESET_ROLE_IDS, PresetRoleSlug
+from app.db.dialect_sql import conditional_count, delete_returning, dialect_name, is_mysql, update_returning
 from app.db.models import (
     ApiKey,
     ApiKeyDeactivatedReason,
@@ -246,7 +247,7 @@ class DashboardUsersRepository:
             await self._session.execute(
                 select(
                     func.count(DashboardUser.id),
-                    func.count(DashboardUser.id).filter(active),
+                    conditional_count(self._session, DashboardUser.id, active),
                 )
             )
         ).one()
@@ -286,10 +287,12 @@ class DashboardUsersRepository:
             await self._session.execute(
                 select(
                     func.count(DashboardUser.id),
-                    func.count(DashboardUser.id).filter(status == DashboardUserStatus.ACTIVE.value),
-                    func.count(DashboardUser.id).filter(status == DashboardUserStatus.INVITED.value),
-                    func.count(DashboardUser.id).filter(status == DashboardUserStatus.DISABLED.value),
-                    func.count(DashboardUser.id).filter(DashboardUser.role_id != PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]),
+                    conditional_count(self._session, DashboardUser.id, status == DashboardUserStatus.ACTIVE.value),
+                    conditional_count(self._session, DashboardUser.id, status == DashboardUserStatus.INVITED.value),
+                    conditional_count(self._session, DashboardUser.id, status == DashboardUserStatus.DISABLED.value),
+                    conditional_count(
+                        self._session, DashboardUser.id, DashboardUser.role_id != PRESET_ROLE_IDS[PresetRoleSlug.ADMIN]
+                    ),
                 ).where(live)
             )
         ).one()
@@ -347,20 +350,24 @@ class DashboardUsersRepository:
             .with_for_update()
         )
 
-    @staticmethod
-    def _other_active_admin_exists(user_id: str) -> ColumnElement[bool]:
+    def _other_active_admin_exists(self, user_id: str) -> ColumnElement[bool]:
         other = aliased(DashboardUser)
-        return (
+        inner = (
             select(other.id)
             .where(other.id != user_id)
             .where(other.status == DashboardUserStatus.ACTIVE.value)
             .where(other.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN])
-            .exists()
         )
+        if is_mysql(dialect_name(self._session)):
+            # MySQL rejects a subquery that reads the UPDATE target table
+            # (error 1093); the derived table materialises it and stays legal.
+            derived = inner.subquery()
+            return select(derived.c.id).where(derived.c.id.is_not(None)).exists()
+        return inner.exists()
 
     def _other_qualifying_break_glass_exists(self, user_id: str) -> ColumnElement[bool]:
         other = aliased(DashboardUser)
-        return (
+        inner = (
             select(other.id)
             .where(other.id != user_id)
             .where(other.is_break_glass.is_(True))
@@ -368,8 +375,13 @@ class DashboardUsersRepository:
             .where(other.role_id == PRESET_ROLE_IDS[PresetRoleSlug.ADMIN])
             .where(other.totp_secret_encrypted.is_not(None))
             .where(other.password_hash.is_not(None))
-            .exists()
         )
+        if is_mysql(dialect_name(self._session)):
+            # MySQL rejects a subquery that reads the UPDATE target table
+            # (error 1093); the derived table materialises it and stays legal.
+            derived = inner.subquery()
+            return select(derived.c.id).where(derived.c.id.is_not(None)).exists()
+        return inner.exists()
 
     async def update_role_status_guarded(
         self,
@@ -396,10 +408,12 @@ class DashboardUsersRepository:
         values: dict[str, object] = {"role_id": role_id, "status": status}
         if is_break_glass is not None:
             values["is_break_glass"] = is_break_glass
-        result = await self._session.execute(
-            stmt.values(**values).returning(DashboardUser.id).execution_options(synchronize_session=False)
+        rows = await update_returning(
+            self._session,
+            stmt.values(**values).execution_options(synchronize_session=False),
+            DashboardUser.id,
         )
-        return result.scalar_one_or_none() is not None
+        return bool(rows)
 
     # --- invites ---
 
@@ -437,10 +451,9 @@ class DashboardUsersRepository:
             .where(DashboardUserInvite.token_hash == token_hash)
             .where(live_invite_filter(now))
             .values(consumed_at=now)
-            .returning(DashboardUserInvite.id)
             .execution_options(synchronize_session=False)
         )
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
 
     async def find_invite_expecting_identity(
         self, provider: str, provider_key: str, subject: str, now: datetime
@@ -462,15 +475,16 @@ class DashboardUsersRepository:
     async def consume_invite_by_identity(self, invite_id: str, *, now: datetime) -> bool:
         """Consume the invite via its expected identity (compare-and-set); ``False`` = no longer live (no commit)."""
 
-        result = await self._session.execute(
+        rows = await update_returning(
+            self._session,
             update(DashboardUserInvite)
             .where(DashboardUserInvite.id == invite_id)
             .where(live_invite_filter(now))
             .values(consumed_at=now)
-            .returning(DashboardUserInvite.id)
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
+            DashboardUserInvite.id,
         )
-        return result.scalar_one_or_none() is not None
+        return bool(rows)
 
     async def live_invite_for_user(self, user_id: str, now: datetime) -> DashboardUserInvite | None:
         """The live invite of a still-``invited`` account, or ``None``."""
@@ -539,17 +553,16 @@ class DashboardUsersRepository:
             .where(live_invite_filter(now))
             .exists()
         )
-        deleted = (
-            await self._session.execute(
-                delete(DashboardUser)
-                .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
-                .where(expired_invite)
-                .where(~live_invite)
-                .returning(DashboardUser.id)
-                .execution_options(synchronize_session=False)
-            )
-        ).scalars()
-        purged = list(deleted.all())
+        deleted_rows = await delete_returning(
+            self._session,
+            delete(DashboardUser)
+            .where(DashboardUser.status == DashboardUserStatus.INVITED.value)
+            .where(expired_invite)
+            .where(~live_invite)
+            .execution_options(synchronize_session=False),
+            DashboardUser.id,
+        )
+        purged = [row[0] for row in deleted_rows]
         if not purged:
             await self._session.rollback()
             return 0
@@ -572,15 +585,24 @@ class DashboardUsersRepository:
             .where(DashboardUserInvite.user_id == user_id)
             .where(still_invited)
             .values(token_hash=token_hash, expires_at=expires_at, consumed_at=None, revoked_at=None)
-            .returning(DashboardUserInvite.id)
             .execution_options(synchronize_session=False)
         )
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
 
     # --- writes ---
 
     def add(self, *rows: DashboardUser | DashboardUserInvite | DashboardIdentity) -> None:
         self._session.add_all(rows)
+
+    async def flush(self) -> None:
+        """Push pending ORM changes into the open transaction without committing.
+
+        Used to order a status write ahead of the key cascade: the cascade has to
+        run after the owner flip, or a key activated in that window survives it
+        (see ``deactivate_owned_keys``).
+        """
+
+        await self._session.flush()
 
     async def commit_user(self, user_id: str, *, bump_generation: bool = False) -> DashboardUser:
         """Commit pending changes, optionally bumping ``session_generation`` atomically
@@ -611,14 +633,15 @@ class DashboardUsersRepository:
     async def deactivate_owned_keys(self, user_id: str) -> list[str]:
         """Turn off every active key the account owns, recording why (no commit); returns their hashes."""
 
-        result = await self._session.execute(
+        rows = await update_returning(
+            self._session,
             update(ApiKey)
             .where(ApiKey.owner_user_id == user_id)
             .where(ApiKey.is_active.is_(True))
-            .values(is_active=False, deactivated_reason=ApiKeyDeactivatedReason.OWNER_DISABLED.value)
-            .returning(ApiKey.key_hash)
+            .values(is_active=False, deactivated_reason=ApiKeyDeactivatedReason.OWNER_DISABLED.value),
+            ApiKey.key_hash,
         )
-        return list(result.scalars().all())
+        return [row[0] for row in rows]
 
     async def reactivate_owner_disabled_keys(self, user_id: str) -> list[str] | None:
         """Restore only the keys the owner cascade turned off; manual blocks stay off.
@@ -633,17 +656,18 @@ class DashboardUsersRepository:
             .where(DashboardUser.status == DashboardUserStatus.ACTIVE.value)
             .exists()
         )
-        result = await self._session.execute(
+        rows = await update_returning(
+            self._session,
             update(ApiKey)
             .where(ApiKey.owner_user_id == user_id)
             .where(ApiKey.is_active.is_(False))
             .where(ApiKey.deactivated_reason == ApiKeyDeactivatedReason.OWNER_DISABLED.value)
             .where(owner_active)
             .values(is_active=True, deactivated_reason=None)
-            .returning(ApiKey.key_hash)
-            .execution_options(synchronize_session=False)
+            .execution_options(synchronize_session=False),
+            ApiKey.key_hash,
         )
-        hashes = list(result.scalars().all())
+        hashes = [row[0] for row in rows]
         if not hashes:
             status = (
                 await self._session.execute(select(DashboardUser.status).where(DashboardUser.id == user_id))
@@ -685,10 +709,12 @@ class DashboardUsersRepository:
                 stmt = stmt.where(self._other_qualifying_break_glass_exists(user.id))
             if only_while_invited:
                 stmt = stmt.where(DashboardUser.status == DashboardUserStatus.INVITED.value)
-            deleted = await self._session.execute(
-                stmt.returning(DashboardUser.id).execution_options(synchronize_session=False)
+            deleted_rows = await delete_returning(
+                self._session,
+                stmt.execution_options(synchronize_session=False),
+                DashboardUser.id,
             )
-            if deleted.scalar_one_or_none() is None:
+            if not deleted_rows:
                 await self._session.rollback()
                 return None
             await self._session.commit()

@@ -501,6 +501,7 @@ def _bulk_history_since_capped_sqlite(
     - If uncapped_recent_floor is provided: unions the capped tail [cutoff, uncapped_floor)
       bounded by per_account_row_cap with all uncapped rows >= uncapped_floor.
     """
+    capped_tail_limit = max(0, per_account_row_cap)
     if not account_ids:
         return {}
 
@@ -562,7 +563,7 @@ def _bulk_history_since_capped_sqlite(
 
             if uncapped_recent_floor is None:
                 query = capped_only_sql
-                params: list[object] = [account_id, *window_params, cutoff_param, per_account_row_cap]
+                params: list[object] = [account_id, *window_params, cutoff_param, capped_tail_limit]
             else:
                 uncapped_floor = max(cutoff, uncapped_recent_floor)
                 if uncapped_floor <= cutoff:
@@ -577,7 +578,7 @@ def _bulk_history_since_capped_sqlite(
                         *window_params,
                         cutoff_param,
                         floor_param,
-                        per_account_row_cap,
+                        capped_tail_limit,
                         account_id,
                         *window_params,
                         floor_param,

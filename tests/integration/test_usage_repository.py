@@ -1299,6 +1299,48 @@ async def test_bulk_history_since_per_account_row_cap_keeps_newest_rows(db_setup
 
 
 @pytest.mark.asyncio
+async def test_bulk_history_since_negative_row_cap_is_empty_on_sqlite(db_setup):
+    """SQLite treats a negative cap as an empty tail, not an unlimited query."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only negative LIMIT regression test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-negative-cap"))
+        await repo.add_entry(
+            "acc-negative-cap",
+            10.0,
+            window="secondary",
+            recorded_at=now - timedelta(hours=2),
+        )
+        await repo.add_entry(
+            "acc-negative-cap",
+            20.0,
+            window="secondary",
+            recorded_at=now - timedelta(minutes=30),
+        )
+
+        without_floor = await repo.bulk_history_since(
+            ["acc-negative-cap"],
+            "secondary",
+            now - timedelta(days=1),
+            per_account_row_cap=-1,
+        )
+        with_floor = await repo.bulk_history_since(
+            ["acc-negative-cap"],
+            "secondary",
+            now - timedelta(days=1),
+            per_account_row_cap=-1,
+            uncapped_recent_floor=now - timedelta(hours=1),
+        )
+
+    assert without_floor.get("acc-negative-cap", []) == []
+    assert [snapshot.used_percent for snapshot in with_floor["acc-negative-cap"]] == [20.0]
+
+
+@pytest.mark.asyncio
 async def test_bulk_history_since_row_cap_respects_per_account_cutoffs_postgresql(db_setup):
     """The cap composes with per-account cutoffs: the cutoff bounds the
     lookback first, then the cap keeps the newest rows inside it."""

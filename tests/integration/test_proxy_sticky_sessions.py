@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, StickySessionKind
+from app.db.dialect_sql import is_mysql
+from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -1496,10 +1497,7 @@ async def test_v1_session_id_does_not_create_durable_codex_session_affinity(asyn
 
     async with SessionLocal() as session:
         codex_row = (
-            await session.execute(
-                text("SELECT kind FROM sticky_sessions WHERE key = :key"),
-                {"key": "v1-thread-123"},
-            )
+            await session.execute(select(StickySession.kind).where(StickySession.key == "v1-thread-123"))
         ).fetchone()
         assert codex_row is None
 
@@ -1684,8 +1682,9 @@ async def test_backend_codex_session_affinity_also_forwards_prompt_cache_key_whe
     async with SessionLocal() as session:
         row = (
             await session.execute(
-                text("SELECT kind FROM sticky_sessions WHERE key = :key"),
-                {"key": _codex_session_selection_key("backend-thread-123")},
+                select(StickySession.kind).where(
+                    StickySession.key == _codex_session_selection_key("backend-thread-123")
+                )
             )
         ).fetchone()
         assert row is not None
@@ -1840,14 +1839,9 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
         )
         stale_updated_at = utcnow() - timedelta(minutes=10)
         await session.execute(
-            text(
-                """
-                UPDATE sticky_sessions
-                SET updated_at = :stale_updated_at
-                WHERE key = :sticky_key AND kind = 'prompt_cache'
-                """
-            ),
-            {"sticky_key": thread_key, "stale_updated_at": stale_updated_at},
+            update(StickySession)
+            .where(StickySession.key == thread_key, StickySession.kind == "prompt_cache")
+            .values(updated_at=stale_updated_at)
         )
         await session.commit()
 
@@ -1886,7 +1880,7 @@ async def test_codex_endpoint_uses_prompt_cache_sticky_kind(async_client, monkey
     assert seen == ["acc_kind_a"]
 
     async with SessionLocal() as session:
-        row = (await session.execute(text("SELECT kind FROM sticky_sessions WHERE key = 'pck_abc'"))).fetchone()
+        row = (await session.execute(select(StickySession.kind).where(StickySession.key == "pck_abc"))).fetchone()
         assert row is not None
         assert row[0] == "prompt_cache"
 
@@ -2125,8 +2119,13 @@ async def test_reallocate_sticky_respects_existing_session_then_falls_back(async
 
 @pytest.mark.asyncio
 async def test_sticky_upsert_single_statement_insert_and_update(db_setup):
-    """The upsert must persist and return the row with one data statement
-    (RETURNING), for both the insert and the conflict-update arms."""
+    """The upsert must persist and return the row without extra round trips.
+
+    SQLite and PostgreSQL do that with one ``INSERT ... RETURNING`` per call.
+    MySQL cannot return rows from an insert, so the bar there is the tightest
+    equivalent shape: exactly one ``INSERT ... ON DUPLICATE KEY UPDATE`` plus
+    exactly one read-back per call -- no refresh statement, no third round trip.
+    """
     from sqlalchemy import event
 
     from app.db.models import StickySessionKind
@@ -2157,6 +2156,7 @@ async def test_sticky_upsert_single_statement_insert_and_update(db_setup):
 
     async with SessionLocal() as session:
         repo = StickySessionsRepository(session)
+        mysql = is_mysql(session)
         event.listen(engine.sync_engine, "before_cursor_execute", _capture)
         try:
             inserted = await repo.upsert("key_rt", "acc_sticky_rt", kind=StickySessionKind.PROMPT_CACHE)
@@ -2169,9 +2169,19 @@ async def test_sticky_upsert_single_statement_insert_and_update(db_setup):
     assert updated.key == "key_rt"
     assert updated.account_id == "acc_sticky_rt"
     assert updated.updated_at >= inserted.updated_at
-    # One INSERT ... RETURNING per upsert; no follow-up SELECT/refresh.
-    assert len(statements) == 2
-    assert all("INSERT" in stmt.upper() and "RETURNING" in stmt.upper() for stmt in statements)
+    if mysql:
+        # One ODKU insert plus one read-back per call, in that order, and nothing
+        # else touching the table: the read-back stands in for RETURNING.
+        assert len(statements) == 4
+        for write, read in zip(statements[0::2], statements[1::2], strict=True):
+            assert write.lstrip().upper().startswith("INSERT INTO STICKY_SESSIONS")
+            assert "ON DUPLICATE KEY UPDATE" in write.upper()
+            assert "RETURNING" not in write.upper()
+            assert read.lstrip().upper().startswith("SELECT")
+    else:
+        # One INSERT ... RETURNING per upsert; no follow-up SELECT/refresh.
+        assert len(statements) == 2
+        assert all("INSERT" in stmt.upper() and "RETURNING" in stmt.upper() for stmt in statements)
 
 
 @pytest.mark.asyncio

@@ -6,12 +6,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
+from app.db.dialect_sql import dialect_upsert
 from app.db.models import RuntimeSentinel
 from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 
@@ -36,24 +35,25 @@ def _fingerprint_prefix(fingerprint: str) -> str:
 
 
 async def _stamp_if_absent(session: AsyncSession, fingerprint: str) -> None:
-    values = {"name": ENCRYPTION_KEY_FINGERPRINT_SENTINEL, "value": fingerprint}
-    dialect = session.get_bind().dialect.name
-    if dialect == "postgresql":
-        stmt = pg_insert(RuntimeSentinel).values(**values).on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
-        await session.execute(stmt)
-    elif dialect == "sqlite":
-        stmt = (
-            sqlite_insert(RuntimeSentinel)
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
+    """Stamp the sentinel without ever overwriting an existing stamp.
+
+    Two replicas booting at the same instant take the same branch, and every
+    backend inserts-if-absent, so exactly one fingerprint is stored: the other
+    replica reads it back and refuses to start with the remediation message. The
+    fallback branch this replaces (read, then insert when the read was empty) was
+    not atomic -- on MySQL both replicas read an empty table and both inserted,
+    and the loser failed with a duplicate-key error instead of the mismatch the
+    guard exists to report.
+    """
+
+    await session.execute(
+        dialect_upsert(
+            session,
+            RuntimeSentinel,
+            {"name": ENCRYPTION_KEY_FINGERPRINT_SENTINEL, "value": fingerprint},
+            conflict_columns=["name"],
         )
-        await session.execute(stmt)
-    else:
-        existing = await session.scalar(
-            select(RuntimeSentinel).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)
-        )
-        if existing is None:
-            session.add(RuntimeSentinel(**values))
+    )
     await session.commit()
 
 

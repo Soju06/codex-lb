@@ -45,7 +45,7 @@ In the verified Docker Engine setup on Linux, host networking does not use `-p`;
 
 For a production-shaped Compose setup (watchtower-friendly tags, external PostgreSQL via env), start from
 [`docker-compose.prod.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.prod.yml) — it defines
-only the `server` service. The optional `postgres` / `postgres-upgrade` profiles live in the root
+only the `server` service. The optional `postgres` / `postgres-upgrade` / `mysql` profiles live in the root
 [`docker-compose.yml`](https://github.com/Soju06/codex-lb/blob/main/docker-compose.yml) (see [Database](../database.md)):
 
 ```bash
@@ -53,7 +53,7 @@ cp .env.example .env.local   # required: the compose file references .env.local 
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
+For PostgreSQL and MySQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
 
 ## Auth mode examples
 

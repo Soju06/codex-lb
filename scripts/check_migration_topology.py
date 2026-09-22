@@ -100,6 +100,14 @@ _DEPLOYED_CONTEXT_COLLISION = {
     "20260911_020000_add_http_bridge_terminal_append_phase": ("20260911_010000_merge_pin_index_and_affinity_heads",),
 }
 
+# These two revisions already coexist on upstream main at 3d23d53. Keep their
+# published identities while joining their heads; do not permit a third member.
+_PUBLISHED_UPSTREAM_COLLISION = {
+    "20260914_000000_add_scim_tokens": ("20260913_000000_add_oidc_provider_flow",),
+    "20260914_000000_drop_subscription_overflow_schema": ("20260913_000000_add_oidc_provider_flow",),
+}
+
+
 _FAILURE_PREFIX = "check_migration_topology"
 
 
@@ -376,7 +384,10 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             continue
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
-        if {item.revision: item.down_revisions for item in group} == _DEPLOYED_CONTEXT_COLLISION:
+        if {item.revision: item.down_revisions for item in group} in (
+            _DEPLOYED_CONTEXT_COLLISION,
+            _PUBLISHED_UPSTREAM_COLLISION,
+        ):
             continue
         group = sorted(group, key=lambda item: item.revision)
         described = "; ".join(revision.describe() for revision in group)

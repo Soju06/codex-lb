@@ -64,6 +64,10 @@ DenialCode = Literal["identity_not_provisioned", "account_disabled"]
 _SLUG_MAX_LENGTH = 56
 _SLUG_DISALLOWED = re.compile(r"[^a-z0-9._-]")
 _JIT_ATTEMPTS = 3
+#: What a name becomes when the value slugifies to nothing. One marker per
+#: provisioning path, so a name says which path made it; the sign-in one is the
+#: default because changing it would rename accounts that already exist.
+TRUSTED_HEADER_SLUG_PREFIX = "th-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +83,34 @@ class Denied:
 Resolution = ResolvedAccount | Denied
 
 
-def slugify_subject(subject: str) -> str:
+@dataclass(frozen=True, slots=True)
+class InviteLinkFailure:
+    """Why :meth:`IdentityResolver.link_expected_invite` wrote nothing.
+
+    ``stale`` means the invite stopped being live between the lookup and the
+    compare-and-set; ``raced`` means a concurrent request landed the same
+    identity triple first, so the caller re-reads it and that request's answer
+    stands.
+    """
+
+    reason: Literal["stale", "raced"]
+
+
+def slugify_subject(subject: str, *, empty_prefix: str = TRUSTED_HEADER_SLUG_PREFIX) -> str:
     """The username stem of a just-in-time account (PLAN.md 4.6 JIT rules).
 
     Lower-cased, ``@`` becomes ``.``, everything outside ``[a-z0-9._-]`` is
     dropped, cut to 56 characters (leaving room for a collision suffix). An
-    empty result falls back to ``th-<sha256 8hex>`` of the subject so any
-    subject yields a valid, stable name.
+    empty result falls back to ``<prefix><sha256 8hex>`` of the value so any
+    value yields a valid, stable name. The prefix names the path that
+    provisioned the account and defaults to the sign-in one, so no existing
+    account name changes when a second path starts using these rules.
     """
 
     lowered = subject.casefold().replace("@", ".")
     slug = _SLUG_DISALLOWED.sub("", lowered)[:_SLUG_MAX_LENGTH]
     if not slug:
-        return f"th-{hashlib.sha256(subject.encode('utf-8')).hexdigest()[:8]}"
+        return f"{empty_prefix}{hashlib.sha256(subject.encode('utf-8')).hexdigest()[:8]}"
     return slug
 
 
@@ -328,6 +347,43 @@ class IdentityResolver:
 
     # --- step 1.5: pre-created account waiting for this identity ---
 
+    async def link_expected_invite(
+        self,
+        invite: DashboardUserInvite,
+        identity: ExternalIdentity,
+        *,
+        now: datetime,
+        actor_ip: str | None,
+        user_name: str | None = None,
+        record_login: bool = True,
+    ) -> DashboardUser | InviteLinkFailure:
+        """Attach this identity to the account an invite pre-created for it, and activate it.
+
+        The narrow entry point of resolution step 1.5, shared by the sign-in
+        path and by SCIM: a provisioning push finds the same pre-created
+        account a first sign-in would have, by the same exact triple, and must
+        not create a second one beside it. ``record_login`` is off for SCIM —
+        a push is not a sign-in and must not fake a last-login timestamp.
+        """
+
+        user = invite.user
+        self._repo.add(self._identity_row(user, identity, user_name=user_name))
+        user.status = DashboardUserStatus.ACTIVE.value
+        if record_login:
+            user.last_login_at = _naive_now()
+        try:
+            if not await self._repo.consume_invite_by_identity(invite.id, now=now):
+                await self._repo.rollback()
+                return InviteLinkFailure("stale")
+            user = await self._repo.commit_user(user.id, bump_generation=True)
+        except IntegrityError:
+            # The identity row landed from a concurrent request; that request's answer stands.
+            await self._repo.rollback()
+            return InviteLinkFailure("raced")
+        await get_dashboard_users_cache().invalidate()
+        self._audit_linked(user, identity, actor_ip, via="invite")
+        return user
+
     async def _link_invited(
         self,
         invite: DashboardUserInvite,
@@ -336,22 +392,12 @@ class IdentityResolver:
         now: datetime,
         actor_ip: str | None,
     ) -> Resolution:
-        user = invite.user
-        self._repo.add(self._identity_row(user, identity))
-        user.status = DashboardUserStatus.ACTIVE.value
-        user.last_login_at = _naive_now()
-        try:
-            if not await self._repo.consume_invite_by_identity(invite.id, now=now):
-                await self._repo.rollback()
+        linked = await self.link_expected_invite(invite, identity, now=now, actor_ip=actor_ip)
+        if isinstance(linked, InviteLinkFailure):
+            if linked.reason == "stale":
                 return Denied("identity_not_provisioned")
-            user = await self._repo.commit_user(user.id, bump_generation=True)
-        except IntegrityError:
-            # The identity row landed from a concurrent request; that request's answer stands.
-            await self._repo.rollback()
             return await self._retry_seen(identity, provider, now)
-        await get_dashboard_users_cache().invalidate()
-        self._audit_linked(user, identity, actor_ip, via="invite")
-        return ResolvedAccount(user_id=user.id)
+        return ResolvedAccount(user_id=linked.id)
 
     # --- step 2: e-mail link ---
 
@@ -378,6 +424,96 @@ class IdentityResolver:
 
     # --- step 3: just-in-time provisioning ---
 
+    async def provision_account(
+        self,
+        identity: ExternalIdentity,
+        *,
+        role_id: str,
+        role_slug: str,
+        role_source: str,
+        actor_ip: str | None,
+        user_name: str | None = None,
+        username_source: str | None = None,
+        empty_slug_prefix: str = TRUSTED_HEADER_SLUG_PREFIX,
+        record_login: bool = True,
+        via: str = "jit",
+    ) -> DashboardUser | DashboardIdentity:
+        """Create the account an identity names, on an explicitly chosen role.
+
+        The one copy of the provisioning rules, parameterised by where the role
+        came from: the sign-in path passes what its mappings resolved and
+        ``role_source=mapping``; SCIM passes the slug the push named and
+        ``role_source=scim``. Everything else is shared — the
+        e-mail-already-taken rule, the username slug walk that reserves
+        ``admin``, the bounded ``IntegrityError`` retry that re-checks whether
+        the triple landed concurrently and re-reads the address a concurrent
+        write may have claimed, the identity row, and the ``user_created`` /
+        ``identity_linked`` audit pair.
+
+        Returns the new account, or the identity row a concurrent request wrote
+        for the same triple — in which case nothing was created and that
+        request's account is the answer.
+        """
+
+        # Scalars only: a rollback below expires the ORM row and a lazy reload
+        # outside the session's greenlet would fail (MissingGreenlet).
+        email = identity.email
+        if email is not None and await self._repo.get_by_email(email) is not None:
+            # Same e-mail, linking off: the address stays on the identity row only.
+            email = None
+        for attempt in range(_JIT_ATTEMPTS):
+            username = await self._free_username(
+                username_source if username_source is not None else identity.subject,
+                empty_prefix=empty_slug_prefix,
+            )
+            user = DashboardUser(
+                id=str(uuid.uuid4()),
+                username=username,
+                display_name=identity.display_name,
+                email=email,
+                role_id=role_id,
+                role_source=role_source,
+                status=DashboardUserStatus.ACTIVE.value,
+                last_login_at=_naive_now() if record_login else None,
+            )
+            self._repo.add(user, self._identity_row(user, identity, user_name=user_name))
+            try:
+                user = await self._repo.commit_user(user.id)
+            except IntegrityError:
+                await self._repo.rollback()
+                existing = await self._repo.get_identity(identity.provider, identity.provider_key, identity.subject)
+                if existing is not None:
+                    return existing
+                if attempt == _JIT_ATTEMPTS - 1:
+                    raise
+                if email is not None and await self._repo.get_by_email(email) is not None:
+                    # The check above this loop was stale: a concurrent write
+                    # claimed the address between it and this commit. Re-reading
+                    # it is what makes the retry differ from the attempt that
+                    # just failed — carrying the same conflicting address
+                    # forward would spend every remaining attempt on the same
+                    # violation and end in a 500 for a case the rule above
+                    # already has an answer for. The address stays on the
+                    # identity row either way.
+                    email = None
+                continue
+            await get_dashboard_users_cache().invalidate()
+            AuditService.log_async(
+                "user_created",
+                actor_ip=actor_ip,
+                details={
+                    "username": user.username,
+                    "role": role_slug,
+                    "jit": True,
+                    **_identity_details(identity),
+                },
+                actor=AuditActor(user_id=None, username=None, role_slug=None, auth_method=identity.provider),
+                target=AuditTarget("user", user.id),
+            )
+            self._audit_linked(user, identity, actor_ip, via=via)
+            return user
+        raise RuntimeError("unreachable")  # pragma: no cover
+
     async def _provision(
         self, identity: ExternalIdentity, provider: DashboardAuthProvider, now: datetime, actor_ip: str | None
     ) -> Resolution:
@@ -390,47 +526,16 @@ class IdentityResolver:
                 severity=AuditSeverity.WARNING,
             )
             return Denied("identity_not_provisioned")
-        # Scalars only: a rollback below expires the ORM row and a lazy reload
-        # outside the session's greenlet would fail (MissingGreenlet).
-        role_id, role_slug = role.id, role.slug
-        email = identity.email
-        if email is not None and await self._repo.get_by_email(email) is not None:
-            # Same e-mail, linking off: the address stays on the identity row only.
-            email = None
-        for attempt in range(_JIT_ATTEMPTS):
-            username = await self._free_username(identity.subject)
-            user = DashboardUser(
-                id=str(uuid.uuid4()),
-                username=username,
-                display_name=identity.display_name,
-                email=email,
-                role_id=role_id,
-                role_source=DashboardUserRoleSource.MAPPING.value,
-                status=DashboardUserStatus.ACTIVE.value,
-                last_login_at=_naive_now(),
-            )
-            self._repo.add(user, self._identity_row(user, identity))
-            try:
-                user = await self._repo.commit_user(user.id)
-            except IntegrityError:
-                await self._repo.rollback()
-                existing = await self._repo.get_identity(identity.provider, identity.provider_key, identity.subject)
-                if existing is not None:
-                    return await self._seen(existing, identity, provider, now)
-                if attempt == _JIT_ATTEMPTS - 1:
-                    raise
-                continue
-            await get_dashboard_users_cache().invalidate()
-            AuditService.log_async(
-                "user_created",
-                actor_ip=actor_ip,
-                details={"username": user.username, "role": role_slug, "jit": True, **_identity_details(identity)},
-                actor=AuditActor(user_id=None, username=None, role_slug=None, auth_method=identity.provider),
-                target=AuditTarget("user", user.id),
-            )
-            self._audit_linked(user, identity, actor_ip, via="jit")
-            return ResolvedAccount(user_id=user.id)
-        raise RuntimeError("unreachable")  # pragma: no cover
+        provisioned = await self.provision_account(
+            identity,
+            role_id=role.id,
+            role_slug=role.slug,
+            role_source=DashboardUserRoleSource.MAPPING.value,
+            actor_ip=actor_ip,
+        )
+        if isinstance(provisioned, DashboardIdentity):
+            return await self._seen(provisioned, identity, provider, now)
+        return ResolvedAccount(user_id=provisioned.id)
 
     async def _jit_role(
         self, provider: DashboardAuthProvider, identity: ExternalIdentity
@@ -459,13 +564,13 @@ class IdentityResolver:
             )
         return role
 
-    async def _free_username(self, subject: str) -> str:
+    async def _free_username(self, value: str, *, empty_prefix: str = TRUSTED_HEADER_SLUG_PREFIX) -> str:
         """First candidate no account holds. ``admin`` is reserved for the local
         break-glass account even before it exists -- and stays reserved after that
         account is renamed away from it -- so a proxy user named admin becomes
         ``admin-2`` and the name the recovery runbooks use never means someone else."""
 
-        for candidate in jit_username_candidates(slugify_subject(subject)):
+        for candidate in jit_username_candidates(slugify_subject(value, empty_prefix=empty_prefix)):
             if candidate == COMPAT_ADMIN_USERNAME:
                 continue
             if await self._repo.get_by_username(candidate) is None:
@@ -483,7 +588,9 @@ class IdentityResolver:
         return await self._seen(existing, identity, provider, now)
 
     @staticmethod
-    def _identity_row(user: DashboardUser, identity: ExternalIdentity) -> DashboardIdentity:
+    def _identity_row(
+        user: DashboardUser, identity: ExternalIdentity, *, user_name: str | None = None
+    ) -> DashboardIdentity:
         return DashboardIdentity(
             id=str(uuid.uuid4()),
             user_id=user.id,
@@ -493,6 +600,7 @@ class IdentityResolver:
             email=identity.email,
             display_name=identity.display_name,
             groups_json=_groups_snapshot(identity.groups),
+            user_name=user_name,
             last_seen_at=_naive_now(),
         )
 

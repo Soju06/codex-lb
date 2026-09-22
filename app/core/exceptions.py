@@ -117,6 +117,34 @@ class DashboardRateLimitError(AppError):
         super().__init__(message, code=code)
 
 
+class ScimError(AppError):
+    """A refusal from ``/scim/v2``, answered in RFC 7644's error envelope.
+
+    The status is per-instance because one exception type covers the whole
+    surface; ``scim_type`` carries an RFC 7644 §3.12 keyword only where the
+    specification defines one for the case (``400`` and the duplicate-resource
+    ``409``), and nothing product-specific is ever added to the body. The
+    dashboard envelope is deliberately not reused: an identity provider parses
+    this shape and no other.
+    """
+
+    status_code = 400
+    code = "scim_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 400,
+        scim_type: str | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.scim_type = scim_type
+        self.headers = dict(headers) if headers else None
+        super().__init__(message)
+
+
 class DashboardUpstreamError(AppError):
     status_code = 502
     code = "upstream_error"

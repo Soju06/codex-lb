@@ -17,7 +17,10 @@ DEPLOYED_HEAD = "20260910_180000_merge_context_dashboard_heads"
 UPSTREAM_HEAD = "20260910_020000_add_dashboard_role_mappings"
 PREVIOUS_AUTH_MERGE = "20260911_020000_merge_context_auth_provider_heads"
 CURRENT_UPSTREAM = "20260913_000000_add_oidc_provider_flow"
-MERGED_HEAD = "20260916_000000_merge_context_oidc_heads"
+PREVIOUS_OIDC_MERGE = "20260916_000000_merge_context_oidc_heads"
+SCIM_HEAD = "20260914_000000_add_scim_tokens"
+OVERFLOW_WITHDRAWAL_HEAD = "20260914_000000_drop_subscription_overflow_schema"
+MERGED_HEAD = "20260922_000000_merge_context_scim_overflow_heads"
 
 
 @pytest.mark.parametrize(
@@ -31,6 +34,9 @@ MERGED_HEAD = "20260916_000000_merge_context_oidc_heads"
         UPSTREAM_HEAD,
         PREVIOUS_AUTH_MERGE,
         CURRENT_UPSTREAM,
+        PREVIOUS_OIDC_MERGE,
+        SCIM_HEAD,
+        OVERFLOW_WITHDRAWAL_HEAD,
     ],
 )
 async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_path, starting_revision):
@@ -45,7 +51,13 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
         if starting_revision == DEPLOYED_CONTEXT:
             columns = {row[1] for row in db.execute("PRAGMA table_info(dashboard_settings)")}
             assert "model_context_window_overrides" not in columns
-        if starting_revision in {DEPLOYED_CONTEXT, PREVIOUS_MERGE, DEPLOYED_HEAD, PREVIOUS_AUTH_MERGE}:
+        if starting_revision in {
+            DEPLOYED_CONTEXT,
+            PREVIOUS_MERGE,
+            DEPLOYED_HEAD,
+            PREVIOUS_AUTH_MERGE,
+            PREVIOUS_OIDC_MERGE,
+        }:
             db.execute(
                 "INSERT INTO codex_context_sessions VALUES ('00000000-0000-4000-8000-000000000011','key','owner')"
             )
@@ -60,7 +72,7 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             owners, participants = [], []
 
         credentials = ("retained-password-hash", b"retained-encrypted-totp", 123)
-        if starting_revision != CURRENT_UPSTREAM:
+        if starting_revision not in {CURRENT_UPSTREAM, PREVIOUS_OIDC_MERGE, SCIM_HEAD, OVERFLOW_WITHDRAWAL_HEAD}:
             db.execute(
                 "UPDATE dashboard_settings SET password_hash = ?, totp_secret_encrypted = ?, "
                 "totp_last_verified_step = ? WHERE id = 1",
@@ -72,6 +84,9 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             UPSTREAM_HEAD,
             PREVIOUS_AUTH_MERGE,
             CURRENT_UPSTREAM,
+            PREVIOUS_OIDC_MERGE,
+            SCIM_HEAD,
+            OVERFLOW_WITHDRAWAL_HEAD,
         }:
             db.execute(
                 "INSERT INTO dashboard_users "
@@ -101,6 +116,9 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             UPSTREAM_HEAD,
             PREVIOUS_AUTH_MERGE,
             CURRENT_UPSTREAM,
+            PREVIOUS_OIDC_MERGE,
+            SCIM_HEAD,
+            OVERFLOW_WITHDRAWAL_HEAD,
         }:
             assert db.execute("SELECT id FROM dashboard_users WHERE username = 'admin'").fetchone() == (
                 "existing-admin",

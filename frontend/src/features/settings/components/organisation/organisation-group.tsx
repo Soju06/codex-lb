@@ -13,10 +13,12 @@ import {
   useOrganisationMutations,
   useOrganisationSettings,
   useRoleMappings,
+  useScimTokens,
 } from "@/features/organisation/hooks";
 import {
   companyLoginLabel,
   hasCompanyLogin,
+  hasScimTokens,
   isLocalLoginRestricted,
   isOrganisationConfigured,
   oidcProvider,
@@ -30,12 +32,15 @@ import {
   ORGANISATION_OIDC_HASH,
   ORGANISATION_OIDC_ID,
   ORGANISATION_REFUSED_HASH,
+  ORGANISATION_SCIM_HASH,
+  ORGANISATION_SCIM_ID,
   shouldExpandOrganisationSettings,
 } from "@/features/settings/advanced-settings-deeplink";
 import {
   AdvancedSettingsGroup,
   type SettingsGroupLabelKeys,
 } from "@/features/settings/components/advanced-settings-group";
+import { AutomaticAccountsCard } from "@/features/settings/components/organisation/automatic-accounts-card";
 import { GroupRulesCard } from "@/features/settings/components/organisation/group-rules-card";
 import { LoginPolicyCard } from "@/features/settings/components/organisation/login-policy-card";
 import { OidcCard } from "@/features/settings/components/organisation/oidc-card";
@@ -59,6 +64,18 @@ const POLICY_ONLY_LABELS: SettingsGroupLabelKeys = {
   ...LABEL_KEYS,
   description: "organisation.group.summaryPolicyOnly",
 };
+// A credential for automatic account management outlives the company sign-in
+// it was issued against — an operator can switch the provider back off. Saying
+// "password sign-in is restricted" for that install would be a plain lie, so
+// the fact that survived gets its own sentence.
+const AUTOMATIC_ONLY_LABELS: SettingsGroupLabelKeys = {
+  ...LABEL_KEYS,
+  description: "organisation.group.summaryAutomatic",
+};
+const AUTOMATIC_RESTRICTED_LABELS: SettingsGroupLabelKeys = {
+  ...LABEL_KEYS,
+  description: "organisation.group.summaryAutomaticRestricted",
+};
 // With exactly one company sign-in active the summary names it, from the login
 // hint every session already carries. `access_summary` lists provider kinds and
 // never labels, and a collapsed group may not ask.
@@ -71,11 +88,13 @@ const NAMED_RESTRICTED_LABELS: SettingsGroupLabelKeys = {
 function labelsFor({
   configured,
   companyLogin,
+  automatic,
   restricted,
   named,
 }: {
   configured: boolean;
   companyLogin: boolean;
+  automatic: boolean;
   restricted: boolean;
   named: boolean;
 }): SettingsGroupLabelKeys {
@@ -83,6 +102,9 @@ function labelsFor({
     return UNCONFIGURED_LABELS;
   }
   if (!companyLogin) {
+    if (automatic) {
+      return restricted ? AUTOMATIC_RESTRICTED_LABELS : AUTOMATIC_ONLY_LABELS;
+    }
     return POLICY_ONLY_LABELS;
   }
   if (named) {
@@ -107,6 +129,7 @@ const ORGANISATION_LAYOUT_QUERY_KEYS = [
 const CARD_ANCHORS: Record<string, string | undefined> = {
   [ORGANISATION_LOGIN_POLICY_HASH]: ORGANISATION_LOGIN_POLICY_ID,
   [ORGANISATION_OIDC_HASH]: ORGANISATION_OIDC_ID,
+  [ORGANISATION_SCIM_HASH]: ORGANISATION_SCIM_ID,
 };
 
 /** Everything the group's cards need, fetched only once the group is open. */
@@ -125,6 +148,7 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
   const rolesQuery = useAssignableRoles();
   const usersQuery = useDashboardUsers(canManageUsers);
   const settingsQuery = useOrganisationSettings();
+  const tokensQuery = useScimTokens();
   const mutations = useOrganisationMutations();
 
   if (providersQuery.isLoading || mappingsQuery.isLoading || rolesQuery.isLoading) {
@@ -150,11 +174,13 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
     />
   );
 
-  // Order per PLAN §4.8: company sign-in, reverse proxy, rules, login policy.
-  // The first and the last render on every install — every install can connect
-  // an identity provider, and every install has a local sign-in — while the
-  // proxy cards describe a deployment that may simply not exist. Saying so is a
-  // neutral fact about the topology, never a missing piece.
+  // Order per PLAN §4.8: company sign-in, reverse proxy, rules, login policy,
+  // automatic account management. The first, the fourth and the last render on
+  // every install — every install can connect an identity provider, every
+  // install has a local sign-in, and the collapsed line promises automatic
+  // account management to all of them — while the proxy cards describe a
+  // deployment that may simply not exist. Saying so is a neutral fact about the
+  // topology, never a missing piece.
   return (
     <>
       {oidc === null ? null : <OidcCard provider={oidc} mutations={mutations} disabled={disabled} />}
@@ -175,6 +201,12 @@ function OrganisationGroupBody({ refusedOpen, disabled }: { refusedOpen: boolean
         </>
       )}
       {loginPolicyCard}
+      <AutomaticAccountsCard
+        tokensQuery={tokensQuery}
+        providers={providersQuery.data}
+        mutations={mutations}
+        disabled={disabled}
+      />
     </>
   );
 }
@@ -206,6 +238,7 @@ export function OrganisationSettingsGroup({ disabled = false }: { disabled?: boo
   const labels = labelsFor({
     configured: isOrganisationConfigured(accessSummary),
     companyLogin: hasCompanyLogin(accessSummary),
+    automatic: hasScimTokens(accessSummary),
     restricted: isLocalLoginRestricted(accessSummary),
     named: providerLabel !== null,
   });

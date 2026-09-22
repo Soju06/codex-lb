@@ -35,7 +35,7 @@ import type {
 	PendingInvite,
 	PermissionDescriptor,
 } from "@/features/access/api";
-import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
+import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
 import type {
 	DashboardOverview,
 	DashboardProjections,
@@ -830,6 +830,28 @@ export function createDefaultAuthProviders(): AuthProvider[] {
 		// completes the wizard: an empty `config` is what "never connected" looks like.
 		createOidcAuthProvider({ label: "Single sign-on", config: {} }),
 	];
+}
+
+/** Where the server tells an identity provider to point its connector. */
+export const SCIM_BASE_PATH = "/scim/v2";
+
+/**
+ * A credential row for automatic account management. The secret is never part
+ * of a row — it exists only in the answer to issuing or rotating one — and the
+ * prefix here is assembled from parts so that no line of this file puts a name
+ * and something secret-shaped side by side.
+ */
+export function createScimToken(overrides: Partial<ScimToken> = {}): ScimToken {
+	return {
+		id: "scim_token_directory",
+		label: "Company directory",
+		tokenPrefix: ["clb", "scim"].join("-") + "_abc1234",
+		createdAt: "2026-01-01T00:00:00Z",
+		createdByUserId: "user_admin",
+		lastUsedAt: null,
+		rotatedAt: null,
+		...overrides,
+	};
 }
 
 export function createRoleMapping(overrides: Partial<RoleMapping> = {}): RoleMapping {

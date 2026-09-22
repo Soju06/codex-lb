@@ -52,3 +52,10 @@ Full CI runs in GitHub Actions. Local verification here is scoped to the affecte
 - [x] Run affected context, replay, bridge, migration and dashboard checks with current upstream.
 - [x] Verify native notes/history and fork recovery using the updated Codex client in an isolated candidate.
 - [x] Preserve credential-ledger recovery with a durable context merge marker; verify lost/rewound ledgers and downgrade cleanup.
+
+## September 22 upstream and client refresh
+- [ ] Integrate upstream SCIM, withdrawn overflow schema, transport changes and CI corrections, retaining the context contract.
+- [ ] Join the deployed context revision and both published upstream migration heads without rewriting their identities.
+- [ ] Correct historical-schema bootstrap fixtures to omit context tables that did not exist in the simulated installation.
+- [ ] Verify upgrades, downgrade/re-upgrade, ledger recovery, and preservation of context data on SQLite and PostgreSQL.
+- [ ] Verify current client notes/history/fork compatibility and native model availability in an isolated candidate.

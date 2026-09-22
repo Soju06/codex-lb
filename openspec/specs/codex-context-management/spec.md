@@ -171,3 +171,11 @@ The topology guard SHALL permit only the exact deployed context/authentication m
 #### Scenario: A new migration reuses the preserved timestamp slot
 - **WHEN** another revision is authored with the preserved timestamp prefix
 - **THEN** topology validation rejects that collision
+
+### Requirement: Preserve context during SCIM and overflow-schema upgrades
+An upgrade from the deployed context/OIDC merge or either published upstream SCIM/overflow-withdrawal head SHALL reach one merged head without rewriting applied revision identities. It MUST preserve context owners and participants and apply the upstream schema changes. Historical bootstrap fixtures MUST NOT pre-create context tables that their simulated installations never owned.
+
+#### Scenario: Upgrade the deployed context installation
+- **GIVEN** an installation at the context/OIDC merge with existing context owners and participants
+- **WHEN** it upgrades through the SCIM and overflow-withdrawal merge
+- **THEN** it SHALL retain those rows, add SCIM storage and remove the withdrawn overflow schema

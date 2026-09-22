@@ -3043,7 +3043,7 @@ def test_context_merge_recovery_preserves_ownership(tmp_path: Path, ledger_state
             run_upgrade(url, "head", bootstrap_legacy=True)
     else:
         result = run_upgrade(url, "head", bootstrap_legacy=True)
-        assert result.current_revision == migrate_module.CONTEXT_OIDC_MERGE_REVISION
+        assert result.current_revision == inspect_migration_state(url).head_revision
         assert check_schema_drift(url) == ()
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT * FROM codex_context_sessions").fetchall() == [owner]

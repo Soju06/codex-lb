@@ -88,7 +88,13 @@ def test_bootstrap_existing_schema_preserves_affinity_values(tmp_path: Path) -> 
     url = f"sqlite+aiosqlite:///{path}"
     engine = create_engine(f"sqlite:///{path}")
     try:
-        Base.metadata.create_all(engine)
+        # Simulate an upstream installation that predates this context feature.
+        # Creating current context tables here would fabricate unowned tables,
+        # which the ownership migration intentionally refuses to adopt.
+        Base.metadata.create_all(
+            engine,
+            tables=[table for table in Base.metadata.sorted_tables if not table.name.startswith("codex_context_")],
+        )
         with engine.begin() as connection:
             connection.execute(
                 text("""

@@ -431,10 +431,13 @@ def test_repaired_branch_includes_upstream_head(checker: ModuleType, tmp_path: P
     assert checker.check_branch_fork(unmerged, base, "origin/main").errors
 
 
-def test_deployed_collision_does_not_allow_new_members_or_changed_parents(checker: ModuleType) -> None:
-    pair = [_base_revision(checker, name, parents) for name, parents in checker._DEPLOYED_CONTEXT_COLLISION.items()]
+@pytest.mark.parametrize("collision_name", ["_DEPLOYED_CONTEXT_COLLISION", "_PUBLISHED_UPSTREAM_COLLISION"])
+def test_deployed_collision_does_not_allow_new_members_or_changed_parents(
+    checker: ModuleType, collision_name: str
+) -> None:
+    pair = [_base_revision(checker, name, parents) for name, parents in getattr(checker, collision_name).items()]
     assert checker.check_timestamp_prefix_collisions(pair).errors == []
-    extra = _base_revision(checker, "20260911_020000_new_collision", pair[0].revision)
+    extra = _base_revision(checker, pair[0].revision[:15] + "_new_collision", pair[0].revision)
     assert checker.check_timestamp_prefix_collisions([*pair, extra]).errors
     changed = _base_revision(checker, pair[0].revision, "20260910_000000_changed_parent")
     assert checker.check_timestamp_prefix_collisions([changed, pair[1]]).errors

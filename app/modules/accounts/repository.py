@@ -7,17 +7,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import extract_id_token_claims, resolve_seat_identity
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
-from app.db.account_identity_lock import advisory_lock_key, lock_postgresql_account_identities
+from app.db.account_identity_lock import (
+    account_identity_lock_key,
+    advisory_lock_key,
+    lock_postgresql_account_identities,
+)
+from app.db.dialect_sql import is_mysql, statement_matched
 from app.db.models import (
     Account,
     AccountLimitWarmup,
@@ -221,7 +227,11 @@ class AccountsRepository:
         # operator's point of view: they never appear in listings (dashboard,
         # usage refresh, automations) even though their rows survive until the
         # deletion worker finishes draining them.
-        stmt = select(Account).where(Account.delete_requested_at.is_(None)).order_by(Account.email)
+        # Accounts sharing an email (workspace slots for one operator) would
+        # otherwise come back in whatever order the backend happens to scan, so
+        # the id breaks the tie: listings must be stable everywhere, not only on
+        # the backends that happen to return insertion order.
+        stmt = select(Account).where(Account.delete_requested_at.is_(None)).order_by(Account.email, Account.id)
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
@@ -234,7 +244,7 @@ class AccountsRepository:
             select(Account)
             .where(Account.id.in_(account_ids))
             .where(Account.delete_requested_at.is_(None))
-            .order_by(Account.email)
+            .order_by(Account.email, Account.id)
         )
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
@@ -373,6 +383,16 @@ class AccountsRepository:
                     merge_by_chatgpt_identity=merge_by_chatgpt_identity,
                     _identity_lock_attempt=_identity_lock_attempt + 1,
                 )
+        elif is_mysql(dialect_name):
+            # MySQL has no transaction-scoped advisory lock; the same-email and
+            # same-identity serialization PostgreSQL gets from
+            # ``pg_advisory_xact_lock`` comes from exclusive sentinel row locks
+            # held until this transaction commits. Without them two concurrent
+            # imports can both miss each other's row and insert twice -- under
+            # one email (merge enabled) or under one upstream identity (merge
+            # disabled, where side-by-side rows are allowed per email but never
+            # per identity).
+            await self._acquire_mysql_upsert_locks(account, merge_by_email=bool(merge_by_email))
 
         # Identity-aware reconciliation runs before the deterministic-id
         # check so that a deactivated row whose refresh token was revoked
@@ -738,7 +758,8 @@ class AccountsRepository:
             }
             if blocked_at is not _UNSET:
                 values["blocked_at"] = blocked_at
-            result = await self._session.execute(
+            updated = await statement_matched(
+                self._session,
                 update(Account)
                 .where(Account.id == account_id)
                 # An account marked for background deletion is terminal: a
@@ -748,32 +769,32 @@ class AccountsRepository:
                 # selectable again mid-drain. Only a credential replacement
                 # (which clears the marker) may resurrect the row.
                 .where(Account.delete_requested_at.is_(None))
-                .values(**values)
-                .returning(Account.id)
+                .values(**values),
+                Account.id,
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
+            if updated and self._hard_sticky_outage_started(previous_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status == AccountStatus.DEACTIVATED:
+            if updated and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return updated_id is not None
+            return updated
 
     async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            matched = await statement_matched(
+                self._session,
                 update(Account)
                 .where(Account.id == account_id)
                 # Marked-for-deletion rows are gone from the operator's
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(security_work_authorized=enabled)
-                .returning(Account.id)
+                .values(security_work_authorized=enabled),
+                Account.id,
             )
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def update_status_if_current(
         self,
@@ -805,7 +826,6 @@ class AccountsRepository:
                 # rows are terminal for ordinary status writers.
                 .where(Account.delete_requested_at.is_(None))
                 .values(**values)
-                .returning(Account.id)
             )
             if expected_deactivation_reason is None:
                 stmt = stmt.where(Account.deactivation_reason.is_(None))
@@ -825,15 +845,14 @@ class AccountsRepository:
                 # re-auth/import rotates the token ciphertext without touching
                 # status/reason/reset, and this write must lose that race.
                 stmt = stmt.where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
-            result = await self._session.execute(stmt)
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
+            updated = await statement_matched(self._session, stmt, Account.id)
+            if updated and self._hard_sticky_outage_started(expected_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status == AccountStatus.DEACTIVATED:
+            if updated and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
-            return updated_id is not None
+            return updated
 
     @staticmethod
     def _hard_sticky_outage_started(
@@ -885,23 +904,35 @@ class AccountsRepository:
         as the sole grace-clock source from then on.
         """
         dialect = self._session.get_bind().dialect.name
+        mysql = is_mysql(dialect)
         if dialect == "postgresql":
             insert_fn = pg_insert
         elif dialect == "sqlite":
             insert_fn = sqlite_insert
+        elif mysql:
+            insert_fn = mysql_insert
         else:
             raise RuntimeError(f"Hard-sticky outage grace seeding sentinel unsupported for dialect={dialect!r}")
-        stamp_stmt = (
-            insert_fn(RuntimeSentinel)
-            .values(name=_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, value=utcnow().isoformat())
-            .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
-            .returning(RuntimeSentinel.name)
+        stamp_stmt = insert_fn(RuntimeSentinel).values(
+            name=_HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL, value=utcnow().isoformat()
         )
+        if not mysql:
+            stamp_stmt = stamp_stmt.on_conflict_do_nothing(index_elements=[RuntimeSentinel.name]).returning(
+                RuntimeSentinel.name
+            )
 
         async def seed_once() -> int:
             async with sqlite_writer_section():
-                stamp_result = await self._session.execute(stamp_stmt)
-                stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
+                try:
+                    stamp_result = await self._session.execute(stamp_stmt)
+                except IntegrityError:
+                    # MySQL has no ON CONFLICT ... DO NOTHING RETURNING; the
+                    # duplicate-key error is the equivalent "already stamped"
+                    # signal, so another replica (or an earlier boot) owns the
+                    # backfill.
+                    await self._session.rollback()
+                    return 0
+                stamped_by_this_boot = True if mysql else stamp_result.scalar_one_or_none() is not None
                 if not stamped_by_this_boot:
                     await self._session.commit()
                     return 0
@@ -956,48 +987,51 @@ class AccountsRepository:
 
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            matched = await statement_matched(
+                self._session,
                 update(Account)
                 .where(Account.id == account_id)
                 # Marked-for-deletion rows are gone from the operator's
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(alias=alias)
-                .returning(Account.id)
+                .values(alias=alias),
+                Account.id,
             )
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def update_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            matched = await statement_matched(
+                self._session,
                 update(Account)
                 .where(Account.id == account_id)
                 # Marked-for-deletion rows are gone from the operator's
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(limit_warmup_enabled=enabled)
-                .returning(Account.id)
+                .values(limit_warmup_enabled=enabled),
+                Account.id,
             )
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def update_routing_policy(self, account_id: str, routing_policy: str) -> bool:
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            matched = await statement_matched(
+                self._session,
                 update(Account)
                 .where(Account.id == account_id)
                 # Marked-for-deletion rows are gone from the operator's
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(routing_policy=routing_policy)
-                .returning(Account.id)
+                .values(routing_policy=routing_policy),
+                Account.id,
             )
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         """Mark an account for background deletion; commits in milliseconds.
@@ -1080,6 +1114,21 @@ class AccountsRepository:
                     seat_user_id = resolve_seat_identity(claims, claims.auth)
                 except Exception:
                     seat_user_id = None
+            # The variant flag is written by its own conditional statement
+            # BEFORE the marker update. MySQL evaluates a multi-column UPDATE's
+            # SET list left to right against the row as it stands, so a CASE
+            # that reads ``delete_requested_at`` inside the statement that
+            # assigns it sees a non-NULL marker and keeps the old flag -- always
+            # ``False`` on a first request, silently downgrading a hard delete
+            # (``delete_history=True``) to a soft one. The conditional predicate
+            # is also the "first request wins" rule: it matches only while the
+            # row is unmarked, and the row lock both backends take makes the
+            # predicate re-evaluate after a concurrent marker claims the row.
+            await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                .values(delete_history_requested=delete_history)
+            )
             values: dict[str, Any] = {
                 "status": AccountStatus.DEACTIVATED,
                 "deactivation_reason": ACCOUNT_PENDING_DELETION_REASON,
@@ -1089,18 +1138,13 @@ class AccountsRepository:
                 "refresh_token_encrypted": wiped_token,
                 "id_token_encrypted": wiped_token,
                 "delete_requested_at": func.coalesce(Account.delete_requested_at, utcnow()),
-                "delete_history_requested": case(
-                    (Account.delete_requested_at.is_(None), delete_history),
-                    else_=Account.delete_history_requested,
-                ),
             }
             if seat_user_id is not None:
                 values["chatgpt_user_id"] = seat_user_id
-            result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            updated = await statement_matched(
+                self._session, update(Account).where(Account.id == account_id).values(**values), Account.id
             )
-            updated_id = result.scalar_one_or_none()
-            if updated_id is not None:
+            if updated:
                 # Same immediate cleanup the DEACTIVATED transition performs:
                 # sticky mappings and bridge sessions must not outlive the
                 # account's routability.
@@ -1110,7 +1154,7 @@ class AccountsRepository:
                     delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id)
                 )
             await self._session.commit()
-            return updated_id is not None
+            return updated
 
     async def delete(
         self,
@@ -1213,16 +1257,17 @@ class AccountsRepository:
                 await mirror_account_soft_delete_into_time_rollups(self._session, account_id)
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))
-            result = await self._session.execute(delete(Account).where(Account.id == account_id).returning(Account.id))
-            deleted_id = result.scalar_one_or_none()
+            deleted = await statement_matched(
+                self._session, delete(Account).where(Account.id == account_id), Account.id
+            )
             await self._session.commit()
-            if deleted_id is not None:
+            if deleted:
                 _clear_bulk_history_since_sqlite_cache()
                 # Deletion drops the account's rollup row and detaches or
                 # deletes its request logs; cached listing summaries would
                 # keep reporting the account until TTL expiry.
                 _clear_request_usage_summary_cache()
-            return deleted_id is not None
+            return deleted
 
     async def rotate_tokens(
         self,
@@ -1286,11 +1331,10 @@ class AccountsRepository:
                 # clobbered by a slower writer.
                 .where(Account.refresh_token_encrypted == expected_refresh_token_encrypted)
                 .values(**values)
-                .returning(Account.id)
             )
-            result = await self._session.execute(stmt)
+            matched = await statement_matched(self._session, stmt, Account.id)
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def update_account_metadata(
         self,
@@ -1338,11 +1382,13 @@ class AccountsRepository:
             if not values:
                 existing = await self._session.get(Account, account_id)
                 return existing is not None
-            result = await self._session.execute(
-                update(Account).where(Account.id == account_id).values(**values).returning(Account.id)
+            matched = await statement_matched(
+                self._session,
+                update(Account).where(Account.id == account_id).values(**values),
+                Account.id,
             )
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return matched
 
     async def workspace_slot_taken(
         self,
@@ -1553,6 +1599,43 @@ class AccountsRepository:
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": lock_key},
         )
+
+    async def _acquire_mysql_upsert_locks(self, account: Account, *, merge_by_email: bool) -> None:
+        """Serialize an upsert's identity/email candidates (MySQL/MariaDB).
+
+        PostgreSQL takes transaction-scoped advisory locks on the candidate
+        upstream identities and then on the email (or, when the account carries
+        no identity at all, on the deterministic account id). MySQL has no
+        advisory lock, so the same serialization comes from exclusive
+        ``runtime_sentinels`` row locks, held until this transaction commits.
+        Keys are acquired in canonical (sorted) order so two replicas locking
+        the same pair can never deadlock -- the ordering rule the PostgreSQL
+        path applies to its advisory keys too. Each key reuses the PostgreSQL
+        derivation, so equal identities and emails map to one lock on both
+        backends, and the derived integers fit ``runtime_sentinels.name``
+        (``String(64)``).
+
+        The lock is taken on the incoming identity itself, which is what
+        serializes two concurrent imports of one upstream identity; the wider
+        candidate set PostgreSQL derives from email matches is not replicated,
+        because computing it needs a read whose result the lock would have to be
+        taken on.
+        """
+        lock_names: list[str] = []
+        if account.chatgpt_account_id:
+            lock_names.append(f"account-identity:{account_identity_lock_key(account.chatgpt_account_id)}")
+        if merge_by_email:
+            lock_names.append(f"account-merge:{advisory_lock_key('merge-email', account.email)}")
+        elif account.id:
+            lock_names.append(f"account-id:{advisory_lock_key('account-id', account.id)}")
+        for name in sorted(set(lock_names)):
+            await self._session.execute(
+                text(
+                    "INSERT INTO runtime_sentinels (name, value) VALUES (:name, '') "
+                    "ON DUPLICATE KEY UPDATE value = value"
+                ),
+                {"name": name},
+            )
 
     async def _acquire_postgresql_identity_lock(self, account_id: str) -> None:
         lock_key = advisory_lock_key("account-id", account_id)

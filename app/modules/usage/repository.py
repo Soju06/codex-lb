@@ -34,6 +34,7 @@ from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import lock_postgresql_account_identities
+from app.db.dialect_sql import epoch_seconds, is_mysql
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
@@ -1143,8 +1144,16 @@ class UsageRepository:
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
             bucket_expr = func.floor(func.extract("epoch", UsageHistory.recorded_at) / bucket_seconds) * bucket_seconds
+        elif is_mysql(dialect):
+            # MySQL's signed CAST ROUNDS instead of truncating, so rows past
+            # the half-bucket mark would land in the next bucket (SQLite
+            # truncates, PostgreSQL floors).
+            bucket_expr = (
+                func.floor(sqlalchemy_cast(epoch_seconds(UsageHistory.recorded_at), Integer) / bucket_seconds)
+                * bucket_seconds
+            )
         else:
-            epoch_col = sqlalchemy_cast(func.strftime("%s", UsageHistory.recorded_at), Integer)
+            epoch_col = sqlalchemy_cast(epoch_seconds(UsageHistory.recorded_at), Integer)
             bucket_expr = sqlalchemy_cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
@@ -1502,36 +1511,39 @@ class AdditionalUsageRepository:
                 since=since,
             )
 
+        # Same bounded top-1 probe per account as the history query above, and
+        # the same shape PostgreSQL pays for with LATERAL: one index descent per
+        # account instead of a window function that has to sort every matching
+        # row of the quota key before discarding all but one per account. The
+        # ordering is the one the window function used (recorded_at, then
+        # used_percent, then id), so the selected row is identical.
         conditions = [
             _additional_quota_match_clause(scope),
             AdditionalUsageHistory.window == window,
         ]
-        if account_ids is not None:
-            conditions.append(AdditionalUsageHistory.account_id.in_(account_ids))
         if since is not None:
             conditions.append(AdditionalUsageHistory.recorded_at >= since)
-        subq = (
-            select(
-                AdditionalUsageHistory.id.label("usage_id"),
-                func.row_number()
-                .over(
-                    partition_by=AdditionalUsageHistory.account_id,
-                    order_by=(
-                        AdditionalUsageHistory.recorded_at.desc(),
-                        AdditionalUsageHistory.used_percent.desc(),
-                        AdditionalUsageHistory.id.desc(),
-                    ),
-                )
-                .label("row_number"),
+        acct_stmt = select(Account.id)
+        if account_ids is not None:
+            acct_stmt = acct_stmt.where(Account.id.in_(account_ids))
+        acct_subq = acct_stmt.subquery("accts")
+        latest_id = (
+            select(AdditionalUsageHistory.id)
+            .where(
+                *conditions,
+                AdditionalUsageHistory.account_id == acct_subq.c.id,
             )
-            .where(*conditions)
-            .subquery()
+            .order_by(
+                AdditionalUsageHistory.recorded_at.desc(),
+                AdditionalUsageHistory.used_percent.desc(),
+                AdditionalUsageHistory.id.desc(),
+            )
+            .limit(1)
+            .correlate(acct_subq)
+            .scalar_subquery()
         )
-        stmt = (
-            select(AdditionalUsageHistory)
-            .join(subq, AdditionalUsageHistory.id == subq.c.usage_id)
-            .where(subq.c.row_number == 1)
-        )
+        id_rows = select(latest_id.label("usage_id")).select_from(acct_subq).subquery("latest_ids")
+        stmt = select(AdditionalUsageHistory).join(id_rows, AdditionalUsageHistory.id == id_rows.c.usage_id)
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 

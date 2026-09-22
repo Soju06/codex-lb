@@ -253,6 +253,41 @@ async def test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_ema
 
 
 @pytest.mark.asyncio
+async def test_accounts_upsert_serializes_concurrent_same_upstream_identity(db_setup):
+    """Two concurrent reauths of one upstream identity leave exactly one row.
+
+    The reauth flow passes ``merge_by_chatgpt_identity=True``, whose contract is
+    one row per upstream identity (side-by-side rows are an import-time choice,
+    not a reauth one). PostgreSQL serializes those upserts with an advisory lock
+    on the identity; MySQL reaches the same outcome through the port's
+    sentinel-row lock, and this test pins it: without that lock the same race
+    left two rows for one identity on MySQL (reproduced 6 times out of 6).
+    """
+    upstream_identity = "race-upstream-identity"
+    barrier = asyncio.Barrier(2)
+
+    async def _worker(account_id: str) -> str:
+        async with SessionLocal() as session:
+            repo = AccountsRepository(session)
+            await barrier.wait()
+            incoming = _make_account_with_chatgpt_id(account_id, f"{account_id}@example.com", upstream_identity)
+            saved = await repo.upsert(incoming, merge_by_email=False, merge_by_chatgpt_identity=True)
+            return saved.id
+
+    first_id, second_id = await asyncio.gather(_worker("acc_identity_race_a"), _worker("acc_identity_race_b"))
+
+    assert {first_id, second_id} <= {"acc_identity_race_a", "acc_identity_race_b"}
+    async with SessionLocal() as session:
+        rows = list(
+            (await session.execute(select(Account).where(Account.chatgpt_account_id == upstream_identity)))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].id in {first_id, second_id}
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql(db_setup, monkeypatch):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

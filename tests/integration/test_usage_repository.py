@@ -1245,12 +1245,13 @@ async def test_bulk_history_since_per_account_cutoffs_parity(db_setup):
         )
         unbounded = await repo.bulk_history_since(["acc-short", "acc-wide"], "primary", shared_floor)
 
-    dialect = "postgresql" if str(engine.url).startswith("postgresql") else "sqlite"
-    if dialect == "postgresql":
-        assert [snapshot.used_percent for snapshot in bounded["acc-short"]] == [20.0]
-    else:
-        # SQLite keeps the shared floor; callers trim per account.
+    # SQLite (direct-file snapshot cache) keeps the shared floor and lets
+    # callers trim per account; PostgreSQL and MySQL/MariaDB honour the
+    # per-account cutoff inside the query.
+    if str(engine.url).startswith("sqlite"):
         assert [snapshot.used_percent for snapshot in bounded["acc-short"]] == [10.0, 20.0]
+    else:
+        assert [snapshot.used_percent for snapshot in bounded["acc-short"]] == [20.0]
     assert [snapshot.used_percent for snapshot in bounded["acc-wide"]] == [30.0, 40.0]
 
     # Parity with the shared-floor fetch after per-account trimming.
@@ -1295,7 +1296,8 @@ async def test_bulk_history_since_per_account_row_cap_keeps_newest_rows(db_setup
         assert [snapshot.used_percent for snapshot in capped["acc-dense"]] == [15.0, 16.0, 17.0]
         assert capped["acc-dense"] == uncapped["acc-dense"][-3:]
     else:
-        # SQLite serves the shared-floor snapshot cache; the cap is ignored.
+        # SQLite serves the shared-floor snapshot cache and MySQL's generic
+        # path has no per-account cap: both return the full slice.
         assert [snapshot.used_percent for snapshot in capped["acc-dense"]] == [
             snapshot.used_percent for snapshot in uncapped["acc-dense"]
         ]

@@ -57,6 +57,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import Account, AccountPlanDowngradeObservation
 from app.db.session import get_background_session, sqlite_writer_section
 
@@ -72,11 +73,17 @@ def _is_missing_observations_schema(exc: Exception) -> bool:
     code against a not-yet-migrated database must degrade to process-local
     confirmation rather than fail every usage refresh: a stale plan label is a far
     smaller problem than a broken refresh loop. PostgreSQL and SQLite word the
-    error differently, so both families are matched.
+    error differently, and MySQL reports the table with its schema prefix, so
+    all three families are matched.
     """
     origin = getattr(exc, "orig", None)
     message = str(origin).lower() if origin is not None else str(exc).lower()
-    return f"no such table: {_TABLE_NAME}" in message or f'relation "{_TABLE_NAME}" does not exist' in message
+    return (
+        f"no such table: {_TABLE_NAME}" in message
+        or f'relation "{_TABLE_NAME}" does not exist' in message
+        # MySQL/MariaDB: Table 'codex_lb.account_plan_downgrade_observations' doesn't exist
+        or f"{_TABLE_NAME}' doesn't exist" in message
+    )
 
 
 # Domain separation for the lineage digest. The fingerprint only ever needs to
@@ -231,6 +238,48 @@ _OBSERVE_SQL_TEMPLATE = """
 """
 
 
+# The MySQL/MariaDB twin of the statement above: no ``ON CONFLICT``, no
+# ``RETURNING``. The lineage comparison lives inside each assignment and the
+# resulting count is read back in the same transaction. MySQL evaluates an
+# ``ON DUPLICATE KEY UPDATE`` assignment list left to right, and a bare column
+# reference there denotes the value from the row as it stands at that point, so
+# ``observations`` and ``first_observed_at`` are computed BEFORE the lineage
+# columns are overwritten -- the same "same lineage increments, changed lineage
+# restarts at one" decision the ``CASE`` form makes. New values come from bound
+# parameters only (never ``VALUES()`` or a row alias), which keeps the
+# statement valid on both MySQL 8 and MariaDB.
+_MYSQL_OBSERVE_UPSERT_SQL = text(
+    """
+    INSERT INTO account_plan_downgrade_observations (
+        account_id, observations, credential_fingerprint, observed_plan_type,
+        first_observed_at, last_observed_at
+    )
+    VALUES (:account_id, 1, :fingerprint, :plan_type, :now, :now)
+    ON DUPLICATE KEY UPDATE
+        observations = IF(
+            account_plan_downgrade_observations.credential_fingerprint = :fingerprint
+             AND account_plan_downgrade_observations.observed_plan_type = :plan_type,
+            account_plan_downgrade_observations.observations + 1,
+            1
+        ),
+        first_observed_at = IF(
+            account_plan_downgrade_observations.credential_fingerprint = :fingerprint
+             AND account_plan_downgrade_observations.observed_plan_type = :plan_type,
+            account_plan_downgrade_observations.first_observed_at,
+            :now
+        ),
+        credential_fingerprint = :fingerprint,
+        observed_plan_type = :plan_type,
+        last_observed_at = :now
+    """
+).bindparams(
+    bindparam("account_id", type_=String()),
+    bindparam("fingerprint", type_=String()),
+    bindparam("plan_type", type_=String()),
+    bindparam("now", type_=DateTime()),
+)
+
+
 class PlanDowngradeObservationStore:
     """Database-backed store shared by every replica.
 
@@ -291,22 +340,34 @@ class PlanDowngradeObservationStore:
                     # shapes: asyncpg in particular must see the naive UTC
                     # ``utcnow()`` values as a plain (timezone-less) TIMESTAMP
                     # rather than inferring a type for a textual parameter.
-                    statement = text(_OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME)).bindparams(
-                        bindparam("account_id", type_=String()),
-                        bindparam("fingerprint", type_=String()),
-                        bindparam("plan_type", type_=String()),
-                        bindparam("now", type_=DateTime()),
-                    )
-                    result = await session.execute(
-                        statement,
-                        {
-                            "account_id": account_id,
-                            "fingerprint": credential_fingerprint,
-                            "plan_type": observed_plan_type,
-                            "now": utcnow(),
-                        },
-                    )
-                    observations = result.scalar_one()
+                    parameters = {
+                        "account_id": account_id,
+                        "fingerprint": credential_fingerprint,
+                        "plan_type": observed_plan_type,
+                        "now": utcnow(),
+                    }
+                    if is_mysql(session):
+                        # No ``RETURNING`` on the MySQL upsert: run the
+                        # conditional upsert, then read the counting row back
+                        # inside the same transaction (which sees its own
+                        # write), yielding the value the RETURNING form yields.
+                        await session.execute(_MYSQL_OBSERVE_UPSERT_SQL, parameters)
+                        observations = (
+                            await session.execute(
+                                select(AccountPlanDowngradeObservation.observations).where(
+                                    AccountPlanDowngradeObservation.account_id == account_id
+                                )
+                            )
+                        ).scalar_one()
+                    else:
+                        statement = text(_OBSERVE_SQL_TEMPLATE.format(table=_TABLE_NAME)).bindparams(
+                            bindparam("account_id", type_=String()),
+                            bindparam("fingerprint", type_=String()),
+                            bindparam("plan_type", type_=String()),
+                            bindparam("now", type_=DateTime()),
+                        )
+                        result = await session.execute(statement, parameters)
+                        observations = result.scalar_one()
                     await session.commit()
                     return int(observations)
         except (OperationalError, ProgrammingError) as exc:

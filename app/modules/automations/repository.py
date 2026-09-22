@@ -15,6 +15,7 @@ from sqlalchemy.sql.selectable import CTE
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import (
     Account,
     AccountStatus,
@@ -419,11 +420,10 @@ class AutomationsRepository:
         return self._job_from_model(job)
 
     async def delete_job(self, job_id: str) -> bool:
-        result = await self._session.execute(
-            delete(AutomationJob).where(AutomationJob.id == job_id).returning(AutomationJob.id)
-        )
+        result = await self._session.execute(delete(AutomationJob).where(AutomationJob.id == job_id))
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        # rowcount is the dialect-neutral verdict (MySQL has no RETURNING).
+        return (result.rowcount or 0) > 0
 
     async def list_existing_account_ids(self, account_ids: Sequence[str]) -> set[str]:
         if not account_ids:
@@ -487,57 +487,73 @@ class AutomationsRepository:
     ) -> AutomationScheduledRunClaimRecord:
         model, reasoning_effort, prompt = await self._get_job_snapshot(job_id)
         run_id = f"run_{uuid4().hex}"
-        stmt = (
-            insert(AutomationRun)
-            .from_select(
-                [
-                    "id",
-                    "job_id",
-                    "trigger",
-                    "slot_key",
-                    "cycle_key",
-                    "cycle_expected_accounts",
-                    "cycle_window_end",
-                    "model",
-                    "reasoning_effort",
-                    "prompt",
-                    "scheduled_for",
-                    "started_at",
-                    "status",
-                    "account_id",
-                    "attempt_count",
-                    "claim_budget_seconds",
-                ],
-                select(
-                    literal(run_id),
-                    literal(job_id),
-                    literal(trigger),
-                    literal(slot_key),
-                    literal(cycle_key),
-                    literal(cycle_expected_accounts),
-                    literal(cycle_window_end),
-                    literal(model),
-                    literal(reasoning_effort),
-                    literal(prompt),
-                    literal(scheduled_for),
-                    literal(started_at),
-                    literal("running"),
-                    literal(account_id),
-                    literal(0),
-                    literal(effective_compact_request_budget_seconds()),
-                ).where(
-                    exists(
-                        select(AutomationRunCycleAccount.account_id)
-                        .where(AutomationRunCycleAccount.cycle_key == cycle_key)
-                        .where(AutomationRunCycleAccount.account_id == account_id)
-                    )
-                ),
-            )
-            .returning(AutomationRun)
+        stmt = insert(AutomationRun).from_select(
+            [
+                "id",
+                "job_id",
+                "trigger",
+                "slot_key",
+                "cycle_key",
+                "cycle_expected_accounts",
+                "cycle_window_end",
+                "model",
+                "reasoning_effort",
+                "prompt",
+                "scheduled_for",
+                "started_at",
+                "status",
+                "account_id",
+                "attempt_count",
+                "claim_budget_seconds",
+            ],
+            select(
+                literal(run_id),
+                literal(job_id),
+                literal(trigger),
+                literal(slot_key),
+                literal(cycle_key),
+                literal(cycle_expected_accounts),
+                literal(cycle_window_end),
+                literal(model),
+                literal(reasoning_effort),
+                literal(prompt),
+                literal(scheduled_for),
+                literal(started_at),
+                literal("running"),
+                literal(account_id),
+                literal(0),
+                literal(effective_compact_request_budget_seconds()),
+            ).where(
+                exists(
+                    select(AutomationRunCycleAccount.account_id)
+                    .where(AutomationRunCycleAccount.cycle_key == cycle_key)
+                    .where(AutomationRunCycleAccount.account_id == account_id)
+                )
+            ),
         )
         try:
-            result = await self._session.execute(stmt)
-            run = result.scalar_one_or_none()
+            if is_mysql(self._session):
+                # MySQL has no INSERT ... RETURNING, and the driver cannot report a
+                # primary key for this statement either: the id is supplied
+                # explicitly below, and MySQL's LAST_INSERT_ID() (which asyncmy
+                # surfaces as ``inserted_primary_key``) stays 0 for an INSERT ...
+                # SELECT that provides its own key -- verified directly against
+                # MySQL 8.4: an explicit-id INSERT ... SELECT inserts the row
+                # (rowcount 1) yet reports ``inserted_primary_key=(None,)``, so
+                # trusting it re-selected WHERE id IS NULL, yielded None, and made
+                # scheduled dispatch a silent no-op (30 tests in
+                # tests/integration/test_automations_api.py failed on MySQL).
+                # Read the inserted row back by the id generated above instead: if
+                # the guard left the row uninserted there is nothing to find, which
+                # is exactly the no-claim answer RETURNING used to give, and a
+                # duplicate id still surfaces as IntegrityError.
+                await self._session.execute(stmt)
+                run = (
+                    await self._session.execute(select(AutomationRun).where(AutomationRun.id == run_id))
+                ).scalar_one_or_none()
+            else:
+                result = await self._session.execute(stmt.returning(AutomationRun))
+                run = result.scalar_one_or_none()
             await self._session.commit()
         except IntegrityError:
             await self._session.rollback()
@@ -938,7 +954,7 @@ class AutomationsRepository:
         claimed_started_at: datetime,
         stale_started_before: datetime,
     ) -> AutomationRunRecord | None:
-        result = await self._session.execute(
+        stmt = (
             update(AutomationRun)
             .where(AutomationRun.id == run_id)
             .where(AutomationRun.trigger == "manual")
@@ -956,9 +972,18 @@ class AutomationsRepository:
                 started_at=claimed_started_at,
                 claim_budget_seconds=effective_compact_request_budget_seconds(),
             )
-            .returning(AutomationRun)
         )
-        run = result.scalar_one_or_none()
+        if is_mysql(self._session):
+            # MySQL has no UPDATE ... RETURNING: check the guarded update and
+            # re-select the claimed row in the same transaction.
+            result = await self._session.execute(stmt)
+            run = None
+            if (result.rowcount or 0) > 0:
+                run = (
+                    await self._session.execute(select(AutomationRun).where(AutomationRun.id == run_id))
+                ).scalar_one_or_none()
+        else:
+            run = (await self._session.execute(stmt.returning(AutomationRun))).scalar_one_or_none()
         await self._session.commit()
         if run is None:
             return None
@@ -972,7 +997,7 @@ class AutomationsRepository:
         claimed_started_at: datetime,
         stale_started_before: datetime,
     ) -> AutomationRunRecord | None:
-        result = await self._session.execute(
+        stmt = (
             update(AutomationRun)
             .where(AutomationRun.id == run_id)
             .where(AutomationRun.trigger == "scheduled")
@@ -989,9 +1014,18 @@ class AutomationsRepository:
                 started_at=claimed_started_at,
                 claim_budget_seconds=effective_compact_request_budget_seconds(),
             )
-            .returning(AutomationRun)
         )
-        run = result.scalar_one_or_none()
+        if is_mysql(self._session):
+            # MySQL has no UPDATE ... RETURNING: check the guarded update and
+            # re-select the claimed row in the same transaction.
+            result = await self._session.execute(stmt)
+            run = None
+            if (result.rowcount or 0) > 0:
+                run = (
+                    await self._session.execute(select(AutomationRun).where(AutomationRun.id == run_id))
+                ).scalar_one_or_none()
+        else:
+            run = (await self._session.execute(stmt.returning(AutomationRun))).scalar_one_or_none()
         await self._session.commit()
         if run is None:
             return None
@@ -1023,10 +1057,8 @@ class AutomationsRepository:
                 error_code=None,
                 error_message=None,
             )
-            .returning(AutomationRun.id)
         )
-        skipped_run_id = result.scalar_one_or_none()
-        if skipped_run_id is None:
+        if (result.rowcount or 0) == 0:
             await self._session.commit()
             return False
 
@@ -1045,14 +1077,13 @@ class AutomationsRepository:
             delete(AutomationRunCycleAccount)
             .where(AutomationRunCycleAccount.cycle_key == cycle_key)
             .where(AutomationRunCycleAccount.account_id == account_id)
-            .returning(AutomationRunCycleAccount.account_id)
         )
-        deleted_account_id = result.scalar_one_or_none()
-        if deleted_account_id is not None:
+        deleted = (result.rowcount or 0) > 0
+        if deleted:
             await self._sync_run_cycle_expected_accounts(cycle_key=cycle_key)
         await self._session.commit()
         self._session.expire_all()
-        return deleted_account_id is not None
+        return deleted
 
     async def run_cycle_account_exists(self, *, cycle_key: str, account_id: str) -> bool:
         result = await self._session.execute(

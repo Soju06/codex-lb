@@ -113,3 +113,20 @@ Ruff, formatting and targeted Ty checks pass. `check_proxy_timing_seams.py`, `ch
 The active change and both owning specifications pass strict OpenSpec validation. Whole-repository strict validation reports 37 passing and 22 failing specifications; the failing set matches an untouched export of current main exactly. No unrelated specification is changed to silence those failures.
 
 No production server restart or new live-account test is part of this revision. Earlier live Codex 0.153.1 evidence belongs to the preceding implementation; current validation is the local integration evidence above plus the GitHub checks after publication.
+
+
+## September 22 integration
+
+Integrated upstream `3d23d53f89dbbaa2353040a30451cf90ca48ee92`. The merge adds SCIM and applies the upstream removal of the unused overflow schema while retaining the deployed context migration identities. `20260922_000000_merge_context_scim_overflow_heads` joins all three heads.
+
+Validation on this integration:
+- 991 context, replay, native-path, HTTP bridge, WebSocket and retry tests passed.
+- 123 migration and topology tests passed, including upgrades from deployed revisions, downgrade/re-upgrade, ownership preservation and lost-ledger recovery.
+- `make lint`, full Ty, strict context-change validation and all 67 specifications passed.
+- The production image built successfully, including the frontend and native egress worker.
+- A consistent production copy passed migration, schema drift, integrity and foreign-key checks. Existing rows and retained columns were unchanged across 70 original tables; only the verified-empty `model_source_pins` table and two NULL overflow settings were removed. Five accounts, seven API keys and the encryption key were preserved.
+- PostgreSQL lost-ledger recovery preserved the context owner and participant without schema drift.
+- Codex CLI 0.156.0 completed parent/fork note writes, reads and independent namespaces. Fresh processes resumed both sessions, read notes and queried history. Actual tool calls were recorded in the isolated client's session records.
+- Native CLI requests for `gpt-6-sol` and `gpt-6-luna` completed through the candidate. These models were tested with experimental notes disabled. The current catalog also marks Astra's experimental-context support false, so the Astra context probe used an explicit local capability override; this is verified compatibility, not an upstream support guarantee.
+
+The existing deployment-only WebSocket handshake patch passed 62 tests and remains outside this PR. Local checks do not establish GitHub CI readiness or maintainer acceptance.

@@ -25,6 +25,7 @@ from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
+from app.db.dialect_sql import is_mysql
 from app.db.migration_lock import migration_lock
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
@@ -368,7 +369,8 @@ def _max_revision_id_length(config: Config) -> int:
 
 
 def _ensure_alembic_version_table_capacity_for_connection(connection: Connection, *, required_length: int) -> None:
-    if connection.dialect.name != "postgresql":
+    dialect = connection.dialect.name
+    if dialect not in ("postgresql", "mysql", "mariadb"):
         return
 
     inspector = inspect(connection)
@@ -401,12 +403,15 @@ def _ensure_alembic_version_table_capacity_for_connection(connection: Connection
     if version_num_length is None or version_num_length >= required_length:
         return
 
-    connection.execute(
-        text(
+    statement = (
+        f"ALTER TABLE {_ALEMBIC_VERSION_TABLE} ALTER COLUMN {_ALEMBIC_VERSION_COLUMN} TYPE VARCHAR({required_length})"
+        if dialect == "postgresql"
+        else (
             f"ALTER TABLE {_ALEMBIC_VERSION_TABLE} "
-            f"ALTER COLUMN {_ALEMBIC_VERSION_COLUMN} TYPE VARCHAR({required_length})"
+            f"MODIFY COLUMN {_ALEMBIC_VERSION_COLUMN} VARCHAR({required_length}) NOT NULL"
         )
     )
+    connection.execute(text(statement))
 
 
 def _ensure_alembic_version_table_capacity(config: Config) -> None:
@@ -605,6 +610,104 @@ def _unwrap_schema_drift_diff(diff: object) -> object:
     return diff
 
 
+_MYSQL_CHARACTER_TYPE_FAMILY = frozenset(
+    {
+        "VARCHAR",
+        "CHAR",
+        "NCHAR",
+        "NVARCHAR",
+        "TEXT",
+        "TINYTEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "STRING",
+        "ENUM",
+        "SET",
+    }
+)
+
+_MYSQL_DEFAULT_SYNONYMS = {
+    "now()": "current_timestamp",
+    "now": "current_timestamp",
+    "current_timestamp()": "current_timestamp",
+    "localtime": "current_timestamp",
+    "localtime()": "current_timestamp",
+    "localtimestamp": "current_timestamp",
+    "localtimestamp()": "current_timestamp",
+    "b'1'": "true",
+    "1": "true",
+    "b'0'": "false",
+    "0": "false",
+}
+
+
+_MYSQL_BINARY_TYPE_FAMILY = frozenset(
+    {
+        "BINARY",
+        "VARBINARY",
+        "BLOB",
+        "TINYBLOB",
+        "MEDIUMBLOB",
+        "LONGBLOB",
+        "LARGEBINARY",
+    }
+)
+
+#: ``DateTime`` renders as ``DATETIME(6)`` on MySQL/MariaDB (see
+#: ``app/db/mysql_compat.py``) so microseconds survive a round trip the way they
+#: do on SQLite/PostgreSQL. Reflection reports the precision back
+#: (``DATETIME(6)``) while the metadata type is the generic ``DateTime``, so the
+#: pair differs only by fractional-seconds precision.
+_MYSQL_DATETIME_TYPE_FAMILY = frozenset({"DATETIME", "TIMESTAMP"})
+
+#: ``Float`` renders as ``DOUBLE`` on MySQL/MariaDB for 8-byte precision, while
+#: the metadata type reflects/renders as ``FLOAT``; both spell the same
+#: double-precision column the other backends already have.
+_MYSQL_FLOAT_TYPE_FAMILY = frozenset({"FLOAT", "DOUBLE", "DOUBLE PRECISION", "REAL"})
+
+
+def _mysql_type_family(type_text: str) -> str:
+    head = type_text.strip().upper()
+    for separator in ("(", " "):
+        head = head.split(separator)[0]
+    return head
+
+
+def _mysql_default_token(value: object) -> str:
+    """Render a reflected/metadata default to a comparable token."""
+    inner = getattr(value, "arg", None)
+    if inner is None:
+        inner = value
+    text = str(inner).strip().lower()
+    # A fractional-seconds default comes back as ``current_timestamp(6)`` (the
+    # precision the port's ``DATETIME(6)`` columns declare) while the metadata
+    # spells the same default ``now()``/``CURRENT_TIMESTAMP``: normalise the
+    # precision argument away before the parentheses are dropped below.
+    text = re.sub(r"(current_timestamp|now|localtime|localtimestamp)\s*\(\s*\d+\s*\)", r"\1", text)
+    # MySQL reflects literal defaults as ``(_utf8mb4'value')``: drop the
+    # parentheses the port adds for TEXT defaults, then the charset
+    # introducer, then quotes, before comparing.
+    text = text.replace("(", "").replace(")", "").strip()
+    text = re.sub(r"^_[a-z0-9]+\s*'", "'", text)
+    text = text.strip().strip("'\"").strip()
+    # A ``DATETIME(6)`` column reflects a literal default with its fractional
+    # field (``1970-01-01 00:00:00.000000``) while the model spells the same
+    # instant without one: compare on the second.
+    text = re.sub(r"^(\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}:\d{2})\.\d+$", r"\1", text)
+    return _MYSQL_DEFAULT_SYNONYMS.get(text, text)
+
+
+def _mysql_defaults_equivalent(existing: object, target: object) -> bool:
+    left = _mysql_default_token(existing)
+    right = _mysql_default_token(target)
+    if left == right:
+        return True
+    try:
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return False
+
+
 def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
     diff = _unwrap_schema_drift_diff(diff)
     if not isinstance(diff, tuple) or not diff:
@@ -615,6 +718,45 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
         column_name = getattr(column, "name", None)
         if (str(diff[2]), str(column_name)) in _LEGACY_EXTRA_COLUMNS:
             return True
+
+    if is_mysql(connection):
+        # The MySQL port sizes unbounded String columns (schema rules + index
+        # key limits) and MySQL normalises defaults on reflection, so
+        # width-only differences inside the character family and equivalent
+        # default spellings are expected. Structural drift (missing tables or
+        # columns, incompatible types, missing indexes) still fails the check.
+        if diff[0] == "modify_type" and len(diff) >= 7:
+            existing_family = _mysql_type_family(str(diff[5]))
+            target_family = _mysql_type_family(str(diff[6]))
+            families = (existing_family, target_family)
+            if all(family in _MYSQL_CHARACTER_TYPE_FAMILY for family in families):
+                return True
+            if all(family in _MYSQL_BINARY_TYPE_FAMILY for family in families):
+                # keyed binary columns become VARBINARY on MySQL (BLOB cannot be keyed)
+                return True
+            if all(family in _MYSQL_FLOAT_TYPE_FAMILY for family in families):
+                # ``Float`` renders as ``DOUBLE`` for 8-byte precision.
+                return True
+            # ``DateTime`` renders as ``DATETIME(6)`` so microseconds round-trip;
+            # reflection reports the precision while the metadata type does not.
+            return all(family in _MYSQL_DATETIME_TYPE_FAMILY for family in families)
+        if diff[0] == "modify_default" and len(diff) >= 7:
+            return _mysql_defaults_equivalent(diff[5], diff[6])
+        if diff[0] in ("remove_index", "add_index") and len(diff) >= 2:
+            # MySQL reflection does not report functional key parts (or reports
+            # a unique column index as a constraint), so autogenerate can think
+            # an existing index is absent or different. Accept the diff only
+            # when an index of that name really is there.
+            index = diff[1]
+            index_name = getattr(index, "name", None)
+            table_name = getattr(getattr(index, "table", None), "name", None)
+            if index_name is None or table_name is None:
+                return False
+            inspector = inspect(connection)
+            if not inspector.has_table(table_name):
+                return False
+            return any(str(existing.get("name")) == str(index_name) for existing in inspector.get_indexes(table_name))
+        return False
 
     if connection.dialect.name == "sqlite" and diff[0] == "modify_type" and len(diff) >= 7:
         table_name = str(diff[2])

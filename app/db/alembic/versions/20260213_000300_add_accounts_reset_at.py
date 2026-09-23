@@ -32,7 +32,7 @@ def upgrade() -> None:
         return
 
     with op.batch_alter_table("accounts") as batch_op:
-        batch_op.add_column(sa.Column("reset_at", sa.Integer(), nullable=True))
+        batch_op.add_column(sa.Column("reset_at", sa.BigInteger(), nullable=True))
 
 
 def downgrade() -> None:

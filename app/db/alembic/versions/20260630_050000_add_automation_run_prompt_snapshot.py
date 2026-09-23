@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import is_mysql
+
 revision = "20260630_050000_add_automation_run_prompt_snapshot"
 down_revision = "20260630_040000_merge_automation_snapshot_and_warmup_threshold_heads"
 branch_labels = None
@@ -32,6 +34,17 @@ def upgrade() -> None:
     if "prompt" not in run_columns:
         with op.batch_alter_table("automation_runs") as batch_op:
             batch_op.add_column(sa.Column("prompt", sa.Text(), nullable=True))
+
+    if is_mysql(bind):
+        # MySQL spells the PostgreSQL/SQLite ``UPDATE ... FROM`` as a join.
+        op.execute(
+            """
+            UPDATE automation_runs
+            JOIN automation_jobs ON automation_jobs.id = automation_runs.job_id
+            SET automation_runs.prompt = COALESCE(automation_runs.prompt, automation_jobs.prompt)
+            """
+        )
+        return
 
     op.execute(
         """

@@ -80,7 +80,7 @@ def upgrade() -> None:
             ),
             sa.Column("status", account_status, nullable=False),
             sa.Column("deactivation_reason", sa.Text(), nullable=True),
-            sa.Column("reset_at", sa.Integer(), nullable=True),
+            sa.Column("reset_at", sa.BigInteger(), nullable=True),
         )
 
     created_usage_history = not _table_exists(bind, "usage_history")
@@ -99,7 +99,7 @@ def upgrade() -> None:
             sa.Column("used_percent", sa.Float(), nullable=False),
             sa.Column("input_tokens", sa.Integer(), nullable=True),
             sa.Column("output_tokens", sa.Integer(), nullable=True),
-            sa.Column("reset_at", sa.Integer(), nullable=True),
+            sa.Column("reset_at", sa.BigInteger(), nullable=True),
             sa.Column("window_minutes", sa.Integer(), nullable=True),
             sa.Column("credits_has", sa.Boolean(), nullable=True),
             sa.Column("credits_unlimited", sa.Boolean(), nullable=True),

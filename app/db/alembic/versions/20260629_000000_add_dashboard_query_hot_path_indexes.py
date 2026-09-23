@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260629_000000_add_dashboard_query_hot_path_indexes"
 down_revision = "20260626_010000_add_request_logs_upstream_transport"
 branch_labels = None
@@ -17,6 +19,30 @@ depends_on = None
 
 
 def upgrade() -> None:
+    _bind = op.get_bind()
+    if is_mysql(_bind):
+        # ``"window"`` is a reserved word: MySQL needs backticks (double quotes
+        # would be a string literal and the index would not build).
+        create_mysql_index(
+            _bind,
+            index_name="ix_additional_usage_quota_window_latest",
+            table_name="additional_usage_history",
+            columns_sql="`quota_key`, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC",
+        )
+        create_mysql_index(
+            _bind,
+            index_name="idx_logs_account_kind_deleted_latest",
+            table_name="request_logs",
+            columns_sql="`account_id`, `request_kind`, `deleted_at`, `requested_at`, `id`",
+        )
+        create_mysql_index(
+            _bind,
+            index_name="idx_logs_account_request_latest",
+            table_name="request_logs",
+            columns_sql="`account_id`, `request_id`, `requested_at`, `id`",
+        )
+        return
+
     op.create_index(
         "ix_additional_usage_quota_window_latest",
         "additional_usage_history",

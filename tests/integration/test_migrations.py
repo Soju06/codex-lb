@@ -56,6 +56,10 @@ def _is_postgresql_database_url(url: str) -> bool:
     return url.startswith("postgresql+")
 
 
+def _is_mysql_database_url(url: str) -> bool:
+    return url.startswith("mysql+")
+
+
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:
     encryptor = TokenEncryptor()
     return Account(
@@ -261,6 +265,45 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.bootstrap.stamped_revision is None
     assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    (not _is_mysql_database_url(_DATABASE_URL)) or check_migration_policy is None,
+    reason="MySQL-only migration contract test",
+)
+async def test_mysql_migration_contract_policy_and_drift_match(db_setup):
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    assert check_migration_policy is not None
+    assert check_migration_policy(_DATABASE_URL) == ()
+    assert check_schema_drift(_DATABASE_URL) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_mysql_database_url(_DATABASE_URL),
+    reason="MySQL-only empty database migration test",
+)
+async def test_mysql_upgrade_head_from_empty_database(db_setup):
+    async with SessionLocal() as session:
+        await session.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        tables = await session.execute(
+            text("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()")
+        )
+        for (table_name,) in tables.fetchall():
+            await session.execute(text(f"DROP TABLE IF EXISTS `{table_name}`"))
+        await session.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
+        assert revisions == [_HEAD_REVISION]
 
 
 @pytest.mark.asyncio

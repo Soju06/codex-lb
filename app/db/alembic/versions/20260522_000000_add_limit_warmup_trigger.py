@@ -131,7 +131,7 @@ def upgrade() -> None:
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
             sa.Column("account_id", sa.String(), sa.ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False),
             sa.Column("window", sa.String(), nullable=False),
-            sa.Column("reset_at", sa.Integer(), nullable=False),
+            sa.Column("reset_at", sa.BigInteger(), nullable=False),
             sa.Column("status", sa.String(), nullable=False),
             sa.Column("model", sa.String(), nullable=False),
             sa.Column("attempted_at", sa.DateTime(), nullable=False),

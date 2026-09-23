@@ -586,6 +586,38 @@ class AuthManager:
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
         except RefreshError as exc:
+            # Shared refresh work may serve private callers. Correlate failures
+            # without exposing identities or untrusted provider error content.
+            safe_codes = {
+                "refresh_token_revoked",
+                "refresh_token_reused",
+                "refresh_token_expired",
+                "refresh_token_invalidated",
+                "invalid_grant",
+                "invalid_refresh_token",
+                "token_revoked",
+                "token_invalidated",
+                "account_auth_invalidated",
+                "account_deactivated",
+                "account_suspended",
+                "transport_error",
+                "invalid_response",
+                "http_400",
+                "http_401",
+                "http_403",
+                "http_429",
+                "http_500",
+                "http_502",
+                "http_503",
+                "http_504",
+            }
+            logger.warning(
+                "OAuth refresh failed account_ref=%s code=%s permanent=%s transport=%s",
+                sha256(account.id.encode("utf-8")).hexdigest()[:16],
+                exc.code if exc.code in safe_codes else "other",
+                bool(exc.is_permanent),
+                bool(exc.transport_error),
+            )
             if exc.is_permanent:
                 adopted = await self._handle_permanent_refresh_failure(
                     account, exc, attempted_fingerprint, deadline=deadline

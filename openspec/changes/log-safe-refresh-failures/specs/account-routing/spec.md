@@ -21,3 +21,8 @@ The system SHALL log each failed refresh attempt with a stable pseudonymous acco
 - **WHEN** a private caller and an ordinary caller overlap on the same refresh, in either arrival order
 - **THEN** a single refresh attempt runs and both callers receive the refresh error
 - **AND** exactly one content-free, account-correlatable failure warning is emitted
+
+#### Scenario: Refresh claim exhausts the caller budget
+- **WHEN** a foreign claim remains held until the caller budget expires, or acquisition finishes after that budget expires
+- **THEN** exactly one safe refresh-attempt warning includes `code=refresh_claim_timeout`
+- **AND** no provider exchange runs, and an acquired claim is released

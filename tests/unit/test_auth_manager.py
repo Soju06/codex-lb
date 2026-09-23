@@ -50,11 +50,13 @@ async def test_refresh_failure_diagnostic_is_correlatable_and_secret_safe(
     expected_code,
     private_first,
 ) -> None:
+    """Mixed-privacy callers share one failed exchange and one safe warning."""
     started = asyncio.Event()
     release = asyncio.Event()
     refresh_calls = 0
 
     async def fail_refresh(*_args, **_kwargs):
+        """Hold the exchange open until both refresh callers overlap."""
         nonlocal refresh_calls
         refresh_calls += 1
         started.set()
@@ -62,6 +64,7 @@ async def test_refresh_failure_diagnostic_is_correlatable_and_secret_safe(
         raise RefreshError(code, "secret-provider-message", permanent, transport_error=transport)
 
     async def handle_failure(*_args, **_kwargs):
+        """Isolate diagnostic behavior from permanent-status persistence."""
         return None
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", fail_refresh)
@@ -667,17 +670,23 @@ async def test_refresh_account_converts_pre_exchange_failure_to_safe_attempt_dia
     caplog,
     failure_stage,
 ):
+    """Local failures retain safe categories without contacting the provider."""
+
     @asynccontextmanager
     async def fake_background_session() -> AsyncIterator[object]:
+        """Supply a session placeholder for the mocked route lookup."""
         yield object()
 
     async def fail_resolve_route(*_args: object, **_kwargs: object) -> None:
+        """Reject the configured route before an OAuth request is possible."""
         raise UpstreamProxyRouteError("pool_unavailable", account_id="acc_route")
 
     async def unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        """Fail the test if local rejection reaches the provider boundary."""
         raise AssertionError("refresh_access_token should not run when route resolution fails")
 
     async def unexpected_admission():
+        """Fail the test if an already expired budget acquires admission."""
         raise AssertionError("expired admission budget should fail before acquiring")
 
     monkeypatch.setattr(auth_manager_module, "get_background_session", fake_background_session)
@@ -2732,7 +2741,8 @@ async def test_permanent_failure_status_cas_exhaustion_surfaces_transient_error(
 
 
 @pytest.mark.asyncio
-async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
+@pytest.mark.parametrize("acquired_after_budget", [False, True])
+async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch, caplog, acquired_after_budget):
     """Regression: the shielded singleflight body outlives a cancelled caller,
     so a foreign refresh claim must not keep it polling for the full
     fixed claim wait (``_TOKEN_REFRESH_CLAIM_WAIT_SECONDS``, 8s) when the caller's
@@ -2740,15 +2750,23 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
 
     class _ForeignClaims:
         claimant_id = "this-replica"
+        released = False
 
         async def try_acquire(self, account_id: str, *, ttl_seconds: float, owner: str) -> bool:
+            """Hold the claim or acquire it only after the caller deadline."""
             del account_id, ttl_seconds, owner
+            if acquired_after_budget:
+                await asyncio.sleep(0.06)
+                return True
             return False
 
         async def release(self, account_id: str, *, owner: str) -> None:
+            """Record release of a claim acquired after deadline expiry."""
             del account_id, owner
+            self.released = True
 
     async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        """Reject any exchange after the refresh budget expires."""
         raise AssertionError("no upstream exchange may run while a foreign claim is held")
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
@@ -2767,7 +2785,8 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     )
     repo = _DummyRepo()
     repo.accounts_by_id[account.id] = account
-    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=_ForeignClaims())
+    claims = _ForeignClaims()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo), refresh_claims=claims)
 
     # The proxy request path pushes its remaining budget as the refresh
     # timeout override; the claim wait must be capped by it (0.05s), not run
@@ -2775,7 +2794,7 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     override_token = push_token_refresh_timeout_override(0.05)
     try:
         started = time.monotonic()
-        with pytest.raises(RefreshError) as exc_info:
+        with caplog.at_level(logging.WARNING), pytest.raises(RefreshError) as exc_info:
             await manager.ensure_fresh(account, force=True)
         elapsed = time.monotonic() - started
     finally:
@@ -2785,6 +2804,14 @@ async def test_claim_wait_is_capped_by_caller_refresh_budget(monkeypatch):
     assert exc_info.value.is_permanent is False
     assert exc_info.value.transport_error is True
     assert elapsed < 2.0
+    assert claims.released is acquired_after_budget
+    records = [r for r in caplog.records if "OAuth refresh attempt failed" in r.getMessage()]
+    assert len(records) == 1
+    assert "code=refresh_claim_timeout permanent=False transport=True" in records[0].getMessage()
+    assert f"account_ref={sha256(account.id.encode()).hexdigest()[:16]}" in records[0].getMessage()
+    assert records[0].exc_info is None
+    for secret in (account.id, account.email, "access-old", "refresh-old", "id-old"):
+        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio

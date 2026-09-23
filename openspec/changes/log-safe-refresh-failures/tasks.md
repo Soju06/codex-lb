@@ -5,3 +5,5 @@
 - [x] Port diagnostics alone to current main and validate auth-manager tests, lint, formatting, types, and this OpenSpec change.
 - [x] Preserve known pre-exchange route/admission error codes and label warnings as refresh-attempt failures.
 - [x] Exercise ordinary/private singleflight failures in both arrival orders and prove local failures make no provider call.
+- [x] Log foreign-claim and post-acquisition budget timeouts exactly once with the shared safe helper; verify no exchange, safe correlation, and acquired-claim release.
+- [x] Document the diagnostic helper and touched test functions.

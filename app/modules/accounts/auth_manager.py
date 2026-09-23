@@ -485,7 +485,7 @@ class AuthManager:
                     if caller_deadline is not None:
                         remaining_budget = caller_deadline - time.monotonic()
                         if remaining_budget <= 0:
-                            raise RefreshError(
+                            failure = RefreshError(
                                 "refresh_claim_timeout",
                                 f"Token refresh for account {account.id} exhausted its "
                                 f"{caller_budget:.3f}s budget waiting for a peer replica's refresh "
@@ -493,6 +493,8 @@ class AuthManager:
                                 False,
                                 transport_error=True,
                             )
+                            self._log_refresh_attempt_failure(account.id, failure)
+                            raise failure
                         override_token = push_token_refresh_timeout_override(remaining_budget)
                         try:
                             return await self._perform_refresh(
@@ -519,13 +521,15 @@ class AuthManager:
                 return _adopt_account_row(account, latest)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RefreshError(
+                failure = RefreshError(
                     "refresh_claim_timeout",
                     f"Token refresh for account {account.id} is claimed by another replica; "
                     f"timed out waiting {wait_seconds:.3f}s for its rotation",
                     False,
                     transport_error=True,
                 )
+                self._log_refresh_attempt_failure(account.id, failure)
+                raise failure
             # Cap the per-iteration sleep to the remaining claim-wait budget.
             # The configured poll interval may exceed what is left of the
             # caller's deadline; sleeping the full interval would let this
@@ -574,6 +578,43 @@ class AuthManager:
             exc_info=None if self._redact_sensitive_details else last_exc,
         )
 
+    def _log_refresh_attempt_failure(self, account_id: str, exc: RefreshError) -> None:
+        """Correlate one failed attempt without exposing identities or provider content."""
+        # Shared refresh work may serve private callers. Correlate failures
+        # without exposing identities or untrusted provider error content.
+        safe_codes = {
+            "refresh_token_revoked",
+            "refresh_token_reused",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "invalid_grant",
+            "invalid_refresh_token",
+            "token_revoked",
+            "token_invalidated",
+            "account_auth_invalidated",
+            "account_deactivated",
+            "account_suspended",
+            "transport_error",
+            "upstream_proxy_unavailable",
+            "refresh_claim_timeout",
+            "invalid_response",
+            "http_400",
+            "http_401",
+            "http_403",
+            "http_429",
+            "http_500",
+            "http_502",
+            "http_503",
+            "http_504",
+        }
+        logger.warning(
+            "OAuth refresh attempt failed account_ref=%s code=%s permanent=%s transport=%s",
+            sha256(account_id.encode("utf-8")).hexdigest()[:16],
+            exc.code if exc.code in safe_codes else "other",
+            bool(exc.is_permanent),
+            bool(exc.transport_error),
+        )
+
     async def _perform_refresh(
         self,
         account: Account,
@@ -581,45 +622,13 @@ class AuthManager:
         refresh_token_encrypted: bytes,
         deadline: float | None = None,
     ) -> Account:
+        """Exchange and persist refreshed credentials, logging failures once."""
         attempted_fingerprint = _refresh_token_material_fingerprint(self._encryptor, refresh_token_encrypted)
         refresh_token = self._encryptor.decrypt(refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
         except RefreshError as exc:
-            # Shared refresh work may serve private callers. Correlate failures
-            # without exposing identities or untrusted provider error content.
-            safe_codes = {
-                "refresh_token_revoked",
-                "refresh_token_reused",
-                "refresh_token_expired",
-                "refresh_token_invalidated",
-                "invalid_grant",
-                "invalid_refresh_token",
-                "token_revoked",
-                "token_invalidated",
-                "account_auth_invalidated",
-                "account_deactivated",
-                "account_suspended",
-                "transport_error",
-                "upstream_proxy_unavailable",
-                "refresh_claim_timeout",
-                "invalid_response",
-                "http_400",
-                "http_401",
-                "http_403",
-                "http_429",
-                "http_500",
-                "http_502",
-                "http_503",
-                "http_504",
-            }
-            logger.warning(
-                "OAuth refresh attempt failed account_ref=%s code=%s permanent=%s transport=%s",
-                sha256(account.id.encode("utf-8")).hexdigest()[:16],
-                exc.code if exc.code in safe_codes else "other",
-                bool(exc.is_permanent),
-                bool(exc.transport_error),
-            )
+            self._log_refresh_attempt_failure(account.id, exc)
             if exc.is_permanent:
                 adopted = await self._handle_permanent_refresh_failure(
                     account, exc, attempted_fingerprint, deadline=deadline

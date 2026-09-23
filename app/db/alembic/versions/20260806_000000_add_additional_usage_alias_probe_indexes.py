@@ -17,6 +17,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260806_000000_add_additional_usage_alias_probe_indexes"
 down_revision = "20260804_230000_add_request_log_connection_request_kind"
 branch_labels = None
@@ -64,6 +66,16 @@ def upgrade() -> None:
                         """
                     )
                 )
+    elif is_mysql(bind):
+        for index_name, expression in _ALIAS_INDEXES:
+            create_mysql_index(
+                bind,
+                index_name=index_name,
+                table_name="additional_usage_history",
+                columns_sql=(
+                    f"({expression}), `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC"
+                ),
+            )
     else:
         for index_name, expression in _ALIAS_INDEXES:
             op.execute(

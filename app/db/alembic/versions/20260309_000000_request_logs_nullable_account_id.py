@@ -19,10 +19,10 @@ depends_on = None
 
 def upgrade() -> None:
     with op.batch_alter_table("request_logs") as batch_op:
-        batch_op.alter_column("account_id", nullable=True)
+        batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=True)
 
 
 def downgrade() -> None:
     op.execute(sa.text("DELETE FROM request_logs WHERE account_id IS NULL"))
     with op.batch_alter_table("request_logs") as batch_op:
-        batch_op.alter_column("account_id", nullable=False)
+        batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=False)

@@ -47,7 +47,13 @@ def upgrade() -> None:
                 server_default=sa.text("false"),
             )
     else:
-        op.alter_column(_TABLE, "event_spool_complete", server_default=sa.text("false"))
+        op.alter_column(
+            _TABLE,
+            "event_spool_complete",
+            existing_type=sa.Boolean(),
+            existing_nullable=False,
+            server_default=sa.text("false"),
+        )
 
 
 def downgrade() -> None:
@@ -62,4 +68,10 @@ def downgrade() -> None:
                     server_default=sa.text("true"),
                 )
         else:
-            op.alter_column(_TABLE, "event_spool_complete", server_default=sa.text("true"))
+            op.alter_column(
+                _TABLE,
+                "event_spool_complete",
+                existing_type=sa.Boolean(),
+                existing_nullable=False,
+                server_default=sa.text("true"),
+            )

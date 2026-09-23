@@ -14,6 +14,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260828_000000_add_accounts_chatgpt_identity_index"
 down_revision = "20260826_000000_add_http_bridge_event_chunks"
 branch_labels = None
@@ -42,6 +44,11 @@ def _drop_invalid_postgres_index(index_name: str) -> None:
 
 
 def upgrade() -> None:
+    _bind = op.get_bind()
+    if is_mysql(_bind):
+        create_mysql_index(_bind, index_name=_INDEX, table_name=_TABLE, columns_sql="`chatgpt_account_id`")
+        return
+
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
         with op.get_context().autocommit_block():

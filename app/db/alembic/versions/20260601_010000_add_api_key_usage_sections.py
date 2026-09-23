@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import text_default
+
 revision = "20260601_010000_add_api_key_usage_sections"
 down_revision = "20260629_000000_add_dashboard_query_hot_path_indexes"
 branch_labels = None
@@ -42,7 +44,7 @@ def upgrade() -> None:
                     "usage_sections",
                     sa.Text(),
                     nullable=False,
-                    server_default="upstream_limits,account_pool_usage",
+                    server_default=text_default(bind, "'upstream_limits,account_pool_usage'"),
                 )
             )
 

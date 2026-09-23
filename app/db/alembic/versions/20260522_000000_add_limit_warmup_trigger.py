@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import text_default
+
 revision = "20260522_000000_add_limit_warmup_trigger"
 down_revision = "20260520_010000_add_request_logs_api_key_account_index"
 branch_labels = None
@@ -105,7 +107,7 @@ def upgrade() -> None:
                 "limit_warmup_prompt",
                 sa.Text(),
                 nullable=False,
-                server_default=sa.text("'Say OK.'"),
+                server_default=text_default(bind, "'Say OK.'"),
             ),
             "limit_warmup_cooldown_seconds": sa.Column(
                 "limit_warmup_cooldown_seconds",

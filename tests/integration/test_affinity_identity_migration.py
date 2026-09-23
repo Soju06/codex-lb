@@ -20,10 +20,47 @@ _COLUMNS = ("sticky_key_source", "sticky_kind", "sticky_key_hash")
 _AUTH_TABLES = ("dashboard_roles", "dashboard_role_grants", "dashboard_users", "dashboard_identities")
 
 
+def _empty_mysql_test_database(connection: Connection) -> None:
+    """Empty the disposable test database (the MySQL twin of ``DROP SCHEMA public``).
+
+    MySQL has no schema-level reset, so every base table is dropped. Foreign-key
+    checks are disabled for the drop pass and re-enabled before the connection
+    returns to the pool.
+    """
+
+    connection.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    names = [
+        str(name)
+        for name in connection.execute(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'"
+            )
+        ).scalars()
+    ]
+    for name in names:
+        connection.execute(text(f"DROP TABLE IF EXISTS `{name}`"))
+    connection.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+
+
 @pytest.fixture
 def migration_url(tmp_path: Path, db_setup: bool) -> Iterator[str]:
     del db_setup
     configured = os.environ["CODEX_LB_DATABASE_URL"]
+    if configured.startswith("mysql"):
+        # Run on the real MySQL server: the configured test database is
+        # disposable, so emptying it is the schema reset this fixture needs.
+        assert os.environ["CODEX_LB_TEST_DATABASE_URL"] == configured
+        engine = create_engine(to_sync_database_url(configured))
+        try:
+            with engine.begin() as connection:
+                _empty_mysql_test_database(connection)
+            yield configured
+        finally:
+            with engine.begin() as connection:
+                _empty_mysql_test_database(connection)
+            engine.dispose()
+        return
     if not configured.startswith("postgresql"):
         yield f"sqlite+aiosqlite:///{tmp_path / 'identity-merge.sqlite'}"
         return

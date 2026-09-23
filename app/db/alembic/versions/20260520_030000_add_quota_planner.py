@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import text_default
+
 revision = "20260520_030000_add_quota_planner"
 down_revision = "20260520_000000_merge_api_key_and_http_bridge_heads"
 branch_labels = None
@@ -74,6 +76,7 @@ def _ensure_request_logs_request_kind() -> None:
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
     tables = _table_names()
     _ensure_request_logs_request_kind()
 
@@ -83,7 +86,9 @@ def upgrade() -> None:
             sa.Column("id", sa.Integer(), autoincrement=False, nullable=False),
             sa.Column("mode", sa.String(), server_default=sa.text("'shadow'"), nullable=False),
             sa.Column("timezone", sa.String(), server_default=sa.text("'UTC'"), nullable=False),
-            sa.Column("working_days_json", sa.Text(), server_default=sa.text("'[0,1,2,3,4]'"), nullable=False),
+            sa.Column(
+                "working_days_json", sa.Text(), server_default=text_default(bind, "'[0,1,2,3,4]'"), nullable=False
+            ),
             sa.Column("working_hours_start", sa.String(), server_default=sa.text("'09:00'"), nullable=False),
             sa.Column("working_hours_end", sa.String(), server_default=sa.text("'18:00'"), nullable=False),
             sa.Column("prewarm_enabled", sa.Boolean(), server_default=sa.true(), nullable=False),

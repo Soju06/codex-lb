@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import is_mysql
+
 revision = "20260830_000000_add_quota_warmup_claim_expiry"
 down_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
 branch_labels = None
@@ -58,6 +60,12 @@ def upgrade() -> None:
         lease_expr = (
             "COALESCE(executed_at, created_at, TIMESTAMP '1970-01-01 00:00:00') "
             f"+ make_interval(secs => {_LEGACY_CLAIM_LEASE_WINDOW_SECONDS})"
+        )
+    elif is_mysql(bind):
+        # MySQL has no strftime; DATE_ADD yields a DATETIME directly.
+        lease_expr = (
+            "DATE_ADD(COALESCE(executed_at, created_at, '1970-01-01 00:00:00'), "
+            f"INTERVAL {_LEGACY_CLAIM_LEASE_WINDOW_SECONDS} SECOND)"
         )
     else:
         lease_expr = (

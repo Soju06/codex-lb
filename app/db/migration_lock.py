@@ -10,6 +10,7 @@ from typing import Callable, Iterator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
+from app.db.dialect_sql import is_mysql
 from app.db.sqlite_utils import sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,44 @@ def _postgresql_migration_lock(sync_database_url: str, *, timeout_seconds: float
 
 
 @contextmanager
+def _mysql_migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterator[None]:
+    # MySQL/MariaDB have no advisory-lock function; ``GET_LOCK`` is the native
+    # cross-process named mutex. Like the PostgreSQL session advisory lock it
+    # lives on this dedicated connection and is released by the server when
+    # that connection dies, so a crashed migrator never wedges its peers.
+    # AUTOCOMMIT keeps the holder out of "idle in transaction" (the lock is
+    # not transactional: it survives commit/rollback of the statements around
+    # it), matching the PostgreSQL lock connection's isolation choice.
+    engine = create_engine(sync_database_url, future=True)
+    try:
+        with engine.connect() as connection:
+            connection = connection.execution_options(isolation_level="AUTOCOMMIT")
+
+            def _try_acquire() -> bool:
+                return bool(
+                    connection.execute(
+                        text("SELECT GET_LOCK(:key, 0)"),
+                        {"key": MIGRATION_LOCK_KEY},
+                    ).scalar()
+                )
+
+            _acquire_with_timeout(
+                _try_acquire,
+                timeout_seconds=timeout_seconds,
+                description="MySQL named migration lock",
+            )
+            try:
+                yield
+            finally:
+                connection.execute(
+                    text("SELECT RELEASE_LOCK(:key)"),
+                    {"key": MIGRATION_LOCK_KEY},
+                )
+    finally:
+        engine.dispose()
+
+
+@contextmanager
 def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Iterator[None]:
     # Holding a BEGIN IMMEDIATE write transaction on a sentinel SQLite file is
     # the mutex: SQLite's RESERVED lock is exclusive across processes sharing
@@ -139,6 +178,8 @@ def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterato
     """Cross-process mutex serializing schema upgrades/stamps for one database.
 
     PostgreSQL: session-level advisory lock held on a dedicated connection.
+    MySQL/MariaDB: session-scoped named lock (``GET_LOCK``/``RELEASE_LOCK``)
+    held on a dedicated connection, released by the server if the holder dies.
     File-backed SQLite: exclusive write transaction on a sentinel SQLite file
     adjacent to the database. In-memory SQLite is a no-op (the database is
     process-private, there is no peer), as are dialects without a portable
@@ -147,6 +188,10 @@ def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterato
     backend = make_url(sync_database_url).get_backend_name()
     if backend == "postgresql":
         with _postgresql_migration_lock(sync_database_url, timeout_seconds=timeout_seconds):
+            yield
+        return
+    if is_mysql(backend):
+        with _mysql_migration_lock(sync_database_url, timeout_seconds=timeout_seconds):
             yield
         return
     if backend == "sqlite":

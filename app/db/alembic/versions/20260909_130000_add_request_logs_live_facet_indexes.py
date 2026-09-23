@@ -27,6 +27,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260909_130000_add_request_logs_live_facet_indexes"
 down_revision = "20260909_120000_dashboard_conversation_archive"
 branch_labels = None
@@ -60,6 +62,17 @@ def _drop_invalid_postgres_index(index_name: str) -> None:
 
 
 def upgrade() -> None:
+    _bind = op.get_bind()
+    if is_mysql(_bind):
+        for index_name, columns in _LIVE_FACET_INDEXES:
+            create_mysql_index(
+                _bind,
+                index_name=index_name,
+                table_name=_TABLE_NAME,
+                columns_sql=", ".join(f"`{column}`" for column in columns),
+            )
+        return
+
     bind = op.get_bind()
 
     if bind.dialect.name == "postgresql":

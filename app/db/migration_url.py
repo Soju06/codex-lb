@@ -14,5 +14,7 @@ def to_sync_database_url(database_url: str) -> str:
         parsed = parsed.set(drivername="sqlite")
     elif driver == "postgresql+asyncpg":
         parsed = parsed.set(drivername="postgresql+psycopg")
+    elif driver in ("mysql+asyncmy", "mysql+aiomysql"):
+        parsed = parsed.set(drivername="mysql+pymysql")
 
     return parsed.render_as_string(hide_password=False)

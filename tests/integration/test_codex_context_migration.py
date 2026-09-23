@@ -20,7 +20,7 @@ CURRENT_UPSTREAM = "20260913_000000_add_oidc_provider_flow"
 PREVIOUS_OIDC_MERGE = "20260916_000000_merge_context_oidc_heads"
 SCIM_HEAD = "20260914_000000_add_scim_tokens"
 OVERFLOW_WITHDRAWAL_HEAD = "20260914_000000_drop_subscription_overflow_schema"
-MERGED_HEAD = "20260922_000000_merge_context_scim_overflow_heads"
+CURRENT_HEAD = "20260923_000000_add_api_key_astra_notes"
 
 
 @pytest.mark.parametrize(
@@ -43,7 +43,7 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
     database = tmp_path / "context-upgrade.sqlite"
     url = f"sqlite+aiosqlite:///{database}"
     script = ScriptDirectory.from_config(_build_alembic_config(url))
-    assert script.get_heads() == [MERGED_HEAD]
+    assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(DEPLOYED_CONTEXT).down_revision == "20260830_000000_add_quota_warmup_claim_expiry"
     await to_thread.run_sync(lambda: run_upgrade(url, starting_revision, bootstrap_legacy=False))
 
@@ -96,10 +96,10 @@ async def test_deployed_context_and_fresh_upstream_upgrade_to_single_head(tmp_pa
             )
 
     result = await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-    assert result.current_revision == MERGED_HEAD
+    assert result.current_revision == CURRENT_HEAD
     assert not await to_thread.run_sync(lambda: check_schema_drift(url))
     with sqlite3.connect(database) as db:
-        assert db.execute("SELECT * FROM alembic_version").fetchall() == [(MERGED_HEAD,)]
+        assert db.execute("SELECT * FROM alembic_version").fetchall() == [(CURRENT_HEAD,)]
         assert db.execute("SELECT * FROM codex_context_sessions").fetchall() == owners
         assert db.execute("SELECT * FROM codex_context_participants ORDER BY account_id").fetchall() == participants
         assert (

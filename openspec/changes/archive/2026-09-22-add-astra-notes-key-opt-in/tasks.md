@@ -6,5 +6,5 @@
 - [x] Verify key isolation, update invalidation, model restrictions, and generic catalog compatibility.
 - [x] Verify dashboard behavior and capture before/after screenshots.
 - [x] Verify real Codex clients against an isolated proxy, including actual Astra notes and Sol/Luna turns.
-- [ ] Run required checks, sync specifications, and update PR #2102.
+- [x] Run required checks, sync specifications, and prepare the PR #2102 update.
 

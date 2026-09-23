@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import text_default
+
 revision = "20260601_010000_add_routing_policy_persistence"
 down_revision = "20260509_000000_add_api_key_traffic_class"
 branch_labels = None
@@ -53,7 +55,7 @@ def upgrade() -> None:
             "additional_quota_routing_policies_json",
             sa.Text(),
             nullable=False,
-            server_default=sa.text("'{}'"),
+            server_default=text_default(bind, "'{}'"),
         ),
     )
 

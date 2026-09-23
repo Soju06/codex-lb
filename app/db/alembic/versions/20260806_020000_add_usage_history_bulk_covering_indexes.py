@@ -24,6 +24,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
 down_revision = "20260730_000000_add_api_key_fair_share_threshold"
 branch_labels = None
@@ -82,6 +84,15 @@ def upgrade() -> None:
                         """
                     )
                 )
+    elif is_mysql(bind):
+        for index_name, window_expression, _include_columns in _COVERING_INDEXES:
+            window_part = "(coalesce(`window`, 'primary'))" if window_expression.startswith("coalesce") else "`window`"
+            create_mysql_index(
+                bind,
+                index_name=index_name,
+                table_name="usage_history",
+                columns_sql=f"{window_part}, `account_id`, `recorded_at`",
+            )
     else:
         for index_name, window_expression, _include_columns in _COVERING_INDEXES:
             op.execute(

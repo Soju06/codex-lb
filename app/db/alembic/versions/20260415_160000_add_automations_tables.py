@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import text_default
+
 revision = "20260415_160000_add_automations_tables"
 down_revision = "20260415_160000_add_request_logs_response_lookup_index"
 branch_labels = None
@@ -58,7 +60,7 @@ def upgrade() -> None:
             sa.Column("include_paused_accounts", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column("model", sa.String(), nullable=False),
             sa.Column("reasoning_effort", sa.String(length=16), nullable=True),
-            sa.Column("prompt", sa.Text(), nullable=False, server_default=sa.text("'ping'")),
+            sa.Column("prompt", sa.Text(), nullable=False, server_default=text_default(bind, "'ping'")),
             sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
             sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
             sa.PrimaryKeyConstraint("id"),

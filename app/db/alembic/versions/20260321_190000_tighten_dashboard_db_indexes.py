@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, index_exists, is_mysql
+
 # revision identifiers, used by Alembic.
 revision = "20260321_190000_tighten_dashboard_db_indexes"
 down_revision = "20260319_183000_normalize_sqlite_account_status_casing"
@@ -18,6 +20,35 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if is_mysql(bind):
+        create_mysql_index(
+            bind,
+            index_name="idx_usage_window_account_time",
+            table_name="usage_history",
+            columns_sql="(coalesce(`window`, 'primary')), `account_id`, `recorded_at`",
+        )
+        create_mysql_index(bind, index_name="idx_api_keys_name", table_name="api_keys", columns_sql="`name`")
+        create_mysql_index(
+            bind,
+            index_name="idx_logs_requested_at_model_tier",
+            table_name="request_logs",
+            columns_sql="`requested_at` DESC, `model`, `service_tier`",
+        )
+        create_mysql_index(
+            bind,
+            index_name="idx_logs_model_effort_time",
+            table_name="request_logs",
+            columns_sql="`model`, `reasoning_effort`, `requested_at` DESC, `id` DESC",
+        )
+        create_mysql_index(
+            bind,
+            index_name="idx_logs_status_error_time",
+            table_name="request_logs",
+            columns_sql="`status`, `error_code`, `requested_at` DESC, `id` DESC",
+        )
+        return
+
     op.execute(
         sa.text(
             """
@@ -57,6 +88,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    if is_mysql(bind):
+        for index_name, table_name in (
+            ("idx_logs_status_error_time", "request_logs"),
+            ("idx_logs_model_effort_time", "request_logs"),
+            ("idx_logs_requested_at_model_tier", "request_logs"),
+            ("idx_api_keys_name", "api_keys"),
+            ("idx_usage_window_account_time", "usage_history"),
+        ):
+            if index_exists(bind, index_name, table_name):
+                op.execute(sa.text(f"DROP INDEX {index_name} ON {table_name}"))
+        return
+
     op.drop_index("idx_logs_status_error_time", table_name="request_logs", if_exists=True)
     op.drop_index("idx_logs_model_effort_time", table_name="request_logs", if_exists=True)
     op.drop_index("idx_logs_requested_at_model_tier", table_name="request_logs", if_exists=True)

@@ -601,6 +601,8 @@ class AuthManager:
                 "account_deactivated",
                 "account_suspended",
                 "transport_error",
+                "upstream_proxy_unavailable",
+                "refresh_claim_timeout",
                 "invalid_response",
                 "http_400",
                 "http_401",
@@ -612,7 +614,7 @@ class AuthManager:
                 "http_504",
             }
             logger.warning(
-                "OAuth refresh failed account_ref=%s code=%s permanent=%s transport=%s",
+                "OAuth refresh attempt failed account_ref=%s code=%s permanent=%s transport=%s",
                 sha256(account.id.encode("utf-8")).hexdigest()[:16],
                 exc.code if exc.code in safe_codes else "other",
                 bool(exc.is_permanent),

@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import cast
 
@@ -26,6 +27,66 @@ from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "permanent", "transport", "expected_code"),
+    [
+        ("refresh_token_revoked", True, False, "refresh_token_revoked"),
+        ("refresh_token_invalidated", True, False, "refresh_token_invalidated"),
+        ("refresh_token_reused", True, False, "refresh_token_reused"),
+        ("transport_error", False, True, "transport_error"),
+        ("secret-provider-code\nforged-log", False, False, "other"),
+    ],
+)
+async def test_refresh_failure_diagnostic_is_correlatable_and_secret_safe(
+    monkeypatch,
+    caplog,
+    code,
+    permanent,
+    transport,
+    expected_code,
+) -> None:
+    async def fail_refresh(*_args, **_kwargs):
+        raise RefreshError(code, "secret-provider-message", permanent, transport_error=transport)
+
+    async def handle_failure(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(AuthManager, "_refresh_tokens", fail_refresh)
+    monkeypatch.setattr(AuthManager, "_handle_permanent_refresh_failure", handle_failure)
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="private-account-identity",
+        email="private@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("secret-access"),
+        refresh_token_encrypted=encryptor.encrypt("secret-refresh"),
+        id_token_encrypted=encryptor.encrypt("secret-id"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+    )
+    manager = AuthManager(cast(AccountsRepositoryPort, _DummyRepo()), redact_sensitive_details=True)
+    with caplog.at_level(logging.WARNING), pytest.raises(RefreshError):
+        await manager._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
+    records = [r for r in caplog.records if "OAuth refresh failed" in r.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert f"account_ref={sha256(account.id.encode()).hexdigest()[:16]}" in message
+    assert f"code={expected_code} permanent={permanent} transport={transport}" in message
+    assert records[0].exc_info is None
+    for secret in (
+        account.id,
+        account.email,
+        "secret-access",
+        "secret-refresh",
+        "secret-id",
+        "secret-provider-message",
+        "secret-provider-code",
+        "forged-log",
+    ):
+        assert secret not in caplog.text
 
 
 @pytest.fixture(autouse=True)

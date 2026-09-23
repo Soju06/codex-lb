@@ -30,6 +30,7 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("private_first", [True, False])
 @pytest.mark.parametrize(
     ("code", "permanent", "transport", "expected_code"),
     [
@@ -47,15 +48,25 @@ async def test_refresh_failure_diagnostic_is_correlatable_and_secret_safe(
     permanent,
     transport,
     expected_code,
+    private_first,
 ) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_calls = 0
+
     async def fail_refresh(*_args, **_kwargs):
+        nonlocal refresh_calls
+        refresh_calls += 1
+        started.set()
+        await release.wait()
         raise RefreshError(code, "secret-provider-message", permanent, transport_error=transport)
 
     async def handle_failure(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(AuthManager, "_refresh_tokens", fail_refresh)
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", fail_refresh)
     monkeypatch.setattr(AuthManager, "_handle_permanent_refresh_failure", handle_failure)
+    monkeypatch.setattr(auth_manager_module, "get_refresh_claim_coordinator", lambda: None)
     encryptor = TokenEncryptor()
     account = Account(
         id="private-account-identity",
@@ -67,10 +78,30 @@ async def test_refresh_failure_diagnostic_is_correlatable_and_secret_safe(
         last_refresh=utcnow(),
         status=AccountStatus.ACTIVE,
     )
-    manager = AuthManager(cast(AccountsRepositoryPort, _DummyRepo()), redact_sensitive_details=True)
-    with caplog.at_level(logging.WARNING), pytest.raises(RefreshError):
-        await manager._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
-    records = [r for r in caplog.records if "OAuth refresh failed" in r.getMessage()]
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    private_manager = AuthManager(cast(AccountsRepositoryPort, repo), redact_sensitive_details=True)
+    ordinary_manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    managers = [private_manager, ordinary_manager] if private_first else [ordinary_manager, private_manager]
+    tasks = []
+    with caplog.at_level(logging.WARNING):
+        try:
+            tasks.append(asyncio.create_task(managers[0].ensure_fresh(account, force=True)))
+            await asyncio.wait_for(started.wait(), timeout=5)
+            tasks.append(asyncio.create_task(managers[1].ensure_fresh(account, force=True)))
+            await asyncio.sleep(0)
+            release.set()
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
+        finally:
+            release.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    assert refresh_calls == 1
+    assert len(results) == 2
+    assert all(isinstance(result, RefreshError) and result.code == code for result in results)
+    records = [r for r in caplog.records if "OAuth refresh attempt failed" in r.getMessage()]
     assert len(records) == 1
     message = records[0].getMessage()
     assert f"account_ref={sha256(account.id.encode()).hexdigest()[:16]}" in message
@@ -630,7 +661,12 @@ async def test_refresh_account_does_not_promote_unknown_workspace_into_taken_slo
 
 
 @pytest.mark.asyncio
-async def test_refresh_account_converts_upstream_route_failure_to_refresh_error(monkeypatch):
+@pytest.mark.parametrize("failure_stage", ["route", "admission"])
+async def test_refresh_account_converts_pre_exchange_failure_to_safe_attempt_diagnostic(
+    monkeypatch,
+    caplog,
+    failure_stage,
+):
     @asynccontextmanager
     async def fake_background_session() -> AsyncIterator[object]:
         yield object()
@@ -641,9 +677,15 @@ async def test_refresh_account_converts_upstream_route_failure_to_refresh_error(
     async def unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         raise AssertionError("refresh_access_token should not run when route resolution fails")
 
+    async def unexpected_admission():
+        raise AssertionError("expired admission budget should fail before acquiring")
+
     monkeypatch.setattr(auth_manager_module, "get_background_session", fake_background_session)
     monkeypatch.setattr(auth_manager_module, "resolve_upstream_route", fail_resolve_route)
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", unexpected_refresh)
+    monkeypatch.setattr(auth_manager_module, "get_refresh_claim_coordinator", lambda: None)
+    if failure_stage == "admission":
+        monkeypatch.setattr(auth_manager_module, "get_token_refresh_timeout_override", lambda: 0.0)
 
     encryptor = TokenEncryptor()
     account = Account(
@@ -658,16 +700,28 @@ async def test_refresh_account_converts_upstream_route_failure_to_refresh_error(
         deactivation_reason=None,
     )
     repo = _DummyRepo()
-    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    manager = AuthManager(
+        cast(AccountsRepositoryPort, repo),
+        acquire_refresh_admission=unexpected_admission if failure_stage == "admission" else None,
+    )
 
-    with pytest.raises(RefreshError) as exc_info:
-        await manager.refresh_account(account)
+    with caplog.at_level(logging.WARNING), pytest.raises(RefreshError) as exc_info:
+        await manager.ensure_fresh(account, force=True)
 
-    assert exc_info.value.code == "upstream_proxy_unavailable"
-    assert exc_info.value.message == "Upstream proxy route unavailable: pool_unavailable"
+    code = "upstream_proxy_unavailable" if failure_stage == "route" else "refresh_claim_timeout"
+    assert exc_info.value.code == code
     assert exc_info.value.is_permanent is False
     assert exc_info.value.transport_error is True
-    assert exc_info.value.upstream_proxy_fail_closed_reason == "pool_unavailable"
+    if failure_stage == "route":
+        assert exc_info.value.message == "Upstream proxy route unavailable: pool_unavailable"
+        assert exc_info.value.upstream_proxy_fail_closed_reason == "pool_unavailable"
+    records = [r for r in caplog.records if "OAuth refresh attempt failed" in r.getMessage()]
+    assert len(records) == 1
+    assert f"code={code} permanent=False transport=True" in records[0].getMessage()
+    assert records[0].exc_info is None
+    assert "code=other" not in records[0].getMessage()
+    for secret in (account.id, account.email, "access-old", "refresh-old", "id-old", "pool_unavailable"):
+        assert secret not in caplog.text
     assert repo.status_payload is None
     assert repo.tokens_payload is None
 

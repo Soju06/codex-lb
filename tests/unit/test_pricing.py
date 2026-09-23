@@ -82,6 +82,90 @@ def test_get_pricing_for_model_gpt_5_6_aliases(requested_model: str, canonical_m
     assert result == (canonical_model, DEFAULT_PRICING_MODELS[canonical_model])
 
 
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])
+@pytest.mark.parametrize("suffix", ["", "-2026-09-22"])
+@pytest.mark.parametrize("uppercase", [False, True])
+def test_get_pricing_for_model_gpt_6_aliases(model: str, suffix: str, uppercase: bool) -> None:
+    requested_model = model + suffix
+    if uppercase:
+        requested_model = requested_model.upper()
+
+    result = get_pricing_for_model(requested_model)
+
+    assert result is not None
+    assert result[0] == model
+
+
+@pytest.mark.parametrize("model", ["gpt-6", "gpt-6-unknown", "gpt-6-terra"])
+def test_get_pricing_for_model_does_not_guess_unknown_gpt_6_family(model: str) -> None:
+    assert get_pricing_for_model(model) is None
+
+
+@pytest.mark.parametrize(
+    ("model", "input_rate", "cached_rate", "output_rate"),
+    [
+        ("gpt-6-astra", 10.0, 1.0, 50.0),
+        ("gpt-6-sol", 2.0, 0.2, 10.0),
+        ("gpt-6-luna", 0.1, 0.01, 0.5),
+    ],
+)
+@pytest.mark.parametrize(
+    ("service_tier", "tier_multiplier"),
+    [(None, 1.0), ("default", 1.0), ("flex", 0.5), ("priority", 2.0), ("fast", 2.0)],
+)
+@pytest.mark.parametrize(
+    ("input_tokens", "input_multiplier", "output_multiplier"),
+    [(200_000, 1.0, 1.0), (272_000, 1.0, 1.0), (272_001, 2.0, 1.5), (300_000, 2.0, 1.5)],
+)
+def test_gpt_6_cost_breakdown_by_tier_and_context_length(
+    model: str,
+    input_rate: float,
+    cached_rate: float,
+    output_rate: float,
+    service_tier: str | None,
+    tier_multiplier: float,
+    input_tokens: int,
+    input_multiplier: float,
+    output_multiplier: float,
+) -> None:
+    resolved = get_pricing_for_model(model)
+    assert resolved is not None
+    usage = ResponseUsage(
+        input_tokens=input_tokens,
+        output_tokens=100_000,
+        input_tokens_details=ResponseUsageDetails(cached_tokens=100_000),
+    )
+
+    breakdown = calculate_cost_breakdown_from_usage(usage, resolved[1], service_tier=service_tier)
+
+    expected_input = (input_tokens - 100_000) / 1_000_000 * input_rate * tier_multiplier * input_multiplier
+    expected_cached = 0.1 * cached_rate * tier_multiplier * input_multiplier
+    expected_output = 0.1 * output_rate * tier_multiplier * output_multiplier
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(expected_input)
+    assert breakdown.cached_input_usd == pytest.approx(expected_cached)
+    assert breakdown.output_usd == pytest.approx(expected_output)
+    assert breakdown.total_usd == pytest.approx(expected_input + expected_cached + expected_output)
+
+
+def test_calculate_costs_includes_gpt_6_families_and_aliases() -> None:
+    usage = UsageTokens(input_tokens=200_000, cached_input_tokens=100_000, output_tokens=100_000)
+
+    costs = calculate_costs(
+        [
+            CostItem(model="gpt-6-astra", usage=usage),
+            CostItem(model="gpt-6-sol-2026-09-22", usage=usage, service_tier="fast"),
+            CostItem(model="GPT-6-LUNA", usage=usage, service_tier="flex"),
+            CostItem(model="gpt-6-unknown", usage=usage),
+        ]
+    )
+
+    assert costs.total_usd_7d == pytest.approx(8.5705)
+    assert {item.model: item.usd for item in costs.by_model} == pytest.approx(
+        {"gpt-6-astra": 6.1, "gpt-6-sol": 2.44, "gpt-6-luna": 0.0305}
+    )
+
+
 def test_get_pricing_for_model_gpt_5_4_mini_alias():
     result = get_pricing_for_model("gpt-5.4-mini-2026-03-17", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
     assert result is not None

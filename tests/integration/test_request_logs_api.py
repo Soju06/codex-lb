@@ -456,6 +456,58 @@ async def test_request_logs_api_rejects_guest_conversation_filter_and_preserves_
 
 
 @pytest.mark.asyncio
+async def test_request_logs_api_prices_gpt_6_families_and_aggregates(async_client, db_setup):
+    del db_setup
+    cases = [
+        ("gpt-6-astra", "default", 200_000, 100_000, 1.0, 0.1, 5.0, 6.10),
+        ("gpt-6-sol-2026-09-23", "flex", 200_000, 100_000, 0.1, 0.01, 0.5, 0.61),
+        ("GPT-6-LUNA", "default", 200_000, 100_000, 0.01, 0.001, 0.05, 0.061),
+        ("gpt-6-astra-2026-09-23", "fast", 300_000, 50_000, 10.0, 0.2, 15.0, 25.20),
+    ]
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        for index, (model, tier, input_tokens, cached_tokens, *_costs) in enumerate(cases):
+            await repo.add_log(
+                account_id=None,
+                request_id=f"req_gpt_6_cost_{index}",
+                conversation_id="gpt-6-cost-aggregate",
+                model=model,
+                service_tier=tier,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_tokens,
+                output_tokens=100_000,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+            )
+
+    response = await async_client.get(
+        "/api/request-logs",
+        params={"conversation_id": "gpt-6-cost-aggregate"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == len(cases)
+    assert body["conversation"] == {
+        "requestCount": len(cases),
+        "aggregatedCostUsd": pytest.approx(31.971),
+    }
+    by_model = {row["model"]: row for row in body["requests"]}
+    for model, tier, input_tokens, cached_tokens, input_usd, cached_usd, output_usd, total_usd in cases:
+        row = by_model[model]
+        assert row["serviceTier"] == tier
+        assert row["inputTokens"] == input_tokens
+        assert row["cachedInputTokens"] == cached_tokens
+        assert row["costUsd"] == pytest.approx(total_usd)
+        assert row["costBreakdown"] == {
+            "inputUsd": pytest.approx(input_usd),
+            "cachedInputUsd": pytest.approx(cached_usd),
+            "outputUsd": pytest.approx(output_usd),
+            "totalUsd": pytest.approx(total_usd),
+        }
+
+
+@pytest.mark.asyncio
 async def test_request_logs_api_lists_limit_warmup_rows(async_client, db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

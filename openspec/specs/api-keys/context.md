@@ -59,3 +59,32 @@ This list represents supported request model names, not a guarantee that every c
 For example, an operator can create a key with `allowedModels: ["gpt-image-2"]`, reopen its edit dialog and replace it with `gpt-image-1-mini`. An unrestricted key (`All models`) already permits these names subject to other policies; this fix makes explicit image-only restrictions configurable in the UI.
 
 The backend addition requires no migration or new setting. After deployment, reload the dashboard to refresh the cached model list. Bootstrap and refreshed catalogs are both supplemented; duplicate IDs appear once.
+
+## GPT-6 request cost recognition
+
+GPT-6 Astra, Sol, and Luna share the native pricing path used by request logs,
+API-key reservations, settlement, and aggregate estimates. The rates were
+verified on 2026-09-23 against [OpenAI pricing](https://developers.openai.com/api/docs/pricing)
+and the [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[Sol](https://developers.openai.com/api/docs/models/gpt-6-sol), and
+[Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) model pages.
+See [GPT-6 request cost requirements](spec.md#requirement-gpt-6-request-cost-pricing-is-recognized).
+
+Each family has its own price entry and suffixed aliases; there is no generic
+GPT-6 fallback that could charge an unknown future family at the wrong rate.
+Fast uses twice the applicable standard short- or long-context rates, with
+total input including cache hits selecting the context band. The implementation
+reuses the existing tier fields without runtime configuration or price fetching.
+Cache-write billing, Batch processing, and regional surcharges remain outside
+the existing token-accounting contract.
+
+For example, a standard Sol request with 200,000 input tokens (100,000 cached)
+and 100,000 output tokens costs `$0.20 + $0.02 + $1.00 = $1.22`. Fast costs
+`$2.44`; Flex costs `$0.61`. At exactly 272,000 input tokens, short-context
+rates still apply.
+
+Deployment enables recognition for new requests and settlements. Persisted
+historical costs and settled quota counters are retained. Existing null-cost
+rows can gain calculated request-detail breakdowns, while historical aggregates
+remain based on persisted costs. No database migration or production data
+rewrite is included.

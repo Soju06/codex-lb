@@ -3142,6 +3142,81 @@ async def test_chat_completions_stream_finalizes_cost_limit(async_client, monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "tier", "input_tokens", "cached_tokens", "expected_cost"),
+    [
+        ("gpt-6-astra", "default", 200_000, 100_000, 6.10),
+        ("gpt-6-sol-2026-09-23", "flex", 200_000, 100_000, 0.61),
+        ("GPT-6-LUNA", "default", 200_000, 100_000, 0.061),
+        ("gpt-6-astra-2026-09-23", "fast", 300_000, 50_000, 25.20),
+    ],
+)
+async def test_gpt_6_chat_completion_settles_cost_and_persists_log(
+    async_client, monkeypatch, model, tier, input_tokens, cached_tokens, expected_cost
+):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "gpt-6-cost-key",
+            "limits": [{"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 100_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    await _import_account(async_client, "acc_gpt_6_cost", "gpt-6-cost@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_gpt_6_cost",
+                "model": model,
+                "service_tier": tier,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": 100_000,
+                    "total_tokens": input_tokens + 100_000,
+                    "input_tokens_details": {"cached_tokens": cached_tokens},
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    async with async_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == round(expected_cost * 1_000_000)
+        log = (await session.execute(select(RequestLog).where(RequestLog.api_key_id == key_id))).scalar_one()
+        assert log.model == model
+        assert log.service_tier == ("priority" if tier == "fast" else tier)
+        assert log.input_tokens == input_tokens
+        assert log.cached_input_tokens == cached_tokens
+        assert log.output_tokens == 100_000
+        assert log.cost_usd == pytest.approx(expected_cost)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
 @pytest.mark.parametrize("requested_service_tier", ["priority", "fast"])
 async def test_compact_cost_limit_uses_canonical_request_service_tier_when_response_omits_echo(

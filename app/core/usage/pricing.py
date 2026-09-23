@@ -88,6 +88,45 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    "gpt-6-astra": ModelPrice(
+        input_per_1m=10.0,
+        cached_input_per_1m=1.0,
+        output_per_1m=50.0,
+        priority_multiplier=2.0,
+        flex_input_per_1m=5.0,
+        flex_cached_input_per_1m=0.5,
+        flex_output_per_1m=25.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=20.0,
+        long_context_cached_input_per_1m=2.0,
+        long_context_output_per_1m=75.0,
+    ),
+    "gpt-6-sol": ModelPrice(
+        input_per_1m=2.0,
+        cached_input_per_1m=0.2,
+        output_per_1m=10.0,
+        priority_multiplier=2.0,
+        flex_input_per_1m=1.0,
+        flex_cached_input_per_1m=0.1,
+        flex_output_per_1m=5.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=4.0,
+        long_context_cached_input_per_1m=0.4,
+        long_context_output_per_1m=15.0,
+    ),
+    "gpt-6-luna": ModelPrice(
+        input_per_1m=0.1,
+        cached_input_per_1m=0.01,
+        output_per_1m=0.5,
+        priority_multiplier=2.0,
+        flex_input_per_1m=0.05,
+        flex_cached_input_per_1m=0.005,
+        flex_output_per_1m=0.25,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=0.2,
+        long_context_cached_input_per_1m=0.02,
+        long_context_output_per_1m=0.75,
+    ),
     "gpt-5.6-sol": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=0.5,
@@ -323,6 +362,9 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
+    "gpt-6-astra*": "gpt-6-astra",
+    "gpt-6-sol*": "gpt-6-sol",
+    "gpt-6-luna*": "gpt-6-luna",
     "gpt-5.6": "gpt-5.6-sol",
     "gpt-5.6-sol*": "gpt-5.6-sol",
     "gpt-5.6-terra*": "gpt-5.6-terra",
@@ -436,12 +478,6 @@ def _effective_rates(
                 else price.priority_input_per_1m
             )
             return price.priority_input_per_1m, priority_cached, price.priority_output_per_1m
-        if price.priority_multiplier is not None:
-            input_rate *= price.priority_multiplier
-            cached_rate *= price.priority_multiplier
-            output_rate *= price.priority_multiplier
-            return input_rate, cached_rate, output_rate
-
     if _uses_flex_tier(service_tier) and price.flex_input_per_1m is not None and price.flex_output_per_1m is not None:
         input_rate = price.flex_input_per_1m
         cached_rate = price.flex_cached_input_per_1m if price.flex_cached_input_per_1m is not None else input_rate
@@ -460,6 +496,11 @@ def _effective_rates(
             price.long_context_cached_input_per_1m if price.long_context_cached_input_per_1m is not None else input_rate
         )
         output_rate = price.long_context_output_per_1m
+
+    if _uses_priority_tier(service_tier) and price.priority_multiplier is not None:
+        input_rate *= price.priority_multiplier
+        cached_rate *= price.priority_multiplier
+        output_rate *= price.priority_multiplier
 
     return input_rate, cached_rate, output_rate
 

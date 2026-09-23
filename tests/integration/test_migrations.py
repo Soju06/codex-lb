@@ -3252,6 +3252,47 @@ async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_astra_notes_key_migration_defaults_and_round_trip(db_setup):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    parent = "20260922_000000_merge_context_scim_overflow_heads"
+    config = _build_alembic_config(_DATABASE_URL)
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    await to_thread.run_sync(lambda: command.downgrade(config, parent))
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.begin() as conn:
+            assert "auto_enable_astra_notes" not in await conn.run_sync(
+                lambda c: {column["name"] for column in sa_inspect(c).get_columns("api_keys")}
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
+                    "VALUES ('notes-migration', 'Existing key', 'synthetic-hash', 'test', TRUE)"
+                )
+            )
+        for _ in range(2):
+            await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+            async with engine.begin() as conn:
+                row = (
+                    await conn.execute(
+                        text("SELECT name, auto_enable_astra_notes FROM api_keys WHERE id = 'notes-migration'")
+                    )
+                ).one()
+                assert row[0] == "Existing key"
+                assert not row[1]
+                await conn.execute(text("UPDATE api_keys SET auto_enable_astra_notes = TRUE"))
+            assert not await to_thread.run_sync(lambda: check_schema_drift(_DATABASE_URL))
+            await to_thread.run_sync(lambda: command.downgrade(config, parent))
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize(
     "existing_tables",
     [
@@ -3271,7 +3312,11 @@ async def test_codex_context_migration_rejects_unowned_tables_without_changes(db
             await session.execute(text(f"INSERT INTO {table} (marker) VALUES ('preserve-me')"))
         await session.commit()
     with pytest.raises(RuntimeError, match="Refusing to adopt pre-existing context tables"):
-        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=False))
+        # Exercise the ownership migration itself. Independent upstream branches
+        # may legitimately advance before a later upgrade-to-head failure.
+        await to_thread.run_sync(
+            lambda: run_upgrade(_DATABASE_URL, "20260905_120000_add_codex_context_ownership", bootstrap_legacy=False)
+        )
     async with SessionLocal() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == parent
         for table in existing_tables:
@@ -3293,7 +3338,11 @@ async def test_model_source_pins_kind_expires_index_upgrade_downgrade_and_query_
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'pins-kind-expires.sqlite'}"
     parent = "20260910_020000_add_dashboard_role_mappings"
-    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    # The subsequent overflow retirement drops this table. Inspect the index
+    # while its owning revision is active, then verify the final head separately.
+    await to_thread.run_sync(
+        lambda: run_upgrade(db_url, "20260911_000000_model_source_pins_kind_expires_index", bootstrap_legacy=False)
+    )
     engine = create_async_engine(db_url)
     try:
         async with engine.connect() as conn:

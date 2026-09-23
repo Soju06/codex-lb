@@ -100,6 +100,7 @@ type ApiKeyEditDraft = {
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
+  autoEnableAstraNotes: boolean;
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
@@ -118,6 +119,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
+    autoEnableAstraNotes: apiKey.autoEnableAstraNotes,
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
@@ -168,6 +170,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
+      autoEnableAstraNotes: draft.autoEnableAstraNotes,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
@@ -235,6 +238,24 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
               </label>
+            </div>
+
+            <div className="flex items-start gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="edit-api-key-astra-notes"
+                className="mt-0.5"
+                checked={draft.autoEnableAstraNotes}
+                onCheckedChange={(checked) => updateDraft({ autoEnableAstraNotes: checked === true })}
+                aria-describedby="edit-api-key-astra-notes-description"
+              />
+              <div className="space-y-1">
+                <label htmlFor="edit-api-key-astra-notes" className="cursor-pointer">
+                  {t("apiKeys.form.astraNotes")}
+                </label>
+                <p id="edit-api-key-astra-notes-description" className="text-xs text-muted-foreground">
+                  {t("apiKeys.form.astraNotesDescription")}
+                </p>
+              </div>
             </div>
 
             <div className="space-y-1">

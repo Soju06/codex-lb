@@ -215,6 +215,8 @@
   "apiKeys.form.allowedModels": "Allowed models",
   "apiKeys.form.allowedReasoningEfforts": "Allowed efforts",
   "apiKeys.form.applyToCodexModel": "Apply to codex /model",
+  "apiKeys.form.astraNotes": "Experimental Astra notes",
+  "apiKeys.form.astraNotesDescription": "Automatically enables experimental notes for new GPT-6 Astra conversations.",
   "apiKeys.form.assignedAccounts": "Assigned accounts",
   "apiKeys.form.assignedModelSources": "Assigned model sources",
   "apiKeys.form.currentUsage": "Current usage",

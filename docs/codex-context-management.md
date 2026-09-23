@@ -24,13 +24,25 @@ Forks have separate notes namespaces. A copied transcript can contain the result
 
 Run a separate build with a new empty data volume and loopback port, such as `127.0.0.1:2456`. Import eligible accounts, enable API-key authentication and create a test key with access to the pool. Use a new task so participation tracking starts before its first inference request.
 
-Codex rust-v0.153.1 requires the provider display name `OpenAI` and a ChatGPT login for the history/notes extension. Explicit token-budget options enable the extension with a proxy bearer token. These under-development client settings may change in future versions.
+### Automatic activation per API key
 
-Save a separate `~/.codex/codex-context-test.config.toml` with permissions `0600`. Keep the key out of Git.
+In **Settings → API Keys**, create or edit a key and enable **Experimental Astra notes**. This preference defaults to off for existing and new keys. The API field is `autoEnableAstraNotes`; key-management permissions are unchanged.
+
+When enabled, codex-lb adds the experimental activation defaults to the allowed, visible native `gpt-6-astra` entry in that key's remote catalog. It preserves the model's upstream prompts and other metadata. An absent Astra entry or incomplete metadata is left unchanged. It does not grant an account access to an experimental backend feature it lacks.
+
+Turning the option off restores the upstream catalog defaults. It does not revoke context access, delete notes, or reconfigure running tasks. Keys shared by several people share this preference. Clients keep their own catalog cache, which can remain valid for several minutes even after reopening. Refresh the catalog and start a new task after changing the preference.
+
+Use remote discovery without `model_catalog_json`. Also remove any global `[features.token_budget]` override if you want the model catalog to choose activation; explicit client settings take precedence. Save a separate `~/.codex/codex-context-test.config.toml` with permissions `0600` for evaluation:
 
 ```toml
 model = "gpt-6-astra"
 model_provider = "codex-context-test"
+
+[features]
+api_key_model_discovery = true
+
+[features.context_management]
+experimental_mode = true
 
 [model_providers.codex-context-test]
 name = "OpenAI"
@@ -39,16 +51,11 @@ wire_api = "responses"
 requires_openai_auth = true
 experimental_bearer_token = "REPLACE_WITH_POOL_PROXY_KEY"
 supports_websockets = true
-
-[features.context_management]
-experimental_mode = true
-
-[features.token_budget]
-enabled = true
-use_history_notes_extension = true
 ```
 
-Start `codex --profile codex-context-test`. Keep the existing ChatGPT login. The default provider configuration remains separate from this profile.
+Start `codex --profile codex-context-test`. Keep the existing ChatGPT login for native history/notes tools. The normal provider configuration remains separate from this profile. These under-development client settings may change between releases.
+
+For CLI 0.156.0, also add `model_catalog_url = "http://127.0.0.1:2456/backend-api/codex/models"` inside the provider section. Omit that field for the tested Desktop engine, whose strict configuration rejects it. The tested Desktop engine 0.155.0-alpha.9.2 derives the models route from `base_url` and requires a registered Codex authentication state for discovery; a bearer token only in the provider config does not trigger it. Registering a proxy key can enable model discovery without a ChatGPT login, but discovery alone does not establish history/notes tool eligibility.
 
 ## Verification
 
@@ -68,6 +75,6 @@ A missing or invalid key returns `401`. Context requests return `409` if global 
 
 The deployed ownership revision keeps its original August 30 parent. Merge revisions join it to the upstream migrations, including the dashboard user and authentication-provider migration chains. Startup therefore applies intervening upstream changes on existing context installations, while fresh upstream databases create the context tables. These paths and the previous context merge reach `20260911_020000_merge_context_auth_provider_heads` without manual version stamping. Existing dashboard credentials are carried into the upstream user model. Preserve a consistent database backup and its encryption key before upgrading.
 
-Timeouts and ambiguous writes are not retried. An explicit authentication rejection may refresh and retry once on the same owner. There is no account-to-account notes copy or new dashboard setting.
+Timeouts and ambiguous writes are not retried. An explicit authentication rejection may refresh and retry once on the same owner. There is no account-to-account notes copy. The per-key dashboard preference controls catalog activation only.
 
 Stop the isolated proxy and exit the test task to end evaluation. Downgrading the database removes ownership records; begin new context tasks after a downgrade/re-upgrade. Keep old backups and the associated encryption key if those tasks need to be recovered.

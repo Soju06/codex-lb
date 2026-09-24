@@ -1896,7 +1896,7 @@ class _HTTPBridgeStreamingMixin:
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _fingerprint_input_items(previous_response_input_items)
                 effective_payload = effective_payload.model_copy(update={"input": trimmed_input_items})
@@ -1923,16 +1923,22 @@ class _HTTPBridgeStreamingMixin:
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
-            logger.info(
-                "http_bridge_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
-                "previous_response_id=%s",
-                request_state.request_id,
-                previous_response_trimmed_input_count,
+            trimmed_to = (
                 len(cast(list[JsonValue], effective_payload.input))
                 if isinstance(effective_payload.input, list)
-                else None,
-                effective_payload.previous_response_id,
+                else None
             )
+            if trimmed_to != previous_response_trimmed_input_count:
+                # Stripping replayed tool-search ids keeps the item count; only a
+                # real prefix trim is worth an operator-visible log line.
+                logger.info(
+                    "http_bridge_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                    "previous_response_id=%s",
+                    request_state.request_id,
+                    previous_response_trimmed_input_count,
+                    trimmed_to,
+                    effective_payload.previous_response_id,
+                )
         request_state.transport = _REQUEST_TRANSPORT_HTTP
         request_state.request_stage = _http_bridge_request_stage(
             headers=headers,

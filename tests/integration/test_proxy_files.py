@@ -1131,3 +1131,95 @@ async def test_file_id_pin_overrides_bare_session_header_aliases(async_client):
     ):
         resolved = await service._resolve_file_account_for_responses(payload, headers)
         assert resolved == "acc_session_file_a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "finalize", "pinned_finalize"])
+@pytest.mark.parametrize("failure", ["connect", "tls", "body_read", "request", "process_network"])
+async def test_backend_files_routed_transport_failover(async_client, monkeypatch, failure, operation):
+    import errno
+    import ssl
+    from types import SimpleNamespace
+
+    import aiohttp
+    from aiohttp.client_reqrep import ConnectionKey
+
+    import app.core.clients.codex as codex_module
+    import app.core.clients.files as files_module
+    from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+
+    await _import_account(async_client, "routed_files_a", "routed-files-a@example.com")
+    await _import_account(async_client, "routed_files_b", "routed-files-b@example.com")
+    calls: list[str] = []
+    failed_account: str | None = None
+    connection_key = ConnectionKey("proxy.invalid", 8080, False, False, None, None, None)
+
+    class Session:
+        async def request(self, method, url, **kwargs):
+            nonlocal failed_account
+            account_id = kwargs["headers"]["chatgpt-account-id"]
+            calls.append(account_id)
+            failed_account = failed_account or account_id
+            if account_id != failed_account or (operation == "pinned_finalize" and url.endswith("/files")):
+                return SimpleNamespace(
+                    status=200, text='{"file_id":"file_routed","upload_url":"https://blob.invalid","status":"success"}'
+                )
+            if failure == "connect":
+                raise aiohttp.ClientProxyConnectionError(
+                    connection_key, ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+                )
+            if failure == "tls":
+                raise aiohttp.ClientConnectorCertificateError(
+                    connection_key, ssl.SSLCertVerificationError("invalid cert")
+                )
+            if failure == "process_network":
+                raise aiohttp.ClientProxyConnectionError(
+                    connection_key, OSError(errno.ENETUNREACH, "network unreachable")
+                )
+            if failure == "request":
+                raise aiohttp.ClientConnectionError("connection reset after sending request")
+
+            async def read():
+                raise aiohttp.ClientPayloadError("connection reset during body read")
+
+            return SimpleNamespace(status=200, headers={}, read=read)
+
+        async def close(self):
+            pass
+
+    async def route(self, account, **kwargs):
+        return ResolvedUpstreamRoute(
+            "pool", "files-pool", ResolvedProxyEndpoint(f"timeout-{account.id}", "http", "proxy.invalid", 8080)
+        )
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(codex_module, "discover_native_egress_client", lambda: None)
+    monkeypatch.setattr(files_module, "create_codex_session", Session)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", route)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fresh)
+    if operation in {"create", "pinned_finalize"}:
+        response = await async_client.post(
+            "/backend-api/files", json={"file_name": "page.pdf", "file_size": 1024, "use_case": "codex"}
+        )
+        if operation == "pinned_finalize":
+            assert response.status_code == 200, response.text
+            calls.clear()
+    if operation != "create":
+        response = await async_client.post("/backend-api/files/file_routed/uploaded")
+    if failure == "connect" and operation != "pinned_finalize":
+        assert response.status_code == 200, response.text
+        assert len(calls) == 2
+        assert calls[0] != calls[1]
+        if operation == "create":
+            async with SessionLocal() as session:
+                owner = await FileAccountPinRepository(session).get_live_account_id("file_routed")
+                account = await session.get(proxy_module.Account, owner)
+                assert account is not None
+                assert account.chatgpt_account_id == calls[1]
+    else:
+        assert response.status_code == 502, response.text
+        assert len(calls) == 1
+        expected_code = "proxy_network_unavailable" if failure == "process_network" else "upstream_unavailable"
+        assert response.json()["error"]["code"] == expected_code

@@ -1059,6 +1059,47 @@ async def test_key_reactivation_never_leaves_active_keys_on_a_disabled_owner(
 
 
 @pytest.mark.asyncio
+async def test_key_patch_that_also_renames_orders_the_owner_before_the_key(
+    async_client: AsyncClient, app_instance
+) -> None:
+    """The same race when the key PATCH carries a second field, which the key
+    edit form always does. The rename makes the key row dirty, so the owner's
+    status has to be read before the first field is assigned: flushing the
+    rename first would take the key row ahead of the owner row — the opposite
+    order from the owner-driven cascade, which takes the owner row first — and
+    the two would deadlock instead of one of them refusing."""
+
+    await _setup_admin(async_client)
+    for round_number in range(3):
+        created = await _create(async_client, f"dana{round_number}", role_id=OPERATOR_ROLE)
+        user_id = created["user"]["id"]
+        async with _client(app_instance) as dana:
+            await _accept(dana, created["invite"]["token"])
+        key = await _owned_key(async_client, user_id, active=False, reason="owner_disabled")
+        disable, patched = await asyncio.gather(
+            async_client.patch(f"{USERS}/{user_id}", json={"status": "disabled"}),
+            async_client.patch(f"/api/api-keys/{key.id}", json={"isActive": True, "name": f"renamed-{round_number}"}),
+        )
+        assert disable.status_code == 200, disable.text
+        assert patched.status_code in (200, 409), patched.text
+        if patched.status_code == 409:
+            assert _error(patched) == "owner_disabled"
+        await _owner_and_keys_consistent(user_id, [key.id])
+        # The delete path clears ``owner_user_id`` on every owned key, active or
+        # not, so it is the one that would meet the racing rename head-on.
+        second = await _create(async_client, f"erin{round_number}", role_id=OPERATOR_ROLE)
+        async with _client(app_instance) as erin:
+            await _accept(erin, second["invite"]["token"])
+        doomed = await _owned_key(async_client, second["user"]["id"], active=False, reason="owner_disabled")
+        deleted, patched = await asyncio.gather(
+            async_client.delete(f"{USERS}/{second['user']['id']}"),
+            async_client.patch(f"/api/api-keys/{doomed.id}", json={"isActive": True, "name": f"doomed-{round_number}"}),
+        )
+        assert deleted.status_code == 204, deleted.text
+        assert patched.status_code in (200, 409), patched.text
+
+
+@pytest.mark.asyncio
 async def test_purge_spares_an_account_activated_meanwhile(async_client: AsyncClient, monkeypatch) -> None:
     """The purge decides in its own DELETE: an acceptance that committed after the candidate scan survives."""
 

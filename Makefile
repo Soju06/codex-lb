@@ -60,7 +60,10 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql \
-	tests/integration/test_scim_v2_users.py::test_a_patch_meets_the_length_caps_a_replace_meets
+	tests/integration/test_scim_v2_users.py::test_a_patch_meets_the_length_caps_a_replace_meets \
+	tests/integration/test_dashboard_users_api.py::test_concurrent_admin_mutations_keep_exactly_one_admin \
+	tests/integration/test_dashboard_users_api.py::test_key_reactivation_never_leaves_active_keys_on_a_disabled_owner \
+	tests/integration/test_dashboard_users_api.py::test_key_patch_that_also_renames_orders_the_owner_before_the_key
 SHELL := bash
 
 .PHONY: help

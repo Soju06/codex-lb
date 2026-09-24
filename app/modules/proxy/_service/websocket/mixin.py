@@ -342,6 +342,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
     _finalize_ttft_reasoning_deltas,
+    _observe_response_output_timing,
     _PreparedWebSocketRequest,
     _record_response_event,
     _record_websocket_route_metadata,
@@ -1052,7 +1053,10 @@ async def _process_and_forward_upstream_websocket_text(
     continuity_state: _WebSocketContinuityState | None,
     codex_session_affinity: bool,
     clock: Clock | None = None,
+    observed_at: float | None = None,
 ) -> bool:
+    if observed_at is None:
+        observed_at = (clock or clock_for(proxy)).monotonic()
     parsed_frame = _parse_upstream_websocket_text_frame(text, message=message)
     archive_request_id = await _websocket_archive_request_id_for_message(
         message,
@@ -1078,6 +1082,7 @@ async def _process_and_forward_upstream_websocket_text(
         continuity_state=continuity_state,
         codex_session_affinity=codex_session_affinity,
         clock=clock,
+        observed_at=observed_at,
     )
     suppress_downstream_event = upstream_control.suppress_downstream_event
     downstream_texts = upstream_control.downstream_texts
@@ -5218,6 +5223,7 @@ class _WebSocketMixin:
                             continuity_state=continuity_state,
                             codex_session_affinity=codex_session_affinity,
                             clock=clock,
+                            observed_at=clock.monotonic(),
                         ),
                         name=f"proxy-websocket-terminal-{account_id_value}",
                     )
@@ -5419,12 +5425,15 @@ class _WebSocketMixin:
         codex_session_affinity: bool = False,
         parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
         clock: Clock | None = None,
+        observed_at: float | None = None,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
         # The reader loop resolves the owner clock once per connection and
         # passes it per frame; the fallback only serves direct callers (tests).
         if clock is None:
             clock = clock_for(proxy)
+        if observed_at is None:
+            observed_at = clock.monotonic()
         if parsed_frame is None:
             parsed_frame = _parse_upstream_websocket_text_frame(text)
         payload = parsed_frame.payload
@@ -5521,20 +5530,14 @@ class _WebSocketMixin:
                         f"watermark={request_state.last_downstream_sequence_number} replay={sequence_number}"
                     )
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    _record_response_event(request_state, event_type, now=clock.monotonic())
-                elapsed_ms = int((clock.monotonic() - request_state.started_at) * 1000)
+                    _record_response_event(request_state, event_type, now=observed_at)
+                elapsed_ms = int((observed_at - request_state.started_at) * 1000)
                 if request_state.latency_first_upstream_event_ms is None:
                     request_state.latency_first_upstream_event_ms = elapsed_ms
                 if event_type == "response.created" and request_state.latency_response_created_ms is None:
                     request_state.latency_response_created_ms = elapsed_ms
-                if request_state.latency_first_token_ms is None:
-                    ttft_visible_at = _facade()._ttft_event_visible_at(
-                        event_type, payload, request_state.ttft_reasoning_deltas, now=clock.monotonic()
-                    )
-                    if ttft_visible_at is not None:
-                        request_state.latency_first_token_ms = max(
-                            0, int((ttft_visible_at - request_state.started_at) * 1000)
-                        )
+                if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    _observe_response_output_timing(request_state, event_type, payload, now=observed_at)
                 actual_service_tier = _facade()._service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
@@ -5599,12 +5602,6 @@ class _WebSocketMixin:
                         "error",
                     },
                 )
-                if request_state is not None:
-                    # Upstream generation ends here; everything after (affinity
-                    # refresh, settlement, cleanup) is local and must not stretch
-                    # the throughput sample's span. A later terminal for the same
-                    # turn (retry / replay) replaces it; those rows are not sampled.
-                    request_state.upstream_terminal_at = clock.monotonic()
                 if request_state is None and (
                     is_previous_response_not_found_matching_event or is_missing_tool_output_event
                 ):
@@ -5718,6 +5715,7 @@ class _WebSocketMixin:
                 upstream_control.reconnect_requested = True
             downstream_texts: list[str] = []
             for grouped_request_state in grouped_previous_response_request_states:
+                grouped_request_state.upstream_terminal_at = observed_at
                 if grouped_error_reason == PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON:
                     grouped_request_state.previous_response_not_found_recovery_blocked = True
                     _record_continuity_fail_closed(
@@ -6158,6 +6156,8 @@ class _WebSocketMixin:
                         upstream_control.replay_request_state = request_state
                         return downstream_text
 
+        request_state.upstream_terminal_at = observed_at
+        _observe_response_output_timing(request_state, event_type, payload, now=observed_at)
         await proxy._finalize_websocket_request_state(
             request_state,
             account=account,
@@ -6403,13 +6403,9 @@ class _WebSocketMixin:
             request_state.terminal_settlement_phase = None
             return
 
-        # Throughput clock stop: the terminal frame's parse stamp when the reader
-        # set one, else now -- either way before the gate release, the API-key
-        # settlement and the deferred health writes below, so local DB
-        # contention is never counted as generation time.
+        # Only a received final terminal supplies generation evidence. Total
+        # latency below retains settlement and downstream completion time.
         upstream_terminal_at = request_state.upstream_terminal_at
-        if upstream_terminal_at is None:
-            upstream_terminal_at = clock_for(proxy).monotonic()
         # First-token clock start: the TTFT cohort sample is measured from the
         # ``response.create`` send, so bridge pre-send work (session lookup,
         # reconnect, prewarm, image inlining, slimming) that ``started_at``
@@ -6421,10 +6417,14 @@ class _WebSocketMixin:
         )
         if request_state.latency_first_token_ms is None:
             ttft_visible_at = _finalize_ttft_reasoning_deltas(
-                request_state.ttft_reasoning_deltas, now=clock_for(proxy).monotonic()
+                request_state.ttft_reasoning_deltas,
+                now=upstream_terminal_at if upstream_terminal_at is not None else clock_for(proxy).monotonic(),
             )
             if ttft_visible_at is not None:
                 request_state.latency_first_token_ms = max(0, int((ttft_visible_at - request_state.started_at) * 1000))
+
+        if upstream_terminal_at is not None:
+            _observe_response_output_timing(request_state, event_type, payload, now=upstream_terminal_at)
 
         if event_type == "error":
             error = event.error if event else None
@@ -6589,12 +6589,18 @@ class _WebSocketMixin:
                     requested_service_tier=request_state.requested_service_tier,
                     actual_service_tier=request_state.actual_service_tier,
                     latency_first_token_ms=request_state.latency_first_token_ms,
+                    latency_first_output_ms=request_state.latency_first_output_ms,
+                    output_delta_count=request_state.output_delta_count,
                     latency_response_created_ms=request_state.latency_response_created_ms,
                     latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
                     latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
                     latency_bridge_queue_wait_ms=request_state.latency_bridge_queue_wait_ms,
                     latency_upstream_send_ms=latency_upstream_send_ms,
-                    latency_upstream_terminal_ms=max(0, int((upstream_terminal_at - request_state.started_at) * 1000)),
+                    latency_upstream_terminal_ms=(
+                        None
+                        if upstream_terminal_at is None
+                        else max(0, int((upstream_terminal_at - request_state.started_at) * 1000))
+                    ),
                     # TTFT is measured from started_at, so a retried send, a
                     # transparent direct-WebSocket replay (replay_count; the
                     # bridge counts attempts instead) or a capacity wait leaves
@@ -6751,6 +6757,8 @@ class _WebSocketMixin:
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
             latency_first_token_ms=request_state.latency_first_token_ms,
+            latency_first_output_ms=request_state.latency_first_output_ms,
+            output_delta_count=request_state.output_delta_count,
             latency_response_created_ms=request_state.latency_response_created_ms,
             latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
             latency_response_create_gate_wait_ms=request_state.latency_response_create_gate_wait_ms,
@@ -7129,6 +7137,8 @@ class _WebSocketMixin:
                     requested_service_tier=request_state.requested_service_tier,
                     actual_service_tier=request_state.actual_service_tier,
                     latency_first_token_ms=request_state.latency_first_token_ms,
+                    latency_first_output_ms=request_state.latency_first_output_ms,
+                    output_delta_count=request_state.output_delta_count,
                     session_id=request_state.session_id,
                     upstream_proxy_route_mode=request_state.upstream_proxy_route_mode,
                     upstream_proxy_pool_id=request_state.upstream_proxy_pool_id,

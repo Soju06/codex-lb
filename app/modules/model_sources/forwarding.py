@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -30,6 +31,8 @@ from app.db.models import ModelSource
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SOURCE_TIMEOUT_SECONDS = 600
+# Request-log timings and token counts use SQL Integer (PostgreSQL int32).
+_MAX_REQUEST_LOG_INTEGER = 2_147_483_647
 
 # Bounded exposure for OpenAI-compatible model-source transport (#2123 WP-C1,
 # design v3 §3, §8.2). Single definition: callers import, never re-literal.
@@ -85,6 +88,7 @@ class SourceUsage:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int = 0
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +96,10 @@ class SourceTimings:
     """Server-reported generation timing, for TTFT/tokens-per-second reporting.
 
     Maps directly onto ``RequestLog.latency_first_token_ms`` /
-    ``RequestLog.latency_ms`` so source-routed requests get the same TTFT and
-    tokens-per-second dashboard reporting as subscription-backed ones, sourced
-    from the upstream's own measurements rather than proxy-side timers (the
-    proxy does not instrument source forwarding round trips itself).
+    ``RequestLog.latency_ms`` to preserve the upstream's own measurements.
+    Sources do not supply the gateway output-sample evidence required for a
+    qualified TPS estimate; these timings may support a labeled legacy estimate
+    when non-reasoning token usage is known.
     """
 
     latency_first_token_ms: int
@@ -1207,10 +1211,9 @@ def _timings_from_metrics(metrics: Mapping[str, JsonValue]) -> SourceTimings | N
     ``metrics`` object alongside ``usage`` with ``time_to_first_token_ms``
     (TTFT) and ``generation_time_ms`` (wall-clock time to produce the
     completion tokens *after* the first token). Storing their sum as
-    ``latency_ms`` alongside ``latency_first_token_ms`` lets the existing
-    dashboard TPS calculation use ``generation_time_ms`` as its denominator,
-    preserving the generation-only throughput semantics used for
-    subscription-backed requests.
+    ``latency_ms`` alongside ``latency_first_token_ms`` preserves the reported
+    generation interval for legacy estimates without inventing local output
+    samples.
     """
     ttft = metrics.get("time_to_first_token_ms")
     generation = metrics.get("generation_time_ms")
@@ -1220,59 +1223,71 @@ def _timings_from_metrics(metrics: Mapping[str, JsonValue]) -> SourceTimings | N
         return None
     if (isinstance(ttft, float) and not isfinite(ttft)) or (isinstance(generation, float) and not isfinite(generation)):
         return None
-    if ttft < 0 or generation < 0:
+    if not (0 <= ttft <= _MAX_REQUEST_LOG_INTEGER and 0 <= generation <= _MAX_REQUEST_LOG_INTEGER):
+        return None
+    total = ttft + generation
+    if total > _MAX_REQUEST_LOG_INTEGER:
         return None
     return SourceTimings(
         latency_first_token_ms=round(ttft),
-        latency_ms=round(ttft + generation),
+        latency_ms=round(total),
     )
 
 
+def _nonnegative_token_count(value: JsonValue) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_REQUEST_LOG_INTEGER
+        else None
+    )
+
+
+def _reasoning_tokens_from_details(usage: Mapping[str, JsonValue], details_field: str) -> int | None:
+    details = usage.get(details_field)
+    return _nonnegative_token_count(details.get("reasoning_tokens")) if is_json_mapping(details) else None
+
+
 def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
-    prompt_tokens = usage.get("prompt_tokens")
-    completion_tokens = usage.get("completion_tokens")
-    if not isinstance(prompt_tokens, int) or not isinstance(completion_tokens, int):
-        return None
-    if prompt_tokens < 0 or completion_tokens < 0:
-        # Fail closed: negative counts from a misbehaving source would reduce
-        # API-key limit counters or record negative cost at settlement.
+    prompt_tokens = _nonnegative_token_count(usage.get("prompt_tokens"))
+    completion_tokens = _nonnegative_token_count(usage.get("completion_tokens"))
+    if prompt_tokens is None or completion_tokens is None:
+        # Fail closed: invalid counts must not reduce API-key limit counters
+        # or overflow request-log persistence at settlement.
         return None
     cached_tokens = 0
     details = usage.get("prompt_tokens_details")
     if is_json_mapping(details):
-        raw_cached = details.get("cached_tokens")
-        cached_tokens = raw_cached if isinstance(raw_cached, int) else 0
+        cached_tokens = _nonnegative_token_count(details.get("cached_tokens")) or 0
     return SourceUsage(
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         cached_input_tokens=max(0, min(cached_tokens, prompt_tokens)),
+        reasoning_tokens=_reasoning_tokens_from_details(usage, "completion_tokens_details"),
     )
 
 
 def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
-        return None
-    if input_tokens < 0 or output_tokens < 0:
-        # Fail closed: negative counts from a misbehaving source would reduce
-        # API-key limit counters or record negative cost at settlement.
+    input_tokens = _nonnegative_token_count(usage.get("input_tokens"))
+    output_tokens = _nonnegative_token_count(usage.get("output_tokens"))
+    if input_tokens is None or output_tokens is None:
+        # Fail closed: invalid counts must not reduce API-key limit counters
+        # or overflow request-log persistence at settlement.
         return None
     cached_tokens = 0
     details = usage.get("input_tokens_details")
     if is_json_mapping(details):
-        raw_cached = details.get("cached_tokens")
-        cached_tokens = raw_cached if isinstance(raw_cached, int) else 0
+        cached_tokens = _nonnegative_token_count(details.get("cached_tokens")) or 0
     return SourceUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=max(0, min(cached_tokens, input_tokens)),
+        reasoning_tokens=_reasoning_tokens_from_details(usage, "output_tokens_details"),
     )
 
 
 def _usage_from_total_tokens_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
-    total_tokens = usage.get("total_tokens")
-    if not isinstance(total_tokens, int) or total_tokens < 0:
+    total_tokens = _nonnegative_token_count(usage.get("total_tokens"))
+    if total_tokens is None:
         return None
     return SourceUsage(input_tokens=total_tokens, output_tokens=0)
 
@@ -1293,10 +1308,16 @@ class SourceStreamUsageParser:
         self._usage_holder = usage_holder
         self._response_shape = response_shape
         self._buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._bom_pending = True
         self._cr_pending = False
 
     def feed(self, chunk: bytes) -> None:
+        self._feed_text(self._decoder.decode(chunk))
+
+    def _feed_text(self, text: str) -> None:
+        if not text:
+            return
         # SSE permits CRLF (and bare CR) line endings; normalize so frame
         # detection below only has to handle "\n\n". A CRLF split across two
         # chunks must stay one line ending: the CR that closed the previous
@@ -1305,7 +1326,6 @@ class SourceStreamUsageParser:
         # frame into two halves that parse to nothing while the event-block
         # reassembler delivers the whole event to the client (I11: delivered
         # => pinned; usage never captured).
-        text = chunk.decode("utf-8", errors="ignore")
         if self._cr_pending:
             self._cr_pending = False
             text = text.removeprefix("\n")
@@ -1345,6 +1365,7 @@ class SourceStreamUsageParser:
         starts with ``data:`` and parses to nothing. Idempotent.
         """
 
+        self._feed_text(self._decoder.decode(b"", final=True))
         tail, self._buffer = self._buffer, ""
         if tail.strip():
             self._capture_frame(tail)

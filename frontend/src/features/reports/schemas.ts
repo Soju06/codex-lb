@@ -12,9 +12,10 @@ const DailyReportRowSchema = z.object({
   activeAccounts: z.number(),
   cancelledCount: z.number(),
   errorCount: z.number(),
-  medianTtftMs: z.number().optional().default(0),
-  medianTps: z.number().optional().default(0),
-  medianQueueMs: z.number().optional().default(0),
+  medianTtftMs: z.number().nullable().optional().default(null),
+  medianTps: z.number().nullable().optional().default(null),
+  medianQueueMs: z.number().nullable().optional().default(null),
+  tpsSampleCount: z.number().int().nonnegative().optional(),
 });
 
 const ModelCostEntrySchema = z.object({

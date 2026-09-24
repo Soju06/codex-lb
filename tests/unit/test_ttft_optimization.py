@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from typing import cast
@@ -17,6 +18,7 @@ from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.service import ProxyService
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
 
@@ -542,3 +544,123 @@ async def test_stream_responses_ttft_flushes_visible_reasoning_at_eof(monkeypatc
 
     assert len(chunks) == 11
     assert latency_first_token_ms < 20
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first_output",
+    [
+        {"type": "response.output_text.delta", "delta": "hello"},
+        {"type": "response.refusal.done", "refusal": "Unable"},
+        {"type": "response.function_call_arguments.done", "arguments": "{}"},
+        {"type": "response.custom_tool_call_input.done", "input": "pwd"},
+    ],
+)
+async def test_stream_speed_uses_observed_events_before_cleanup_and_preserves_raw_frames(monkeypatch, first_output):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    account = _make_account("timing")
+    clock = VirtualClock(monotonic_value=100.0)
+    service = ProxyService(_repo_factory(request_logs), clock=clock)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    raw_first = f"event: {first_output['type']}\ndata: {json.dumps(first_output, ensure_ascii=False)}\n\n"
+    raw_second = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":"!"}\n\n'
+
+    async def fake_stream(*_args, **_kwargs):
+        clock.monotonic_value = 100.125
+        yield 'data: {"type":"response.reasoning_summary_text.delta","delta":"plan"}\n\n'
+        clock.monotonic_value = 100.25
+        yield raw_first
+        clock.monotonic_value = 100.5
+        yield 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":""}\n\n'
+        clock.monotonic_value = 100.75
+        yield raw_second
+        clock.monotonic_value = 101.0
+        yield (
+            'data: {"type":"response.completed","response":{"id":"timing",'
+            '"usage":{"input_tokens":1,"output_tokens":10}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": [], "stream": True})
+    chunks = []
+    async for chunk in service.stream_responses(payload, {}):
+        chunks.append(chunk)
+        if "response.completed" in chunk:
+            clock.monotonic_value += 2.0
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    row = request_logs.calls[0]
+    assert row["latency_ms"] == 3000
+    assert row["latency_upstream_terminal_ms"] == 1000
+    assert row["latency_first_token_ms"] == 125
+    assert row["latency_first_output_ms"] == 250
+    assert row["output_delta_count"] == 2
+    assert chunks[1] == raw_first
+    assert chunks[3] == raw_second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_content", [False, True])
+@pytest.mark.parametrize("lease_release_seconds", [0.0, 2.0])
+async def test_stream_terminal_snapshot_requires_content_not_usage(monkeypatch, has_content, lease_release_seconds):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    account = _make_account("terminal-timing")
+    clock = VirtualClock(monotonic_value=100.0)
+    service = ProxyService(_repo_factory(request_logs), clock=clock)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+
+    release_calls = 0
+
+    async def release_lease(_lease):
+        nonlocal release_calls
+        release_calls += 1
+        if release_calls == 1:
+            clock.advance(lease_release_seconds)
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    async def fake_stream(*_args, **_kwargs):
+        clock.monotonic_value = 101.0
+        output = [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}] if has_content else []
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "terminal-timing",
+                        "output": output,
+                        "usage": {"input_tokens": 1, "output_tokens": 10},
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "", "input": [], "stream": True})
+    assert len([chunk async for chunk in service.stream_responses(payload, {})]) == 1
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    row = request_logs.calls[0]
+    assert row["latency_ms"] == int((1 + lease_release_seconds) * 1000)
+    assert row["latency_upstream_terminal_ms"] == 1000
+    assert row["latency_first_token_ms"] == (1000 if has_content else None)
+    assert row["latency_first_output_ms"] == (1000 if has_content else None)
+    assert row["output_delta_count"] == int(has_content)

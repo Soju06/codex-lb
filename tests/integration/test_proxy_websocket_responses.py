@@ -2401,6 +2401,11 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
     ("output_event_type", "output_event_fields", "followup_events"),
     [
         ("response.output_text.delta", {"delta": "hello"}, []),
+        ("response.output_text.done", {"text": "hello"}, []),
+        ("response.refusal.done", {"refusal": "Unable"}, []),
+        ("response.function_call_arguments.done", {"arguments": "{}"}, []),
+        ("response.custom_tool_call_input.delta", {"delta": "pwd"}, []),
+        ("response.custom_tool_call_input.done", {"input": "pwd"}, []),
         ("response.function_call_arguments.delta", {"delta": "hello"}, []),
         (
             "response.output_item.added",
@@ -2672,6 +2677,13 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     assert isinstance(latency_response_created_ms, int)
     assert isinstance(latency_first_token_ms, int)
     assert latency_first_upstream_event_ms <= latency_response_created_ms <= latency_first_token_ms
+    assert log["latency_first_output_ms"] == latency_first_token_ms
+    assert log["output_delta_count"] == 1
+    terminal_latency_ms = log["latency_upstream_terminal_ms"]
+    total_latency_ms = log["latency_ms"]
+    assert isinstance(terminal_latency_ms, int)
+    assert isinstance(total_latency_ms, int)
+    assert latency_first_token_ms <= terminal_latency_ms <= total_latency_ms
 
 
 def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch):

@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.core.clients import http as http_module
 from app.core.clients.http import get_http_client
+from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
@@ -3812,6 +3813,191 @@ async def test_source_stream_success_passes_through_sse(async_client, source_ups
 
     assert b'"content":"hello"' in received
     assert b"[DONE]" in received
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+@pytest.mark.parametrize("timing_value", [20, 1e308, 2_147_483_647])
+async def test_source_optional_timing_preserves_response_and_reasoning_log(
+    async_client, source_upstream, responses_api: bool, timing_value: int | float
+) -> None:
+    model = "source-optional-timing"
+    body: dict[str, object]
+    if responses_api:
+        body = {
+            "id": "resp_source_timing",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 8, "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 3}},
+        }
+    else:
+        body = _chat_completion_body(model)
+        body["usage"] = {
+            "prompt_tokens": 8,
+            "completion_tokens": 5,
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        }
+    body["metrics"] = {"time_to_first_token_ms": timing_value, "generation_time_ms": timing_value}
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(body)
+
+    base_url = await source_upstream(completion)
+    await _create_model_source(
+        async_client, name="optional-timing", model=model, base_url=base_url, supports_responses=responses_api
+    )
+    request_body = (
+        {"model": model, "input": "hi"}
+        if responses_api
+        else {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    )
+    response = await async_client.post("/v1/responses" if responses_api else "/v1/chat/completions", json=request_body)
+
+    assert response.status_code == 200
+    assert response.json() == body
+    async with SessionLocal() as session:
+        log = (await session.execute(select(RequestLog).where(RequestLog.model == model))).scalar_one()
+    assert log.status == "success"
+    assert log.output_tokens == 5
+    assert log.reasoning_tokens == 3
+    assert log.latency_first_token_ms == (20 if timing_value == 20 else None)
+    assert log.latency_ms == (40 if timing_value == 20 else None)
+    assert log.latency_upstream_terminal_ms is None
+    assert log.latency_first_output_ms is None
+    assert log.output_delta_count is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+@pytest.mark.parametrize("limited_key", [False, True])
+async def test_source_oversized_usage_keeps_logging_and_fails_closed_for_limited_keys(
+    async_client, source_upstream, responses_api: bool, limited_key: bool
+) -> None:
+    model = "source-oversized-usage"
+    body: dict[str, object]
+    if responses_api:
+        body = {
+            "id": "resp_oversized_usage",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 2**63, "output_tokens": 5},
+        }
+    else:
+        body = _chat_completion_body(model)
+        body["usage"] = {"prompt_tokens": 2**63, "completion_tokens": 5}
+
+    async def completion(_request: web.Request) -> web.Response:
+        return web.json_response(body)
+
+    base_url = await source_upstream(completion)
+    source_id = await _create_model_source(
+        async_client, name="oversized-usage", model=model, base_url=base_url, supports_responses=responses_api
+    )
+    headers = {}
+    if limited_key:
+        await _enable_api_key_auth(async_client)
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "oversized-usage-key",
+                "assignedSourceIds": [source_id],
+                "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000}],
+            },
+        )
+        assert created.status_code == 200
+        headers["Authorization"] = f"Bearer {created.json()['key']}"
+    request_body = (
+        {"model": model, "input": "hi"}
+        if responses_api
+        else {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    )
+    response = await async_client.post(
+        "/v1/responses" if responses_api else "/v1/chat/completions", json=request_body, headers=headers
+    )
+
+    if limited_key:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "usage_unavailable"
+    else:
+        assert response.status_code == 200
+        assert response.json() == body
+    async with SessionLocal() as session:
+        log = (await session.execute(select(RequestLog).where(RequestLog.model == model))).scalar_one()
+        reservations = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert reservations.scalars().all() == []
+    assert log.status == ("error" if limited_key else "success")
+    assert log.input_tokens is None
+    assert log.output_tokens is None
+    assert log.reasoning_tokens is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+async def test_source_multiline_stream_preserves_route_framing_usage_and_timings(
+    async_client, source_upstream, responses_api: bool
+) -> None:
+    model = "source-multiline-timing"
+    if responses_api:
+        first = b'data: {"type":"response.completed","response":{\r'
+        remaining = (
+            b'\ndata: "id":"resp_multiline","status":"completed","output":[],\r\n'
+            b'data: "usage":{"input_tokens":8,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":3}},\r\n'
+            b'data: "metrics":{"time_to_first_token_ms":20,"generation_time_ms":180}}}\r\n\r\n'
+        )
+    else:
+        first = b'data: {"id":"chatcmpl_multiline","choices":[],\r'
+        remaining = (
+            b'\ndata: "usage":{"prompt_tokens":8,"completion_tokens":5,'
+            b'"completion_tokens_details":{"reasoning_tokens":3}},\r\n'
+            b'data: "metrics":{"time_to_first_token_ms":20,"generation_time_ms":180}}\r\n\r\n'
+            b"data: [DONE]\r\n\r\n"
+        )
+
+    async def stream_handler(request: web.Request) -> web.StreamResponse:
+        upstream = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await upstream.prepare(request)
+        await upstream.write(first)
+        await asyncio.sleep(0)
+        await upstream.write(remaining)
+        await upstream.write_eof()
+        return upstream
+
+    base_url = await source_upstream(stream_handler)
+    await _create_model_source(
+        async_client, name="multiline-timing", model=model, base_url=base_url, supports_responses=responses_api
+    )
+    request_body = {"model": model, "stream": True}
+    if responses_api:
+        request_body["input"] = "hi"
+    else:
+        request_body["messages"] = [{"role": "user", "content": "hi"}]
+    response = await async_client.post("/v1/responses" if responses_api else "/v1/chat/completions", json=request_body)
+
+    assert response.status_code == 200
+    if responses_api:
+        # The public Responses wrapper retains its canonical event framing;
+        # raw-byte preservation is tested at the source forwarding stream.
+        expected = parse_sse_data_json((first + remaining).decode())
+        assert expected is not None
+        assert b"event: response.completed\n" in response.content
+        events = [parse_sse_data_json(block) for block in response.text.split("\n\n") if block.strip()]
+        completed = [event for event in events if event is not None and event.get("type") == "response.completed"]
+        assert completed == [expected]
+    else:
+        assert response.content == first + remaining
+    async with SessionLocal() as session:
+        log = (await session.execute(select(RequestLog).where(RequestLog.model == model))).scalar_one()
+    assert log.status == "success"
+    assert log.input_tokens == 8
+    assert log.output_tokens == 5
+    assert log.reasoning_tokens == 3
+    assert log.latency_first_token_ms == 20
+    assert log.latency_ms == 200
+    assert log.latency_upstream_terminal_ms is None
+    assert log.latency_first_output_ms is None
+    assert log.output_delta_count is None
 
 
 @pytest.mark.asyncio

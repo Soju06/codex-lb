@@ -430,7 +430,10 @@ jobs:
   test-integration-core:
     name: Tests (pytest, integration-core-${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Shard 3 can take just under 20 minutes on the hosted runner; leave
+    # enough headroom for setup and post-test cleanup so a passing shard is
+    # not cancelled by the job timeout.
+    timeout-minutes: 30
     needs: changes
     strategy:
       fail-fast: false

@@ -50,9 +50,14 @@ async def _wait_until_ready(server: _RunningServer) -> None:
 async def _wait_until_draining(server: _RunningServer) -> dict[str, str]:
     async with httpx.AsyncClient(timeout=0.2) as client:
         for _ in range(100):
-            response = await client.get(f"{server.http_url}/internal/drain/status")
-            checks = response.json()["checks"]
-            if checks["draining"] == "true":
+            # SIGTERM can land between the poll's connect and its response, so a
+            # transport error here means "not draining yet", not a test failure.
+            try:
+                response = await client.get(f"{server.http_url}/internal/drain/status")
+                checks = response.json()["checks"]
+            except httpx.HTTPError:
+                checks = None
+            if checks is not None and checks["draining"] == "true":
                 return checks
             await asyncio.sleep(0.01)
     raise AssertionError("fixture server did not expose the SIGTERM drain barrier")

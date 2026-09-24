@@ -1490,7 +1490,7 @@
   "settings.backgroundJobs.title": "백그라운드 작업",
   "settings.backgroundJobs.description": "요청 트래픽 없이 주기적으로 도는 루프입니다. 여기서 바꾸기 전까지는 환경 변수(또는 기본값)를 상속하며, 루프는 계속 돌면서 모든 replica의 다음 틱부터 변경을 적용합니다. 재시작이 필요 없습니다.",
   "settings.backgroundJobs.authGuardian.label": "Auth Guardian",
-  "settings.backgroundJobs.authGuardian.description": "12시간 넘게 유휴 상태인 계정의 자격 증명을 미리 갱신해 refresh token이 만료되지 않게 합니다.",
+  "settings.backgroundJobs.authGuardian.description": "요청과 동일한 자격 증명 사용 기간 기준으로 활성 및 일시 중지 계정을 갱신해 유휴 refresh token을 계속 사용할 수 있게 합니다.",
   "settings.backgroundJobs.authGuardian.ariaLabel": "Auth Guardian",
   "settings.backgroundJobs.authGuardian.blockedByTopology": "토폴로지에 의해 차단됨: 리더 선출 없는 멀티 replica 링이므로 이 스위치와 무관하게 guardian은 동작하지 않습니다. 리더 게이트로 실행하려면 CODEX_LB_LEADER_ELECTION_ENABLED=true로 설정하세요.",
   "settings.backgroundJobs.automations.label": "자동화 스케줄러",

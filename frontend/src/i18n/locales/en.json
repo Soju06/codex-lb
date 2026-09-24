@@ -1512,7 +1512,7 @@
   "settings.backgroundJobs.title": "Background jobs",
   "settings.backgroundJobs.description": "Scheduled loops that run without request traffic. Each switch inherits its environment variable (or the default) until you flip it here; the loop keeps running and applies a change on its next tick on every replica, no restart.",
   "settings.backgroundJobs.authGuardian.label": "Auth Guardian",
-  "settings.backgroundJobs.authGuardian.description": "Proactively refreshes the credentials of accounts idle for more than 12 hours so their refresh tokens do not expire.",
+  "settings.backgroundJobs.authGuardian.description": "Uses the same credential-age policy as requests to refresh active and paused accounts, helping idle refresh tokens stay usable.",
   "settings.backgroundJobs.authGuardian.ariaLabel": "Auth Guardian",
   "settings.backgroundJobs.authGuardian.blockedByTopology": "Blocked by topology: this is a multi-replica ring without leader election, so the guardian stays idle whatever this switch says. Set CODEX_LB_LEADER_ELECTION_ENABLED=true to run it leader-gated.",
   "settings.backgroundJobs.automations.label": "Automations scheduler",

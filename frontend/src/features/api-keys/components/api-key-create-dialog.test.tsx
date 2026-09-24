@@ -30,6 +30,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Experimental Astra notes" })).not.toBeChecked();
   });
 
   it("submits the codex /model checkbox value", async () => {
@@ -47,6 +48,7 @@ describe("ApiKeyCreateDialog", () => {
 
     await user.type(screen.getByLabelText("Name"), "Codex key");
     await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
+    await user.click(screen.getByRole("checkbox", { name: "Experimental Astra notes" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => {
@@ -54,6 +56,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+    expect(onSubmit.mock.calls[0][0].autoEnableAstraNotes).toBe(true);
   });
 
   it("submits opportunistic traffic class", async () => {

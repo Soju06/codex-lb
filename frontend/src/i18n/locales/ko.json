@@ -215,6 +215,8 @@
   "apiKeys.form.allowedModels": "허용 Model",
   "apiKeys.form.allowedReasoningEfforts": "허용된 추론 강도",
   "apiKeys.form.applyToCodexModel": "codex /model에 적용",
+  "apiKeys.form.astraNotes": "Astra 실험적 노트",
+  "apiKeys.form.astraNotesDescription": "새 GPT-6 Astra 대화에서 실험적 노트를 자동으로 활성화합니다.",
   "apiKeys.form.assignedAccounts": "할당 Account",
   "apiKeys.form.assignedModelSources": "할당 Model source",
   "apiKeys.form.currentUsage": "현재 사용량",

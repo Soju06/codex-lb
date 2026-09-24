@@ -1,0 +1,60 @@
+{
+  "model": "gpt-6-astra",
+  "instructions": "Reply briefly.",
+  "input": [
+    {
+      "type": "additional_tools",
+      "id": "at_00000000-0000-4000-8000-000000000001",
+      "role": "developer",
+      "tools": [{
+        "type": "namespace",
+        "name": "notes",
+        "description": "Client note tools.",
+        "tools": [{
+          "type": "function",
+          "name": "write_file",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "text": {"type": "string", "encrypted": true},
+              "file_id": {"type": "string"}
+            },
+            "required": ["path", "text"]
+          }
+        }]
+      }]
+    },
+    {
+      "type": "message",
+      "id": "msg_00000000-0000-4000-8000-000000000002",
+      "role": "developer",
+      "content": [{"type": "input_text", "text": "Keep test notes."}],
+      "internal_chat_message_metadata_passthrough": {
+        "content_item_kinds": ["token_budget.context_window_guidance"]
+      }
+    },
+    {
+      "type": "message",
+      "id": "msg_00000000-0000-4000-8000-000000000003",
+      "role": "user",
+      "content": [{"type": "input_text", "text": "Reply OK."}],
+      "internal_chat_message_metadata_passthrough": {
+        "turn_id": "00000000-0000-4000-8000-000000000004",
+        "create_time": 1788595200.25,
+        "content_item_kinds": ["user.text"]
+      }
+    }
+  ],
+  "reasoning": {"effort": "low", "context": "all_turns"},
+  "store": false,
+  "stream": true,
+  "client_metadata": {
+    "session_id": "00000000-0000-4000-8000-000000000005",
+    "thread_id": "00000000-0000-4000-8000-000000000005",
+    "turn_id": "00000000-0000-4000-8000-000000000004",
+    "root_turn_id": "00000000-0000-4000-8000-000000000004",
+    "x-codex-window-id": "00000000-0000-4000-8000-000000000005:0"
+  }
+}

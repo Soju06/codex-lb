@@ -89,6 +89,25 @@ TIMESTAMP_PREFIX_PATTERN = re.compile(r"^(\d{8}_\d{6})_")
 # merge revision): zero violations at or after the cutoff.
 RATCHET_PREFIX = "20260911_000000"
 
+# Both identities were deployed before this integration. Renaming the context
+# merge breaks stamped databases. Freeze the exact pair and parents; a third
+# member or any reparenting still fails. Graph-shape checks remain mandatory.
+_DEPLOYED_CONTEXT_COLLISION = {
+    "20260911_020000_merge_context_auth_provider_heads": (
+        "20260910_180000_merge_context_dashboard_heads",
+        "20260910_020000_add_dashboard_role_mappings",
+    ),
+    "20260911_020000_add_http_bridge_terminal_append_phase": ("20260911_010000_merge_pin_index_and_affinity_heads",),
+}
+
+# These two revisions already coexist on upstream main at 3d23d53. Keep their
+# published identities while joining their heads; do not permit a third member.
+_PUBLISHED_UPSTREAM_COLLISION = {
+    "20260914_000000_add_scim_tokens": ("20260913_000000_add_oidc_provider_flow",),
+    "20260914_000000_drop_subscription_overflow_schema": ("20260913_000000_add_oidc_provider_flow",),
+}
+
+
 _FAILURE_PREFIX = "check_migration_topology"
 
 
@@ -387,6 +406,11 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             continue
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
+        if {item.revision: item.down_revisions for item in group} in (
+            _DEPLOYED_CONTEXT_COLLISION,
+            _PUBLISHED_UPSTREAM_COLLISION,
+        ):
+            continue
         group = sorted(group, key=lambda item: item.revision)
         described = "; ".join(revision.describe() for revision in group)
         forked = not _group_is_chained(group, parents)
@@ -554,6 +578,15 @@ def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Re
         for parent in revision.down_revisions:
             base_children[parent].append(revision.revision)
     base_heads = tuple(sorted(base_ids - set(base_children)))
+    # An explicit merge has already repaired the fork when its sole valid head
+    # includes every base head. Keep the branch-alone check when main is absent
+    # or newer, and never let this exemption hide a malformed graph.
+    heads = graph_heads(revisions)
+    parents = {revision.revision: revision.down_revisions for revision in revisions}
+    if len(heads) == 1 and not check_graph_shape(revisions).errors:
+        reachable = _ancestors(heads[0], parents) | {heads[0]}
+        if base_heads and set(base_heads) <= reachable:
+            return report
     for revision in revisions:
         if revision.revision in base_ids:
             continue

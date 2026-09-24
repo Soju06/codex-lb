@@ -26,12 +26,15 @@ Checks:
    invariant as ``alembic_head_count_invalid`` plus the shapes the head and base
    counts cannot see, minus the database: ``make lint`` on a branch that is
    merged/rebased onto current ``main`` fails before the push.
-2. No two revisions share a ``YYYYMMDD_HHMMSS`` timestamp prefix (error,
-   ratcheted -- see ``RATCHET_PREFIX``). The collision is the authoring-time
-   fingerprint of the incident: two authors picking the same slot means either
-   the graph forks (different parents) or filename order no longer implies
-   graph order (chained). The message names both revisions with their
-   ``down_revision``s so the fork is visible without opening the files.
+2. No two unmerged revisions share a ``YYYYMMDD_HHMMSS`` timestamp prefix
+   (error, ratcheted -- see ``RATCHET_PREFIX``). The collision is the
+   authoring-time fingerprint of the incident: two authors picking the same
+   slot means either the graph forks (different parents) or filename order no
+   longer implies graph order (chained). A later explicit merge revision is a
+   sanctioned repair for already-released same-slot parents, so that historical
+   collision is accepted once both lineages are joined. The message names both
+   revisions with their ``down_revision``s so an unmerged fork is visible
+   without opening the files.
 3. A revision's id matches its filename stem and the shared revision-id format
    (error, whole history). Mirrors the runtime policy's
    ``alembic_revision_filename_mismatch`` / ``alembic_revision_id_format_invalid``
@@ -351,6 +354,16 @@ def _group_is_chained(group: Sequence[Revision], parents: Mapping[str, tuple[str
     )
 
 
+def _group_has_chained_pair(group: Sequence[Revision], parents: Mapping[str, tuple[str, ...]]) -> bool:
+    """True when any two members of ``group`` are an ancestor and descendant pair."""
+    ancestors = {revision.revision: _ancestors(revision.revision, parents) for revision in group}
+    return any(
+        left.revision in ancestors[right.revision] or right.revision in ancestors[left.revision]
+        for index, left in enumerate(group)
+        for right in group[index + 1 :]
+    )
+
+
 def _converged_by(
     group: Sequence[Revision],
     revisions: Sequence[Revision],
@@ -373,6 +386,30 @@ def _converged_by(
     return None
 
 
+def _group_is_joined_by_merge(group: Sequence[Revision], revisions: Sequence[Revision]) -> bool:
+    """True when a later merge revision explicitly joins every group member.
+
+    A historical same-slot pair may already be deployed, so renaming either
+    revision would invalidate stamped databases. Once a merge revision joins
+    both lineages, the graph no longer forks; retain the collision diagnostic
+    for unmerged pairs while allowing the explicit repair to make the tree
+    usable again.
+    """
+    parents = {revision.revision: revision.down_revisions for revision in revisions}
+    heads = graph_heads(revisions)
+    for head in heads:
+        ancestors = _ancestors(head, parents)
+        if not all(revision.revision in ancestors for revision in group):
+            continue
+        for candidate in (head, *ancestors):
+            candidate_ancestors = _ancestors(candidate, parents)
+            if len(parents.get(candidate, ())) > 1 and all(
+                member.revision == candidate or member.revision in candidate_ancestors for member in group
+            ):
+                return True
+    return False
+
+
 def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_prefix: str = RATCHET_PREFIX) -> Report:
     """Two revisions in the same timestamp slot: the incident's authoring-time fingerprint."""
     report = Report()
@@ -388,6 +425,8 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
         group = sorted(group, key=lambda item: item.revision)
+        if _group_is_joined_by_merge(group, revisions):
+            continue
         described = "; ".join(revision.describe() for revision in group)
         forked = not _group_is_chained(group, parents)
         consequence = (
@@ -396,7 +435,11 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             if forked
             else "they are chained, so filename order no longer tells you the graph order"
         )
-        merged_by = _converged_by(group, revisions, parents) if forked else None
+        merged_by = (
+            _converged_by(group, revisions, parents)
+            if forked and not _group_has_chained_pair(group, parents)
+            else None
+        )
         if merged_by is not None:
             # Authored in parallel and it did fork, but a merge revision has since
             # converged them: the graph has one head and nothing fails with

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
-from collections.abc import Container, Mapping
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
+from app.core.utils.sse import parse_sse_data_json
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
@@ -52,6 +54,10 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_TYPES = frozenset(
 _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES = frozenset(
     {"input_file", "input_image", "input_text", "output_text", "refusal", "text"}
 )
+# The content parts a client may send as input items in their own right, rather
+# than inside a message. Both readings mean the same thing -- this is the user's
+# content -- and the relocation key relies on that.
+_ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES = frozenset({"input_file", "input_image", "input_text"})
 _ACCOUNT_NEUTRAL_MESSAGE_FIELDS = frozenset(
     {"content", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "phase", "role", "status", "type"}
 )
@@ -63,6 +69,7 @@ _ACCOUNT_NEUTRAL_CONTENT_FIELDS = {
     "refusal": frozenset({"refusal", "type"}),
     "text": frozenset({"text", "type"}),
 }
+_ANNOTATIONS_FIELD = "annotations"
 _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     "additional_tools": frozenset({"role", "tools", "type"}),
     "apply_patch_call": frozenset(
@@ -121,6 +128,30 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
         "item_reference",
     }
 )
+# A rebuilt conversation is dispatched whole to a replacement account, so both
+# what the rebuild reads and what it costs to assemble have to stop somewhere.
+# These are transport invariants rather than operator knobs, and the Settings
+# ratchet is full.
+RELOCATION_TRANSCRIPT_MAX_TURNS = 128
+RELOCATION_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+# Turns and bytes bound neither of the things every per-item cost here scales
+# with: the smallest legal item repeated until the byte budget is spent is six
+# figures of them inside a chain of one turn. Wide enough for a 128-turn thread
+# whose every stored request restated the whole conversation, which is what the
+# turn cap and a full-resend client produce together.
+RELOCATION_TRANSCRIPT_MAX_ITEMS = 32768
+# Compares equal to nothing, itself included, because identity is the only thing
+# ever asked of it. A sentinel that is merely an unlikely key is an argument
+# about what keys look like, and the prefix function below is wrong rather than
+# imprecise if that argument ever stops holding.
+_OVERLAP_SENTINEL = object()
+_RELOCATION_TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
+
+_RESPONSE_CREATE_EVENT_TYPE = "response.create"
+_ATTEMPT_START_EVENT_TYPE = "response.created"
+_ANSWERED_TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
+_ABANDONED_TERMINAL_EVENT_TYPES = frozenset({"error", "response.failed"})
+_RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE = "response.output_item.done"
 _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
     {
         "conversation",
@@ -612,7 +643,7 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
-    if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
+    if _is_one_of(item_type, _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES):
         return _input_content_part_is_self_contained(item, allow_output=False)
     return (
         item_type in (None, "message")
@@ -941,7 +972,7 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
         if not isinstance(item, dict):
             return False
         item_type = item.get("type")
-        if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
+        if _is_one_of(item_type, _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES):
             if not _input_content_part_is_self_contained(item, allow_output=False):
                 return False
             continue
@@ -1061,3 +1092,540 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
         if identifiers is not None and identifiers != []:
             return True
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class RelocatedReplayBody:
+    """The body a relocation dispatches, and whether the chain is part of it."""
+
+    payload: dict[str, JsonValue]
+    carries_durable_items: bool
+    """False when the join's overlap consumed the chain and the client's own request is the body."""
+
+
+def project_durable_transcript_for_account_neutral_fresh_replay(
+    transcript: Sequence[object],
+    *,
+    anchor_response_id: JsonValue | None,
+    current_payload: Mapping[str, JsonValue],
+    max_turns: int = RELOCATION_TRANSCRIPT_MAX_TURNS,
+    max_bytes: int = RELOCATION_TRANSCRIPT_MAX_BYTES,
+    max_items: int = RELOCATION_TRANSCRIPT_MAX_ITEMS,
+) -> RelocatedReplayBody | None:
+    """Rebuild an anchor-free request body from a durable parent-response chain.
+
+    A Codex continuation carries only its new turn plus ``previous_response_id``,
+    and that anchor names a response object only the account that produced it can
+    resolve. The durable operation spool holds every parent turn's request body
+    and the terminal response it produced, so the conversation can be reassembled
+    here and offered to another account as a fresh request.
+
+    ``anchor_response_id`` is the anchor ``current_payload`` carries, and the walk
+    must end on it. Parent links prove only that these turns follow one another;
+    an internally consistent chain from a different conversation satisfies every
+    one of them while being somebody else's history. A request that names no
+    anchor is joined to the empty chain for the same reason: it would have been
+    dispatched to its own account with no prior state either, so a chain loaded
+    for some other turn is not its history and cannot be missing from it.
+
+    ``transcript`` is consumed structurally -- ``turn.operation.request_text``,
+    ``turn.operation.response_id``, ``turn.operation.parent_response_id``,
+    ``turn.operation.event_spool_complete`` and ``turn.events``, oldest turn
+    first, matching the order the durable repository returns -- so this module
+    stays independent of the persistence layer. The caps are applied to the
+    material this rebuild actually consumes rather than left to whichever loader
+    fetched the chain. Anything the rebuild cannot prove returns ``None``,
+    leaving the caller on the owner-bound behaviour it has without a transcript.
+
+    Every stored request is folded in by ``_join_relocated_input``, the chain's
+    and the client's alike, which is what makes a turn that restated the
+    conversation harmless: it replaces what it restates instead of repeating it.
+    A turn's answer is appended whole, because an answer restates nothing.
+    """
+
+    anchor = cast(str, anchor_response_id) if _is_nonblank_string(anchor_response_id) else None
+    chain = transcript if anchor is not None else ()
+    current_input = current_payload.get("input")
+    # A scalar input is the new prompt by itself and there is no way to put turns
+    # in front of a string, so an anchored turn has to send items. With nothing
+    # to prepend it passes through as the client wrote it, rather than being
+    # lifted into a message item the way a chain turn's stored scalar is.
+    if len(chain) > max_turns or (chain and not (isinstance(current_input, list) and current_input)):
+        return None
+
+    rebuilt: list[_RelocatedItem] = []
+    remaining_bytes = max_bytes
+    remaining_items = max_items
+    expected_parent_response_id: str | None = None
+    linked_response_ids: set[str] = set()
+    for turn in chain:
+        operation = getattr(turn, "operation", None)
+        events = getattr(turn, "events", None)
+        # Decremented across the whole walk: a bound re-read per turn would let
+        # a chain at the turn cap assemble that many times the intended body.
+        remaining_bytes -= _durable_turn_byte_size(operation, events)
+        if remaining_bytes < 0:
+            return None
+        response_id = getattr(operation, "response_id", None)
+        # Four facts about the stored row, any one of which makes the turn
+        # unusable. An unfinished spool holds a fragment of an answer rather than
+        # the answer, and a turn with no response id links to nothing. The oldest
+        # turn opens the conversation while every later one names the turn before
+        # it -- a chain in any other order assembles a conversation that reads
+        # backwards while satisfying every structural predicate downstream. And a
+        # response id the walk already linked closes a cycle, which the
+        # parent-link check alone reads as a well-formed step.
+        if (
+            not getattr(operation, "event_spool_complete", False)
+            or not _is_nonblank_string(response_id)
+            or response_id in linked_response_ids
+            or getattr(operation, "parent_response_id", None) != expected_parent_response_id
+        ):
+            return None
+        expected_parent_response_id = cast(str, response_id)
+        linked_response_ids.add(cast(str, response_id))
+        turn_input = _transcript_turn_input_items(operation)
+        terminal_output = _terminal_response_output_items(events)
+        if turn_input is None or terminal_output is None:
+            return None
+        # Decremented across the whole walk like the byte bound, and checked
+        # before anything is done per item: parsing a turn is bounded by the
+        # bytes it holds, but canonicalizing, projecting and joining are not, and
+        # one legal turn can carry the whole transcript's items on its own.
+        remaining_items -= len(turn_input) + len(terminal_output)
+        if remaining_items < 0:
+            return None
+        # The spool holds these turns as the owner account produced them, item
+        # ids and reasoning included, and none of that resolves anywhere else.
+        # Emptiness only becomes real here: a turn whose whole answer is
+        # response-owned bookkeeping passes the terminal check and then projects
+        # away, leaving its question standing with no reply.
+        replayable_input = _account_neutral_replay_items(turn_input)
+        replayable_answer = _account_neutral_replay_items(terminal_output)
+        if not replayable_input or not replayable_answer:
+            return None
+        _join_relocated_input(rebuilt, replayable_input)
+        # The join belongs to stored requests. An answer is what its turn
+        # produced, so one that reads like the accumulated tail is a coincidence,
+        # and shortening on it deletes a turn the conversation already holds.
+        rebuilt.extend((item, _relocation_comparison_key(item)) for item in replayable_answer)
+    if expected_parent_response_id != anchor:
+        return None
+
+    replay_payload = dict(current_payload)
+    replay_payload.pop("previous_response_id", None)
+    carries_durable_items = False
+    if isinstance(current_input, list):
+        # The client's own items cost the same per-item work the chain's do, so
+        # the bound covers them too -- refusing to relocate keeps today's
+        # behaviour, while exempting them leaves the work this bound exists for
+        # unbounded on the one input nobody rebuilt.
+        if len(current_input) > remaining_items:
+            return None
+        # Verbatim. Projection here would be the proxy editing a turn the user
+        # just wrote: it drops reasoning and settled search bookkeeping
+        # outright, and an item it drops is a message that never reaches the
+        # replacement account while the verdict still reports the turn as moved.
+        carries_durable_items = _join_relocated_input(rebuilt, cast(list[JsonValue], current_input)) > 0
+        replay_payload["input"] = cast(JsonValue, [item for item, _ in rebuilt])
+    dispatched_input = replay_payload.get("input")
+    # A body with nothing to send is not a turn another account can serve, and
+    # calling it movable spends a relocation attempt -- on the ambiguous lane the
+    # one-shot budget, which cannot be refilled -- on a dispatch that can only
+    # come back as an invalid request.
+    if not dispatched_input or (isinstance(dispatched_input, str) and not dispatched_input.strip()):
+        return None
+    # Anything account-owned that survived projection still fails closed here.
+    if not responses_payload_is_account_neutral_fresh_replay(replay_payload):
+        return None
+    return RelocatedReplayBody(payload=replay_payload, carries_durable_items=carries_durable_items)
+
+
+_RelocatedItem = tuple[JsonValue, object]
+"""One item as the rebuild will dispatch it, paired with the key it is compared on.
+
+Paired rather than kept in a second list so the keys cannot fall out of step
+with the items they describe. The join truncates the accumulation, and two lists
+truncated separately are one edit away from dropping an item while keeping its
+key, which silently shifts every later comparison onto the wrong item. Pairing
+also canonicalizes each item exactly once: re-deriving a key per comparison
+would put the transcript's whole item count of serialization work into every
+step of a search that exists to be quicker than losing the conversation.
+"""
+
+
+def _join_relocated_input(accumulated: list[_RelocatedItem], input_items: list[JsonValue]) -> int:
+    """Fold one input into the conversation rebuilt so far; return what survived of the chain.
+
+    The chain is this proxy's own reconstruction of turns the client is not
+    sending; ``input_items`` is what is being sent. Where the two overlap the
+    client's copy is authoritative, so the overlap comes off the accumulation
+    and every incoming item is appended whole. Dropping a chain turn the client
+    just re-supplied loses nothing -- the turn is still dispatched, in the
+    client's words -- while dropping a client item loses a message the user
+    wrote, silently, past every structural check downstream.
+
+    That asymmetry is the whole rule, and it needs no view about what the client
+    meant: a client re-sending its last exchange plus a new turn is
+    byte-identical to one whose conversation genuinely began at that exchange,
+    and both readings come out of here as the same conversation.
+
+    The overlap is measured on comparison keys while the dispatch carries
+    ``input_items`` themselves: normalizing to decide what was restated and
+    normalizing a body are different acts, and only the first is this one's.
+    """
+
+    incoming = [(item, _relocation_comparison_key(item)) for item in input_items]
+    overlap = _tail_overlap_length(accumulated, incoming)
+    del accumulated[len(accumulated) - overlap :]
+    retained = len(accumulated)
+    accumulated.extend(incoming)
+    return retained
+
+
+def _relocation_comparison_key(item: JsonValue) -> object:
+    """What identifies this item, enumerated positively and to the bottom -- never the form dispatched.
+
+    A message is its role and what was said in it; a tool call is which call it
+    is and what it was asked; a tool output is which call it answers and what it
+    answered; a tool bundle is which tools it declares. Nothing else is read, so
+    how an item was recorded cannot decide whether one input restates another --
+    the owner's item id, the ``status`` it was spooled under, the ``phase`` it
+    was tagged with, the ``annotations`` on every part the Responses API produces
+    and the turn metadata a client echoes back are all absent from the key
+    without being named in it.
+
+    Subtracting those instead would have to know every field the wire may carry
+    that a recording may drop, which is not a closed set: a field nobody listed
+    reads as a difference, and one difference collapses the overlap and
+    dispatches the whole conversation twice. What a turn *is* is closed, so
+    enumerating that leaves a field nobody thought of ignored by default.
+
+    Every structure under an item is enumerated the same way, because handing one
+    to a serializer is that same subtraction one level lower: it makes every
+    field inside a content part, a tool declaration or a call's arguments decide
+    whether a turn was restated, so a client that rewords a tool description
+    between turns has its conversation dispatched twice. The recursion stops at
+    the scalars the wire spells inline, and those the strict predicate pins.
+
+    An item type this does not identify, and a structure inside one it cannot
+    reach, get a key equal to nothing -- itself included -- so no overlap is
+    claimed across it and the rebuild fails closed rather than guessing; the
+    strict predicate admits no such item anyway.
+    """
+
+    if not isinstance(item, Mapping):
+        return object()
+    item_type = item.get("type")
+    if item_type is None or item_type == "message":
+        return ("message", item.get("role"), _relocation_content_identity(item.get("content")))
+    if not isinstance(item_type, str):
+        return object()
+    if item_type in _ACCOUNT_NEUTRAL_BARE_INPUT_PART_TYPES:
+        # A part standing on its own is the user's own content, and this rebuild
+        # says so itself: a chain turn stored as a scalar is lifted into exactly
+        # this message. Keying the two spellings apart would leave the proxy
+        # unable to recognise a restatement of a turn it reshaped.
+        return ("message", "user", (_relocation_content_part_identity(item),))
+    if item_type == "additional_tools":
+        return (item_type, item.get("role"), _relocation_declared_tools_identity(item.get("tools")))
+    if item_type in _TOOL_CALL_TYPES:
+        return (item_type, item.get("call_id"), item.get("name"), _relocation_call_arguments_identity(item))
+    if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE:
+        return (item_type, item.get("call_id"), _relocation_tool_result_identity(item.get("output")))
+    return object()
+
+
+def _relocation_declared_tools_identity(tools: JsonValue | None) -> object:
+    """Which tools a bundle declares, not how it described them.
+
+    A declaration's description, strictness, parameter schema, custom format and
+    search options configure a tool that is already named by what it is and what
+    it is called, and a client may reword any of them between turns while
+    declaring the same tools. They are also where a positive enumeration has to
+    stop: a parameter schema is an open structure, so reading it at all means
+    reading it whole.
+    """
+
+    if not isinstance(tools, list):
+        return object()
+    return tuple(_relocation_tool_declaration_identity(tool) for tool in tools)
+
+
+def _relocation_tool_declaration_identity(tool: JsonValue) -> object:
+    if not isinstance(tool, Mapping) or not _is_one_of(tool.get("type"), _ACCOUNT_NEUTRAL_TOOL_TYPES):
+        return object()
+    # The hosted search tools carry no name, so for them the type is all of it.
+    return (tool.get("type"), tool.get("name"))
+
+
+def _relocation_call_arguments_identity(item: Mapping[str, JsonValue]) -> object:
+    """What a call asked, read from every slot the wire may spell it in.
+
+    Which slot a tool uses depends on the tool -- ``arguments`` for a function,
+    ``input`` for a custom tool, one of ``operation``, ``patch`` or ``input`` for
+    an apply-patch call -- so all four are read together and the identity does
+    not depend on knowing which.
+    """
+
+    return (
+        _relocation_opaque_identity(item.get("arguments")),
+        _relocation_opaque_identity(item.get("input")),
+        _relocation_opaque_identity(item.get("patch")),
+        _relocation_apply_patch_operation_identity(item.get("operation")),
+    )
+
+
+def _relocation_opaque_identity(value: JsonValue | None) -> object:
+    """A slot the wire hands over as one blob, or nothing when it holds a structure.
+
+    These are the slots a client is free to fill with anything -- a call's
+    arguments, a patch, a tool's result -- so they are where a structure the
+    enumeration cannot walk actually turns up. Comparing one on its raw form is
+    the thing this key does not do, at any depth, so an object here makes the
+    item unidentifiable; the strict predicate declines such a body in any case.
+    """
+
+    return value if value is None or isinstance(value, (bool, float, int, str)) else object()
+
+
+def _relocation_apply_patch_operation_identity(operation: JsonValue | None) -> object:
+    """Which file an apply-patch call edits, and how, per operation kind."""
+
+    if operation is None:
+        return None
+    if not isinstance(operation, Mapping) or not _is_one_of(
+        operation.get("type"), _ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS
+    ):
+        return object()
+    # A deletion names no diff; reading the slot anyway keeps the three kinds on
+    # one shape and costs a ``None``.
+    return (operation.get("type"), operation.get("path"), operation.get("diff"))
+
+
+def _relocation_tool_result_identity(output: JsonValue | None) -> object:
+    """What a call answered: the text it returned, or the parts it returned."""
+
+    if isinstance(output, list):
+        return tuple(_relocation_content_part_identity(part) for part in output)
+    return _relocation_opaque_identity(output)
+
+
+def _relocation_content_identity(content: JsonValue | None) -> object:
+    # The wire spells a single stretch of text either as the string itself or as
+    # one part holding it, and a chain turn whose stored input was a scalar is
+    # rebuilt into the second spelling, so both have to name the same content.
+    if isinstance(content, str):
+        return (("text", content),)
+    if not isinstance(content, list):
+        return object()
+    return tuple(_relocation_content_part_identity(part) for part in content)
+
+
+def _relocation_content_part_identity(part: JsonValue) -> object:
+    if not isinstance(part, Mapping):
+        return object()
+    part_type = part.get("type")
+    if _is_one_of(part_type, _RELOCATION_TEXT_PART_TYPES):
+        # Which of the three spellings a part uses is a function of where it sits
+        # rather than of what it says, and the role that decides it is already in
+        # the message's own identity.
+        return ("text", part.get("text"))
+    if part_type == "refusal":
+        return ("refusal", part.get("refusal"))
+    if part_type == "input_image":
+        return ("input_image", part.get("file_id"), part.get("image_url"))
+    if part_type == "input_file":
+        return ("input_file", part.get("file_data"), part.get("file_id"), part.get("file_url"))
+    return object()
+
+
+def _tail_overlap_length(accumulated: Sequence[_RelocatedItem], incoming: Sequence[_RelocatedItem]) -> int:
+    """The longest tail of ``accumulated`` that ``incoming`` restates from its start.
+
+    Anchored at both ends deliberately. A match anywhere else is a coincidence
+    -- a client whose new message happens to repeat something said earlier -- and
+    a coincidence must shorten nothing, because the item it would remove is one
+    the user just wrote. The longest match wins so that the boundary lands where
+    the restatement actually ends rather than inside it.
+
+    Read off the prefix function of ``incoming + sentinel + accumulated tail``,
+    whose last entry is that longest match by construction, since no border can
+    straddle a sentinel occurring in neither side. Cutting the accumulation to
+    the incoming length first -- no longer overlap can exist -- makes one fold
+    linear in what it was handed and the walk linear in the transcript's items,
+    the bound neither the turn cap nor the byte cap gives because neither counts
+    items.
+    """
+
+    window = min(len(accumulated), len(incoming))
+    scanned: list[object] = [
+        *(key for _, key in incoming[:window]),
+        _OVERLAP_SENTINEL,
+        *(key for _, key in accumulated[len(accumulated) - window :]),
+    ]
+    borders = [0] * len(scanned)
+    border = 0
+    for index in range(1, len(scanned)):
+        while border and scanned[index] != scanned[border]:
+            border = borders[border - 1]
+        if scanned[index] == scanned[border]:
+            border += 1
+        borders[index] = border
+    return border
+
+
+def _durable_turn_byte_size(operation: object, events: object) -> int:
+    """The stored bytes one chain turn contributes, counted as the spool stores them."""
+
+    request_text = getattr(operation, "request_text", None)
+    turn_bytes = len(request_text.encode("utf-8")) if isinstance(request_text, str) else 0
+    if isinstance(events, Sequence) and not isinstance(events, (str, bytes, bytearray)):
+        turn_bytes += sum(len(event.encode("utf-8")) for event in events if isinstance(event, str))
+    return turn_bytes
+
+
+def _account_neutral_replay_items(input_items: list[JsonValue]) -> list[JsonValue] | None:
+    """``input_items`` with their former owner's response-owned bookkeeping removed.
+
+    Beyond the shared projection this drops ``annotations``, which the Responses
+    API attaches to every assistant ``output_text`` part it produces. The strict
+    predicate does not admit the field, and widening it there would also widen
+    what the already-shipped fresh-replay admission accepts, so the rebuild edits
+    the items it owns instead. A populated list names file, container-file and
+    URL citations minted against the account that produced the turn, and nothing
+    resolves those elsewhere, so it keeps the turn owner-bound.
+    """
+
+    projected_items: list[JsonValue] = []
+    for item in input_items:
+        projected_item = _project_account_neutral_replay_item(item, preserve_developer_message_ids=False)
+        if projected_item is None:
+            continue
+        without_annotations = _content_without_portable_annotations(projected_item)
+        if without_annotations is None:
+            return None
+        projected_items.append(without_annotations)
+    return projected_items
+
+
+def _content_without_portable_annotations(item: JsonValue) -> JsonValue | None:
+    if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+        return item
+    parts: list[JsonValue] = []
+    for part in cast(list[JsonValue], item["content"]):
+        if not isinstance(part, dict) or _ANNOTATIONS_FIELD not in part:
+            parts.append(part)
+            continue
+        if part[_ANNOTATIONS_FIELD] != []:
+            return None
+        parts.append({key: value for key, value in part.items() if key != _ANNOTATIONS_FIELD})
+    return {**item, "content": cast(JsonValue, parts)}
+
+
+def responses_request_frame_payload(request_text: str) -> dict[str, JsonValue] | None:
+    """Return the Responses body inside a stored or live request frame.
+
+    The session bridge holds the exact upstream frame, which wraps the body in a
+    ``response.create`` envelope; the direct paths hold the body alone. Any other
+    envelope is not a turn this rebuild knows how to replay.
+    """
+
+    try:
+        payload = json.loads(request_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    event_type = payload.get("type")
+    if event_type is not None and event_type != _RESPONSE_CREATE_EVENT_TYPE:
+        return None
+    return {key: value for key, value in payload.items() if key != "type"}
+
+
+def _transcript_turn_input_items(operation: object) -> list[JsonValue] | None:
+    """One chain turn's stored input, or ``None`` when the row stored no turn.
+
+    A body that parses but names nothing to replay is not a turn that
+    contributed nothing: it is a hole where a turn should be, and the assembled
+    conversation cannot tell the two apart afterwards.
+    """
+
+    request_text = getattr(operation, "request_text", None)
+    if not isinstance(request_text, str):
+        return None
+    payload = responses_request_frame_payload(request_text)
+    if payload is None:
+        return None
+    turn_input = payload.get("input")
+    if isinstance(turn_input, str):
+        # A stored scalar input is that turn's whole user message and loses
+        # nothing by taking the item form the rebuilt chain concatenates. The
+        # client's own scalar is left alone under the same lossless transform,
+        # because the chain is this proxy's reconstruction and its shape is the
+        # proxy's to choose, while the client's body is dispatched as written.
+        message: JsonValue = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": turn_input}],
+        }
+        return [message] if turn_input.strip() else None
+    return cast(list[JsonValue], turn_input) if isinstance(turn_input, list) and turn_input else None
+
+
+def _terminal_response_output_items(events: object) -> list[JsonValue] | None:
+    """One turn's answer, or ``None`` when the turn never settled on one.
+
+    A turn is material for the rebuild only when its spool carries a terminal
+    that reports an answer. ``response.failed`` and a transport ``error`` frame
+    are terminals too, and they are deliberately not in that set: admitting one
+    would let a turn the owner account failed be rebuilt as the assistant's
+    reply, which is the one reading of the spool that invents content rather
+    than losing it.
+
+    An abandoned attempt leaves its item frames behind. It ends explicitly at
+    one of those failure terminals, or -- the shape production actually
+    produces -- it dies mid-stream and is recognisable only by the replacement's
+    ``response.created``. Either marker starts the accumulation over, so the
+    abandoned generation cannot be reported as part of this turn's answer.
+
+    Some upstream versions omit ``response.output`` from a ``response.incomplete``
+    terminal while still emitting every ``response.output_item.done`` frame; the
+    accumulated items are complete enough to preserve that turn's context. A
+    terminal carrying no response object at all proves nothing about either, and
+    an answer that is empty is not an answer, so both fail closed as a missing
+    terminal does.
+
+    The spool stores each frame as the upstream wrote it, so the shared SSE field
+    parser reads it: only CR, LF and CRLF end a line, and a multi-line ``data:``
+    field joins with LF. ``str.splitlines`` would additionally break on U+2028,
+    U+2029, NEL, VT, FF and the file/group/record separators, all of which are
+    legal unescaped inside a JSON string -- one of them in a model's answer would
+    leave the turn with no readable terminal and refuse a rebuild the material
+    fully supports.
+    """
+
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes, bytearray)):
+        return None
+    completed_items: list[JsonValue] = []
+    for event_text in events:
+        if not isinstance(event_text, str):
+            continue
+        event_payload = parse_sse_data_json(event_text)
+        if event_payload is None:
+            continue
+        event_type = event_payload.get("type")
+        if event_type in _ANSWERED_TERMINAL_EVENT_TYPES:
+            response = event_payload.get("response")
+            if not isinstance(response, dict):
+                return None
+            output = response.get("output")
+            settled_items = cast(list[JsonValue], output) if isinstance(output, list) else completed_items
+            return settled_items or None
+        if event_type == _ATTEMPT_START_EVENT_TYPE or event_type in _ABANDONED_TERMINAL_EVENT_TYPES:
+            completed_items.clear()
+        elif event_type == _RESPONSE_OUTPUT_ITEM_DONE_EVENT_TYPE:
+            item = event_payload.get("item")
+            if isinstance(item, dict):
+                completed_items.append(cast(JsonValue, item))
+    return None

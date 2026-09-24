@@ -9201,7 +9201,8 @@ async def test_stream_responses_maps_typed_dns_failure_with_failed_session_prove
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(monkeypatch):
+@pytest.mark.parametrize("winerror", [None, 64, 121])
+async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(monkeypatch, winerror):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -9213,7 +9214,11 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
     class _AmbiguousRouteFailureSession:
         def post(self, url: str, **kwargs: object):
             del url, kwargs
-            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+            if winerror is None:
+                raise OSError(errno.ENETUNREACH, "Network is unreachable")
+            error = OSError("Windows transport failure")
+            error.winerror = winerror
+            raise error
 
     session = _AmbiguousRouteFailureSession()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())

@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -10863,3 +10865,32 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Owner-forward HTTP streams preserve SSE event boundaries
+
+The owner-forward HTTP receiver MUST dispatch each complete SSE event delimited
+by two consecutive CR, LF, or CRLF line endings, including mixed endings,
+without waiting for connection close. Chunk boundaries MUST NOT change payload
+text or cause a CRLF continuation byte to become part of the next event. Invalid
+UTF-8 bytes in complete events or the final unterminated block MUST decode with
+replacement characters instead of aborting the relay. Valid UTF-8 characters
+split across chunks MUST remain intact. Existing idle and request-budget timeout
+classification MUST remain unchanged.
+
+#### Scenario: Non-LF framing streams incrementally
+
+- **WHEN** an owner forwards multiple events separated by CRLF, CR, or mixed CR/LF blank lines
+- **THEN** the origin dispatches each event before EOF
+- **AND** the final `response.completed` remains separately parseable
+
+#### Scenario: Chunk boundaries preserve text and event identity
+
+- **WHEN** network chunks split a multi-byte UTF-8 character or a CRLF separator
+- **THEN** decoded payload text remains intact
+- **AND** the next event has no residual separator byte prefixed to its fields
+
+#### Scenario: Malformed UTF-8 is replaced
+
+- **WHEN** an event or the final unterminated block contains invalid UTF-8
+- **THEN** the receiver replaces the invalid bytes with U+FFFD
+- **AND** continues delivering subsequent events when present

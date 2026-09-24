@@ -317,6 +317,21 @@ Local failure events and locally assigned response IDs are separate facts. `Pars
 
 Canonical background JSON acknowledgements with status `queued` or `in_progress` carry the same authoritative response identity as SSE lifecycle events. The lifecycle parser includes both, and the HTTP relay keeps queued events on the parsed path. For example, a two-account request receiving a queued acknowledgement can immediately route a same-process continuation to its known account while its originating log is pending. An in-progress event following token output has the same ownership behavior. The provider still decides whether unfinished work can be continued.
 
+## Owner-forward SSE framing
+
+The [owner-forward framing contract](spec.md#requirement-owner-forward-http-streams-preserve-sse-event-boundaries)
+uses the canonical CR/LF separator detector while retaining the bridge's own
+scheduler and request budget. For example, a created event ending in
+`\r\n\r\n` followed by a completed event now reaches the origin as two events
+before EOF. A trailing CR can dispatch immediately; the following LF, if any,
+belongs to that ending rather than the next event.
+
+Malformed UTF-8 decodes as U+FFFD, including final unterminated bytes; downstream
+JSON validation still applies. Valid multi-byte UTF-8 split across chunks was
+already buffered safely and remains intact. Ordinary owners emit LF, making
+this compatibility hardening for the receiver. No migration, operator setting,
+account-selection change, or new event-size policy is involved.
+
 ## Detached retirement sweep deadline
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.

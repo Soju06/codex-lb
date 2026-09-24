@@ -13,6 +13,7 @@ from aiohttp.client_reqrep import ConnectionKey
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
+from app.core.utils.sse import parse_sse_data_json
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_AFFINITY_KEY_HEADER,
@@ -1059,6 +1060,113 @@ def test_owner_forward_receive_timeout_allows_bridge_budget_beyond_proxy_budget(
 
     assert timeout.timeout_seconds == pytest.approx(3600.0)
     assert timeout.error_code == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("separator", [b"\n\n", b"\r\n\r\n", b"\r\r", b"\n\r", b"\r\n\n"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 65536])
+@pytest.mark.parametrize("invalid_utf8", [False, True])
+async def test_owner_forward_streams_separate_events_before_eof(
+    monkeypatch: pytest.MonkeyPatch, separator: bytes, chunk_size: int, invalid_utf8: bool
+) -> None:
+    text = b"\xff" if invalid_utf8 else "é雪\u2028".encode()
+    body = (
+        b'data: {"type":"response.output_text.delta","delta":"'
+        + text
+        + b'"}'
+        + separator
+        + b'data: {"type":"response.completed","response":{"id":"resp-test"}}'
+        + separator
+    )
+    reached_eof = False
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self) -> FakeResponse:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        @property
+        def content(self) -> SimpleNamespace:
+            async def chunks(_: int) -> AsyncIterator[bytes]:
+                nonlocal reached_eof
+                for offset in range(0, len(body), chunk_size):
+                    yield body[offset : offset + chunk_size]
+                reached_eof = True
+
+            return SimpleNamespace(iter_chunked=chunks)
+
+    class FakeSession:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+    stream = HTTPBridgeOwnerClient().stream_responses(
+        owner_endpoint="http://instance-b:2455",
+        payload=_payload(),
+        headers={},
+        context=HTTPBridgeForwardContext(
+            origin_instance="instance-a",
+            target_instance="instance-b",
+            codex_session_affinity=False,
+            downstream_turn_state=None,
+        ),
+        request_started_at=10.0,
+        clock=VirtualClock(monotonic_value=10.0),
+    )
+    try:
+        first = await anext(stream)
+        assert not reached_eof
+        assert first.startswith("data:")
+        assert parse_sse_data_json(first) == {
+            "type": "response.output_text.delta",
+            "delta": "\ufffd" if invalid_utf8 else "é雪\u2028",
+        }
+        terminal = await anext(stream)
+        assert not reached_eof
+        assert terminal.startswith("data:")
+        assert parse_sse_data_json(terminal) == {"type": "response.completed", "response": {"id": "resp-test"}}
+        assert [event async for event in stream] == []
+        assert reached_eof
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_iter_sse_event_blocks_replaces_invalid_utf8_at_eof() -> None:
+    async def chunks(_: int) -> AsyncIterator[bytes]:
+        yield b'data: {"delta":"\xe9'
+        yield b'"}'
+
+    response = cast(aiohttp.ClientResponse, SimpleNamespace(content=SimpleNamespace(iter_chunked=chunks)))
+    clock = VirtualClock(monotonic_value=10.0)
+    scheduler = VirtualScheduler(clock)
+    events = [
+        event
+        async for event in _iter_sse_event_blocks(
+            response,
+            request_started_at=10.0,
+            proxy_request_budget_seconds=30.0,
+            stream_idle_timeout_seconds=10.0,
+            scheduler=scheduler,
+            clock=clock,
+        )
+    ]
+    assert events == ['data: {"delta":"\ufffd"}']
+    assert scheduler.owned_tasks == frozenset()
+    assert scheduler.pending_timers == 0
 
 
 @pytest.mark.asyncio

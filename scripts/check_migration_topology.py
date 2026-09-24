@@ -444,9 +444,7 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             else "they are chained, so filename order no longer tells you the graph order"
         )
         merged_by = (
-            _converged_by(group, revisions, parents)
-            if forked and not _group_has_chained_pair(group, parents)
-            else None
+            _converged_by(group, revisions, parents) if forked and not _group_has_chained_pair(group, parents) else None
         )
         if merged_by is not None:
             # Authored in parallel and it did fork, but a merge revision has since

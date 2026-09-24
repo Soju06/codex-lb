@@ -454,6 +454,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_precreated_replay_fallback_error,
     _websocket_precreated_retry_error_code,
     _websocket_receive_timeout_for_pending_requests,
+    _websocket_request_requires_preferred_account,
     _websocket_response_id,
     _wrapped_websocket_error_event,
 )
@@ -491,6 +492,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     _upstream_error_from_openai,
+    is_model_scoped_upstream_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -531,6 +533,11 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+# Pre-created rejections that name the requested model rather than the account:
+# the legacy entitlement alias and the exact upstream ``model_not_found`` code.
+# Both take the same bounded one-replacement replay and restore the same
+# retained envelope when replacement selection is exhausted.
+_WEBSOCKET_MODEL_REJECTION_REPLAY_CODES = frozenset({_ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE, "model_not_found"})
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -3683,16 +3690,7 @@ class _WebSocketMixin:
                 or forced_refresh_account_id
                 or request_state.preferred_account_id
             )
-            turn_state_owner_required = (
-                request_state.affinity_policy.codex_session_source == "turn_state"
-                and request_state.preferred_account_id is not None
-            )
-            require_preferred_account = (
-                (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
-                or request_state.replay_required_account_id is not None
-                or request_state.file_required_preferred_account
-                or turn_state_owner_required
-            )
+            require_preferred_account = _websocket_request_requires_preferred_account(request_state)
             try:
                 account = await proxy._select_websocket_connect_account(
                     deadline,
@@ -3748,7 +3746,7 @@ class _WebSocketMixin:
                 and account.id != request_state.precreated_replay_account_id
             )
             if selected_account_model_replacement:
-                # Preserve the rejected account's 400 only when selection
+                # Preserve the rejected account's original envelope only when selection
                 # cannot find a replacement. Once this replacement attempt
                 # starts, a connection/open failure belongs to the replacement.
                 _clear_websocket_precreated_replay_fallback(request_state)
@@ -4629,6 +4627,11 @@ class _WebSocketMixin:
         else:
             classified = await proxy._handle_websocket_connect_error(account, exc)
             failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
+        error = _parse_openai_error(exc.payload)
+        model_scoped_rejection = is_model_scoped_upstream_rejection(
+            error.message if error else None,
+            error_code=_normalize_error_code(error.code if error else None, error.type if error else None),
+        )
         candidates_remaining = max_attempts - attempt
         if confirmed_pre_dispatch:
             action = "surface" if require_preferred_account or candidates_remaining <= 0 else "failover_next"
@@ -4639,6 +4642,13 @@ class _WebSocketMixin:
                 failure_class=failure_class,
                 downstream_visible=False,
                 candidates_remaining=candidates_remaining,
+                # A required continuity or file owner cannot be excluded for a
+                # different account after rejecting the model: ``failover_next``
+                # would only re-select into the owner requirement and replace
+                # the owner's own envelope (a 404 ``model_not_found`` included)
+                # with owner unavailability. Capacity failures keep their
+                # existing owner-unavailable translation.
+                owner_bound=require_preferred_account and model_scoped_rejection,
             )
         else:
             action = "surface"
@@ -5947,10 +5957,20 @@ class _WebSocketMixin:
                 # it, so the fresh body is re-sent to the same account on a
                 # fresh socket instead of excluding the account it must use.
                 request_state.request_text = safe_request_text
-        if retry_error_code == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE:
+        if retry_error_code in _WEBSOCKET_MODEL_REJECTION_REPLAY_CODES:
             retry_text = None
             if not request_state.file_required_preferred_account:
                 retry_text = _prepare_websocket_request_state_for_account_switch(request_state)
+            if retry_text is not None and not _websocket_accepted_replay_can_switch_account(request_state):
+                # Decide ownership only after the body prep: a proxy-injected
+                # anchor is released together with the pin it created, so a
+                # continuation turn whose retained full resend is
+                # account-neutral may still move. The owner left standing here
+                # is one the connect hard-requires (turn state), and re-sending
+                # the same model to the same owner can only be rejected again:
+                # surface the original envelope instead of excluding the owner
+                # and failing the reconnect closed as owner-unavailable.
+                retry_text = None
             if retry_text is not None:
                 request_state.precreated_replay_reason = _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
                 request_state.precreated_replay_account_id = account.id

@@ -500,6 +500,8 @@ def test_observe_only_admission_builds_without_transition_logging() -> None:
         latest_primary={},
         latest_secondary={},
         latest_monthly={},
+        standard_latest_primary={},
+        standard_latest_secondary={},
         routing_policy_override=None,
         ignore_standard_quota_account_ids=frozenset(),
     )

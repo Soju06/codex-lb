@@ -414,3 +414,25 @@ def test_missing_base_ref_skips_the_branch_fork_check(checker: ModuleType) -> No
     assert checker.base_ref_revisions("refs/heads/definitely-not-a-real-ref") is None
     _, summary = checker.run_all(versions_dir=VERSIONS_DIR, base_ref="refs/heads/definitely-not-a-real-ref")
     assert "base-ref check: skipped (ref unavailable)" in summary
+
+
+@pytest.mark.parametrize("repair", ["exact", "missing", "wrong-parent", "extra-collision"])
+def test_released_collision_requires_its_exact_repair(checker: ModuleType, tmp_path: Path, repair: str) -> None:
+    base = _linear_fixture(checker, tmp_path)
+    left = "20260914_000000_add_scim_tokens"
+    right = "20260914_000000_drop_subscription_overflow_schema"
+    _write_revision(tmp_path, left, base)
+    _write_revision(tmp_path, right, base)
+    if repair != "missing":
+        _write_revision(
+            tmp_path,
+            "20260918_000000_merge_scim_and_overflow_removal",
+            (left, base if repair == "wrong-parent" else right),
+        )
+    if repair == "extra-collision":
+        _write_revision(tmp_path, "20260914_000000_unrelated", base)
+    reports, _ = checker.run_all(versions_dir=tmp_path, base_ref="")
+    collisions = [error for error in _errors(reports) if error.startswith("alembic_timestamp_prefix_collision")]
+    assert bool(collisions) is (repair != "exact")
+    if repair == "exact":
+        assert _errors(reports) == []

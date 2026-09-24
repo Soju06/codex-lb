@@ -136,6 +136,12 @@ async def test_account_and_api_key_routes_record_their_targets(async_client: Asy
     assert (created.target_type, created.target_id) == ("account", account_id)
     assert (created.actor_role_slug, created.auth_method, created.actor_user_id) == ("admin", "local_bootstrap", None)
 
+    limited = await async_client.put(f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": 80})
+    assert limited.status_code == 200, limited.text
+    (limit_row,) = await _rows("account_usage_limit_updated")
+    assert (limit_row.target_type, limit_row.target_id) == ("account", account_id)
+    assert (limit_row.actor_role_slug, limit_row.auth_method) == ("admin", "local_bootstrap")
+
     key = await async_client.post("/api/api-keys/", json={"name": "audit-actor-key"})
     assert key.status_code == 200, key.text
     key_id = key.json()["id"]

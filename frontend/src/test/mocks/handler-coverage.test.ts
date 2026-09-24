@@ -28,6 +28,7 @@ const EXPECTED_ENDPOINTS = [
 	// dashboard
 	"GET /api/dashboard/overview",
 	"GET /api/dashboard/projections",
+	"GET /api/dashboard/request-activity",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
 	// conversations

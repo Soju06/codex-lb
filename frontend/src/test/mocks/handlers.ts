@@ -929,6 +929,10 @@ export const handlers = [
     return HttpResponse.json(createDashboardProjections());
   }),
 
+  http.get("/api/dashboard/request-activity", () => {
+    return HttpResponse.json({ days: [] });
+  }),
+
   http.get("/api/request-logs", ({ request }) => {
     const url = new URL(request.url);
     const filtered = filterRequestLogs(url);

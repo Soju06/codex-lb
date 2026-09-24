@@ -1095,6 +1095,10 @@ def _is_account_neutral_request_rejection(
         return False
     if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
         return True
+    if code == "invalid_encrypted_content":
+        return True
+    if _is_reasoning_replay_rejection(code=code, http_status=http_status, message=message):
+        return True
     return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
 

@@ -755,6 +755,29 @@ def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, Json
     return _tools_are_account_neutral(tools)
 
 
+def responses_payload_has_only_encrypted_account_scoped_state(payload: Mapping[str, JsonValue]) -> bool:
+    """Return whether ciphertext is the payload's only account-scoped retained state.
+
+    The encrypted items themselves are omitted only for this classification;
+    the caller still forwards the original payload byte-for-byte. Everything
+    left behind must satisfy the canonical account-neutral replay predicate,
+    and encrypted items may not smuggle a file, hosted-resource, or other
+    independently account-scoped reference alongside their ciphertext.
+    """
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return False
+    input_items = cast(list[JsonValue], input_value)
+    if extract_input_file_ids(input_items) or _contains_non_ciphertext_account_scoped_input_state(input_items):
+        return False
+    ciphertext_items = [item for item in input_items if _contains_encrypted_content(item)]
+    if not ciphertext_items:
+        return False
+    projected_payload = dict(payload)
+    projected_payload["input"] = [item for item in input_items if not _contains_encrypted_content(item)]
+    return responses_payload_is_account_neutral_fresh_replay(projected_payload)
+
+
 def _reasoning_config_is_account_neutral(reasoning: JsonValue | None) -> bool:
     if reasoning is None:
         return True
@@ -1018,6 +1041,14 @@ def _url_is_account_neutral(value: JsonValue | None, *, allow_data: bool) -> boo
 
 
 def _contains_account_scoped_input_state(value: JsonValue) -> bool:
+    return _contains_account_scoped_input_state_matching(value, include_encrypted_content=True)
+
+
+def _contains_non_ciphertext_account_scoped_input_state(value: JsonValue) -> bool:
+    return _contains_account_scoped_input_state_matching(value, include_encrypted_content=False)
+
+
+def _contains_account_scoped_input_state_matching(value: JsonValue, *, include_encrypted_content: bool) -> bool:
     pending = [value]
     while pending:
         current = pending.pop()
@@ -1036,7 +1067,10 @@ def _contains_account_scoped_input_state(value: JsonValue) -> bool:
                 and item_type not in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE
             ):
                 return True
-            if _mapping_has_account_scoped_reference(current):
+            if _mapping_has_account_scoped_reference(
+                current,
+                include_encrypted_content=include_encrypted_content,
+            ):
                 return True
             pending.extend(
                 nested for key, nested in current.items() if not (item_type == "additional_tools" and key == "tools")
@@ -1046,11 +1080,28 @@ def _contains_account_scoped_input_state(value: JsonValue) -> bool:
     return False
 
 
-def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> bool:
+def _contains_encrypted_content(value: JsonValue) -> bool:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            if current.get("encrypted_content") not in (None, ""):
+                return True
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+    return False
+
+
+def _mapping_has_account_scoped_reference(
+    value: Mapping[str, JsonValue],
+    *,
+    include_encrypted_content: bool = True,
+) -> bool:
     for key in ("file_id", "container_id", "vector_store_id"):
         if value.get(key) not in (None, ""):
             return True
-    if value.get("encrypted_content") not in (None, ""):
+    if include_encrypted_content and value.get("encrypted_content") not in (None, ""):
         return True
     for url_field, allow_data in (("image_url", True), ("file_url", False)):
         url_value = value.get(url_field)

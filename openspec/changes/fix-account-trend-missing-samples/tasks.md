@@ -1,0 +1,4 @@
+- [x] Preserve sparse chart observations, window labels, and account-scoped smoothing state.
+- [x] Verify regression tests and local synthetic browser scenarios.
+- [x] Verify continuous interpolated rendering with trailing carry-forward, real zero values, and no backfill before the first sample.
+- [x] Merge equivalent instants across UTC offsets and preserve scheduled values at those instants.

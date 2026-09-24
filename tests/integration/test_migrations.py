@@ -3429,6 +3429,19 @@ async def test_http_bridge_transcript_core_migration_upgrade_and_downgrade(tmp_p
         reverted_columns, reverted_indexes = await _schema(engine)
         assert all(column not in reverted_columns for column in columns_added)
         assert all(index not in reverted_indexes for index in indexes_added)
+        async with engine.connect() as conn:
+            retained_operation = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT operation_id, state
+                        FROM http_bridge_operations
+                        WHERE operation_id = 'legacy-transcript-operation'
+                        """
+                    )
+                )
+            ).one()
+        assert retained_operation == ("legacy-transcript-operation", "completed")
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION

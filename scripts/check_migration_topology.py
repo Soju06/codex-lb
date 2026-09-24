@@ -396,7 +396,7 @@ def _group_is_joined_by_merge(group: Sequence[Revision], revisions: Sequence[Rev
     usable again.
     """
     parents = {revision.revision: revision.down_revisions for revision in revisions}
-    if _group_is_chained(group, parents):
+    if _group_has_chained_pair(group, parents):
         return False
     revisions_by_id = {revision.revision: revision for revision in revisions}
     heads = graph_heads(revisions)

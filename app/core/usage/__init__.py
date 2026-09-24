@@ -75,14 +75,19 @@ def _normalize_window_key(window: str | None) -> str:
     return normalized
 
 
+def is_monthly_window_minutes(window_minutes: int | float | None) -> bool:
+    return window_minutes is not None and 28 * 24 * 60 <= window_minutes <= 32 * 24 * 60
+
+
 def normalize_rate_limit_windows(
     primary_window: UsageWindow | None,
     secondary_window: UsageWindow | None,
 ) -> NormalizedRateLimitWindows:
     if (
         primary_window is not None
-        and primary_window.limit_window_seconds == DEFAULT_WINDOW_MINUTES_MONTHLY * 60
-        and secondary_window is None
+        and primary_window.limit_window_seconds is not None
+        and is_monthly_window_minutes(primary_window.limit_window_seconds / 60)
+        and (secondary_window is None or secondary_window.limit_window_seconds == 0)
     ):
         return NormalizedRateLimitWindows(primary=None, secondary=None, monthly=primary_window)
     return NormalizedRateLimitWindows(primary=primary_window, secondary=secondary_window, monthly=None)

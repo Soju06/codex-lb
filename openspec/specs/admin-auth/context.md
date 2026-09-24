@@ -59,6 +59,15 @@ Stateless encrypted cookies using Fernet. Session payload: `{exp, pw, tv}`. Defa
 
 ## Rate Limiting
 
+TOTP normalization retains ASCII digits only; see the
+[normalization requirement](spec.md#requirement-totp-normalization-accepts-only-ascii-digits).
+Unicode-aware digit filtering previously allowed values such as `１２３４５６`
+to reach an ASCII-only constant-time comparison and raise `TypeError`. Such
+input now receives the existing invalid-code response without enrolling a
+secret or advancing a replay counter. Formatting in ASCII codes (for example,
+`123 456`) remains tolerated. There is no numeral transliteration, migration,
+or new operator setting.
+
 Password login and TOTP verification: max 8 attempts per 60-second window per client IP. Stored in `rate_limit_attempts` table. Returns 429 with `Retry-After` header.
 
 ## Audit Logging

@@ -19,10 +19,11 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from github_api import GitHubApiError, next_link, request_json
 
-NOREPLY_RE = re.compile(r"^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$")
+NOREPLY_RE = re.compile(r"^(?:(?P<id>\d+)\+)?(?P<login>[^@]+)@users\.noreply\.github\.com$")
 
 
 def _request_json(url: str, token: str | None) -> tuple[list[dict[str, object]], str | None]:
+    """Read one complete GitHub list page using the shared retry policy."""
     payload, link = request_json(url, token=token)
     if not isinstance(payload, list):
         raise GitHubApiError(f"expected list payload, got {type(payload).__name__}")
@@ -30,12 +31,25 @@ def _request_json(url: str, token: str | None) -> tuple[list[dict[str, object]],
 
 
 def _next_link(link_header: str | None) -> str | None:
+    """Find the next page without treating partial coverage as complete."""
     return next_link(link_header)
 
 
-def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
+def _human_identity(user: dict[str, object]) -> tuple[str, int | None] | None:
+    """Retain human logins and only genuine positive integer GitHub IDs."""
+    login = user.get("login")
+    if not isinstance(login, str) or user.get("type") == "Bot" or login.endswith("[bot]"):
+        return None
+    user_id = user.get("id")
+    # bool is an int subclass, but it is not a GitHub user ID.
+    valid_id = user_id if type(user_id) is int and user_id > 0 else None
+    return login.lower(), valid_id
+
+
+def fetch_contributors(repository: str, token: str | None) -> dict[int | str, str]:
+    """Fetch human logins keyed by stable ID, or by login when the ID is unavailable."""
     url: str | None = f"https://api.github.com/repos/{repository}/contributors?per_page=100&anon=false"
-    logins: set[str] = set()
+    contributors: dict[int | str, str] = {}
     while url:
         try:
             page, link = _request_json(url, token)
@@ -48,18 +62,16 @@ def fetch_contributor_logins(repository: str, token: str | None) -> set[str]:
                 f"cannot validate all-contributors coverage from partial evidence: {exc}"
             ) from exc
         for contributor in page:
-            login = contributor.get("login")
-            contributor_type = contributor.get("type")
-            if not isinstance(login, str):
+            identity = _human_identity(contributor)
+            if identity is None:
                 continue
-            if contributor_type == "Bot" or login.endswith("[bot]"):
-                continue
-            logins.add(login.lower())
+            login, user_id = identity
+            contributors[user_id if user_id is not None else login] = login
         url = _next_link(link)
-    return logins
+    return contributors
 
 
-def local_commit_author_logins() -> set[str]:
+def local_commit_author_logins(logins_by_id: dict[int, str] | None = None) -> set[str]:
     """Best-effort local check for PR commits that are not in GitHub contributors yet."""
     try:
         result = subprocess.run(
@@ -76,13 +88,17 @@ def local_commit_author_logins() -> set[str]:
     for email in result.stdout.splitlines():
         match = NOREPLY_RE.match(email.strip())
         if match:
-            login = match.group(1)
+            login = match.group("login").lower()
             if not login.endswith("[bot]"):
-                logins.add(login.lower())
+                user_id = match.group("id")
+                if logins_by_id is not None and user_id is not None:
+                    login = logins_by_id.get(int(user_id), login)
+                logins.add(login)
     return logins
 
 
 def _pull_request_event(event_path: str | None) -> dict[str, object] | None:
+    """Read PR metadata when the invocation has a pull-request event."""
     if not event_path:
         return None
     path = Path(event_path)
@@ -93,7 +109,8 @@ def _pull_request_event(event_path: str | None) -> dict[str, object] | None:
     return pull_request if isinstance(pull_request, dict) else None
 
 
-def pull_request_author_login(event_path: str | None) -> set[str]:
+def pull_request_author_login(event_path: str | None, *, logins_by_id: dict[int, str] | None = None) -> set[str]:
+    """Resolve a possibly stale PR opener against live API identity evidence."""
     pull_request = _pull_request_event(event_path)
     if pull_request is None:
         return set()
@@ -101,17 +118,21 @@ def pull_request_author_login(event_path: str | None) -> set[str]:
     if not isinstance(user, dict):
         return set()
     user = cast(dict[str, object], user)
-    login = user.get("login")
-    user_type = user.get("type")
-    if not isinstance(login, str) or user_type == "Bot" or login.endswith("[bot]"):
+    identity = _human_identity(user)
+    if identity is None:
         return set()
-    return {login.lower()}
+    login, user_id = identity
+    if logins_by_id is not None and user_id is not None:
+        # Reruns retain the original event, so prefer fresh API identity evidence.
+        login = logins_by_id.setdefault(user_id, login)
+    return {login}
 
 
-def pull_request_commit_author_logins(event_path: str | None, token: str | None) -> set[str]:
+def pull_request_commit_authors(event_path: str | None, token: str | None) -> dict[int | str, str]:
+    """Fetch all human PR commit identities, refusing incomplete API evidence."""
     pull_request = _pull_request_event(event_path)
     if pull_request is None:
-        return set()
+        return {}
     commit_count = pull_request.get("commits")
     if isinstance(commit_count, int) and commit_count > 250:
         raise SystemExit(
@@ -120,9 +141,9 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
         )
     commits_url = pull_request.get("commits_url")
     if not isinstance(commits_url, str) or not commits_url:
-        return set()
+        return {}
     url: str | None = f"{commits_url}?per_page=100"
-    logins: set[str] = set()
+    authors: dict[int | str, str] = {}
     while url:
         try:
             page, link = _request_json(url, token)
@@ -139,16 +160,17 @@ def pull_request_commit_author_logins(event_path: str | None, token: str | None)
             if not isinstance(author, dict):
                 continue
             author = cast(dict[str, object], author)
-            login = author.get("login")
-            author_type = author.get("type")
-            if not isinstance(login, str) or author_type == "Bot" or login.endswith("[bot]"):
+            identity = _human_identity(author)
+            if identity is None:
                 continue
-            logins.add(login.lower())
+            login, user_id = identity
+            authors[user_id if user_id is not None else login] = login
         url = _next_link(link)
-    return logins
+    return authors
 
 
 def load_all_contributors(path: Path) -> set[str]:
+    """Load recorded contributor logins for case-insensitive coverage checks."""
     data = json.loads(path.read_text(encoding="utf-8"))
     return {
         contributor["login"].lower()
@@ -158,6 +180,7 @@ def load_all_contributors(path: Path) -> set[str]:
 
 
 def main() -> int:
+    """Check recorded coverage after reconciling API and historical identities."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--repo",
@@ -172,12 +195,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    expected = (
-        fetch_contributor_logins(args.repo, os.environ.get("GITHUB_TOKEN"))
-        | local_commit_author_logins()
-        | pull_request_author_login(os.environ.get("GITHUB_EVENT_PATH"))
-        | pull_request_commit_author_logins(os.environ.get("GITHUB_EVENT_PATH"), os.environ.get("GITHUB_TOKEN"))
-    )
+    token = os.environ.get("GITHUB_TOKEN")
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    contributors = fetch_contributors(args.repo, token)
+    # Keep IDs until both API sources are combined; repository contributor
+    # results can retain an older login than the PR commit-author response.
+    contributors.update(pull_request_commit_authors(event_path, token))
+    logins_by_id = {user_id: login for user_id, login in contributors.items() if isinstance(user_id, int)}
+    expected = set(contributors.values())
+    expected |= pull_request_author_login(event_path, logins_by_id=logins_by_id)
+    expected |= local_commit_author_logins(logins_by_id)
     recorded = load_all_contributors(args.config)
     missing = sorted(expected - recorded)
 

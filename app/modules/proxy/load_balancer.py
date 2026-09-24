@@ -99,6 +99,7 @@ from app.modules.proxy._load_balancer.opportunistic_admission import (
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.quarantine import apply_local_routing_quarantine
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -150,7 +151,10 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+)
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -632,6 +636,7 @@ class LoadBalancer:
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
+            apply_local_routing_quarantine(excluded_ids, selection_inputs.accounts)
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
@@ -1736,9 +1741,11 @@ class LoadBalancer:
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
         (the DB row was repaired and left ACTIVE), the account keeps its
-        repaired state. A landed DEACTIVATED downgrade is excluded from local
-        routing; REAUTH_REQUIRED remains request-routable with its stored access
-        token while still blocking future refresh-token exchange.
+        repaired state. A landed DEACTIVATED downgrade and an explicit
+        access-token invalidation or revocation reason are excluded from local
+        routing; other REAUTH_REQUIRED states remain request-routable with
+        their stored access token while still blocking future refresh-token
+        exchange.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1768,7 +1775,7 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
+            if downgraded and state.blocks_routing:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded

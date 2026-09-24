@@ -27,6 +27,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy.load_balancer import (
@@ -1701,8 +1702,9 @@ def test_apply_usage_quota_sets_fallback_reset_from_evaluation_time():
 
 def test_usage_recency_uses_injected_evaluation_time() -> None:
     clock = VirtualClock(epoch_value=2_000_000_000.0)
-    recent = datetime.fromtimestamp(clock.time() - 179.0, tz=timezone.utc)
-    stale = datetime.fromtimestamp(clock.time() - 181.0, tz=timezone.utc)
+    recent_window_seconds = usage_freshness_horizon_seconds()
+    recent = datetime.fromtimestamp(clock.time() - recent_window_seconds + 1.0, tz=timezone.utc)
+    stale = datetime.fromtimestamp(clock.time() - recent_window_seconds - 1.0, tz=timezone.utc)
 
     assert _usage_entry_is_recent_enough(recent, now=clock.time())
     assert not _usage_entry_is_recent_enough(stale, now=clock.time())
@@ -1798,6 +1800,43 @@ def test_handle_permanent_failure_sets_reauth_required_for_token_invalidated():
     handle_permanent_failure(state, "token_invalidated")
     assert state.status == AccountStatus.REAUTH_REQUIRED
     assert state.deactivation_reason == "Authentication token invalidated - re-login required"
+
+
+def test_handle_permanent_failure_sets_reauth_required_for_token_revoked():
+    state = AccountState("a", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(state, "token_revoked")
+    assert state.status == AccountStatus.REAUTH_REQUIRED
+    assert state.deactivation_reason == "Authentication token revoked - re-login required"
+
+
+def test_select_account_skips_reauth_account_with_revoked_access_token():
+    revoked = AccountState(
+        "revoked",
+        AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="Authentication token revoked - re-login required",
+    )
+    healthy = AccountState("healthy", AccountStatus.ACTIVE)
+
+    no_fallback = select_account([revoked])
+    assert no_fallback.account is None
+
+    result = select_account([revoked, healthy])
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy"
+
+
+def test_select_account_keeps_reauth_account_with_only_revoked_refresh_token():
+    refresh_revoked = AccountState(
+        "refresh-revoked",
+        AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="Refresh token was revoked - re-login required",
+    )
+
+    result = select_account([refresh_revoked])
+
+    assert result.account is not None
+    assert result.account.account_id == "refresh-revoked"
 
 
 def test_handle_permanent_failure_sets_reason_for_account_deactivated():

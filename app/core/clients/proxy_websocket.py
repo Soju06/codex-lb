@@ -54,6 +54,7 @@ from app.core.clients.proxy import (
     _openai_error_detail,
     filter_inbound_headers,
 )
+from app.core.clients.websocket_dispatch import WebSocketDispatchTransport, current_websocket_send_callback
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
@@ -333,13 +334,21 @@ class WebsocketsUpstreamWebSocket:
         self._connection = connection
         self._uses_proxy = uses_proxy
         self._preserve_close_semantics = preserve_close_semantics
+        self._dispatch_transport: WebSocketDispatchTransport | None = None
+        if isinstance(connection, ClientConnection):
+            self._dispatch_transport = WebSocketDispatchTransport(connection.transport)
+            connection.transport = self._dispatch_transport.as_transport()
         connection_lost_waiter = getattr(connection, "connection_lost_waiter", None)
         if isinstance(connection_lost_waiter, asyncio.Future):
             connection_lost_waiter.add_done_callback(_consume_connection_lost_exception)
 
     async def send_text(self, text: str) -> None:
         try:
-            await self._connection.send(text)
+            if self._dispatch_transport is None:
+                await self._connection.send(text)
+            else:
+                with self._dispatch_transport.send_context():
+                    await self._connection.send(text)
         except Exception as exc:
             await _raise_websocket_send_error(exc, uses_proxy=self._uses_proxy)
 
@@ -501,12 +510,36 @@ class CodexUpstreamWebSocket:
         self._owns_codex_client = owns_codex_client
         self._endpoint_id = endpoint_id
         self._response_headers = _normalize_response_headers(response_headers)
+        self._dispatch_transport: WebSocketDispatchTransport | None = None
 
     async def send_text(self, text: str) -> None:
+        if self._dispatch_transport is None and current_websocket_send_callback() is not None:
+            if isinstance(self._websocket, aiohttp.ClientWebSocketResponse):
+                try:
+                    writer = self._websocket._writer
+                    transport = writer.transport
+                    if not isinstance(transport, asyncio.Transport):
+                        raise TypeError("unsupported aiohttp transport")
+                    dispatch_transport = WebSocketDispatchTransport(transport)
+                    writer.transport = dispatch_transport.as_transport()
+                except (AttributeError, TypeError):
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "steering_not_supported",
+                            "Steering dispatch is unavailable on this transport; retry on a new connection.",
+                            error_type="server_error",
+                        ),
+                    ) from None
+                self._dispatch_transport = dispatch_transport
         try:
-            result = self._websocket.send_str(text)
-            if asyncio.iscoroutine(result):
-                await result
+            if self._dispatch_transport is None:
+                result = self._websocket.send_str(text)
+                if asyncio.iscoroutine(result):
+                    await result
+            else:
+                with self._dispatch_transport.send_context():
+                    await self._websocket.send_str(text)
         except Exception as exc:
             classification_exc = _aiohttp_stored_liveness_exception(self._websocket) or exc
             await _raise_websocket_send_error(classification_exc, endpoint_id=self._endpoint_id, uses_proxy=True)

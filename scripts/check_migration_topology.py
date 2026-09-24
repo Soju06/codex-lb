@@ -396,15 +396,24 @@ def _group_is_joined_by_merge(group: Sequence[Revision], revisions: Sequence[Rev
     usable again.
     """
     parents = {revision.revision: revision.down_revisions for revision in revisions}
+    if _group_is_chained(group, parents):
+        return False
+    revisions_by_id = {revision.revision: revision for revision in revisions}
     heads = graph_heads(revisions)
     for head in heads:
         ancestors = _ancestors(head, parents)
         if not all(revision.revision in ancestors for revision in group):
             continue
         for candidate in (head, *ancestors):
+            candidate_revision = revisions_by_id.get(candidate)
+            if candidate_revision is None or candidate_revision.prefix is None:
+                continue
             candidate_ancestors = _ancestors(candidate, parents)
             if len(parents.get(candidate, ())) > 1 and all(
                 member.revision == candidate or member.revision in candidate_ancestors for member in group
+            ) and all(
+                member.prefix is not None and candidate_revision.prefix > member.prefix
+                for member in group
             ):
                 return True
     return False

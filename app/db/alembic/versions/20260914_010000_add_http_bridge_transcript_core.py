@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260914_010000_add_http_bridge_transcript_core"
-down_revision = "20260913_000000_add_oidc_provider_flow"
+down_revision = "20260914_000001_merge_scim_and_subscription_heads"
 branch_labels = None
 depends_on = None
 

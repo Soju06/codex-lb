@@ -68,10 +68,17 @@ def test_exact_tool_call_and_output_echoes_are_deduplicated() -> None:
 
 
 def test_tool_echo_deduplication_fails_closed_on_conflicting_content() -> None:
-    call = {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"}
+    call = {"id": "item_1", "type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"}
     conflicting = {**call, "arguments": '{"cmd":"rm -rf /"}'}
 
     assert _deduplicate_exact_replayed_tool_items([call, conflicting]) is None
+
+
+def test_tool_echo_deduplication_preserves_malformed_call_echo() -> None:
+    call = {"id": "item_1", "type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"}
+    malformed_echo = {**call, "id": None}
+
+    assert _deduplicate_exact_replayed_tool_items([call, malformed_echo]) == [call, malformed_echo]
 
 
 def test_tool_echo_deduplication_preserves_unhashable_malformed_types() -> None:

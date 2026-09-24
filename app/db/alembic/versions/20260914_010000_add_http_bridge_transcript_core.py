@@ -100,6 +100,7 @@ def downgrade() -> None:
         if name in columns
     ]
     if to_drop:
-        with op.batch_alter_table(_TABLE) as batch_op:
+        recreate = "never" if bind.dialect.name == "sqlite" else "auto"
+        with op.batch_alter_table(_TABLE, recreate=recreate) as batch_op:
             for name in to_drop:
                 batch_op.drop_column(name)

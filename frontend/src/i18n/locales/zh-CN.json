@@ -1434,6 +1434,7 @@
   "settings.routing.additionalQuota.policies.normal": "普通",
   "settings.routing.additionalQuota.policies.burnFirst": "优先消耗",
   "settings.routing.additionalQuota.policies.preserve": "保留",
+  "settings.routing.additionalQuota.policies.disabled": "禁用",
   "settings.routing.relativeAvailability.powerLabel": "相对可用性幂",
   "settings.routing.relativeAvailability.powerDescription": "在加权选择前，将标准化相对可用性分数提升到此幂次。",
   "settings.routing.relativeAvailability.savePower": "保存幂次",

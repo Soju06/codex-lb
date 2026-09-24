@@ -30,7 +30,7 @@ def _normalize_weekly_pace_working_days(value: str | None) -> str | None:
 class AdditionalQuotaPolicy(DashboardModel):
     quota_key: str
     display_label: str
-    routing_policy: str = Field(pattern=r"^(inherit|burn_first|normal|preserve)$")
+    routing_policy: str = Field(pattern=r"^(inherit|burn_first|normal|preserve|disabled)$")
     model_ids: list[str] = Field(default_factory=list)
 
 

@@ -427,6 +427,24 @@ def test_dump_additional_quota_routing_policies_canonicalizes_keys_and_filters_i
     assert json.loads(dumped) == {"codex_spark": "burn_first"}
 
 
+def test_additional_quota_routing_policies_round_trip_preserves_disabled() -> None:
+    # Regression: switching a routable-default quota to Off (``disabled``) must
+    # persist. The dump/parse policy set omitted ``disabled``, so the override
+    # was dropped, serialized as {}, and routing silently continued on reload.
+    dumped = _dump_additional_quota_routing_policies({"codex_spark": "disabled"})
+    assert json.loads(dumped) == {"codex_spark": "disabled"}
+    assert _parse_additional_quota_routing_policies(dumped) == {"codex_spark": "disabled"}
+
+
+def test_additional_quota_routing_policies_drop_invalid_override() -> None:
+    # Spec: an unrecognized dashboard override is ignored so the quota falls back
+    # to its registry default, not normalized to inherit. A typo must not turn a
+    # disabled-by-default quota (base_model_inference) routable.
+    dumped = _dump_additional_quota_routing_policies({"base_model_inference": "typo"})
+    assert json.loads(dumped) == {}
+    assert _parse_additional_quota_routing_policies('{"base_model_inference":"typo"}') == {}
+
+
 # --- C2-3 resilience toggles -------------------------------------------------
 
 

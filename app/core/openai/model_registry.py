@@ -367,7 +367,23 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
         visibility="hide",
         raw={"max_context_window": 1_000_000},
     ),
+    _bootstrap_model(
+        "gpt-reserve",
+        "Luna Reserve",
+        description="GPT-5.6 Luna served from the account's separate reserve allowance.",
+        prefer_websockets=True,
+        minimal_client_version="0.0.1",
+        available_in_plans=frozenset({"plus", "pro"}),
+    ),
 )
+
+# Bootstrap slugs that upstream never lists in a model catalog: they exist only
+# to route an additional-quota allowance (the Luna Reserve). Unlike a real model
+# that merely carries an extra quota (e.g. gpt-5.3-codex-spark), their absence
+# from an authoritative catalog is not evidence of withdrawal, so they are never
+# suppressed and always served from the bootstrap floor. Kept lowercase to match
+# the normalized-slug comparisons in the accessor methods.
+_QUOTA_ONLY_BOOTSTRAP_SLUGS: frozenset[str] = frozenset({"gpt-reserve"})
 
 
 # Speed/service-tier metadata must aggregate (union) when the same slug is
@@ -515,6 +531,16 @@ class ModelRegistry:
         self._ttl_seconds = ttl_seconds
         self._snapshot: ModelRegistrySnapshot | None = None
         self._bootstrap_models: dict[str, UpstreamModel] = {m.slug: m for m in _BOOTSTRAP_STATIC_MODELS}
+        # Bootstrap models mapped to an additional quota (e.g. gpt-reserve) are
+        # never listed in an upstream model catalog, so an authoritative refresh
+        # would otherwise treat their absence as withdrawal. Serve them from the
+        # bootstrap floor regardless of catalog evidence so an operator-enabled
+        # reserve stays routable.
+        self._quota_only_bootstrap_slugs: frozenset[str] = frozenset(
+            slug.strip().lower()
+            for slug in self._bootstrap_models
+            if slug.strip().lower() in _QUOTA_ONLY_BOOTSTRAP_SLUGS
+        )
         self._metadata_models: dict[str, UpstreamModel] | None = None
         self._applied_content_hash: str | None = None
         self._lock = anyio.Lock()
@@ -550,7 +576,15 @@ class ModelRegistry:
                     models.pop(slug, None)
                 models.update(snapshot.models)
                 return models
-            return snapshot.models
+            if not self._quota_only_bootstrap_slugs:
+                return snapshot.models
+            # An authoritative catalog omits quota-only mapped models; serve
+            # them from the bootstrap floor so they stay listed and routable.
+            models = dict(snapshot.models)
+            for slug, bootstrap_model in self._bootstrap_models.items():
+                if slug.strip().lower() in self._quota_only_bootstrap_slugs and slug not in models:
+                    models[slug] = bootstrap_model
+            return models
         return self._bootstrap_models
 
     def get_models_for_metadata(self) -> dict[str, UpstreamModel]:
@@ -568,9 +602,12 @@ class ModelRegistry:
         if normalized_slug in self._snapshot.model_plans:
             return self._snapshot.model_plans[normalized_slug]
         if (
-            self._snapshot.bootstrap_floor_active
-            and bootstrap_model is not None
+            bootstrap_model is not None
             and normalized_slug not in self._snapshot.suppressed_model_slugs
+            and (
+                self._snapshot.bootstrap_floor_active
+                or normalized_slug in self._quota_only_bootstrap_slugs
+            )
         ):
             return bootstrap_model.available_in_plans
         snapshot_plans = frozenset()
@@ -676,6 +713,12 @@ class ModelRegistry:
         normalized_slug = slug.strip().lower()
         if not normalized_slug:
             return None
+        if normalized_slug in self._quota_only_bootstrap_slugs:
+            # A quota-only model is never in a per-account catalog, so an
+            # authoritative snapshot cannot enumerate its accounts. Report
+            # incomplete coverage rather than an empty set, so callers fall back
+            # to inference instead of excluding every account.
+            return None
         return self._snapshot.model_accounts.get(slug) or self._snapshot.model_accounts.get(
             normalized_slug, frozenset()
         )
@@ -691,7 +734,9 @@ class ModelRegistry:
             model = self._snapshot.models.get(slug) or self._snapshot.models.get(normalized_slug)
             if model is not None:
                 return model.prefer_websockets
-            if self._snapshot.bootstrap_floor_active and normalized_slug not in self._snapshot.suppressed_model_slugs:
+            if normalized_slug not in self._snapshot.suppressed_model_slugs and (
+                self._snapshot.bootstrap_floor_active or normalized_slug in self._quota_only_bootstrap_slugs
+            ):
                 bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
                 if bootstrap_model is not None:
                     return bootstrap_model.prefer_websockets
@@ -923,7 +968,7 @@ class ModelRegistry:
 
                 if authoritative_account_catalogs:
                     for slug in self._bootstrap_models:
-                        if slug not in models:
+                        if slug not in models and slug.strip().lower() not in self._quota_only_bootstrap_slugs:
                             suppressed_model_slugs.add(slug)
                     for _plan_type, account_models in (per_account_results or {}).values():
                         for model in account_models:

@@ -1434,6 +1434,7 @@
   "settings.routing.additionalQuota.policies.normal": "Normal",
   "settings.routing.additionalQuota.policies.burnFirst": "Burn first",
   "settings.routing.additionalQuota.policies.preserve": "Preserve",
+  "settings.routing.additionalQuota.policies.disabled": "Off",
   "settings.routing.relativeAvailability.powerLabel": "Relative availability power",
   "settings.routing.relativeAvailability.powerDescription": "Raise normalized relative-availability scores to this power before weighted selection.",
   "settings.routing.relativeAvailability.savePower": "Save power",

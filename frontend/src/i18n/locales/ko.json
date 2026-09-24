@@ -1554,6 +1554,7 @@
   "settings.routing.additionalQuota.policies.inherit": "상속",
   "settings.routing.additionalQuota.policies.normal": "Normal",
   "settings.routing.additionalQuota.policies.preserve": "Preserve",
+  "settings.routing.additionalQuota.policies.disabled": "사용 안 함",
   "settings.routing.additionalQuota.policyAria": "{{quotaKey}} routing policy",
   "settings.routing.additionalQuota.reset": "Reset",
   "settings.routing.additionalQuota.save": "Policy 저장",

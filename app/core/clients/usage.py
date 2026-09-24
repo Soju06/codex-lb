@@ -418,7 +418,11 @@ def _usage_url(base_url: str) -> str:
     normalized = base_url.rstrip("/")
     if "/backend-api" not in normalized:
         normalized = f"{normalized}/backend-api"
-    return f"{normalized}/wham/usage"
+    # ``supportsLunaReserve`` asks upstream to include the reserve bucket
+    # (``metered_feature: base_model_inference``) in ``additional_rate_limits``.
+    # Servers that do not know the parameter ignore it, so the fetch behaves
+    # exactly as before on older upstreams.
+    return f"{normalized}/wham/usage?supportsLunaReserve=true"
 
 
 def _rate_limit_reset_url(base_url: str) -> str:

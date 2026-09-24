@@ -7,5 +7,14 @@
     "applies_to_plans": ["pro", "prolite", "team", "business", "enterprise"],
     "limit_name_aliases": ["codex_other", "GPT-5.3-Codex-Spark", "gpt-5.3-codex-spark"],
     "metered_feature_aliases": ["codex_bengalfox"]
+  },
+  {
+    "quota_key": "base_model_inference",
+    "display_label": "Luna Reserve",
+    "routing_policy": "disabled",
+    "model_ids": ["gpt-reserve"],
+    "applies_to_plans": ["plus", "pro"],
+    "limit_name_aliases": ["gpt-reserve"],
+    "metered_feature_aliases": ["base_model_inference"]
   }
 ]

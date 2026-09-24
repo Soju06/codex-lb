@@ -168,6 +168,47 @@ async def test_accounts_list_returns_additional_quotas(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_accounts_list_returns_disabled_reserve_quota(async_client, db_setup):
+    # Regression: the Luna Reserve quota resolves to routing policy "disabled"
+    # by default. The account response schema (backend + frontend) rejected that
+    # value, so /api/accounts raised a validation error for every eligible
+    # account the feature targets.
+    account_id = "acc_dash_reserve"
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        additional_repo = AdditionalUsageRepository(session)
+
+        await accounts_repo.upsert(_make_account(account_id, "dash_reserve@example.com"))
+        await usage_repo.add_entry(
+            account_id,
+            25.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=1),
+        )
+        await additional_repo.add_entry(
+            account_id=account_id,
+            limit_name="gpt-reserve",
+            metered_feature="base_model_inference",
+            window="primary",
+            used_percent=10.0,
+            reset_at=1741500000,
+            window_minutes=300,
+            recorded_at=now,
+        )
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+
+    account = next(item for item in response.json()["accounts"] if item["accountId"] == account_id)
+    reserve = next(q for q in account["additionalQuotas"] if q["quotaKey"] == "base_model_inference")
+    assert reserve["routingPolicy"] == "disabled"
+    assert reserve["displayLabel"] == "Luna Reserve"
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_omits_additional_quotas(async_client, db_setup):
     account_id = "acc_dash_no_additional"
     now = utcnow().replace(microsecond=0)

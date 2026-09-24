@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
@@ -170,9 +170,14 @@ from app.modules.proxy.fair_share import (
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
-    canonicalize_additional_quota_key,
-    get_additional_quota_routing_policy,
+    ADDITIONAL_QUOTA_ROUTING_POLICIES as _ADDITIONAL_QUOTA_ROUTING_POLICIES,
+)
+from app.modules.usage.additional_quota_keys import (
+    ROUTING_POLICY_DISABLED,
+    additional_quota_display_label,
+    additional_quota_routing_disabled,
     normalize_additional_quota_key,
+    resolve_additional_quota_routing_policy,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
@@ -193,9 +198,9 @@ NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 ADDITIONAL_QUOTA_EXHAUSTED = "quota_exhausted"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+ADDITIONAL_QUOTA_ROUTING_DISABLED = "additional_quota_routing_disabled"
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
-_ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"
@@ -1223,6 +1228,39 @@ class LoadBalancer:
                 allowed_account_ids = set(account_ids)
                 scoped_accounts = [account for account in scoped_accounts if account.id in allowed_account_ids]
             sticky_mutation_authority_account_ids = frozenset(account.id for account in scoped_accounts)
+
+            async def cached_refusal(
+                *,
+                owners: Sequence[Account] | None = None,
+                error_message: str | None = None,
+                error_code: str | None = None,
+            ) -> _SelectionInputs:
+                """Cache and return an empty result for a request that cannot be routed.
+
+                ``owners`` defaults to the enclosing ``continuity_owner_candidates``
+                read at call time, because that name is reassigned as filtering
+                narrows the pool.
+                """
+                refusal = _SelectionInputs(
+                    accounts=[],
+                    latest_primary={},
+                    latest_secondary={},
+                    latest_monthly={},
+                    continuity_owner_candidates=[
+                        _clone_account(account)
+                        for account in (continuity_owner_candidates if owners is None else owners)
+                    ],
+                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
+                    quota_planner_settings=quota_planner_settings,
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    error_message=error_message,
+                    error_code=error_code,
+                )
+                await self._selection_inputs_cache.set(
+                    _clone_selection_inputs(refusal), key=cache_key, generation=load_generation
+                )
+                return refusal
+
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
@@ -1256,63 +1294,12 @@ class LoadBalancer:
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
-                    selection_inputs = _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly={},
-                        continuity_owner_candidates=[
-                            _clone_account(account) for account in continuity_owner_candidates
-                        ],
-                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                        quota_planner_settings=quota_planner_settings,
-                        runtime_accounts=[_clone_account(account) for account in all_accounts],
-                    )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
+                    return await cached_refusal()
                 if not pre_model_filter_accounts:
-                    selection_inputs = _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly={},
-                        continuity_owner_candidates=[],
-                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                        quota_planner_settings=quota_planner_settings,
-                        runtime_accounts=[_clone_account(account) for account in all_accounts],
-                    )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
+                    return await cached_refusal(owners=[])
                 if continuity_owner_candidates:
-                    selection_inputs = _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly={},
-                        continuity_owner_candidates=[
-                            _clone_account(account) for account in continuity_owner_candidates
-                        ],
-                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                        quota_planner_settings=quota_planner_settings,
-                        runtime_accounts=[_clone_account(account) for account in all_accounts],
-                    )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
-                selection_inputs = _SelectionInputs(
-                    accounts=[],
-                    latest_primary={},
-                    latest_secondary={},
-                    latest_monthly={},
-                    continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
-                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                    quota_planner_settings=quota_planner_settings,
-                    runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    return await cached_refusal()
+                return await cached_refusal(
                     error_message=(
                         f"No accounts with a plan supporting model '{model}' at service tier '{applied_service_tier}'"
                         if applied_service_tier is not None
@@ -1320,10 +1307,19 @@ class LoadBalancer:
                     ),
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
-                await self._selection_inputs_cache.set(
-                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+
+            if effective_limit_name and additional_quota_routing_disabled(
+                effective_limit_name, additional_quota_routing_policies
+            ):
+                # Returns before the filter so the reauthentication rescue below
+                # cannot route a bucket the operator has switched off.
+                return await cached_refusal(
+                    error_message=(
+                        f"Routing for model '{model}' is turned off. Enable the "
+                        f"'{additional_quota_display_label(effective_limit_name)}' quota in Settings to use it."
+                    ),
+                    error_code=ADDITIONAL_QUOTA_ROUTING_DISABLED,
                 )
-                return selection_inputs
 
             if effective_limit_name:
                 additional_quota_candidates = accounts
@@ -1343,39 +1339,12 @@ class LoadBalancer:
                 ):
                     accounts = additional_quota_candidates
                 elif not accounts:
-                    selection_inputs = _SelectionInputs(
-                        accounts=[],
-                        latest_primary={},
-                        latest_secondary={},
-                        latest_monthly={},
-                        continuity_owner_candidates=[
-                            _clone_account(account) for account in continuity_owner_candidates
-                        ],
-                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                        quota_planner_settings=quota_planner_settings,
-                        runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    return await cached_refusal(
                         error_message=additional_filter.error_message,
                         error_code=additional_filter.error_code,
                     )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
             if not accounts:
-                selection_inputs = _SelectionInputs(
-                    accounts=[],
-                    latest_primary={},
-                    latest_secondary={},
-                    latest_monthly={},
-                    continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
-                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
-                    quota_planner_settings=quota_planner_settings,
-                    runtime_accounts=[_clone_account(account) for account in all_accounts],
-                )
-                await self._selection_inputs_cache.set(
-                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                )
-                return selection_inputs
+                return await cached_refusal()
 
             # These share one AsyncSession: concurrent execution on a single
             # session is unsafe (asyncpg) and gains nothing — the driver
@@ -2225,13 +2194,12 @@ async def _load_dashboard_additional_quota_routing_overrides() -> dict[str, str]
 
 
 def _additional_quota_routing_policy_override(limit_name: str | None, policies: dict[str, str]) -> str | None:
-    if limit_name is None:
-        return None
-    normalized_limit_name = canonicalize_additional_quota_key(limit_name=limit_name)
-    if normalized_limit_name is None:
-        return None
-    policy = get_additional_quota_routing_policy(normalized_limit_name, overrides=policies)
-    if policy == "inherit":
+    policy = resolve_additional_quota_routing_policy(limit_name, policies)
+    # ``inherit`` defers to the account policy; ``disabled`` is not a ranking
+    # policy at all and is handled by ``additional_quota_routing_disabled``
+    # before selection runs. Neither may reach ``AccountState.routing_policy``,
+    # which only accepts the account-level policies.
+    if policy is None or policy in ("inherit", ROUTING_POLICY_DISABLED):
         return None
     return policy
 

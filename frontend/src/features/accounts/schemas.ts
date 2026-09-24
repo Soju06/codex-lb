@@ -60,7 +60,7 @@ export const AccountAdditionalQuotaSchema = z.object({
   limitName: z.string(),
   meteredFeature: z.string(),
   displayLabel: z.string().nullable().optional(),
-  routingPolicy: z.enum(["inherit", "normal", "burn_first", "preserve"]).nullable().optional(),
+  routingPolicy: z.enum(["inherit", "normal", "burn_first", "preserve", "disabled"]).nullable().optional(),
   primaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });

@@ -679,6 +679,7 @@ export function RoutingSettings({
                       <SelectItem value="normal">{t("settings.routing.additionalQuota.policies.normal")}</SelectItem>
                       <SelectItem value="burn_first">{t("settings.routing.additionalQuota.policies.burnFirst")}</SelectItem>
                       <SelectItem value="preserve">{t("settings.routing.additionalQuota.policies.preserve")}</SelectItem>
+                      <SelectItem value="disabled">{t("settings.routing.additionalQuota.policies.disabled")}</SelectItem>
                     </SelectContent>
                   </Select>
                   {hasOverride ? (
@@ -720,6 +721,7 @@ export function RoutingSettings({
                     <SelectItem value="normal">{t("settings.routing.additionalQuota.policies.normal")}</SelectItem>
                     <SelectItem value="burn_first">{t("settings.routing.additionalQuota.policies.burnFirst")}</SelectItem>
                     <SelectItem value="preserve">{t("settings.routing.additionalQuota.policies.preserve")}</SelectItem>
+                    <SelectItem value="disabled">{t("settings.routing.additionalQuota.policies.disabled")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <Button

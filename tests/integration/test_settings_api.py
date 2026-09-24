@@ -866,7 +866,13 @@ async def test_settings_api_returns_known_additional_quota_policies(async_client
             "displayLabel": "GPT-5.3-Codex-Spark",
             "routingPolicy": "burn_first",
             "modelIds": ["gpt_5_3_codex_spark"],
-        }
+        },
+        {
+            "quotaKey": "base_model_inference",
+            "displayLabel": "Luna Reserve",
+            "routingPolicy": "disabled",
+            "modelIds": ["gpt_reserve"],
+        },
     ]
 
     update_payload = {

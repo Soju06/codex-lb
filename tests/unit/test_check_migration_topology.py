@@ -188,9 +188,7 @@ def test_timestamp_prefix_collision_chained_before_unrelated_merge_is_not_repair
     assert "they are chained" in collisions[0]
 
 
-def test_timestamp_prefix_collision_same_prefix_merge_is_not_repaired(
-    checker: ModuleType, tmp_path: Path
-) -> None:
+def test_timestamp_prefix_collision_same_prefix_merge_is_not_repaired(checker: ModuleType, tmp_path: Path) -> None:
     versions = tmp_path / "versions"
     head = _linear_fixture(checker, versions)
     first = "20260912_000000_first_slot"

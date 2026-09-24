@@ -409,11 +409,10 @@ def _group_is_joined_by_merge(group: Sequence[Revision], revisions: Sequence[Rev
             if candidate_revision is None or candidate_revision.prefix is None:
                 continue
             candidate_ancestors = _ancestors(candidate, parents)
-            if len(parents.get(candidate, ())) > 1 and all(
-                member.revision == candidate or member.revision in candidate_ancestors for member in group
-            ) and all(
-                member.prefix is not None and candidate_revision.prefix > member.prefix
-                for member in group
+            if (
+                len(parents.get(candidate, ())) > 1
+                and all(member.revision == candidate or member.revision in candidate_ancestors for member in group)
+                and all(member.prefix is not None and candidate_revision.prefix > member.prefix for member in group)
             ):
                 return True
     return False

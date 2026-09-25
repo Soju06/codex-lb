@@ -57,7 +57,9 @@ def _is_postgresql_database_url(url: str) -> bool:
 
 
 def _is_mysql_database_url(url: str) -> bool:
-    return url.startswith("mysql+")
+    # ``mariadb+`` reaches the same MySQL implementations (asyncmy, pymysql), so a
+    # MariaDB test URL must not silently skip the drift and empty-database checks.
+    return url.startswith(("mysql+", "mariadb+"))
 
 
 def _make_account(account_id: str, email: str, plan_type: str) -> Account:

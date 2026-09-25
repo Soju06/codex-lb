@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_constraints import mariadb_fk_safe_alter
+
 # revision identifiers, used by Alembic.
 revision = "20260309_000000_request_logs_nullable_account_id"
 down_revision = "20260308_000000_add_sqlite_performance_indexes"
@@ -18,11 +20,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("request_logs") as batch_op:
-        batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=True)
+    bind = op.get_bind()
+    with mariadb_fk_safe_alter(bind, table_name="request_logs", column_name="account_id"):
+        with op.batch_alter_table("request_logs") as batch_op:
+            batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=True)
 
 
 def downgrade() -> None:
     op.execute(sa.text("DELETE FROM request_logs WHERE account_id IS NULL"))
-    with op.batch_alter_table("request_logs") as batch_op:
-        batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=False)
+    bind = op.get_bind()
+    with mariadb_fk_safe_alter(bind, table_name="request_logs", column_name="account_id"):
+        with op.batch_alter_table("request_logs") as batch_op:
+            batch_op.alter_column("account_id", existing_type=sa.String(255), nullable=False)

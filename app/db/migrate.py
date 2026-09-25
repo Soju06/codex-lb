@@ -25,7 +25,7 @@ from sqlalchemy.engine import Connection
 
 from app.core.config.settings import get_settings
 from app.db.alembic.revision_ids import LEGACY_MIGRATION_TO_NEW_REVISION, OLD_TO_NEW_REVISION_MAP, REVISION_ID_PATTERN
-from app.db.dialect_sql import is_mysql
+from app.db.dialect_sql import is_mariadb, is_mysql
 from app.db.migration_lock import migration_lock
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
@@ -697,13 +697,22 @@ def _mysql_default_token(value: object) -> str:
     return _MYSQL_DEFAULT_SYNONYMS.get(text, text)
 
 
+#: Boolean defaults are normalised to these tokens, but a DOUBLE column can
+#: reflect its default as a bare ``1``/``0`` (MariaDB) where the model spells the
+#: same value ``1.0``/``0.0``: fall back to the numeric spelling when the
+#: token comparison fails.
+_MYSQL_BOOLEAN_NUMERIC_SYNONYMS = {"true": "1", "false": "0"}
+
+
 def _mysql_defaults_equivalent(existing: object, target: object) -> bool:
     left = _mysql_default_token(existing)
     right = _mysql_default_token(target)
     if left == right:
         return True
+    normalised_left = _MYSQL_BOOLEAN_NUMERIC_SYNONYMS.get(left, left)
+    normalised_right = _MYSQL_BOOLEAN_NUMERIC_SYNONYMS.get(right, right)
     try:
-        return float(left) == float(right)
+        return float(normalised_left) == float(normalised_right)
     except (TypeError, ValueError):
         return False
 
@@ -717,6 +726,12 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
         column = diff[3]
         column_name = getattr(column, "name", None)
         if (str(diff[2]), str(column_name)) in _LEGACY_EXTRA_COLUMNS:
+            return True
+        if is_mariadb(connection) and getattr(column, "computed", None) is not None:
+            # MariaDB cannot index an expression, so the port's index emulation
+            # materialises functional key parts as VIRTUAL generated columns
+            # (window_key, lowered_*) that the models do not declare. They are
+            # part of the MariaDB schema, not drift.
             return True
 
     if is_mysql(connection):

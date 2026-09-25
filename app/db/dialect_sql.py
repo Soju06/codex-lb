@@ -47,6 +47,19 @@ def is_mysql(target: Any) -> bool:
     return _dialect_name_of(target) in MYSQL_DIALECT_NAMES
 
 
+def is_mariadb(target: Any) -> bool:
+    """True when the dialect behind a session/connection/engine/name is MariaDB.
+
+    A ``mysql+pymysql://`` (or ``mysql+asyncmy://``) URL keeps the dialect name
+    ``mysql`` even when the server is MariaDB, so the name alone is not enough:
+    SQLAlchemy reports the server through the dialect's ``is_mariadb`` flag.
+    """
+    dialect = getattr(target, "dialect", target)
+    if str(getattr(dialect, "name", "")) == "mariadb":
+        return True
+    return bool(getattr(dialect, "is_mariadb", False))
+
+
 def dialect_name(session: Any) -> str:
     """Name of the dialect behind a Session/AsyncSession ('' when unknown)."""
     try:

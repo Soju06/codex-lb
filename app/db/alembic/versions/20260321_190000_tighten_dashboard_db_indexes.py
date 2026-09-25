@@ -10,13 +10,23 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from app.db.migration_indexes import create_mysql_index, index_exists, is_mysql
+from app.db.migration_indexes import GeneratedKeyPart, create_mysql_index, index_exists, is_mysql
 
 # revision identifiers, used by Alembic.
 revision = "20260321_190000_tighten_dashboard_db_indexes"
 down_revision = "20260319_183000_normalize_sqlite_account_status_casing"
 branch_labels = None
 depends_on = None
+
+#: MariaDB cannot index an expression: it keeps the coalesced window in a
+#: virtual generated column that the index references instead. MySQL renders
+#: the expression directly as a functional key part.
+_WINDOW_KEY = GeneratedKeyPart(
+    placeholder="window_key",
+    column="window_key",
+    expression_sql="coalesce(`window`, 'primary')",
+    column_type_sql="VARCHAR(64)",
+)
 
 
 def upgrade() -> None:
@@ -26,7 +36,8 @@ def upgrade() -> None:
             bind,
             index_name="idx_usage_window_account_time",
             table_name="usage_history",
-            columns_sql="(coalesce(`window`, 'primary')), `account_id`, `recorded_at`",
+            columns_sql="{window_key}, `account_id`, `recorded_at`",
+            generated_parts=(_WINDOW_KEY,),
         )
         create_mysql_index(bind, index_name="idx_api_keys_name", table_name="api_keys", columns_sql="`name`")
         create_mysql_index(

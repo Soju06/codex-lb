@@ -80,7 +80,7 @@ describe("AccountDetail", () => {
     expect(screen.getByRole("button", { name: "Save binding" })).toBeDisabled();
   });
 
-  it("disables usage reset for paused accounts", () => {
+  it("shows credits while disabling usage reset for paused accounts", () => {
     const account = createAccountSummary({ status: "paused" });
 
     renderWithClient(
@@ -103,6 +103,7 @@ describe("AccountDetail", () => {
       />,
     );
 
+    expect(screen.getByText("2 available")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset usage" })).toBeDisabled();
   });
 });

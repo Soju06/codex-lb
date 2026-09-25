@@ -77,6 +77,7 @@ ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 RefreshUsageFn = Callable[[Account], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
+_NON_OBSERVABLE_STATUSES = frozenset({AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
 _NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
 
 _redeem_locks: dict[str, asyncio.Lock] = {}
@@ -138,7 +139,7 @@ async def get_rate_limit_reset_credits(
     if account is None or account.delete_requested_at is not None:
         await store.invalidate(account_id)
         return None
-    if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
+    if account.status in _NON_OBSERVABLE_STATUSES or not account.chatgpt_account_id:
         await store.invalidate(account_id)
         return None
 

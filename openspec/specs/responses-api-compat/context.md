@@ -8,6 +8,13 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 ## Rationale and Decisions
 
+For a custom Responses source, a non-blank `multi_agent_version` declares
+support for namespace tools, including Codex collaboration. Those declarations
+and their supported tool choices survive the source filter; the filter still
+removes undeclared hosted tools. Existing replay namespace stripping is
+unchanged. See [model catalog context](../model-catalog-compat/context.md) for
+catalog import and client refresh details.
+
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
 - **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.

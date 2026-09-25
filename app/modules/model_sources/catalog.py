@@ -57,6 +57,15 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     # source identifiers must not leak to proxy clients.
     raw["model_provider"] = "codex-lb"
 
+    # ``base_instructions`` is a first-class Codex catalog field rather than
+    # an ``extra`` entry. Keep the source declaration when it is well-typed so
+    # the client receives the same instructions as it would from the upstream
+    # model catalog. All other Codex capability fields remain in ``raw`` and
+    # are emitted as catalog extras by the proxy serializer.
+    base_instructions = raw.get("base_instructions")
+    if not isinstance(base_instructions, str):
+        base_instructions = ""
+
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
     # The dashboard's single Reasoning switch is the master gate: it is the
@@ -87,6 +96,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         minimal_client_version=None,
         priority=0,
         available_in_plans=frozenset(),
+        base_instructions=base_instructions,
         source_kind=source.kind,
         source_id=source.id,
         raw=raw,
@@ -222,7 +232,9 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     Function tools are always forwarded to OpenAI-compatible sources; hosted
     tool types are dropped unless the model opts in via
     ``"supports_search_tool": true`` (web search) or lists the tool type in
-    ``"experimental_supported_tools"`` in ``raw_metadata_json``.
+    ``"experimental_supported_tools"`` in ``raw_metadata_json``. A source
+    that declares ``multi_agent_version`` also opts into the Responses
+    ``namespace`` collaboration tool used by Codex ``spawn_agent``.
     """
     entry = next(
         (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
@@ -237,6 +249,9 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     experimental = raw.get("experimental_supported_tools")
     if is_json_list(experimental):
         supported.update(item for item in experimental if isinstance(item, str))
+    multi_agent_version = raw.get("multi_agent_version")
+    if isinstance(multi_agent_version, str) and multi_agent_version.strip():
+        supported.add("namespace")
     return frozenset(supported)
 
 

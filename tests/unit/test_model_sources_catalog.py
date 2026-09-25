@@ -181,6 +181,46 @@ def test_source_model_supported_tool_types_includes_experimental_tools() -> None
     assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset({"custom"})
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_source_model_supported_tool_types_includes_namespace_for_multi_agent_models(version: str) -> None:
+    source = _overrides_source({"multi_agent_version": version})
+
+    assert "namespace" in source_model_supported_tool_types(source, "llama3.1:8b")
+
+
+@pytest.mark.parametrize("version", [None, "", "  ", False, 2, ["v2"]])
+def test_source_model_supported_tool_types_ignores_invalid_multi_agent_versions(version: object) -> None:
+    source = _overrides_source({"multi_agent_version": version})
+
+    assert "namespace" not in source_model_supported_tool_types(source, "llama3.1:8b")
+
+
+def test_source_model_catalog_preserves_codex_capability_metadata() -> None:
+    source = _overrides_source(
+        {
+            "base_instructions": "Use the source's coding policy.",
+            "tool_mode": "code_mode_only",
+            "multi_agent_version": "v2",
+            "multi_agent_reasoning_effort": "xhigh",
+            "supports_experimental_context": False,
+            "supports_reasoning_effort_updates": True,
+            "use_responses_lite": True,
+            "experimental_supported_tools": ["custom"],
+        }
+    )
+
+    [model] = source_models_to_upstream_models([source])
+
+    assert model.base_instructions == "Use the source's coding policy."
+    assert model.raw["tool_mode"] == "code_mode_only"
+    assert model.raw["multi_agent_version"] == "v2"
+    assert model.raw["multi_agent_reasoning_effort"] == "xhigh"
+    assert model.raw["supports_experimental_context"] is False
+    assert model.raw["supports_reasoning_effort_updates"] is True
+    assert model.raw["use_responses_lite"] is True
+    assert model.raw["experimental_supported_tools"] == ["custom"]
+
+
 def test_source_models_to_upstream_models_skips_disabled_sources_and_models() -> None:
     disabled_source = ModelSource(
         id="src_disabled",

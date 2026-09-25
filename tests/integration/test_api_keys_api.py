@@ -1572,6 +1572,68 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
     assert any("resp_source_tools" in line for line in lines)
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/backend-api/codex/responses", "/backend-api/codex/responses/", "/v1/responses", "/v1/responses/"],
+)
+@pytest.mark.asyncio
+async def test_responses_preserves_collaboration_namespace_for_multi_agent_source(async_client, monkeypatch, path):
+    model = "external-multi-agent-responses"
+    await _create_model_source(
+        async_client,
+        name="multi-agent-responses",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json='{"tool_mode":"code_mode_only","multi_agent_version":"v2"}',
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload, **_kwargs):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_multi_agent",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+    collaboration_tool = {
+        "type": "namespace",
+        "name": "collaboration",
+        "description": "Tools for spawning and managing sub-agents.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "parameters": {"type": "object", "properties": {"task": {"type": "string"}}},
+            }
+        ],
+    }
+    response = await async_client.post(
+        path,
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+            "tools": [collaboration_tool, {"type": "web_search"}],
+            "tool_choice": {"type": "namespace", "name": "collaboration"},
+            "parallel_tool_calls": True,
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["tools"] == [collaboration_tool]
+    assert forwarded_payload["tool_choice"] == {"type": "namespace", "name": "collaboration"}
+    assert forwarded_payload["parallel_tool_calls"] is True
+
+
 @pytest.mark.asyncio
 async def test_backend_codex_responses_keeps_search_tools_for_capable_model_source(async_client, monkeypatch):
     model = "external-codex-responses-search"

@@ -1,0 +1,5 @@
+- [x] Preserve source base instructions and Codex capability metadata in the model registry projection.
+- [x] Derive collaboration namespace support from a source model's multi-agent declaration, retaining existing explicit opt-in.
+- [x] Add catalog and Responses forwarding regression tests.
+- [x] Run focused tests and strict OpenSpec validation; confirm no additional errors against the existing full-spec baseline.
+- [x] Restore the affected source metadata and local client catalog; verify a real parent and child through HTTP.

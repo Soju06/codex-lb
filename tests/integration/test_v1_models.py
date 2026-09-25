@@ -679,6 +679,35 @@ async def test_codex_catalog_sanitizes_invalid_source_tool_metadata(
     assert alias_entry["experimental_supported_tools"] == expected_tools
 
 
+@pytest.mark.asyncio
+async def test_codex_catalog_preserves_source_multi_agent_metadata(async_client):
+    model = "external-multi-agent-model"
+    metadata = {
+        "base_instructions": "Use the source's coding policy.",
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": "v2",
+        "multi_agent_reasoning_effort": "xhigh",
+        "supports_experimental_context": False,
+        "supports_reasoning_effort_updates": True,
+        "use_responses_lite": True,
+        "experimental_supported_tools": ["custom"],
+    }
+    await _create_model_source(
+        async_client,
+        name="codex-source-multi-agent-metadata",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=json.dumps(metadata),
+    )
+
+    for path in ("/backend-api/codex/models", "/v1/models?client_version=0.156.1"):
+        response = await async_client.get(path)
+        assert response.status_code == 200
+        entry = next(item for item in response.json()["models"] if item["slug"] == model)
+        for key, value in metadata.items():
+            assert entry[key] == value
+
+
 @pytest.mark.parametrize(
     ("case", "raw_policy"),
     [

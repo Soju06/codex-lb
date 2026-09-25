@@ -50,14 +50,18 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
                         INSERT INTO dashboard_user_invites
                             (id, user_id, token_hash, expires_at, consumed_at, revoked_at,
                              created_by_user_id, sso_only, username_locked)
-                        VALUES (:id, :id, :token, '2026-09-12 01:00:00+00:00', :consumed, :revoked,
+                        VALUES (:id, :id, :token, '2026-09-12 01:00:00', :consumed, :revoked,
                                 'deleted-inviter-snapshot', :sso, :locked)
                     """),
                         {
                             "id": state,
                             "token": bytes([index + 1]),
-                            "consumed": "2026-09-11 01:00:00+00:00" if state == "consumed" else None,
-                            "revoked": "2026-09-11 02:00:00+00:00" if state == "revoked" else None,
+                            # MariaDB rejects a datetime literal that carries a
+                            # ``+00:00`` offset ("Incorrect datetime value"),
+                            # so the seed is written as the naive UTC value both
+                            # servers accept.
+                            "consumed": "2026-09-11 01:00:00" if state == "consumed" else None,
+                            "revoked": "2026-09-11 02:00:00" if state == "revoked" else None,
                             "sso": state == "pending",
                             "locked": state != "pending",
                         },

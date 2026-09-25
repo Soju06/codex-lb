@@ -16,5 +16,10 @@ def to_sync_database_url(database_url: str) -> str:
         parsed = parsed.set(drivername="postgresql+psycopg")
     elif driver in ("mysql+asyncmy", "mysql+aiomysql"):
         parsed = parsed.set(drivername="mysql+pymysql")
+    elif driver in ("mariadb+asyncmy", "mariadb+aiomysql"):
+        # A ``mariadb+…`` URL keeps SQLAlchemy's MariaDB compilation (its
+        # ``ON DUPLICATE KEY UPDATE`` uses ``VALUES(col)`` and not MySQL 8's row
+        # alias, which MariaDB rejects); the synchronous side must stay MariaDB.
+        parsed = parsed.set(drivername="mariadb+pymysql")
 
     return parsed.render_as_string(hide_password=False)

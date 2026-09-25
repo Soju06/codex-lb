@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -162,6 +163,58 @@ async def test_probe_active_account_returns_snapshot(
         account_id=account_id,
         http_status=200,
     )
+
+
+@pytest.mark.asyncio
+async def test_probe_route_omits_unsupported_output_limit(async_client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ARG002
+            return False
+
+    class _Session:
+        def post(self, _url: str, **kwargs: Any):
+            payload = kwargs["json"]
+            captured["payload"] = payload
+            return _Response(400 if "max_output_tokens" in payload else 200)
+
+    class _Lease:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ARG002
+            return False
+
+    async def _force_refresh_fetches_without_writing(self, account, *, ignore_refresh_disabled=False):  # noqa: ARG001
+        return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
+
+    record_probe_result = AsyncMock()
+    proxy_service = type("_ProbeRecorder", (), {"record_account_probe_result": record_probe_result})()
+    monkeypatch.setattr("app.modules.accounts.service.lease_http_session", lambda: _Lease())
+    monkeypatch.setattr(UsageUpdater, "force_refresh_result", _force_refresh_fetches_without_writing)
+    monkeypatch.setattr(accounts_api, "get_proxy_service_for_app", lambda app: proxy_service)
+
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-wire-body@example.com",
+        account_id="acc_probe_wire_body",
+    )
+
+    response = await async_client.post(f"/api/accounts/{account_id}/probe")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["probeStatusCode"] == 200
+    assert captured["payload"]["stream"] is True
+    assert captured["payload"]["store"] is False
+    assert "max_output_tokens" not in captured["payload"]
+    record_probe_result.assert_awaited_once_with(account_id=account_id, http_status=200)
 
 
 @pytest.mark.asyncio

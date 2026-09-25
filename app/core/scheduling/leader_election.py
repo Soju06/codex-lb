@@ -10,7 +10,7 @@ from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
-from app.db.dialect_sql import is_mysql
+from app.db.dialect_sql import dialect_name, is_mysql
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
@@ -181,23 +181,42 @@ def _mysql_ttl_microseconds(ttl: float) -> int:
     return max(1, int(round(float(ttl) * 1_000_000)))
 
 
+def _mysql_acquire_sql(*, ttl_us: int, mariadb: bool) -> str:
+    """The single-statement conditional upsert, in the server's own syntax.
+
+    MySQL 8.0.19+ names the inserted row with ``AS new``; MariaDB has no row
+    alias and spells the same references ``VALUES(col)``.
+    """
+    if mariadb:
+        inserted_leader_id = "VALUES(leader_id)"
+        inserted_acquired_at = "VALUES(acquired_at)"
+        inserted_expires_at = "VALUES(expires_at)"
+        row_alias = ""
+    else:
+        inserted_leader_id = "new.leader_id"
+        inserted_acquired_at = "new.acquired_at"
+        inserted_expires_at = "new.expires_at"
+        row_alias = " AS new"
+    return (
+        "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) "
+        f"VALUES (1, :leader_id, NOW(6), NOW(6) + INTERVAL {ttl_us} MICROSECOND){row_alias} "
+        "ON DUPLICATE KEY UPDATE "
+        "leader_id = IF(scheduler_leader.expires_at < NOW(6) "
+        f"OR scheduler_leader.leader_id = :leader_id, {inserted_leader_id}, scheduler_leader.leader_id), "
+        "acquired_at = IF(scheduler_leader.expires_at < NOW(6) "
+        f"OR scheduler_leader.leader_id = :leader_id, {inserted_acquired_at}, scheduler_leader.acquired_at), "
+        "expires_at = IF(scheduler_leader.expires_at < NOW(6) "
+        f"OR scheduler_leader.leader_id = :leader_id, {inserted_expires_at}, scheduler_leader.expires_at)"
+    )
+
+
 async def _mysql_acquire_remaining(session: AsyncSession, *, leader_id: str, ttl: float) -> float | None:
     ttl_us = _mysql_ttl_microseconds(ttl)
     # Single-statement conditional upsert: the guard lives inside the IF()
     # assignments, so there is no SELECT ... FOR UPDATE followed by INSERT
     # (gap lock + insert intention) deadlock window under concurrent replicas.
     await session.execute(
-        text(
-            "INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) "
-            f"VALUES (1, :leader_id, NOW(6), NOW(6) + INTERVAL {ttl_us} MICROSECOND) AS new "
-            "ON DUPLICATE KEY UPDATE "
-            "leader_id = IF(scheduler_leader.expires_at < NOW(6) "
-            "OR scheduler_leader.leader_id = :leader_id, new.leader_id, scheduler_leader.leader_id), "
-            "acquired_at = IF(scheduler_leader.expires_at < NOW(6) "
-            "OR scheduler_leader.leader_id = :leader_id, new.acquired_at, scheduler_leader.acquired_at), "
-            "expires_at = IF(scheduler_leader.expires_at < NOW(6) "
-            "OR scheduler_leader.leader_id = :leader_id, new.expires_at, scheduler_leader.expires_at)"
-        ),
+        text(_mysql_acquire_sql(ttl_us=ttl_us, mariadb=dialect_name(session) == "mariadb")),
         {"leader_id": leader_id},
     )
     row = (

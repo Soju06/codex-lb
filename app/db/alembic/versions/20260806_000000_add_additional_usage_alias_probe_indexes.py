@@ -17,7 +17,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from app.db.migration_indexes import create_mysql_index, is_mysql
+from app.db.migration_indexes import GeneratedKeyPart, create_mysql_index, is_mysql
 
 revision = "20260806_000000_add_additional_usage_alias_probe_indexes"
 down_revision = "20260804_230000_add_request_log_connection_request_kind"
@@ -28,6 +28,23 @@ _ALIAS_INDEXES = (
     ("ix_additional_usage_alias_limit_latest", "lower(limit_name)"),
     ("ix_additional_usage_alias_feature_latest", "lower(metered_feature)"),
 )
+
+
+def _generated_alias_part(expression: str) -> GeneratedKeyPart:
+    """The alias probe's key part as MariaDB can index it.
+
+    MySQL indexes the ``lower(col)`` expression directly. MariaDB cannot index
+    an expression, so the same key part becomes a virtual generated column
+    named after the lowered column, which MariaDB's optimiser uses for the same
+    ``lower(col) = ?`` predicates.
+    """
+    column = expression.split("(", 1)[1].rstrip(")")
+    return GeneratedKeyPart(
+        placeholder="alias_key",
+        column=f"lowered_{column}",
+        expression_sql=f"lower(`{column}`)",
+        column_type_sql="VARCHAR(255)",
+    )
 
 
 def _drop_invalid_postgres_index(index_name: str) -> None:
@@ -73,8 +90,9 @@ def upgrade() -> None:
                 index_name=index_name,
                 table_name="additional_usage_history",
                 columns_sql=(
-                    f"({expression}), `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC"
+                    "{alias_key}, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC"
                 ),
+                generated_parts=(_generated_alias_part(expression),),
             )
     else:
         for index_name, expression in _ALIAS_INDEXES:

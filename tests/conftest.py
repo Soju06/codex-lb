@@ -128,10 +128,99 @@ def _drop_test_migration_tables(sync_conn) -> None:
     sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
 
 
+def _detach_functional_indexes():
+    """Remove expression-based indexes from the metadata for one create_all.
+
+    MariaDB cannot index an expression, so ``create_all`` would emit MySQL's
+    ``((coalesce(...)))`` form and fail. They are re-attached afterwards and
+    created through the port's own helper, which knows the MariaDB form (a
+    ``VIRTUAL`` generated column the index references, exactly like the
+    migrations).
+    """
+    from sqlalchemy.schema import Column as _Column
+
+    detached = []
+    for table in Base.metadata.tables.values():
+        for index in list(table.indexes):
+            if any(not isinstance(expression, _Column) for expression in index.expressions):
+                table.indexes.discard(index)
+                detached.append((table, index))
+    return detached
+
+
+def _create_mariadb_functional_indexes(sync_conn) -> None:
+    """The MariaDB spelling of the functional window and alias indexes."""
+    from app.db.migration_indexes import GeneratedKeyPart, create_mysql_index
+
+    window_key = GeneratedKeyPart(
+        placeholder="window_key",
+        column="window_key",
+        expression_sql="coalesce(`window`, 'primary')",
+        column_type_sql="VARCHAR(64)",
+    )
+    lowered_limit = GeneratedKeyPart(
+        placeholder="lowered_limit_name",
+        column="lowered_limit_name",
+        expression_sql="lower(`limit_name`)",
+        column_type_sql="VARCHAR(255)",
+    )
+    lowered_feature = GeneratedKeyPart(
+        placeholder="lowered_metered_feature",
+        column="lowered_metered_feature",
+        expression_sql="lower(`metered_feature`)",
+        column_type_sql="VARCHAR(255)",
+    )
+    specs = (
+        ("usage_history", "idx_usage_window_account_time", "{window_key}, `account_id`, `recorded_at`", window_key),
+        (
+            "usage_history",
+            "idx_usage_window_account_latest",
+            "{window_key}, `account_id`, `recorded_at` DESC, `id` DESC",
+            window_key,
+        ),
+        (
+            "usage_history",
+            "idx_usage_window_account_time_covering",
+            "{window_key}, `account_id`, `recorded_at`",
+            window_key,
+        ),
+        (
+            "additional_usage_history",
+            "ix_additional_usage_alias_limit_latest",
+            "{lowered_limit_name}, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC",
+            lowered_limit,
+        ),
+        (
+            "additional_usage_history",
+            "ix_additional_usage_alias_feature_latest",
+            "{lowered_metered_feature}, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC",
+            lowered_feature,
+        ),
+    )
+    for table_name, index_name, columns_sql, part in specs:
+        create_mysql_index(
+            sync_conn,
+            index_name=index_name,
+            table_name=table_name,
+            columns_sql=columns_sql,
+            generated_parts=(part,),
+        )
+
+
 def _recreate_test_schema(sync_conn) -> None:
     _drop_test_migration_tables(sync_conn)
-    Base.metadata.drop_all(sync_conn)
-    Base.metadata.create_all(sync_conn)
+    if sync_conn.dialect.name == "mariadb":
+        detached = _detach_functional_indexes()
+        try:
+            Base.metadata.drop_all(sync_conn)
+            Base.metadata.create_all(sync_conn)
+        finally:
+            for table, index in detached:
+                table.indexes.add(index)
+        _create_mariadb_functional_indexes(sync_conn)
+    else:
+        Base.metadata.drop_all(sync_conn)
+        Base.metadata.create_all(sync_conn)
     # Production seeds these through the migration and at startup; the test
     # schema is built with create_all, so seed the preset role rows here too.
     seed_preset_dashboard_roles(sync_conn)

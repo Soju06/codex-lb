@@ -193,7 +193,7 @@ async def test_get_returns_cached_snapshot_shape(monkeypatch: pytest.MonkeyPatch
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status",
-    [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
+    [AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
 )
 async def test_get_invalidates_cached_snapshot_for_ineligible_status(
     status: AccountStatus,

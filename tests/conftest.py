@@ -208,8 +208,12 @@ def _create_mariadb_functional_indexes(sync_conn) -> None:
 
 
 def _recreate_test_schema(sync_conn) -> None:
+    from app.db.migration_indexes import is_mariadb
+
     _drop_test_migration_tables(sync_conn)
-    if sync_conn.dialect.name == "mariadb":
+    # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
+    # ``mysql``: test the server, not the URL spelling.
+    if is_mariadb(sync_conn):
         detached = _detach_functional_indexes()
         try:
             Base.metadata.drop_all(sync_conn)

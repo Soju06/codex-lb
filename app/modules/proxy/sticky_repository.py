@@ -6,12 +6,14 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.db.dialect_sql import delete_returning, is_mysql, update_returning
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
@@ -224,21 +226,19 @@ class StickySessionsRepository:
         # The DELETE remains safe because every value observed above participates
         # in the predicate; a concurrent rebind therefore wins the comparison.
         await self._session.commit()
-        statement = (
-            delete(StickySession)
-            .where(
-                StickySession.key == key,
-                StickySession.kind == kind,
-                StickySession.account_id == row.account_id,
-                StickySession.updated_at == observed_updated_at,
-                StickySession.updated_at < cutoff,
-            )
-            .returning(StickySession.key)
+        statement = delete(StickySession).where(
+            StickySession.key == key,
+            StickySession.kind == kind,
+            StickySession.account_id == row.account_id,
+            StickySession.updated_at == observed_updated_at,
+            StickySession.updated_at < cutoff,
         )
         current: tuple[str, datetime, datetime | None, str | None] | None = None
         async with sqlite_writer_section():
-            deleted_key = (await self._session.execute(statement)).scalar_one_or_none()
-            if deleted_key is None:
+            # delete_returning runs the DELETE with RETURNING where supported and
+            # selects-then-deletes on MySQL.
+            deleted_rows = await delete_returning(self._session, statement, StickySession.key)
+            if not deleted_rows:
                 current = (
                     (
                         await self._session.execute(
@@ -258,7 +258,7 @@ class StickySessionsRepository:
                 )
             await self._session.commit()
 
-        if deleted_key is not None or current is None:
+        if deleted_rows or current is None:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
         (
             current_account_id,
@@ -316,10 +316,25 @@ class StickySessionsRepository:
         # first upstream byte on sticky requests, so round trips are TTFT.
         # populate_existing forces the returned row to overwrite any stale
         # identity-map instance the session may already hold for this key.
-        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        statement = self._build_upsert_statement(key, account_id, kind)
+        mysql = is_mysql(self._session)
         async with sqlite_writer_section():
-            result = await self._session.execute(statement, execution_options={"populate_existing": True})
-            row = result.scalar_one_or_none()
+            if mysql:
+                # MySQL has no INSERT ... RETURNING: upsert, then read the row
+                # back inside the same transaction.
+                await self._session.execute(statement)
+                row = (
+                    await self._session.execute(
+                        select(StickySession)
+                        .where(StickySession.key == key, StickySession.kind == kind)
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+            else:
+                result = await self._session.execute(
+                    statement.returning(StickySession), execution_options={"populate_existing": True}
+                )
+                row = result.scalar_one_or_none()
             await self._session.commit()
         if row is None:
             raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
@@ -328,10 +343,17 @@ class StickySessionsRepository:
     async def insert_if_absent(self, key: str, account_id: str, kind: StickySessionKind) -> str:
         """Insert immutable ownership and return the persisted owner."""
 
-        statement = self._build_insert_do_nothing_statement(key, account_id, kind).returning(StickySession.account_id)
+        statement = self._build_insert_do_nothing_statement(key, account_id, kind)
+        mysql = is_mysql(self._session)
         async with sqlite_writer_section():
-            result = await self._session.execute(statement)
-            owner_id = result.scalar_one_or_none()
+            if mysql:
+                # No RETURNING on MySQL; the fallback lookup below resolves the
+                # persisted owner either way.
+                await self._session.execute(statement)
+                owner_id = None
+            else:
+                result = await self._session.execute(statement.returning(StickySession.account_id))
+                owner_id = result.scalar_one_or_none()
             if owner_id is None:
                 owner_id = await self._session.scalar(
                     select(StickySession.account_id).where(
@@ -361,15 +383,26 @@ class StickySessionsRepository:
         # later siblings. Do not replace the seed's DO NOTHING with an upsert:
         # another thread may have won first-writer initialization already.
         seed_statement = self._build_insert_do_nothing_statement(seed_key, account_id, seed_kind)
-        mapping_statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        mapping_statement = self._build_upsert_statement(key, account_id, kind)
+        mysql = is_mysql(self._session)
         async with sqlite_writer_section():
             try:
                 await self._session.execute(seed_statement)
-                result = await self._session.execute(
-                    mapping_statement,
-                    execution_options={"populate_existing": True},
-                )
-                row = result.scalar_one_or_none()
+                if mysql:
+                    await self._session.execute(mapping_statement)
+                    row = (
+                        await self._session.execute(
+                            select(StickySession)
+                            .where(StickySession.key == key, StickySession.kind == kind)
+                            .execution_options(populate_existing=True)
+                        )
+                    ).scalar_one_or_none()
+                else:
+                    result = await self._session.execute(
+                        mapping_statement.returning(StickySession),
+                        execution_options={"populate_existing": True},
+                    )
+                    row = result.scalar_one_or_none()
                 if row is None:
                     raise RuntimeError(f"StickySession seeded upsert failed for key={key!r} kind={kind.value!r}")
                 await self._session.commit()
@@ -388,9 +421,9 @@ class StickySessionsRepository:
             StickySession.kind == kind,
         )
         async with sqlite_writer_section():
-            result = await self._session.execute(statement.returning(StickySession.key))
+            rows = await delete_returning(self._session, statement, StickySession.key)
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return bool(rows)
 
     async def abandon_legacy_session_header_owner_if_unavailable(
         self,
@@ -444,16 +477,15 @@ class StickySessionsRepository:
                 continuity_abandoned_at=None,
                 continuity_abandonment_scope=_SESSION_HEADER_ABANDONMENT_SCOPE,
             )
-            .returning(StickySession.key)
         )
         async with sqlite_writer_section():
             owner_status = await self._session.scalar(owner_status_lock)
             if owner_status not in unavailable_statuses:
                 await self._session.commit()
                 return False
-            result = await self._session.execute(statement)
+            rows = await update_returning(self._session, statement, StickySession.key)
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return bool(rows)
 
     async def restore_if_current(
         self,
@@ -470,19 +502,15 @@ class StickySessionsRepository:
         if expected_account_id is None:
             if restore_account_id is None:
                 return True
-            statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
-                StickySession.key
-            )
+            statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind)
+            write_kind = "insert"
         elif restore_account_id is None:
-            statement = (
-                delete(StickySession)
-                .where(
-                    StickySession.key == key,
-                    StickySession.kind == kind,
-                    StickySession.account_id == expected_account_id,
-                )
-                .returning(StickySession.key)
+            statement = delete(StickySession).where(
+                StickySession.key == key,
+                StickySession.kind == kind,
+                StickySession.account_id == expected_account_id,
             )
+            write_kind = "delete"
         else:
             statement = (
                 update(StickySession)
@@ -497,13 +525,33 @@ class StickySessionsRepository:
                     continuity_abandoned_at=None,
                     continuity_abandonment_scope=None,
                 )
-                .returning(StickySession.key)
             )
+            write_kind = "update"
 
         async with sqlite_writer_section():
-            result = await self._session.execute(statement)
+            if write_kind == "delete":
+                changed = bool(await delete_returning(self._session, statement, StickySession.key))
+            elif write_kind == "update":
+                changed = bool(await update_returning(self._session, statement, StickySession.key))
+            else:
+                # INSERT ... ON CONFLICT DO NOTHING: rowcount is 1 when this
+                # writer inserted and 0 when another one already had. MySQL cannot
+                # be asked that way — a no-op ON DUPLICATE KEY UPDATE reports 1 only
+                # under CLIENT_FOUND_ROWS — so there the row is read back and the
+                # stored owner compared with the one this call meant to restore.
+                result = await self._session.execute(statement)
+                if is_mysql(self._session):
+                    stored_owner = await self._session.scalar(
+                        select(StickySession.account_id).where(
+                            StickySession.key == key,
+                            StickySession.kind == kind,
+                        )
+                    )
+                    changed = stored_owner == restore_account_id
+                else:
+                    changed = (result.rowcount or 0) > 0
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return changed
 
     async def delete_entries(
         self,
@@ -521,9 +569,9 @@ class StickySessionsRepository:
                 or_(*(and_(StickySession.key == key, StickySession.kind == kind) for key, kind in chunk))
             )
             async with sqlite_writer_section():
-                result = await self._session.execute(statement.returning(StickySession.key, StickySession.kind))
+                rows = await delete_returning(self._session, statement, StickySession.key, StickySession.kind)
                 await self._session.commit()
-            deleted.extend((key, kind) for key, kind in result.all())
+            deleted.extend((key, kind) for key, kind in rows)
         return deleted
 
     async def list_entry_identifiers(
@@ -612,8 +660,8 @@ class StickySessionsRepository:
         if kind is not None:
             stmt = stmt.where(StickySession.kind == kind)
         async with sqlite_writer_section():
-            result = await self._session.execute(stmt.returning(StickySession.key))
-            deleted = len(result.scalars().all())
+            rows = await delete_returning(self._session, stmt, StickySession.key)
+            deleted = len(rows)
             await self._session.commit()
         return deleted
 
@@ -639,13 +687,26 @@ class StickySessionsRepository:
             .order_by(StickySession.updated_at.asc(), StickySession.key.asc())
             .limit(limit)
         )
+        # The bounded key set is materialised before the delete: MySQL refuses a
+        # LIMIT inside IN (...)/ANY/SOME ("This version of MySQL doesn't yet
+        # support 'LIMIT & IN/ALL/ANY/SOME subquery'", error 1235), and nesting
+        # the limit any deeper is dialect trivia this repository should not
+        # carry. Selecting the keys first is the same bounded batch on every
+        # dialect and keeps one code path.
+        bounded_keys = [row[0] for row in (await self._session.execute(target_keys)).all()]
+        if not bounded_keys:
+            return 0
         stmt = delete(StickySession).where(
             StickySession.kind == kind,
-            StickySession.key.in_(target_keys),
+            StickySession.key.in_(bounded_keys),
+            # Re-check the cutoff in the delete: another writer can upsert one of
+            # these keys between the select and here, and a fresh key must not be
+            # purged. Applies to every dialect, not only MySQL.
+            StickySession.updated_at < to_utc_naive(cutoff),
         )
         async with sqlite_writer_section():
-            result = await self._session.execute(stmt.returning(StickySession.key))
-            deleted = len(result.scalars().all())
+            rows = await delete_returning(self._session, stmt, StickySession.key)
+            deleted = len(rows)
             await self._session.commit()
         return deleted
 
@@ -731,10 +792,8 @@ class StickySessionsRepository:
             StickySession.continuity_abandoned_at < cutoff_naive,
         )
         async with sqlite_writer_section():
-            tombstoned_result = await self._session.execute(tombstone_stmt.returning(StickySession.key))
-            tombstoned = len(tombstoned_result.scalars().all())
-            deleted_result = await self._session.execute(delete_stmt.returning(StickySession.key))
-            deleted = len(deleted_result.scalars().all())
+            tombstoned = len(await update_returning(self._session, tombstone_stmt, StickySession.key))
+            deleted = len(await delete_returning(self._session, delete_stmt, StickySession.key))
             await self._session.commit()
         return tombstoned + deleted
 
@@ -744,9 +803,19 @@ class StickySessionsRepository:
             insert_fn = pg_insert
         elif dialect == "sqlite":
             insert_fn = sqlite_insert
+        elif is_mysql(dialect):
+            insert_fn = mysql_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
         statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        if is_mysql(dialect):
+            # MySQL targets the (key, kind) primary key directly.
+            return statement.on_duplicate_key_update(
+                account_id=account_id,
+                updated_at=func.now(),
+                continuity_abandoned_at=None,
+                continuity_abandonment_scope=None,
+            )
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
@@ -767,9 +836,14 @@ class StickySessionsRepository:
             insert_fn = pg_insert
         elif dialect == "sqlite":
             insert_fn = sqlite_insert
+        elif is_mysql(dialect):
+            insert_fn = mysql_insert
         else:
             raise RuntimeError(f"StickySession insert unsupported for dialect={dialect!r}")
         statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        if is_mysql(dialect):
+            # "Do nothing" is a no-op update of the key to its inserted value.
+            return statement.on_duplicate_key_update(key=statement.inserted.key)
         return statement.on_conflict_do_nothing(index_elements=[StickySession.key, StickySession.kind])
 
     @staticmethod

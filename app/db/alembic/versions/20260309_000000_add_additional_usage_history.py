@@ -42,7 +42,7 @@ def upgrade() -> None:
             sa.Column("metered_feature", sa.String(), nullable=False),
             sa.Column("window", sa.String(), nullable=False),
             sa.Column("used_percent", sa.Float(), nullable=False),
-            sa.Column("reset_at", sa.Integer(), nullable=True),
+            sa.Column("reset_at", sa.BigInteger(), nullable=True),
             sa.Column("window_minutes", sa.Integer(), nullable=True),
             sa.Column("recorded_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         )

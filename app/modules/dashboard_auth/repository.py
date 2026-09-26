@@ -119,10 +119,11 @@ class DashboardAuthRepository:
             .where(DashboardSettings.id == _SETTINGS_ID)
             .where(DashboardSettings.bootstrap_token_hash.is_(None))
             .values(bootstrap_token_encrypted=token_encrypted, bootstrap_token_hash=token_hash)
-            .returning(DashboardSettings.id)
         )
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        # MySQL has no UPDATE ... RETURNING; rowcount expresses the same fact
+        # on every dialect here.
+        return (result.rowcount or 0) > 0
 
     async def clear_bootstrap_token(self) -> bool:
         await self._settings_repository.get_or_create()
@@ -131,10 +132,9 @@ class DashboardAuthRepository:
             .where(DashboardSettings.id == _SETTINGS_ID)
             .where(DashboardSettings.bootstrap_token_hash.is_not(None))
             .values(bootstrap_token_encrypted=None, bootstrap_token_hash=None)
-            .returning(DashboardSettings.id)
         )
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
 
     # --- users: reads ---
 
@@ -260,9 +260,10 @@ class DashboardAuthRepository:
                         role_id=PRESET_ROLE_IDS[PresetRoleSlug.ADMIN],
                         role_source=DashboardUserRoleSource.MANUAL.value,
                     )
-                    .returning(DashboardUser.id)
                 )
-                if armed.scalar_one_or_none() is None:
+                # Verdict via rowcount: RETURNING is not available on MySQL and
+                # the affected-row count is equivalent on every dialect here.
+                if (armed.rowcount or 0) == 0:
                     await self._session.rollback()
                     return None
                 user_id = existing.id
@@ -321,11 +322,12 @@ class DashboardAuthRepository:
             mutate_user(user)
             if bump_generation:
                 await self._session.flush()
+                # The bumped generation is observed by later reads, not by this
+                # statement: no RETURNING, so MySQL compiles it unchanged.
                 await self._session.execute(
                     update(DashboardUser)
                     .where(DashboardUser.id == user_id)
                     .values(session_generation=DashboardUser.session_generation + 1)
-                    .returning(DashboardUser.session_generation)
                 )
             if mutate_settings is not None:
                 row = await self._settings_repository.get_or_create()
@@ -409,9 +411,8 @@ class DashboardAuthRepository:
                 )
             )
             .values(totp_last_verified_step=step)
-            .returning(DashboardUser.id)
         )
-        if result.scalar_one_or_none() is None:
+        if (result.rowcount or 0) == 0:
             await self._session.rollback()
             return False
         await self._session.commit()

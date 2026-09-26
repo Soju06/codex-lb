@@ -11,6 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
+from app.db.migration_indexes import is_mysql
+
 revision = "20260630_030000_add_automation_run_model_snapshot"
 down_revision = "20260630_020000_merge_automations_and_main_heads"
 branch_labels = None
@@ -34,6 +36,21 @@ def upgrade() -> None:
             batch_op.add_column(sa.Column("model", sa.String(), nullable=True))
         if "reasoning_effort" not in run_columns:
             batch_op.add_column(sa.Column("reasoning_effort", sa.String(length=16), nullable=True))
+
+    if is_mysql(bind):
+        # MySQL spells the PostgreSQL/SQLite ``UPDATE ... FROM`` as a join.
+        op.execute(
+            """
+            UPDATE automation_runs
+            JOIN automation_jobs ON automation_jobs.id = automation_runs.job_id
+            SET
+                automation_runs.model = COALESCE(automation_runs.model, automation_jobs.model),
+                automation_runs.reasoning_effort = COALESCE(
+                    automation_runs.reasoning_effort, automation_jobs.reasoning_effort
+                )
+            """
+        )
+        return
 
     op.execute(
         """

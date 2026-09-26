@@ -128,27 +128,203 @@ def _drop_test_migration_tables(sync_conn) -> None:
     sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
 
 
+def _detach_functional_indexes():
+    """Remove expression-based indexes from the metadata for one create_all.
+
+    MariaDB cannot index an expression, so ``create_all`` would emit MySQL's
+    ``((coalesce(...)))`` form and fail. They are re-attached afterwards and
+    created through the port's own helper, which knows the MariaDB form (a
+    ``VIRTUAL`` generated column the index references, exactly like the
+    migrations).
+    """
+    from sqlalchemy.schema import Column as _Column
+
+    detached = []
+    for table in Base.metadata.tables.values():
+        for index in list(table.indexes):
+            if any(not isinstance(expression, _Column) for expression in index.expressions):
+                table.indexes.discard(index)
+                detached.append((table, index))
+    return detached
+
+
+def _create_mariadb_ordered_indexes(sync_conn, detached) -> None:
+    """Re-create the ordered indexes ``create_all`` skipped.
+
+    MariaDB accepts ``ASC``/``DESC`` key parts (unlike an expression), so these
+    are plain ``CREATE INDEX`` statements, the same DDL the migrations issue.
+    Indexes whose key part is a *function* yield no column list here; the
+    generated-column emulation in :func:`_create_mariadb_functional_indexes`
+    owns those instead.
+    """
+    from sqlalchemy.schema import Column as _Column
+    from sqlalchemy.sql.elements import UnaryExpression
+
+    from app.db.migration_indexes import create_mysql_index
+
+    for _, index in detached:
+        parts: list[str] = []
+        for expression in index.expressions:
+            if isinstance(expression, _Column):
+                parts.append(f"`{expression.name}`")
+            elif isinstance(expression, UnaryExpression) and isinstance(expression.element, _Column):
+                modifier = str(getattr(expression.modifier, "value", "") or "").upper()
+                parts.append(f"`{expression.element.name}`{' DESC' if modifier == 'DESC' else ' ASC'}")
+            else:
+                parts = []
+                break
+        if not parts:
+            continue
+        create_mysql_index(
+            sync_conn,
+            index_name=index.name,
+            table_name=index.table.name,
+            columns_sql=", ".join(parts),
+            unique=bool(index.unique),
+        )
+
+
+def _create_mariadb_functional_indexes(sync_conn) -> None:
+    """The MariaDB spelling of the functional window and alias indexes."""
+    from app.db.migration_indexes import GeneratedKeyPart, create_mysql_index
+
+    window_key = GeneratedKeyPart(
+        placeholder="window_key",
+        column="window_key",
+        expression_sql="coalesce(`window`, 'primary')",
+        column_type_sql="VARCHAR(64)",
+    )
+    lowered_limit = GeneratedKeyPart(
+        placeholder="lowered_limit_name",
+        column="lowered_limit_name",
+        expression_sql="lower(`limit_name`)",
+        column_type_sql="VARCHAR(255)",
+    )
+    lowered_feature = GeneratedKeyPart(
+        placeholder="lowered_metered_feature",
+        column="lowered_metered_feature",
+        expression_sql="lower(`metered_feature`)",
+        column_type_sql="VARCHAR(255)",
+    )
+    specs = (
+        ("usage_history", "idx_usage_window_account_time", "{window_key}, `account_id`, `recorded_at`", window_key),
+        (
+            "usage_history",
+            "idx_usage_window_account_latest",
+            "{window_key}, `account_id`, `recorded_at` DESC, `id` DESC",
+            window_key,
+        ),
+        (
+            "usage_history",
+            "idx_usage_window_account_time_covering",
+            "{window_key}, `account_id`, `recorded_at`",
+            window_key,
+        ),
+        (
+            "additional_usage_history",
+            "ix_additional_usage_alias_limit_latest",
+            "{lowered_limit_name}, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC",
+            lowered_limit,
+        ),
+        (
+            "additional_usage_history",
+            "ix_additional_usage_alias_feature_latest",
+            "{lowered_metered_feature}, `window`, `account_id`, `recorded_at` DESC, `used_percent` DESC, `id` DESC",
+            lowered_feature,
+        ),
+    )
+    for table_name, index_name, columns_sql, part in specs:
+        create_mysql_index(
+            sync_conn,
+            index_name=index_name,
+            table_name=table_name,
+            columns_sql=columns_sql,
+            generated_parts=(part,),
+        )
+
+
+#: The test module whose schema is currently in the database. MySQL/MariaDB keep
+#: their tables between tests, so the schema is rebuilt when the *file* changes
+#: and only rows are reset within a file: rebuilding per test cost seconds each
+#: (the leg was a multi-hour job), while never rebuilding let state leak between
+#: files (the full leg failed where every file passed on its own). See
+#: :func:`_reset_test_database`.
+_schema_built_for: str | None = None
+
+
 def _recreate_test_schema(sync_conn) -> None:
-    _drop_test_migration_tables(sync_conn)
-    Base.metadata.drop_all(sync_conn)
-    Base.metadata.create_all(sync_conn)
+    from app.db.migration_indexes import is_mariadb
+
+    _drop_test_migration_tables(sync_conn)    # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
+    # ``mysql``: test the server, not the URL spelling.
+    if is_mariadb(sync_conn):
+        detached = _detach_functional_indexes()
+        try:
+            Base.metadata.drop_all(sync_conn)
+            Base.metadata.create_all(sync_conn)
+        finally:
+            for table, index in detached:
+                table.indexes.add(index)
+        _create_mariadb_functional_indexes(sync_conn)
+        _create_mariadb_ordered_indexes(sync_conn, detached)
+    else:
+        Base.metadata.drop_all(sync_conn)
+        Base.metadata.create_all(sync_conn)
     # Production seeds these through the migration and at startup; the test
     # schema is built with create_all, so seed the preset role rows here too.
     seed_preset_dashboard_roles(sync_conn)
     seed_default_auth_providers(sync_conn)
 
 
-def _reset_test_database(sync_conn) -> None:
-    _recreate_test_schema(sync_conn)
+def _clear_test_data(sync_conn) -> None:
+    """Empty every table without touching the schema.
+
+    Rebuilding 69 tables plus the five emulated functional indexes costs seconds
+    on a real server, which is why MySQL/MariaDB build the schema once per
+    session and only reset the rows per test.
+    """
+    sync_conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS=0")
+    try:
+        for table in reversed(Base.metadata.sorted_tables):
+            sync_conn.exec_driver_sql(f"DELETE FROM `{table.name}`")
+    finally:
+        sync_conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS=1")
+    seed_preset_dashboard_roles(sync_conn)
+    seed_default_auth_providers(sync_conn)
+
+
+def _reset_test_database(sync_conn, module: str | None = None) -> None:
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.db.migration_indexes import is_mariadb
+
+    # SQLite keeps the recreate-per-test behaviour (it is cheap there and the
+    # suite relies on it). MySQL/MariaDB rebuild per test *file* and reset only
+    # the rows within a file: at seconds per rebuild, doing it per test turned
+    # the MySQL leg into a multi-hour run. ``CODEX_LB_TEST_RECREATE_SCHEMA=1``
+    # asks for the old behaviour, which is also the fallback when a test leaves
+    # the schema altered.
+    global _schema_built_for
+    if not is_mariadb(sync_conn) or os.environ.get("CODEX_LB_TEST_RECREATE_SCHEMA") == "1":
+        _recreate_test_schema(sync_conn)
+        return
+    if _schema_built_for != module:
+        _recreate_test_schema(sync_conn)
+        _schema_built_for = module
+        return
+    try:
+        _clear_test_data(sync_conn)
+    except ProgrammingError:
+        _recreate_test_schema(sync_conn)
 
 
 @pytest_asyncio.fixture
-async def _reset_db_state():
+async def _reset_db_state(request):
     from app.db.session import close_db
 
     await close_db()
     async with engine.begin() as conn:
-        await conn.run_sync(_reset_test_database)
+        await conn.run_sync(_reset_test_database, getattr(request.module, "__name__", None))
     return True
 
 

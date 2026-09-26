@@ -74,4 +74,4 @@ def test_sqlite_file_pin_statements_use_padded_statement_clock() -> None:
 )
 def test_file_pin_statement_builders_reject_unknown_dialect(builder) -> None:
     with pytest.raises(RuntimeError, match="Unsupported database dialect"):
-        builder(dialect_name="mysql")
+        builder(dialect_name="oracle")

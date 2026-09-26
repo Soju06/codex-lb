@@ -29,6 +29,7 @@ from app.core.usage.types import (
 )
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import epoch_seconds, is_mysql
 from app.db.models import (
     Account,
     AccountUsageRollupState,
@@ -237,8 +238,8 @@ class RequestLogsRepository:
 
     def _conversation_cached_expr(self) -> ColumnElement:
         dialect = self._session.get_bind().dialect.name
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.least if (dialect == "postgresql" or is_mysql(dialect)) else func.min
+        greatest = func.greatest if (dialect == "postgresql" or is_mysql(dialect)) else func.max
         return case(
             (RequestLog.cached_input_tokens.is_(None), None),
             (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
@@ -503,8 +504,13 @@ class RequestLogsRepository:
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
             return func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+        if is_mysql(dialect):
+            # MySQL's CAST(<decimal> AS SIGNED) ROUNDS instead of truncating,
+            # so :30+ rows would land in the next hour bucket; floor the
+            # division explicitly (SQLite and PostgreSQL truncate).
+            return func.floor(cast(epoch_seconds(RequestLog.requested_at), Integer) / bucket_seconds) * bucket_seconds
         # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
-        epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+        epoch_col = cast(epoch_seconds(RequestLog.requested_at), Integer)
         return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
@@ -842,8 +848,8 @@ class RequestLogsRepository:
         dialect = self._session.get_bind().dialect.name
         # SQLite's two-argument min()/max() scalar functions are its
         # least()/greatest().
-        least = func.least if dialect == "postgresql" else func.min
-        greatest = func.greatest if dialect == "postgresql" else func.max
+        least = func.least if (dialect == "postgresql" or is_mysql(dialect)) else func.min
+        greatest = func.greatest if (dialect == "postgresql" or is_mysql(dialect)) else func.max
 
         window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
         output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -972,9 +978,25 @@ class RequestLogsRepository:
         return min(counts, key=lambda code: (-counts[code], code)) or None
 
     async def earliest_activity_at(self) -> datetime | None:
-        stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
-        result = await self._session.execute(stmt)
-        value = result.scalar_one_or_none()
+        # The warmup exclusion cannot be served by an index (`NOT IN` over a
+        # non-leading column), so the filtered aggregate scans: 5.8 s on a 1.45 M
+        # row production table. The globally earliest row is an index dive on
+        # ``(requested_at, id)``, and when that row is not one of the excluded
+        # kinds it *is* the minimum this method wants, so probe it first and fall
+        # back to the filtered aggregate only for the rare excluded earliest row.
+        # The probe must not filter ``deleted_at``: soft-deleted rows count here.
+        probe = (
+            select(RequestLog.requested_at, RequestLog.request_kind)
+            .order_by(RequestLog.requested_at.asc())
+            .limit(1)
+        )
+        earliest_row = (await self._session.execute(probe)).first()
+        if earliest_row is not None and earliest_row[1] not in (RequestKind.WARMUP.value, "limit_warmup"):
+            value: datetime | None = earliest_row[0]
+        else:
+            stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
+            result = await self._session.execute(stmt)
+            value = result.scalar_one_or_none()
         raw_earliest = value if isinstance(value, datetime) else None
         # Raw wins while it survives (sub-hour precision); the whole-hour
         # rollup fallback (keeps history-dependent UI like canCompare
@@ -1580,17 +1602,46 @@ class RequestLogsRepository:
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        sqlite = self._session.get_bind().dialect.name == "sqlite"
         # SQLite can choose the deleted_at index for MIN(facet), rescanning
-        # every live row per successor. Traverse the facet index first, then
-        # check visibility with an equality probe for each candidate value.
-        scan_conditions = prefix_conditions if sqlite else conditions
+        # every live row per successor; MariaDB/MySQL pick the same plan. On all
+        # three, traverse the facet index first and check visibility with an
+        # equality probe for each candidate value. Measured on MariaDB before
+        # this: the dashboard filter panel ran 107 of these in an hour for 870 s
+        # of database time (worst 23.9 s, 37.6 M rows examined).
+        dialect_name = self._session.get_bind().dialect.name
+        emulate_skip_scan = dialect_name in {"sqlite", "mysql", "mariadb"}
+        if dialect_name in {"mysql", "mariadb"}:
+            # MariaDB (and MySQL) re-evaluate the chain's correlated probe on
+            # every step instead of taking the bounded btree step the design
+            # assumes: measured on the production table, the recursive form costs
+            # 3.1 s for the account facet (2.1 s with an ordered LIMIT 1
+            # successor, 3.8 s with FORCE INDEX), while the visibility probe
+            # alone is 1.9 ms. Enumerating with GROUP BY over the facet-leading
+            # index is a loose index scan there (``Using index for group-by``,
+            # 0.4-1.0 ms) and issues no DISTINCT, so the chain's contract is kept
+            # for SQLite and PostgreSQL and the enumeration is engine-local.
+            listing = select(column).where(*prefix_conditions).group_by(column).order_by(column.asc())
+            listed = [value for (value,) in (await self._session.execute(listing)).all() if value is not None]
+            # Visibility in one round trip: a query per candidate would be
+            # thousands of round trips when a facet has many historical values
+            # and few live ones. GROUP BY keeps the result set to the visible
+            # values, ordered like the enumeration.
+            visible_values: list[str] = []
+            if listed:
+                visible_stmt = (
+                    select(column).where(*conditions, column.in_(listed)).group_by(column).order_by(column.asc())
+                )
+                visible_values = [
+                    value for (value,) in (await self._session.execute(visible_stmt)).all() if value is not None
+                ]
+            return visible_values
+        scan_conditions = prefix_conditions if emulate_skip_scan else conditions
         seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
         successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
-        if sqlite:
+        if emulate_skip_scan:
             visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
             stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)
@@ -1605,9 +1656,9 @@ class RequestLogsRepository:
         """(leading, second) facet: skip-scan the leading column, then per
         value probe a `(value, NULL)` pair and skip-scan the non-NULL second
         values. NULL pair placement follows the backend's ORDER BY ASC NULL
-        ordering (SQLite: first, PostgreSQL: last) so results match the
-        legacy DISTINCT path exactly."""
-        nulls_first = self._session.get_bind().dialect.name == "sqlite"
+        ordering (SQLite: first, MySQL/MariaDB: first, PostgreSQL: last) so
+        results match the legacy DISTINCT path exactly."""
+        nulls_first = self._session.get_bind().dialect.name in ("sqlite", "mysql", "mariadb")
         pairs: list[tuple[str, str | None]] = []
         for value in await self._distinct_skip_scan(leading, conditions):
             if not value:

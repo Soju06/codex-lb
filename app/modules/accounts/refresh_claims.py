@@ -32,10 +32,12 @@ from datetime import datetime
 from typing import Protocol
 
 from sqlalchemy import Float, bindparam, delete, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import TextClause
 
 from app.core.config.settings import get_settings
+from app.db.dialect_sql import is_mysql
 from app.db.models import AccountRefreshClaim
 from app.db.session import get_background_session, sqlite_writer_section
 from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
@@ -250,16 +252,12 @@ class RefreshClaimCoordinator:
             for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
                 try:
                     async with get_background_session() as session:
-                        stmt = build_refresh_claim_upsert(dialect_name=session.get_bind().dialect.name)
-                        result = await session.execute(
-                            stmt,
-                            {
-                                "account_id": account_id,
-                                "claimed_by": claimed_by,
-                                "ttl": float(ttl_seconds),
-                            },
+                        claimed = await claim_refresh_claim(
+                            session,
+                            account_id=account_id,
+                            claimed_by=claimed_by,
+                            ttl_seconds=ttl_seconds,
                         )
-                        claimed = result.scalar_one_or_none() is not None
                         await session.commit()
                         return claimed
                 except OperationalError as exc:
@@ -304,6 +302,70 @@ class RefreshClaimCoordinator:
         if row is None:
             return None
         return RefreshClaimSnapshot(claimed_by=row[0], claimed_at=row[1], claim_expires_at=row[2])
+
+
+async def claim_refresh_claim(
+    session: AsyncSession,
+    *,
+    account_id: str,
+    claimed_by: str,
+    ttl_seconds: float,
+) -> bool:
+    """Claim ``account_id`` in the single-use refresh slot.
+
+    PostgreSQL and SQLite run the conditional upsert whose RETURNING row means
+    "won". MySQL has no RETURNING on upsert, so the same verdict is produced
+    from an InnoDB row lock: read the slot ``FOR UPDATE``, then insert, take
+    over (expired or ours), or report that a live foreign claim holds it.
+    """
+    dialect = session.get_bind().dialect.name
+    if not is_mysql(dialect):
+        stmt = build_refresh_claim_upsert(dialect_name=dialect)
+        result = await session.execute(
+            stmt,
+            {"account_id": account_id, "claimed_by": claimed_by, "ttl": float(ttl_seconds)},
+        )
+        return result.scalar_one_or_none() is not None
+
+    ttl_us = max(1, int(round(float(ttl_seconds) * 1_000_000)))
+    row = (
+        await session.execute(
+            text(
+                "SELECT claimed_by, claim_expires_at > NOW(6) AS claim_live "
+                "FROM account_refresh_claims WHERE account_id = :account_id FOR UPDATE"
+            ),
+            {"account_id": account_id},
+        )
+    ).first()
+    if row is None:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO account_refresh_claims "
+                    "(account_id, claimed_by, claimed_at, claim_expires_at) "
+                    f"VALUES (:account_id, :claimed_by, NOW(6), NOW(6) + INTERVAL {ttl_us} MICROSECOND)"
+                ),
+                {"account_id": account_id, "claimed_by": claimed_by},
+            )
+        except IntegrityError:
+            # Two replicas can both read "no row" under READ COMMITTED (no gap
+            # lock on MySQL/MariaDB), and the loser's insert hits the primary key.
+            # That is the same situation as a live claim held elsewhere: follow
+            # the claim-unavailable path instead of letting the error escape.
+            await session.rollback()
+            return False
+        return True
+    if bool(row.claim_live) and str(row.claimed_by) != claimed_by:
+        return False
+    await session.execute(
+        text(
+            "UPDATE account_refresh_claims SET claimed_by = :claimed_by, claimed_at = NOW(6), "
+            f"claim_expires_at = NOW(6) + INTERVAL {ttl_us} MICROSECOND "
+            "WHERE account_id = :account_id"
+        ),
+        {"account_id": account_id, "claimed_by": claimed_by},
+    )
+    return True
 
 
 def build_refresh_claim_upsert(*, dialect_name: str) -> TextClause:

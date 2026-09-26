@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import text_default
+
 revision = "20260509_010000_add_additional_quota_routing_policies"
 down_revision = "20260506_000000_add_account_routing_policy"
 branch_labels = None
@@ -15,6 +17,7 @@ def _columns(table_name: str) -> set[str]:
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
     if "additional_quota_routing_policies_json" in _columns("dashboard_settings"):
         return
 
@@ -23,7 +26,7 @@ def upgrade() -> None:
             sa.Column(
                 "additional_quota_routing_policies_json",
                 sa.Text(),
-                server_default="{}",
+                server_default=text_default(bind, "'{}'"),
                 nullable=False,
             )
         )

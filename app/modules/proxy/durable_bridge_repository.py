@@ -11,12 +11,14 @@ from hashlib import sha256
 from typing import Any, cast
 
 from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.db.dialect_sql import delete_returning, greatest, is_mysql, update_returning
 from app.db.models import (
     HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2,
     HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
@@ -710,21 +712,21 @@ class DurableBridgeRepository:
             conflict_failures = case(
                 (
                     failure_from_current_row,
-                    func.max(
+                    greatest(
                         HttpBridgeRetryCircuit.consecutive_failures + 1,
                         excluded.consecutive_failures,
                     ),
                 ),
                 else_=HttpBridgeRetryCircuit.consecutive_failures,
             )
-            merged_updated_at = func.max(
+            merged_updated_at = greatest(
                 HttpBridgeRetryCircuit.updated_at_epoch,
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
                 (
                     conflict_failures >= threshold,
-                    func.max(
+                    greatest(
                         cooldown_floor,
                         merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
                     ),
@@ -742,7 +744,7 @@ class DurableBridgeRepository:
                     "cooldown_until_epoch": case(
                         (
                             failure_from_current_row,
-                            func.max(
+                            greatest(
                                 HttpBridgeRetryCircuit.cooldown_until_epoch,
                                 excluded.cooldown_until_epoch,
                                 merged_cooldown,
@@ -761,6 +763,119 @@ class DurableBridgeRepository:
                         (failure_from_current_row, merged_updated_at),
                         else_=HttpBridgeRetryCircuit.updated_at_epoch,
                     ),
+                },
+            )
+        elif is_mysql(dialect):
+            insert_statement = mysql_insert(HttpBridgeRetryCircuit).values(**values)
+            excluded = insert_statement.inserted
+            # ``updated_at_epoch`` is an observation timestamp, not a
+            # concurrency version. Equality with the loaded base is the CAS
+            # match, even when a replica's wall clock lags it; the failure
+            # count guard still rejects an older snapshot that was loaded
+            # from the same row after a newer failure had already been
+            # merged. Every base-mismatched write is stale — its episode was
+            # settled, replaced, or outrun while the write waited — and
+            # drops, leaving the row byte-identical so in-flight fences and
+            # bases stay valid; the writer reconciles from the returned row.
+            # Wall-clock recency cannot stand in for lineage: a delayed
+            # write always carries a newer timestamp than the base it
+            # loaded, so admitting "newer than base" writes would merge a
+            # finished episode's count into whatever lineage owns the row
+            # now, including a reset row another replica has already
+            # re-struck. A concurrent same-lineage strike that loses this
+            # race undercounts by exactly its own strike, which is the
+            # accepted direction: the circuit opens at most one failure
+            # later, and a stale count can never reopen a settled episode's
+            # cooldown against a fresh lineage.
+            failure_from_current_row = and_(
+                HttpBridgeRetryCircuit.updated_at_epoch == base_updated_at_epoch,
+                excluded.consecutive_failures >= HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            # An at-threshold poison detail is sticky against non-poison
+            # strikes: the row is the cross-replica record that a poisoned
+            # anchor's clear is still owed, and letting a clean probe
+            # failure overwrite it would strand that debt for every worker.
+            # Only a reset/settle (which rewrites the row wholesale) or
+            # another poison-class strike may change it.
+            sticky_poison_detail = and_(
+                HttpBridgeRetryCircuit.last_detail.in_(
+                    ("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")
+                ),
+                # The effective anchor-poison threshold, not the circuit
+                # threshold: a configured threshold of one authorizes the
+                # abandonment at the first poison strike, and its failed
+                # clear leaves a one-failure debt this predicate must keep.
+                HttpBridgeRetryCircuit.consecutive_failures >= sticky_threshold,
+                excluded.last_detail.notin_(("stream_incomplete", "stream_idle_timeout", "bridge_eventless_timeout")),
+            )
+            # An abandonment tombstone is sticky against every strike
+            # detail: continuity is already gone, the tombstone is what
+            # fails anchorless deltas closed on every replica, and only the
+            # fenced settle/supersede paths — a completion establishing
+            # fresh continuity — may rewrite it.
+            # NULL-safe: a NULL detail must make this term FALSE (so its
+            # negation stays TRUE), not NULL — three-valued logic would
+            # otherwise freeze the detail of every reset row.
+            sticky_tombstone = and_(
+                HttpBridgeRetryCircuit.last_detail.is_not(None),
+                HttpBridgeRetryCircuit.last_detail == _RETRY_CIRCUIT_ABANDONED_TOMBSTONE_DETAIL,
+            )
+            conflict_failures = case(
+                (
+                    failure_from_current_row,
+                    greatest(
+                        HttpBridgeRetryCircuit.consecutive_failures + 1,
+                        excluded.consecutive_failures,
+                    ),
+                ),
+                else_=HttpBridgeRetryCircuit.consecutive_failures,
+            )
+            merged_updated_at = greatest(
+                HttpBridgeRetryCircuit.updated_at_epoch,
+                excluded.updated_at_epoch,
+            )
+            merged_cooldown = case(
+                (
+                    conflict_failures >= threshold,
+                    greatest(
+                        cooldown_floor,
+                        merged_updated_at + cooldown_for_failure_count(conflict_failures, excluded.last_detail),
+                    ),
+                ),
+                else_=0.0,
+            )
+            statement = insert_statement.on_duplicate_key_update(
+                **{
+                    # MySQL and MariaDB evaluate ON DUPLICATE KEY UPDATE assignments
+                    # left to right, and a later assignment sees what an earlier one
+                    # just wrote. ``conflict_failures`` reads the column, so it is
+                    # assigned **last**: otherwise the cooldown below would be
+                    # computed from the already-incremented count (one extra failure).
+                    "cooldown_until_epoch": case(
+                        (
+                            failure_from_current_row,
+                            greatest(
+                                HttpBridgeRetryCircuit.cooldown_until_epoch,
+                                excluded.cooldown_until_epoch,
+                                merged_cooldown,
+                            ),
+                        ),
+                        else_=HttpBridgeRetryCircuit.cooldown_until_epoch,
+                    ),
+                    "last_detail": case(
+                        (
+                            and_(failure_from_current_row, ~sticky_poison_detail, ~sticky_tombstone),
+                            excluded.last_detail,
+                        ),
+                        else_=HttpBridgeRetryCircuit.last_detail,
+                    ),
+                    "updated_at_epoch": case(
+                        (failure_from_current_row, merged_updated_at),
+                        else_=HttpBridgeRetryCircuit.updated_at_epoch,
+                    ),
+                    # Last, per the evaluation-order note above: this assignment
+                    # reads the column the others must still see un-incremented.
+                    "consecutive_failures": conflict_failures,
                 },
             )
         else:
@@ -806,6 +921,10 @@ class DurableBridgeRepository:
                     statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
                 elif dialect == "sqlite":
                     statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
+                elif is_mysql(dialect):
+                    # MySQL "do nothing": a no-op update of the primary key.
+                    _base = mysql_insert(HttpBridgeRetryCircuit).values(**values)
+                    statement = _base.on_duplicate_key_update(session_key_kind=_base.inserted.session_key_kind)
                 else:
                     raise RuntimeError(
                         f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}"
@@ -825,7 +944,22 @@ class DurableBridgeRepository:
                     .values(admission_generation=expected_admission_generation + 1)
                 )
             result = await self._session.execute(statement)
-            if getattr(result, "rowcount", 0) != 1:
+            claimed = getattr(result, "rowcount", 0) == 1
+            if not claimed and expected_updated_at_epoch is None and expected_admission_generation == 0:
+                # That branch is the "insert, or do nothing when the row is already
+                # there" statement, and on MySQL a no-op ON DUPLICATE KEY UPDATE
+                # reports a rowcount that depends on CLIENT_FOUND_ROWS. Decide the
+                # claim by reading the row back: this writer won only when the
+                # stored row carries the values it tried to insert.
+                stored_updated_at = await self._session.scalar(
+                    select(HttpBridgeRetryCircuit.updated_at_epoch).where(
+                        HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                        HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                        HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                    )
+                )
+                claimed = stored_updated_at is not None and stored_updated_at == values["updated_at_epoch"]
+            if not claimed:
                 await self._session.rollback()
                 return None
             await self._session.commit()
@@ -1491,9 +1625,8 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.latest_response_id == response_id,
                 )
                 .values(**values)
-                .returning(HttpBridgeSessionRecord.id)
             )
-            if cleared.scalar_one_or_none() is None:
+            if (cleared.rowcount or 0) == 0:
                 await self._session.rollback()
                 return None
             await self._session.execute(
@@ -2569,16 +2702,16 @@ class DurableBridgeRepository:
                     selected_operations=0,
                     deleted_operations=0,
                 )
-            deleted = await self._session.execute(
-                delete(HttpBridgeOperationRecord)
-                .where(
+            deleted_rows = await delete_returning(
+                self._session,
+                delete(HttpBridgeOperationRecord).where(
                     HttpBridgeOperationRecord.operation_id.in_(operation_ids),
                     HttpBridgeOperationRecord.updated_at < cutoff,
                     purgeable,
-                )
-                .returning(HttpBridgeOperationRecord.operation_id)
+                ),
+                HttpBridgeOperationRecord.operation_id,
             )
-            deleted_ids = [str(value) for value in deleted.scalars().all()]
+            deleted_ids = [str(row[0]) for row in deleted_rows]
             if deleted_ids:
                 await self._delete_operation_spool_material(deleted_ids)
             await self._session.commit()
@@ -3232,7 +3365,7 @@ class DurableBridgeRepository:
         values: dict[str, object],
     ) -> DurableBridgeSessionSnapshot | None:
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            update_stmt = (
                 update(HttpBridgeSessionRecord)
                 .where(
                     HttpBridgeSessionRecord.id == session_id,
@@ -3240,9 +3373,20 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                 )
                 .values(**values)
-                .returning(*_SNAPSHOT_COLUMNS)
             )
-            updated_row = result.one_or_none()
+            if is_mysql(self._session):
+                # MySQL has no UPDATE ... RETURNING: apply the guarded update,
+                # then read the snapshot columns back for their new values.
+                update_result = await self._session.execute(update_stmt)
+                updated_row = None
+                if (update_result.rowcount or 0) > 0:
+                    updated_row = (
+                        await self._session.execute(
+                            select(*_SNAPSHOT_COLUMNS).where(HttpBridgeSessionRecord.id == session_id)
+                        )
+                    ).one_or_none()
+            else:
+                updated_row = (await self._session.execute(update_stmt.returning(*_SNAPSHOT_COLUMNS))).one_or_none()
             await self._session.commit()
         if updated_row is not None:
             return _returned_row_to_snapshot(updated_row)
@@ -3440,13 +3584,14 @@ class DurableBridgeRepository:
                 deletable_ids = [session_id for session_id in session_ids if session_id not in retained_recovery_ids]
                 if deletable_ids:
                     if owner_process_epoch is None:
-                        deleted = await self._session.execute(
+                        deleted_rows = await delete_returning(
+                            self._session,
                             delete(HttpBridgeSessionRecord)
                             .where(HttpBridgeSessionRecord.id.in_(deletable_ids))
-                            .where(startup_purge_filter)
-                            .returning(HttpBridgeSessionRecord.id)
+                            .where(startup_purge_filter),
+                            HttpBridgeSessionRecord.id,
                         )
-                        deleted_ids = list(deleted.scalars().all())
+                        deleted_ids = [row[0] for row in deleted_rows]
                     else:
                         previous_process_ids = [
                             candidate.id for candidate in candidates if candidate.owner_instance_id == instance_id
@@ -3458,7 +3603,8 @@ class DurableBridgeRepository:
                         ]
                         retired_ids: list[str] = []
                         if previous_process_ids:
-                            retired = await self._session.execute(
+                            retired_rows = await update_returning(
+                                self._session,
                                 update(HttpBridgeSessionRecord)
                                 .where(HttpBridgeSessionRecord.id.in_(previous_process_ids))
                                 .where(
@@ -3479,13 +3625,14 @@ class DurableBridgeRepository:
                                     latest_input_item_count=None,
                                     latest_input_full_fingerprint=None,
                                     latest_pending_tool_calls_json=None,
-                                )
-                                .returning(HttpBridgeSessionRecord.id)
+                                ),
+                                HttpBridgeSessionRecord.id,
                             )
-                            retired_ids = list(retired.scalars().all())
+                            retired_ids = [row[0] for row in retired_rows]
                         deleted_ownerless_ids: list[str] = []
                         if ownerless_ids:
-                            deleted_ownerless = await self._session.execute(
+                            ownerless_rows = await delete_returning(
+                                self._session,
                                 delete(HttpBridgeSessionRecord)
                                 .where(HttpBridgeSessionRecord.id.in_(ownerless_ids))
                                 .where(
@@ -3500,10 +3647,10 @@ class DurableBridgeRepository:
                                     HttpBridgeSessionRecord.last_seen_at < ownerless_cutoff
                                     if ownerless_cutoff is not None
                                     else true(),
-                                )
-                                .returning(HttpBridgeSessionRecord.id)
+                                ),
+                                HttpBridgeSessionRecord.id,
                             )
-                            deleted_ownerless_ids = list(deleted_ownerless.scalars().all())
+                            deleted_ownerless_ids = [row[0] for row in ownerless_rows]
                         deleted_ids = retired_ids + deleted_ownerless_ids
                 else:
                     deleted_ids = []
@@ -3563,10 +3710,9 @@ class DurableBridgeRepository:
                             )
                         )
                     )
-                    .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
-            deleted_count += len(deleted.scalars().all())
+            deleted_count += int(deleted.rowcount or 0)
 
     async def retire_continuity_owner_if_unavailable(
         self,
@@ -3617,7 +3763,6 @@ class DurableBridgeRepository:
                 HttpBridgeSessionRecord.account_id.in_(unavailable_owner),
             )
             .values(continuity_abandonment_scope=_REQUEST_PATH_ABANDONMENT_SCOPE)
-            .returning(HttpBridgeSessionRecord.id)
         )
         async with sqlite_writer_section():
             locked = (await self._session.execute(owner_status_lock)).one_or_none()
@@ -3633,7 +3778,8 @@ class DurableBridgeRepository:
                 return False
             result = await self._session.execute(statement)
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        # rowcount is the dialect-neutral verdict (MySQL has no RETURNING).
+        return (result.rowcount or 0) > 0
 
     async def retire_stale_unavailable_bridge_owners(self, cutoff: datetime, *, now: datetime) -> int:
         """Retire continuity owners that have been unroutable since ``cutoff``.
@@ -3690,7 +3836,6 @@ class DurableBridgeRepository:
             # per-source question to answer, and a replica that predates the
             # scope column still understands the timestamp.
             .values(continuity_abandoned_at=now_naive, continuity_abandonment_scope=None)
-            .returning(HttpBridgeSessionRecord.id)
         )
         expired_tombstone_filter = (
             HttpBridgeSessionRecord.continuity_abandoned_at.is_not(None),
@@ -3703,7 +3848,8 @@ class DurableBridgeRepository:
             ),
         )
         async with sqlite_writer_section():
-            tombstoned = len((await self._session.execute(tombstone_stmt)).scalars().all())
+            tombstone_result = await self._session.execute(tombstone_stmt)
+            tombstoned = int(tombstone_result.rowcount or 0)
             # Aliases first, matching ``purge_closed_before``: the FK cascade
             # would cover it, but SQLite builds without foreign-key enforcement
             # would leave orphans that later resolve to a deleted session.
@@ -3714,17 +3860,10 @@ class DurableBridgeRepository:
                     )
                 )
             )
-            deleted = len(
-                (
-                    await self._session.execute(
-                        delete(HttpBridgeSessionRecord)
-                        .where(*expired_tombstone_filter)
-                        .returning(HttpBridgeSessionRecord.id)
-                    )
-                )
-                .scalars()
-                .all()
+            tombstone_delete = await self._session.execute(
+                delete(HttpBridgeSessionRecord).where(*expired_tombstone_filter)
             )
+            deleted = int(tombstone_delete.rowcount or 0)
             await self._session.commit()
         return tombstoned + deleted
 
@@ -3771,10 +3910,9 @@ class DurableBridgeRepository:
                     delete(HttpBridgeSessionRecord)
                     .where(HttpBridgeSessionRecord.id.in_(session_ids))
                     .where(*abandoned_filter)
-                    .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
-            deleted_count += len(deleted.scalars().all())
+            deleted_count += int(deleted.rowcount or 0)
 
     async def purge_retry_circuits_before(
         self,
@@ -3870,9 +4008,8 @@ class DurableBridgeRepository:
                         .where(HttpBridgeRetryCircuit.session_key_hash == session_key_hash)
                         .where(HttpBridgeRetryCircuit.api_key_scope == api_key_scope)
                         .where(stale_predicate)
-                        .returning(HttpBridgeRetryCircuit.session_key_hash)
                     )
-                    batch_deleted_count += len(deleted.scalars().all())
+                    batch_deleted_count += int(deleted.rowcount or 0)
                 await self._session.commit()
             if batch_deleted_count == 0:
                 return deleted_count
@@ -3933,7 +4070,7 @@ class DurableBridgeRepository:
                 session_values["latest_input_item_count"] = latest_input_item_count
                 session_values["latest_input_full_fingerprint"] = latest_input_full_fingerprint
 
-            fenced_update = await self._session.execute(
+            fenced_stmt = (
                 update(HttpBridgeSessionRecord)
                 .where(
                     HttpBridgeSessionRecord.id == session_id,
@@ -3942,13 +4079,32 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                 )
                 .values(**session_values)
-                .returning(
-                    HttpBridgeSessionRecord.id,
-                    HttpBridgeSessionRecord.session_key_kind,
-                    HttpBridgeSessionRecord.session_key_value,
-                )
             )
-            target = fenced_update.one_or_none()
+            if is_mysql(self._session):
+                # MySQL has no UPDATE ... RETURNING: apply the fenced update and
+                # read the target row back when it matched.
+                fenced_result = await self._session.execute(fenced_stmt)
+                target = None
+                if (fenced_result.rowcount or 0) > 0:
+                    target = (
+                        await self._session.execute(
+                            select(
+                                HttpBridgeSessionRecord.id,
+                                HttpBridgeSessionRecord.session_key_kind,
+                                HttpBridgeSessionRecord.session_key_value,
+                            ).where(HttpBridgeSessionRecord.id == session_id)
+                        )
+                    ).one_or_none()
+            else:
+                target = (
+                    await self._session.execute(
+                        fenced_stmt.returning(
+                            HttpBridgeSessionRecord.id,
+                            HttpBridgeSessionRecord.session_key_kind,
+                            HttpBridgeSessionRecord.session_key_value,
+                        )
+                    )
+                ).one_or_none()
             if target is None:
                 return DurableBridgeAliasRegistration.OWNER_FENCED
 
@@ -3985,7 +4141,7 @@ class DurableBridgeRepository:
             now = utcnow()
             # The first UPDATE both fences ownership and acquires the target-row
             # lock (and SQLite's writer lock) before prior alias state is read.
-            fenced_lock = await self._session.execute(
+            fenced_lock_stmt = (
                 update(HttpBridgeSessionRecord)
                 .where(
                     HttpBridgeSessionRecord.id == session_id,
@@ -3997,14 +4153,32 @@ class DurableBridgeRepository:
                     lease_expires_at=now + timedelta(seconds=max(1.0, lease_ttl_seconds)),
                     last_seen_at=now,
                 )
-                .returning(
-                    HttpBridgeSessionRecord.id,
-                    HttpBridgeSessionRecord.session_key_kind,
-                    HttpBridgeSessionRecord.session_key_value,
-                    HttpBridgeSessionRecord.latest_turn_state,
-                )
             )
-            target = fenced_lock.one_or_none()
+            if is_mysql(self._session):
+                fenced_lock_result = await self._session.execute(fenced_lock_stmt)
+                target = None
+                if (fenced_lock_result.rowcount or 0) > 0:
+                    target = (
+                        await self._session.execute(
+                            select(
+                                HttpBridgeSessionRecord.id,
+                                HttpBridgeSessionRecord.session_key_kind,
+                                HttpBridgeSessionRecord.session_key_value,
+                                HttpBridgeSessionRecord.latest_turn_state,
+                            ).where(HttpBridgeSessionRecord.id == session_id)
+                        )
+                    ).one_or_none()
+            else:
+                target = (
+                    await self._session.execute(
+                        fenced_lock_stmt.returning(
+                            HttpBridgeSessionRecord.id,
+                            HttpBridgeSessionRecord.session_key_kind,
+                            HttpBridgeSessionRecord.session_key_value,
+                            HttpBridgeSessionRecord.latest_turn_state,
+                        )
+                    )
+                ).one_or_none()
             if target is None:
                 await self._session.rollback()
                 return DurableBridgeAliasRegistrationReceipt(
@@ -4158,9 +4332,8 @@ class DurableBridgeRepository:
                         else_=HttpBridgeSessionRecord.latest_turn_state,
                     )
                 )
-                .returning(HttpBridgeSessionRecord.id)
             )
-            if fenced_restore.scalar_one_or_none() is None:
+            if (fenced_restore.rowcount or 0) == 0:
                 await self._session.rollback()
                 return False
 
@@ -4296,6 +4469,39 @@ class DurableBridgeRepository:
                 )
                 .returning(HttpBridgeSessionAlias.session_id)
             )
+        elif is_mysql(dialect):
+            # MySQL has no ON CONFLICT ... WHERE ... RETURNING: the conditional
+            # update runs first (same predicate), and only when it matched
+            # nothing is the row inserted, with the duplicate-key path acting as
+            # "do nothing" so a live foreign alias is left alone.
+            key_columns = ("alias_kind", "alias_hash", "api_key_scope")
+            probe = update(HttpBridgeSessionAlias)
+            # ``where(None)`` is not "no predicate" — it renders a statement that
+            # never matches, so an existing alias would never be rebound.
+            if conflict_where is not None:
+                probe = probe.where(conflict_where)
+            for column in key_columns:
+                probe = probe.where(getattr(HttpBridgeSessionAlias, column) == values[column])
+            updated = await self._session.execute(probe.values(**values))
+            if updated.rowcount:
+                return True
+            base = mysql_insert(HttpBridgeSessionAlias).values(**values)
+            await self._session.execute(base.on_duplicate_key_update(alias_kind=base.inserted.alias_kind))
+            # A no-op ON DUPLICATE KEY UPDATE reports a rowcount that depends on
+            # CLIENT_FOUND_ROWS, so ownership is decided by reading the row back and
+            # comparing the payload with what this writer tried to store.
+            stored = (
+                await self._session.execute(
+                    select(HttpBridgeSessionAlias.session_id, HttpBridgeSessionAlias.alias_value).where(
+                        *[getattr(HttpBridgeSessionAlias, column) == values[column] for column in key_columns]
+                    )
+                )
+            ).first()
+            return (
+                stored is not None
+                and stored[0] == values["session_id"]
+                and stored[1] == values["alias_value"]
+            )
         else:
             raise RuntimeError(f"DurableBridgeRepository alias upsert unsupported for dialect={dialect!r}")
         result = await self._session.execute(statement)
@@ -4318,6 +4524,20 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
                 "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
                 "'http_bridge_recovery_attempts', 'http_bridge_operations', 'http_bridge_operation_events', "
                 "'http_bridge_operation_event_chunks')"
+            )
+        )
+    elif is_mysql(dialect):
+        # MySQL's information_schema "schema" is the connected database;
+        # DATABASE() resolves it without hard-coding the name.
+        result = await session.execute(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() "
+                "AND table_name IN ("
+                "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
+                "'http_bridge_recovery_attempts', 'http_bridge_operations', 'http_bridge_operation_events', "
+                "'http_bridge_operation_event_chunks'"
+                ")"
             )
         )
     else:

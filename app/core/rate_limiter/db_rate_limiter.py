@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, insert, literal, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DashboardRateLimitError
+from app.db.dialect_sql import is_mysql
 from app.db.models import RateLimitAttempt
 
 #: How long a recorded attempt is kept before the periodic sweep deletes it.
@@ -16,6 +18,18 @@ from app.db.models import RateLimitAttempt
 #: a caller-supplied username, so an attacker chooses how many rows to leave
 #: behind.
 RATE_LIMIT_ATTEMPT_RETENTION_SECONDS = 3600
+
+#: MySQL/MariaDB serialize their count-then-insert on a fixed ring of sentinel
+#: rows. The limiter's key space includes caller-supplied usernames, so hashing
+#: the key into a bounded ring keeps unrelated keys from blocking each other
+#: without letting that key space grow ``runtime_sentinels`` without bound (its
+#: ``name`` column is ``String(64)`` and this name stays far below that).
+_MYSQL_LOCK_BUCKETS = 64
+
+
+def _mysql_lock_sentinel_name(limiter_type: str, key: str) -> str:
+    digest = hashlib.sha256(f"{limiter_type}:{key}".encode("utf-8")).hexdigest()
+    return f"rate_limit_lock:{int(digest, 16) % _MYSQL_LOCK_BUCKETS}"
 
 
 class DatabaseRateLimiter:
@@ -77,6 +91,21 @@ class DatabaseRateLimiter:
         if dialect_name == "postgresql":
             lock_key = f"{self.type}:{key}"
             await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": lock_key})
+        elif is_mysql(dialect_name):
+            # MySQL has no transaction-scoped advisory lock, so the same
+            # count-then-insert serialization comes from an exclusive row lock
+            # held on a sentinel row until this transaction commits: a
+            # concurrent writer for the same bucket blocks here and then reads
+            # the committed attempt before its own guarded INSERT ... SELECT
+            # decides. Without it two replicas could both see the window one
+            # attempt short of the limit and both admit.
+            await session.execute(
+                text(
+                    "INSERT INTO runtime_sentinels (name, value) VALUES (:name, '') "
+                    "ON DUPLICATE KEY UPDATE value = value"
+                ),
+                {"name": _mysql_lock_sentinel_name(self.type, key)},
+            )
 
         now = datetime.now(UTC)
         window_start = now - timedelta(seconds=self.window_seconds)
@@ -85,8 +114,7 @@ class DatabaseRateLimiter:
         attempted_at_column = RateLimitAttempt.__table__.c.attempted_at
 
         raw_result = await session.execute(
-            insert(RateLimitAttempt)
-            .from_select(
+            insert(RateLimitAttempt).from_select(
                 [key_column.name, type_column.name, attempted_at_column.name],
                 select(
                     literal(key, type_=key_column.type),
@@ -104,9 +132,10 @@ class DatabaseRateLimiter:
                     < self.max_attempts
                 ),
             )
-            .returning(attempted_at_column)
         )
-        inserted = raw_result.scalar_one_or_none() is not None
+        # rowcount is the dialect-neutral verdict (MySQL has no RETURNING): the
+        # guarded INSERT ... SELECT changes no rows when the window is full.
+        inserted = (raw_result.rowcount or 0) > 0
         await session.commit()
 
         if not inserted:

@@ -6,11 +6,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from sqlalchemy import Select, func, select, true, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import Account, AccountUsageRollup, AccountUsageRollupState, ApiKey, ApiKeyUsageRollup, RequestLog
 from app.db.session import get_background_session, sqlite_writer_section
 
@@ -160,6 +162,10 @@ def _add_rollup_sums_stmt(session: AsyncSession, model, key_field: str, key_valu
         cached_input_tokens=sums.cached_input_tokens,
         total_cost_usd=sums.total_cost_usd,
     )
+    if is_mysql(session):
+        return stmt.on_duplicate_key_update(
+            **{column: getattr(model, column) + getattr(stmt.inserted, column) for column in _SUM_COLUMNS}
+        )
     return stmt.on_conflict_do_update(
         index_elements=[getattr(model, key_field)],
         set_={column: getattr(model, column) + getattr(stmt.excluded, column) for column in _SUM_COLUMNS},
@@ -315,6 +321,8 @@ def _insert_fn(session: AsyncSession):
         return pg_insert
     if dialect == "sqlite":
         return sqlite_insert
+    if is_mysql(dialect):
+        return mysql_insert
     raise RuntimeError(f"AccountUsageRollup upsert unsupported for dialect={dialect!r}")
 
 
@@ -328,6 +336,10 @@ def _state_bootstrap_stmt(session: AsyncSession):
         folded_through=_EPOCH,
         upgrade_repair_from=None,
     )
+    if is_mysql(session):
+        # MySQL has no DO NOTHING; rewriting the primary key to its inserted
+        # value is the equivalent no-op upsert.
+        return stmt.on_duplicate_key_update(id=stmt.inserted.id)
     return stmt.on_conflict_do_nothing(index_elements=[AccountUsageRollupState.id])
 
 

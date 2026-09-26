@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
 
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import epoch_seconds, is_mysql, statement_matched
 from app.db.models import (
     Account,
     AccountStatus,
@@ -605,10 +606,10 @@ class ApiKeysRepository:
             .where(ApiKeyLimit.id == limit_id)
             .where(ApiKeyLimit.reset_at == expected_reset_at)
             .values(current_value=0, reset_at=new_reset_at)
-            .returning(ApiKeyLimit.id)
         )
         await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        # rowcount is the dialect-neutral verdict (MySQL has no RETURNING).
+        return (result.rowcount or 0) > 0
 
     async def reset_expired_limits(self, *, now: datetime) -> int:
         reset_count = 0
@@ -628,7 +629,7 @@ class ApiKeysRepository:
                 return reset_count
 
             for limit in expired_limits:
-                update_result = await self._session.execute(
+                update_stmt = (
                     update(ApiKeyLimit)
                     .where(ApiKeyLimit.id == limit.id)
                     .where(ApiKeyLimit.reset_at == limit.reset_at)
@@ -636,9 +637,8 @@ class ApiKeysRepository:
                         current_value=0,
                         reset_at=advance_limit_reset(limit.reset_at, now, limit.limit_window),
                     )
-                    .returning(ApiKeyLimit.id)
                 )
-                if update_result.scalar_one_or_none() is not None:
+                if await statement_matched(self._session, update_stmt, ApiKeyLimit.id):
                     reset_count += 1
             await self._session.commit()
 
@@ -659,20 +659,40 @@ class ApiKeysRepository:
                 reset_at=snapshot.reset_at if snapshot is not None else None,
             )
 
-        result = await self._session.execute(
+        update_stmt = (
             update(ApiKeyLimit)
             .where(ApiKeyLimit.id == limit_id)
             .where(ApiKeyLimit.reset_at == expected_reset_at)
             .where(ApiKeyLimit.current_value + delta <= ApiKeyLimit.max_value)
             .values(current_value=ApiKeyLimit.current_value + delta)
-            .returning(
-                ApiKeyLimit.id,
-                ApiKeyLimit.current_value,
-                ApiKeyLimit.max_value,
-                ApiKeyLimit.reset_at,
-            )
         )
-        row = result.first()
+        if is_mysql(self._session):
+            # MySQL has no UPDATE ... RETURNING: apply the guarded update, then
+            # read the row back for its POST-update values.
+            update_result = await self._session.execute(update_stmt)
+            row = None
+            if (update_result.rowcount or 0) > 0:
+                row = (
+                    await self._session.execute(
+                        select(
+                            ApiKeyLimit.id,
+                            ApiKeyLimit.current_value,
+                            ApiKeyLimit.max_value,
+                            ApiKeyLimit.reset_at,
+                        ).where(ApiKeyLimit.id == limit_id)
+                    )
+                ).first()
+        else:
+            row = (
+                await self._session.execute(
+                    update_stmt.returning(
+                        ApiKeyLimit.id,
+                        ApiKeyLimit.current_value,
+                        ApiKeyLimit.max_value,
+                        ApiKeyLimit.reset_at,
+                    )
+                )
+            ).first()
         if row is not None:
             return ReservationResult(
                 success=True,
@@ -708,10 +728,8 @@ class ApiKeysRepository:
         stmt = update(ApiKeyLimit).where(ApiKeyLimit.id == limit_id).where(ApiKeyLimit.reset_at == expected_reset_at)
         if delta < 0:
             stmt = stmt.where(ApiKeyLimit.current_value >= -delta)
-        result = await self._session.execute(
-            stmt.values(current_value=ApiKeyLimit.current_value + delta).returning(ApiKeyLimit.id)
-        )
-        return result.scalar_one_or_none() is not None
+        result = await self._session.execute(stmt.values(current_value=ApiKeyLimit.current_value + delta))
+        return (result.rowcount or 0) > 0
 
     async def create_usage_reservation(
         self,
@@ -782,9 +800,8 @@ class ApiKeysRepository:
             .where(ApiKeyUsageReservation.id == reservation_id)
             .where(ApiKeyUsageReservation.status == expected_status)
             .values(status=new_status)
-            .returning(ApiKeyUsageReservation.id)
         )
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
 
     async def upsert_reservation_item_actual(
         self,
@@ -883,9 +900,8 @@ class ApiKeysRepository:
             .where(ApiKeyUsageReservation.id == reservation_id)
             .where(ApiKeyUsageReservation.status == "reserved")
             .values(updated_at=utcnow())
-            .returning(ApiKeyUsageReservation.id)
         )
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
 
     async def release_stale_usage_reservations(
         self,
@@ -958,17 +974,15 @@ class ApiKeysRepository:
                                 update(ApiKeyUsageReservation)
                                 .where(ApiKeyUsageReservation.id == reservation_id)
                                 .where(ApiKeyUsageReservation.status == "reserved")
-                            )
-                            .values(
+                            ).values(
                                 status="released",
                                 input_tokens=None,
                                 output_tokens=None,
                                 cached_input_tokens=None,
                                 cost_microdollars=None,
                             )
-                            .returning(ApiKeyUsageReservation.id)
                         )
-                        if claimed.scalar_one_or_none() is None:
+                        if (claimed.rowcount or 0) == 0:
                             continue
 
                         for item in items_by_reservation_id[reservation_id]:
@@ -1067,8 +1081,14 @@ class ApiKeysRepository:
                     func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
                 )
             else:
-                epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-                bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+                epoch_col = cast(epoch_seconds(RequestLog.requested_at), Integer)
+                if is_mysql(dialect):
+                    # MySQL's signed CAST ROUNDS instead of truncating, so rows
+                    # past the half-bucket mark would land in the next bucket
+                    # (SQLite truncates, PostgreSQL floors).
+                    bucket_expr = func.floor(epoch_col / bucket_seconds) * bucket_seconds
+                else:
+                    bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
             bucket_col = bucket_expr.label("bucket_epoch")
 
             stmt = (

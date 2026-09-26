@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config.settings import get_settings
+from app.db.alembic import mysql_impl  # noqa: F401  (registers MySQL/MariaDB DDL impls)
 from app.db.migration_url import to_sync_database_url
 from app.db.models import Base
 

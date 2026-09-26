@@ -200,12 +200,14 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.model_sources.aliases import restore_sse_model_identity
 from app.modules.model_sources.catalog import (
     source_model_audio_cost_usd,
     source_model_cost_usd,
     source_model_request_overrides,
     source_model_supported_tool_types,
     source_model_supports_reasoning,
+    source_model_upstream_id,
     source_models_to_upstream_models,
 )
 from app.modules.model_sources.forwarding import (
@@ -5127,6 +5129,12 @@ async def _open_owned_source_stream(owner: SourceDispatch, source_payload: dict[
         scheduler=owner.scheduler,
         clock=owner.clock,
     )
+    upstream_model = source_model_upstream_id(owner.source, owner.model)
+    if upstream_model != owner.model:
+        stream = replace(
+            stream,
+            body=_source_alias_stream_body(stream.body, model=owner.model, upstream_model=upstream_model),
+        )
     owner.stream = stream
 
 
@@ -5504,6 +5512,12 @@ async def _source_chat_completion_response(
             if reservation is not None:
                 await _release_reservation_deferring_cancellation(reservation)
             raise
+        upstream_model = source_model_upstream_id(source, model)
+        if upstream_model != model:
+            stream = replace(
+                stream,
+                body=_source_alias_stream_body(stream.body, model=model, upstream_model=upstream_model),
+            )
         if _reservation_requires_usage(reservation):
             return await _buffered_limited_source_chat_stream_response(
                 request,
@@ -5953,6 +5967,20 @@ async def _iter_source_sse_event_blocks(
         finally:
             if iterator is not stream:
                 await _aclose_stream(stream)
+
+
+async def _source_alias_stream_body(
+    stream: AsyncIterator[bytes], *, model: str, upstream_model: str
+) -> AsyncIterator[bytes]:
+    blocks = _iter_source_sse_event_blocks(stream)
+    try:
+        async for block in blocks:
+            yield restore_sse_model_identity(block, model=model, upstream_model=upstream_model).encode("utf-8")
+    finally:
+        try:
+            await _aclose_stream(blocks)
+        finally:
+            await _aclose_stream(stream)
 
 
 async def _wrap_source_responses_public_stream(

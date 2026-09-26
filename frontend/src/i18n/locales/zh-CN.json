@@ -896,6 +896,8 @@
   "modelSources.capabilities.vision": "Vision",
   "modelSources.fields.audioPricing": "Audio Pricing",
   "modelSources.fields.audioPricingDescription": "用于按时长计费的 audio transcription model。会优先于 transcription route 的 token pricing。",
+  "modelSources.fields.aliasesDescription": "输入模型 ID 或 别名=上游ID，以逗号分隔。客户端使用别名，端点接收上游 ID。",
+  "modelSources.validation.aliasesInvalid": "请输入不重复的模型 ID，或等号两侧均非空的 别名=上游ID。",
   "modelSources.fields.baseUrl": "Base URL",
   "modelSources.fields.contextWindow": "上下文窗口",
   "modelSources.fields.maxOutputTokens": "最大输出 tokens",

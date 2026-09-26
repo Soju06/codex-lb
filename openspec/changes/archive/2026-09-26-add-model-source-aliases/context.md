@@ -1,18 +1,4 @@
-# Model Source Routing — Context
-
-## Purpose
-
-Capability-based routing and accounting for OpenAI-compatible model sources,
-including field-preserving embeddings forwarding.
-
-This capability keeps source selection separate from subscription-account
-routing: embeddings traffic is served only by sources that declare the
-embeddings capability, while Responses/chat/audio continue to use their own
-capability gates. Field presence (including explicit nulls) is preserved on
-embeddings forwards so compatible sources see the same payload shape the
-client sent.
-
-## Model aliases
+# Model source aliases
 
 Operators can give opaque custom models a stable public ID. In Model Sources, create or edit the Models field using `cd/gpt-6-astra=cd/linxaq`. Entries are separated by commas or newlines; a bare model ID keeps identity forwarding. To retain both public names, list both `cd/linxaq` and `cd/gpt-6-astra=cd/linxaq` in the same source. Both entries use that source's credential; aliases do not create a token pool.
 
@@ -35,5 +21,4 @@ Roll out support to every replica before saving alias metadata. Older versions i
 
 The feature uses the existing HTTP routes; it adds no WebSocket or compaction support. Invalid targets are rejected at create/update time. Empty sides, duplicate public names and multiple equals separators are rejected by the form. Unsupported trailing-slash URLs retain their existing errors.
 
-
-See [spec.md](spec.md) for the routing and dashboard contracts.
+Requirements are in the [routing delta](specs/model-source-routing/spec.md) and [catalog delta](specs/model-catalog-compat/spec.md).

@@ -39,6 +39,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     # time (see source_model_request_overrides); it must never reach the
     # client-visible catalog payloads built from UpstreamModel.raw.
     raw.pop("source_request_overrides", None)
+    raw.pop("upstream_model", None)
     context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
     raw.setdefault("shell_type", "shell_command")
@@ -204,6 +205,15 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
     if entry is None:
         return False
     return _raw_metadata(entry).get("supports_reasoning") is True
+
+
+def source_model_upstream_id(source: ModelSource, model: str) -> str:
+    """Resolve one source-local mapping after selection; never resolve recursively."""
+    entry = next((item for item in source.models if item.model == model and item.is_enabled), None)
+    if entry is None:
+        return model
+    upstream = _raw_metadata(entry).get("upstream_model")
+    return upstream.strip() if isinstance(upstream, str) and upstream.strip() else model
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:

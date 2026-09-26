@@ -896,6 +896,8 @@
   "modelSources.capabilities.vision": "Vision",
   "modelSources.fields.audioPricing": "Audio Pricing",
   "modelSources.fields.audioPricingDescription": "시간 단위로 과금되는 audio transcription model용입니다. Transcription route의 token pricing보다 우선 적용됩니다.",
+  "modelSources.fields.aliasesDescription": "모델 ID 또는 별칭=업스트림-ID를 쉼표로 구분해 입력하세요. 클라이언트는 별칭을, 엔드포인트는 업스트림 ID를 사용합니다.",
+  "modelSources.validation.aliasesInvalid": "중복되지 않는 모델 ID 또는 양쪽이 모두 채워진 별칭=업스트림 항목을 입력하세요.",
   "modelSources.fields.baseUrl": "Base URL",
   "modelSources.fields.contextWindow": "Context Window",
   "modelSources.fields.maxOutputTokens": "Max Output Tokens",

@@ -11,7 +11,9 @@ export function createModelSourceFormSchema(t: TFunction) {
     name: z.string().min(1, t("modelSources.validation.nameRequired")),
     baseUrl: z.string().min(1, t("modelSources.validation.baseUrlRequired")),
     apiKey: z.string(),
-    models: z.string().min(1, t("modelSources.validation.modelsRequired")),
+    models: z.string()
+      .min(1, t("modelSources.validation.modelsRequired"))
+      .refine(validModelEntries, t("modelSources.validation.aliasesInvalid")),
   });
 }
 
@@ -19,8 +21,45 @@ export const modelSourceFormSchema = z.object({
   name: z.string().min(1, "Name is required"),
   baseUrl: z.string().min(1, "Base URL is required"),
   apiKey: z.string(),
-  models: z.string().min(1, "At least one model is required"),
+  models: z.string()
+    .min(1, "At least one model is required")
+    .refine(validModelEntries, "Use unique model IDs or alias=upstream entries"),
 });
+
+export type ModelEntry = { model: string; upstreamModel?: string };
+
+export function parseModelEntries(value: string): ModelEntry[] {
+  return value.split(/[\n,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [model, upstreamModel] = entry.split("=").map((part) => part.trim());
+      return { model, ...(upstreamModel !== undefined ? { upstreamModel } : {}) };
+    });
+}
+
+function validModelEntries(value: string): boolean {
+  const parts = value.split(/[\n,]/).map((entry) => entry.trim()).filter(Boolean);
+  if (!parts.length || parts.some((entry) => entry.split("=").length > 2)) return false;
+  const entries = parseModelEntries(value);
+  return (
+    new Set(entries.map((entry) => entry.model)).size === entries.length &&
+    entries.every(({ model, upstreamModel }) =>
+      model.length > 0 && model.length <= 255 &&
+      (upstreamModel === undefined || (upstreamModel.length > 0 && upstreamModel.length <= 255)),
+    )
+  );
+}
+
+export function mergeUpstreamModelMetadata(
+  existing: string | null | undefined,
+  upstreamModel?: string,
+): string | null {
+  const metadata: Record<string, unknown> = existing ? JSON.parse(existing) : {};
+  if (upstreamModel) metadata.upstream_model = upstreamModel;
+  else delete metadata.upstream_model;
+  return Object.keys(metadata).length ? JSON.stringify(metadata) : null;
+}
 
 export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
 
@@ -174,11 +213,8 @@ export function modelInputsFromForm(
   const cachedInputPer1M = parseNonNegativeFloat(draft.cachedInputPer1M);
   const outputPer1M = parseNonNegativeFloat(draft.outputPer1M);
   const audioPerMinute = parseNonNegativeFloat(draft.audioPerMinute);
-  return values.models
-    .split(/[\n,]/)
-    .map((model) => model.trim())
-    .filter(Boolean)
-    .map((model) => ({
+  return parseModelEntries(values.models)
+    .map(({ model, upstreamModel }) => ({
       model,
       displayName: model,
       contextWindow,
@@ -190,11 +226,14 @@ export function modelInputsFromForm(
       cachedInputPer1M: cachedInputPer1M ?? null,
       outputPer1M: outputPer1M ?? null,
       audioPerMinute: audioPerMinute ?? null,
-      rawMetadataJson: mergeReasoningMetadata(
-        existingRawMetadata[model],
-        draft.supportsReasoning,
-        draft.reasoningEfforts,
-        draft.defaultReasoningEffort,
+      rawMetadataJson: mergeUpstreamModelMetadata(
+        mergeReasoningMetadata(
+          existingRawMetadata[model],
+          draft.supportsReasoning,
+          draft.reasoningEfforts,
+          draft.defaultReasoningEffort,
+        ),
+        upstreamModel,
       ),
       isEnabled: existingEnabledByModel[model] ?? true,
     }));
@@ -281,7 +320,11 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
 }
 
 export function modelIdsToInput(source: ModelSource): string {
-  return source.models.map((model) => model.model).join(", ");
+  return source.models.map((model) => {
+    const metadata: Record<string, unknown> = model.rawMetadataJson ? JSON.parse(model.rawMetadataJson) : {};
+    const upstream = metadata.upstream_model;
+    return typeof upstream === "string" && upstream.trim() ? `${model.model}=${upstream.trim()}` : model.model;
+  }).join(", ");
 }
 
 export function rawMetadataByModel(source: ModelSource): Record<string, string | null> {

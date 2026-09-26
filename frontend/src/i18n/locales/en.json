@@ -896,6 +896,8 @@
   "modelSources.capabilities.vision": "Vision",
   "modelSources.fields.audioPricing": "Audio Pricing",
   "modelSources.fields.audioPricingDescription": "For audio-transcription models billed by duration. Takes precedence over token pricing on the transcription route.",
+  "modelSources.fields.aliasesDescription": "Use model IDs or alias=upstream-id, separated by commas. Clients use the alias; the endpoint receives the upstream ID.",
+  "modelSources.validation.aliasesInvalid": "Use unique model IDs or alias=upstream entries with both sides filled.",
   "modelSources.fields.baseUrl": "Base URL",
   "modelSources.fields.contextWindow": "Context Window",
   "modelSources.fields.maxOutputTokens": "Max Output Tokens",

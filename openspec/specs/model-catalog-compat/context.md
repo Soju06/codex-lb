@@ -24,3 +24,15 @@ file and start a new Codex session to receive metadata changes. Keep the
 source's verified HTTP transport settings: multi-agent capability does not
 imply WebSocket or Responses Lite support. Do not replace a model's reserved
 collaboration schema with a hand-written tool schema; upstream validates it.
+
+## Custom source model aliases
+
+A source can expose `cd/gpt-6-astra` while sending `cd/linxaq` upstream. The
+public slug comes from the model row; `upstream_model` in raw metadata is
+private routing configuration and is omitted from both model catalogs.
+Instructions and multi-agent capabilities remain attached to the public alias.
+
+Configure `cd/gpt-6-astra=cd/linxaq` in the source Models field. After rollout
+and configuration, refresh any pinned client catalog before selecting the alias.
+See [source alias operations](../model-source-routing/context.md#model-aliases)
+for metadata preservation, token scope and rollback considerations.

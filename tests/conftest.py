@@ -207,11 +207,19 @@ def _create_mariadb_functional_indexes(sync_conn) -> None:
         )
 
 
+#: The test module whose schema is currently in the database. MySQL/MariaDB keep
+#: their tables between tests, so the schema is rebuilt when the *file* changes
+#: and only rows are reset within a file: rebuilding per test cost seconds each
+#: (the leg was a multi-hour job), while never rebuilding let state leak between
+#: files (the full leg failed where every file passed on its own). See
+#: :func:`_reset_test_database`.
+_schema_built_for: str | None = None
+
+
 def _recreate_test_schema(sync_conn) -> None:
     from app.db.migration_indexes import is_mariadb
 
-    _drop_test_migration_tables(sync_conn)
-    # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
+    _drop_test_migration_tables(sync_conn)    # A ``mysql+…`` URL pointed at a MariaDB server reports the dialect name
     # ``mysql``: test the server, not the URL spelling.
     if is_mariadb(sync_conn):
         detached = _detach_functional_indexes()
@@ -231,17 +239,55 @@ def _recreate_test_schema(sync_conn) -> None:
     seed_default_auth_providers(sync_conn)
 
 
-def _reset_test_database(sync_conn) -> None:
-    _recreate_test_schema(sync_conn)
+def _clear_test_data(sync_conn) -> None:
+    """Empty every table without touching the schema.
+
+    Rebuilding 69 tables plus the five emulated functional indexes costs seconds
+    on a real server, which is why MySQL/MariaDB build the schema once per
+    session and only reset the rows per test.
+    """
+    sync_conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS=0")
+    try:
+        for table in reversed(Base.metadata.sorted_tables):
+            sync_conn.exec_driver_sql(f"DELETE FROM `{table.name}`")
+    finally:
+        sync_conn.exec_driver_sql("SET FOREIGN_KEY_CHECKS=1")
+    seed_preset_dashboard_roles(sync_conn)
+    seed_default_auth_providers(sync_conn)
+
+
+def _reset_test_database(sync_conn, module: str | None = None) -> None:
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.db.migration_indexes import is_mariadb
+
+    # SQLite keeps the recreate-per-test behaviour (it is cheap there and the
+    # suite relies on it). MySQL/MariaDB rebuild per test *file* and reset only
+    # the rows within a file: at seconds per rebuild, doing it per test turned
+    # the MySQL leg into a multi-hour run. ``CODEX_LB_TEST_RECREATE_SCHEMA=1``
+    # asks for the old behaviour, which is also the fallback when a test leaves
+    # the schema altered.
+    global _schema_built_for
+    if not is_mariadb(sync_conn) or os.environ.get("CODEX_LB_TEST_RECREATE_SCHEMA") == "1":
+        _recreate_test_schema(sync_conn)
+        return
+    if _schema_built_for != module:
+        _recreate_test_schema(sync_conn)
+        _schema_built_for = module
+        return
+    try:
+        _clear_test_data(sync_conn)
+    except ProgrammingError:
+        _recreate_test_schema(sync_conn)
 
 
 @pytest_asyncio.fixture
-async def _reset_db_state():
+async def _reset_db_state(request):
     from app.db.session import close_db
 
     await close_db()
     async with engine.begin() as conn:
-        await conn.run_sync(_reset_test_database)
+        await conn.run_sync(_reset_test_database, getattr(request.module, "__name__", None))
     return True
 
 

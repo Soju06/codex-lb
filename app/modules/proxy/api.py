@@ -147,6 +147,7 @@ from app.core.openai.parsing import classify_event_type, parse_response_payload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
+    extract_input_file_ids,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -182,6 +183,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -237,7 +239,8 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
-from app.modules.model_sources.projection import strip_source_telemetry
+from app.modules.model_sources.ownership_repository import SourceOwnershipRepository
+from app.modules.model_sources.projection import PortabilityView, strip_source_telemetry
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
@@ -275,6 +278,7 @@ from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
+from app.modules.proxy.replay_safety import transcript_is_source_free
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -335,6 +339,13 @@ from app.modules.proxy.source_dispatch import (
     open_with_disconnect_watch,
     settlement_stream,
 )
+from app.modules.proxy.source_ownership import (
+    OwnershipScope,
+    SourceOwnershipError,
+    SourceOwnershipRecorder,
+    source_revision,
+)
+from app.modules.proxy.source_pool import MAX_SOURCE_ATTEMPTS, get_source_pool, retryable_source_error
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -1205,6 +1216,11 @@ async def responses(
     if source_selection is not None:
         responses_payload.model = source_selection[1]
     elif not source_route_excluded and not continuity_suppressed:
+        source_ownership_denial = await _source_ownership_miss_denial(
+            request, responses_payload, api_key, raw_model=raw_source_model
+        )
+        if source_ownership_denial is not None:
+            return source_ownership_denial
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
@@ -1225,10 +1241,11 @@ async def responses(
         if not backend_non_streaming_requested:
             responses_payload.stream = True
         rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
-        return await _source_responses_response(
+        return await _balanced_source_responses_response(
             request,
             responses_payload,
             source=source,
+            original_model=raw_source_model,
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
@@ -1414,6 +1431,11 @@ async def v1_responses(
     if source_selection is not None:
         responses_payload.model = source_selection[1]
     elif not source_route_excluded and not continuity_suppressed:
+        source_ownership_denial = await _source_ownership_miss_denial(
+            request, responses_payload, api_key, raw_model=raw_source_model
+        )
+        if source_ownership_denial is not None:
+            return source_ownership_denial
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
@@ -1432,10 +1454,11 @@ async def v1_responses(
         # source-routed requests use no account, so a closed/empty pool must
         # not reject them.
         rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
-        return await _source_responses_response(
+        return await _balanced_source_responses_response(
             request,
             responses_payload,
             source=source,
+            original_model=raw_source_model,
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
@@ -4643,12 +4666,10 @@ async def _select_responses_model_source_with_continuity(
     """Select a source unless recorded subscription continuity owns the anchor.
 
     Returns ``(selection, continuity_suppressed)``. ``continuity_suppressed``
-    is ``True`` only when an enabled source claimed the model but a recorded
-    subscription owner for ``previous_response_id`` pinned the turn to a
-    subscription account instead. Callers use it to tell that case apart from
-    a genuine lookup miss: only a genuine miss may consult the disabled-source
-    denial, because a continuity-suppressed turn already has a subscription
-    anchor that must keep being served.
+    is ``True`` when a recorded subscription owner for ``previous_response_id``
+    pins the turn to a subscription account, including after source lookup
+    misses. Neither source ownership nor disabled-source denial may override
+    that authoritative subscription anchor.
     """
     source_selection = await _select_responses_model_source(
         payload.model,
@@ -4656,7 +4677,7 @@ async def _select_responses_model_source_with_continuity(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
-    if source_selection is None or payload.previous_response_id is None:
+    if payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
         previous_response_id=payload.previous_response_id,
@@ -4734,6 +4755,57 @@ async def _disabled_model_source_denial(
         error_type="upstream_error",
     )
     return _logged_error_json_response(request, 503, error, headers=headers)
+
+
+async def _source_ownership_miss_denial(
+    request: Request,
+    payload: ResponsesRequest,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+) -> JSONResponse | None:
+    """Fail closed when owned source state has no currently selectable source."""
+    scopes = [
+        OwnershipScope(api_key.id if api_key is not None else None, model)
+        for model in dict.fromkeys(model for model in (raw_model, payload.model) if model)
+    ]
+    original_source_payload = payload.model_dump_for_forwarding()
+    request_keys = set().union(*(scope.request_keys(original_source_payload) for scope in scopes))
+    if not request_keys:
+        return None
+    try:
+        async with get_background_session() as session:
+            ownership = SourceOwnershipRepository(session)
+            references = await ownership.find(sorted(request_keys), now=utcnow())
+            history = await ownership.find_history(sorted(request_keys))
+            has_owner = bool(references or history)
+            if not has_owner and payload.previous_response_id:
+                for scope in scopes:
+                    if await RequestLogsRepository(session).find_source_owner_revisions_for_response_id(
+                        response_id=payload.previous_response_id,
+                        api_key_id=scope.api_key_id,
+                        model=scope.model,
+                    ):
+                        has_owner = True
+                        break
+    except Exception:
+        logger.warning("model_source_pool_lookup_failed", exc_info=True)
+        return _logged_error_json_response(
+            request,
+            502,
+            openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
+        )
+    if not has_owner:
+        return None
+    return _logged_error_json_response(
+        request,
+        409,
+        openai_error(
+            "previous_response_owner_unavailable" if payload.previous_response_id else "model_source_owner_unavailable",
+            "The request's upstream state has no unambiguous available source. "
+            "Use its original source or resend portable full context.",
+        ),
+    )
 
 
 async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -5025,6 +5097,242 @@ async def _source_audio_transcription_response(
     return Response(content=result.body, status_code=200, headers=headers)
 
 
+async def _balanced_source_responses_response(
+    request: Request,
+    payload: ResponsesRequest,
+    *,
+    source: ModelSource,
+    original_model: str | None,
+    api_key: ApiKeyData | None,
+    rate_limit_headers: Mapping[str, str],
+    pre_normalization_effort: str | None,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
+    context: ProxyContext | None = None,
+) -> Response:
+    """Balance only after normal routing established source ownership of this model."""
+    if original_model and original_model != payload.model:
+        # Source selection may normalize the client's model to a fallback.
+        # Evidence recorded under the original public model must still veto
+        # that fallback, while fallback-owned continuations remain usable.
+        original_payload = payload.model_copy(update={"model": original_model})
+        original_owner_denial = await _source_ownership_miss_denial(request, original_payload, api_key)
+        if original_owner_denial is not None:
+            return original_owner_denial
+    pool = get_source_pool()
+    attempted: set[str] = set()
+    last_error: ModelSourceForwardingError | None = None
+    pooled = False
+    scope = OwnershipScope(api_key.id if api_key is not None else None, payload.model)
+    # Subscription cleanup can remove state that direct sources still receive.
+    # Compare overrides against the original source representation instead.
+    request_keys = scope.request_keys(payload.model_dump_for_forwarding())
+    for _ in range(MAX_SOURCE_ATTEMPTS):
+        try:
+            async with get_background_session() as session:
+                candidates = await ModelSourcesRepository(session).list_responses_sources_for_model(
+                    payload.model,
+                    allowed_source_ids=_allowed_source_ids_for_api_key(api_key),
+                    require_streaming=bool(payload.stream),
+                )
+                effective_payloads = {
+                    candidate.id: _shape_source_responses_payload(payload, candidate, api_key=api_key)
+                    for candidate in candidates
+                }
+                invalid_override_ids = {
+                    candidate.id
+                    for candidate in candidates
+                    if _invalid_source_conversation_override(source_model_request_overrides(candidate, payload.model))
+                }
+                invalid_input_ids = {
+                    candidate.id
+                    for candidate in candidates
+                    if _source_payload_has_invalid_input_types(effective_payloads[candidate.id])
+                }
+                file_reference_ids = {
+                    candidate.id
+                    for candidate in candidates
+                    if candidate.id not in invalid_input_ids
+                    and _source_payload_has_file_references(effective_payloads[candidate.id])
+                }
+                effective_keys_by_source = {
+                    candidate_id: scope.request_keys(candidate_payload)
+                    for candidate_id, candidate_payload in effective_payloads.items()
+                    if candidate_id not in invalid_input_ids
+                }
+                effective_request_keys = set(request_keys)
+                for candidate_keys in effective_keys_by_source.values():
+                    effective_request_keys.update(candidate_keys)
+                references = await SourceOwnershipRepository(session).find(sorted(effective_request_keys), now=utcnow())
+                history = await SourceOwnershipRepository(session).find_history(sorted(effective_request_keys))
+                owners_by_reference: dict[str, list[tuple[str, str | None]]] = {
+                    key: [(record.source_id, record.source_revision)] for key, record in references.items()
+                }
+                for key, records in history.items():
+                    owners_by_reference.setdefault(key, []).extend(
+                        (record.source_id, record.source_revision) for record in records
+                    )
+                response_ids = {
+                    previous_response_id
+                    for candidate_id, candidate_payload in effective_payloads.items()
+                    if candidate_id not in invalid_input_ids
+                    if isinstance(previous_response_id := candidate_payload.get("previous_response_id"), str)
+                    and previous_response_id
+                }
+                if payload.previous_response_id:
+                    response_ids.add(payload.previous_response_id)
+                for response_id in response_ids:
+                    response_key = scope.key("response", response_id)
+                    if response_key in owners_by_reference:
+                        continue
+                    owner_revisions = await RequestLogsRepository(session).find_source_owner_revisions_for_response_id(
+                        response_id=response_id,
+                        api_key_id=api_key.id if api_key is not None else None,
+                        model=payload.model,
+                    )
+                    if owner_revisions:
+                        owners_by_reference[response_key] = owner_revisions
+                detach_session_objects(session)
+        except Exception:
+            logger.warning("model_source_pool_lookup_failed", exc_info=True)
+            return _logged_error_json_response(
+                request,
+                502,
+                openai_error("model_source_lookup_failed", "Unable to resolve model source availability and ownership"),
+                headers=rate_limit_headers,
+            )
+        pooled = pooled or len(candidates) > 1
+        eligible_candidates: list[ModelSource] = []
+        portable_by_source: dict[str, bool] = {}
+        for candidate in candidates:
+            if (
+                candidate.id in invalid_override_ids
+                or candidate.id in invalid_input_ids
+                or candidate.id in file_reference_ids
+            ):
+                continue
+            # Each candidate has a different forwarded body. Evidence belonging
+            # only to an unused candidate's overrides cannot veto another source.
+            candidate_keys = request_keys | effective_keys_by_source[candidate.id]
+            owner_revisions = [owner for key in candidate_keys for owner in owners_by_reference.get(key, [])]
+            missing = candidate_keys - owners_by_reference.keys()
+            portable = not candidate_keys and (
+                not pooled
+                or transcript_is_source_free(
+                    PortabilityView(effective_payloads[candidate.id]),
+                    supported_tool_types=source_model_supported_tool_types(candidate, payload.model),
+                    allow_direct_source_tools=True,
+                )
+            )
+            portable_by_source[candidate.id] = portable
+            revision = source_revision(candidate, payload.model)
+            if (
+                any(
+                    owner_id != candidate.id or owner_revision != revision
+                    for owner_id, owner_revision in owner_revisions
+                )
+                or bool(missing & (candidate_keys - request_keys))
+                or (not portable and pooled and (missing or not owner_revisions))
+            ):
+                continue
+            eligible_candidates.append(candidate)
+        if not eligible_candidates and invalid_override_ids and len(invalid_override_ids) == len(candidates):
+            return _logged_error_json_response(
+                request,
+                409,
+                openai_error(
+                    "model_source_override_invalid",
+                    "The selected model sources have malformed conversation overrides.",
+                    error_type="invalid_request_error",
+                ),
+                headers=rate_limit_headers,
+            )
+        if not eligible_candidates and invalid_input_ids and len(invalid_input_ids) == len(candidates):
+            return _logged_error_json_response(
+                request,
+                409,
+                openai_error(
+                    "model_source_override_invalid",
+                    "The selected model sources have malformed input overrides.",
+                    error_type="invalid_request_error",
+                ),
+                headers=rate_limit_headers,
+            )
+        if not eligible_candidates and file_reference_ids and len(file_reference_ids) == len(candidates):
+            return _logged_error_json_response(
+                request,
+                409,
+                openai_error(
+                    "model_source_owner_unavailable",
+                    "The effective source request contains file state that requires subscription ownership.",
+                ),
+                headers=rate_limit_headers,
+            )
+        if not eligible_candidates and (candidates or request_keys):
+            return _logged_error_json_response(
+                request,
+                409,
+                openai_error(
+                    "previous_response_owner_unavailable"
+                    if payload.previous_response_id
+                    else "model_source_owner_unavailable",
+                    "The request's upstream state has no unambiguous available source. "
+                    "Use its original source or resend portable full context without upstream-owned state.",
+                ),
+                headers=rate_limit_headers,
+            )
+        candidates = eligible_candidates
+        if pooled and await request.is_disconnected():
+            return Response()
+        selected = pool.choose(candidates, excluded=attempted) if pooled else next(iter(candidates), None)
+        if selected is None:
+            if last_error is not None:
+                break
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "model_source_busy",
+                    "No permitted model source is currently available; sources may be busy or temporarily cooling down",
+                    error_type="upstream_error",
+                ),
+                headers={**rate_limit_headers, "Retry-After": pool.retry_after(candidates)},
+            )
+        source = selected
+        attempted.add(source.id)
+        try:
+            return await _source_responses_response(
+                request,
+                payload.model_copy(deep=True),
+                source=source,
+                api_key=api_key,
+                rate_limit_headers=rate_limit_headers,
+                pre_normalization_effort=pre_normalization_effort,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                native_codex_heartbeat=native_codex_heartbeat,
+                context=context,
+                propagate_forwarding_errors=pooled,
+                ownership_request_keys=effective_keys_by_source.get(source.id, request_keys),
+            )
+        except ModelSourceForwardingError as exc:
+            # The attempt has finished its transport, reservation and admission.
+            if (task := asyncio.current_task()) is not None and task.cancelling():
+                raise asyncio.CancelledError
+            if await request.is_disconnected():
+                return Response()
+            pool.failed(source, exc)
+            last_error = exc
+            if not portable_by_source[source.id] or not retryable_source_error(exc):
+                break
+    assert last_error is not None
+    return _logged_error_json_response(
+        request,
+        last_error.status_code,
+        last_error.payload,
+        headers=_source_error_response_headers(rate_limit_headers, last_error),
+    )
+
+
 async def _source_responses_response(
     request: Request,
     payload: ResponsesRequest,
@@ -5036,6 +5344,8 @@ async def _source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
+    propagate_forwarding_errors: bool = False,
+    ownership_request_keys: set[str] | None = None,
 ) -> Response:
     """Serve a Responses request from an OpenAI-compatible model source.
 
@@ -5096,6 +5406,47 @@ async def _source_responses_response(
         raise
     try:
         source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        if _source_payload_has_invalid_input_types(source_payload):
+            raise ModelSourceForwardingError(
+                status_code=409,
+                payload=cast(
+                    dict[str, JsonValue],
+                    openai_error(
+                        "model_source_override_invalid",
+                        "The effective source request contains a malformed input item type.",
+                        error_type="invalid_request_error",
+                    ),
+                ),
+            )
+        if _source_payload_has_file_references(source_payload):
+            raise ModelSourceForwardingError(
+                status_code=409,
+                payload=cast(
+                    dict[str, JsonValue],
+                    openai_error(
+                        "model_source_owner_unavailable",
+                        "The effective source request contains file state that requires subscription ownership.",
+                    ),
+                ),
+            )
+        scope = OwnershipScope(api_key.id if api_key is not None else None, payload.model)
+        # Verify that the exact payload sent is the one whose effective
+        # references the pool resolver checked before acquiring dispatch state.
+        if ownership_request_keys is not None and scope.request_keys(source_payload) != ownership_request_keys:
+            raise ModelSourceForwardingError(
+                status_code=409,
+                payload=cast(
+                    dict[str, JsonValue],
+                    openai_error(
+                        "model_source_override_invalid",
+                        "Source request overrides changed continuity references after ownership validation.",
+                        error_type="invalid_request_error",
+                    ),
+                ),
+            )
+        owner.ownership = SourceOwnershipRecorder(
+            scope=scope, source=source, input_keys=scope.request_keys(source_payload), scheduler=owner.scheduler
+        )
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream
@@ -5123,6 +5474,8 @@ async def _source_responses_response(
         return await _finish_non_stream_source_dispatch(request, owner, result, rate_limit_headers=rate_limit_headers)
     except ModelSourceForwardingError as exc:
         await owner.finish_with_forwarding_error(exc)
+        if propagate_forwarding_errors and not owner.reservation_release_failed and not owner.settlement_failed:
+            raise
         return _logged_error_json_response(
             request,
             exc.status_code,
@@ -5206,6 +5559,60 @@ def _shape_source_responses_payload(
     return source_payload
 
 
+def _invalid_source_conversation_override(overrides: Mapping[str, JsonValue]) -> bool:
+    if "conversation" not in overrides or overrides["conversation"] is None:
+        return False
+    conversation = overrides["conversation"]
+    if isinstance(conversation, str):
+        return not conversation
+    return not (isinstance(conversation, dict) and isinstance(conversation.get("id"), str) and bool(conversation["id"]))
+
+
+def _source_payload_has_file_references(payload: Mapping[str, JsonValue]) -> bool:
+    if extract_input_file_ids(payload.get("input")):
+        return True
+    prompt = payload.get("prompt")
+    variables = prompt.get("variables") if isinstance(prompt, dict) else None
+    if isinstance(variables, dict):
+        # Prompt variables accept direct content parts, not arbitrary nested
+        # input items. Filter their types before the shared file-ID extractor.
+        parts: list[JsonValue] = [
+            value
+            for value in variables.values()
+            if isinstance(value, dict) and value.get("type") in ("input_file", "input_image")
+        ]
+        if extract_input_file_ids(parts):
+            return True
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "code_interpreter":
+            continue
+        container = tool.get("container")
+        if isinstance(container, dict) and isinstance(container.get("file_ids"), list) and container["file_ids"]:
+            return True
+    return False
+
+
+def _source_payload_has_invalid_input_types(payload: Mapping[str, JsonValue]) -> bool:
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "type" in item and not isinstance(item["type"], str):
+            return True
+        for field_name in ("content", "output"):
+            parts = item.get(field_name)
+            if isinstance(parts, list) and any(
+                isinstance(part, dict) and "type" in part and not isinstance(part["type"], str) for part in parts
+            ):
+                return True
+    return False
+
+
 async def _finish_non_stream_source_dispatch(
     request: Request,
     owner: SourceDispatch,
@@ -5238,6 +5645,31 @@ async def _finish_non_stream_source_dispatch(
             upstream_status_code=result.upstream_status_code,
         )
         return Response()
+    if owner.ownership is not None:
+        try:
+            await owner.ownership.record_response(
+                result.payload, success=result.payload.get("status") in ("completed", "incomplete")
+            )
+        except asyncio.CancelledError:
+            await owner.finish(
+                status="cancelled",
+                error_code=ABANDON_DISPATCH_INTERRUPTED,
+                error_message="client left while recording model-source continuity",
+                usage=result.usage,
+                timings=result.timings,
+                upstream_status_code=result.upstream_status_code,
+            )
+            raise
+        except SourceOwnershipError as exc:
+            await owner.finish(
+                status="error",
+                error_code="model_source_ownership_unavailable",
+                error_message="Unable to record model-source continuity before delivery",
+                usage=result.usage,
+                timings=result.timings,
+                upstream_status_code=result.upstream_status_code,
+            )
+            raise exc
     await owner.finish(
         status="success",
         usage=result.usage,

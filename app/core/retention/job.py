@@ -11,6 +11,7 @@ from app.core.utils.time import utcnow
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.model_sources.ownership_repository import SourceOwnershipRepository
 from app.modules.proxy.model_source_pins import ModelSourcePinRepository, drain_deadline_from_settings
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
@@ -63,16 +64,31 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
         deleted["usage_history"] = await _prune_usage_history(cutoff)
         deleted["additional_usage_history"] = await _prune_additional_usage_history(cutoff)
     deleted["model_source_pins"] = await prune_model_source_pins()
+    deleted["model_source_ownership"] = await prune_source_ownership(now=now)
     total = sum(deleted.values())
     if total:
         logger.info(
-            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s model_source_pins=%s",
+            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s "
+            "model_source_pins=%s model_source_ownership=%s",
             deleted["request_logs"],
             deleted["usage_history"],
             deleted["additional_usage_history"],
             deleted["model_source_pins"],
+            deleted["model_source_ownership"],
         )
     return deleted
+
+
+async def prune_source_ownership(*, now: datetime) -> int:
+    total = 0
+    while True:
+        async with get_background_session() as session:
+            async with sqlite_writer_section():
+                count = await SourceOwnershipRepository(session).prune(now=now, batch_size=BATCH_SIZE)
+                await session.commit()
+        total += count
+        if count < BATCH_SIZE:
+            return total
 
 
 async def prune_model_source_pins(*, batch_size: int = BATCH_SIZE) -> int:

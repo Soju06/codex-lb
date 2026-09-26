@@ -79,7 +79,13 @@ async def test_retention_disabled_by_default_deletes_nothing(db_setup):
         await session.commit()
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
+    assert deleted == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "model_source_pins": 0,
+        "model_source_ownership": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -641,7 +647,13 @@ async def test_dashboard_zero_disables_retention(db_setup):
     await _set_retention(request_logs=None, usage_history=0)
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 0}
+    assert deleted == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "model_source_pins": 0,
+        "model_source_ownership": 0,
+    }
     async with SessionLocal() as session:
         assert len((await session.execute(select(UsageHistory.id))).scalars().all()) == 2
 
@@ -706,7 +718,13 @@ async def test_model_source_pins_are_pruned_while_retention_is_disabled(db_setup
 
     deleted = await run_retention_pass(now=utcnow())
 
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "model_source_pins": 1}
+    assert deleted == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "model_source_pins": 1,
+        "model_source_ownership": 0,
+    }
     assert not await _pin_exists("thread\npurged")
     assert await _pin_exists("thread\ntombstone")
     assert await _pin_exists("thread\nlive")
@@ -741,6 +759,7 @@ async def test_model_source_pin_drain_invariant_alarm(db_setup, caplog):
         "usage_history": 0,
         "additional_usage_history": 0,
         "model_source_pins": 0,
+        "model_source_ownership": 0,
     }
     assert "model_source_pins_drain_invariant_violated" not in caplog.text
 

@@ -15,7 +15,7 @@ from app.db.models import Account, AccountStatus
 pytestmark = pytest.mark.integration
 
 PARENT = "20260910_010000_merge_beta6_and_key_groups"
-HEAD = "20260921_020000_add_reset_credit_revisions"
+HEAD = "20260926_010000_add_source_ownership_history"
 
 
 def test_reset_credit_migration_preserves_legacy_pins(tmp_path: Path) -> None:

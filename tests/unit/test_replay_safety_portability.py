@@ -883,6 +883,16 @@ def test_neutral_baseline_is_accepted_by_the_predicate_and_the_verdict() -> None
     ) == PortabilityVerdict(True)
 
 
+@pytest.mark.parametrize("value", [0, 5, 20])
+def test_top_logprobs_allowance_is_limited_to_direct_sources(value: int) -> None:
+    body = {**_neutral_baseline(), "top_logprobs": value}
+    view = PortabilityView(body=body)
+    assert transcript_is_source_free(view, allow_direct_source_tools=True)
+    assert not transcript_is_source_free(view)
+    assert not responses_payload_is_account_neutral_fresh_replay(body)
+    assert body["top_logprobs"] == value
+
+
 def test_list_typed_input_item_declines_without_raising_in_every_entry_point() -> None:
     body = _malformed_at(("input", 0, "type"), [])
 

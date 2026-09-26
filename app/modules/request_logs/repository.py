@@ -516,6 +516,51 @@ class RequestLogsRepository:
         )
         return list(result.scalars().all())
 
+    async def find_source_owners_for_response_id(
+        self, *, response_id: str, api_key_id: str | None, model: str
+    ) -> list[str]:
+        """Exact credential scope; two distinct owners are sufficient to fail closed.
+
+        Include failed/cancelled dispatches: they can have delivered an upstream
+        response ID before termination. Do not treat another key's row as evidence.
+        """
+        result = await self._session.execute(
+            select(RequestLog.model_source_id)
+            .where(
+                RequestLog.request_id == response_id,
+                RequestLog.api_key_id == api_key_id,
+                RequestLog.model == model,
+                RequestLog.model_source_id.is_not(None),
+                ~and_(
+                    RequestLog.status == "error",
+                    RequestLog.error_code.is_not_distinct_from("model_source_ownership_unavailable"),
+                ),
+            )
+            .distinct()
+            .limit(2)
+        )
+        return [source_id for source_id in result.scalars() if source_id is not None]
+
+    async def find_source_owner_revisions_for_response_id(
+        self, *, response_id: str, api_key_id: str | None, model: str
+    ) -> list[tuple[str, str | None]]:
+        result = await self._session.execute(
+            select(RequestLog.model_source_id, RequestLog.model_source_revision)
+            .where(
+                RequestLog.request_id == response_id,
+                RequestLog.api_key_id == api_key_id,
+                RequestLog.model == model,
+                RequestLog.model_source_id.is_not(None),
+                ~and_(
+                    RequestLog.status == "error",
+                    RequestLog.error_code.is_not_distinct_from("model_source_ownership_unavailable"),
+                ),
+            )
+            .distinct()
+            .limit(2)
+        )
+        return [(source_id, revision) for source_id, revision in result.all() if source_id is not None]
+
     async def find_latest_owner_record_for_response_id(
         self,
         *,
@@ -1030,6 +1075,7 @@ class RequestLogsRepository:
         upstream_status_code: int | None = None,
         upstream_error_code: str | None = None,
         model_source_id: str | None = None,
+        model_source_revision: str | None = None,
         model_source_kind: str | None = None,
         cost_usd: float | None = None,
         bridge_stage: str | None = None,
@@ -1060,6 +1106,7 @@ class RequestLogsRepository:
             log = RequestLog(
                 account_id=account_id,
                 model_source_id=model_source_id,
+                model_source_revision=model_source_revision,
                 model_source_kind=model_source_kind,
                 api_key_id=api_key_id,
                 session_id=session_id,

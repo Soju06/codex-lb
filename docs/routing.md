@@ -17,6 +17,16 @@ For low-volume, policy-compliant personal use, start with **Capacity weighted** 
 
 Change the strategy live in the dashboard under **Settings → Routing** — no restart required.
 
+## Multiple keys for custom Codex models
+
+Create one **Model source** per upstream key, with the same public model/alias, endpoint and capabilities. Include all intended sources in the client's source assignments. Portable Responses requests share available sources; each attempt applies its selected source's alias and credential. Other API protocols keep their existing selection policy.
+
+Response IDs, conversation state and encrypted reasoning stay on their recorded source. Ownership is stored in the shared database before delivery, so a follow-up can reach another backend immediately. Unknown or conflicting state in a pool returns 409 instead of guessing a key. For externally created or pre-upgrade state, temporarily assign the client key only to its known source; successful use records ownership. Fresh full context can balance only when it contains no opaque upstream-owned state.
+
+Responses redirects return `502 model_source_redirect` without replay; configure the final endpoint URL. Complete the HA rollout on every backend before adding multiple keys for one model. Ownership lasts 30 days after use; load and cooldown counters remain local to each worker.
+
+Owning specification and operational details: [model-source-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-source-routing).
+
 ## Routing, quotas, and eligibility explainer
 
 ### Account eligibility vs displayed status

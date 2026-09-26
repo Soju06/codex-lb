@@ -298,6 +298,17 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
     return all(not call_ids for call_ids in unsettled_call_ids_by_type.values())
 
 
+def self_contained_tool_call_ids(input_items: list[JsonValue]) -> set[str]:
+    """Return complete ordered call/result groups, ignoring only bookkeeping IDs."""
+    groups: dict[str, list[JsonValue]] = {}
+    for item in input_items:
+        if isinstance(item, dict) and isinstance(call_id := item.get("call_id"), str) and call_id:
+            groups.setdefault(call_id, []).append({key: value for key, value in item.items() if key != "id"})
+    return {
+        call_id for call_id, group in groups.items() if responses_input_items_are_self_contained_fresh_replay(group)
+    }
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True
@@ -1095,6 +1106,7 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
 _PORTABILITY_VIEW_ONLY_FIELDS = frozenset(
     {"max_output_tokens", "prompt_cache_retention", "safety_identifier", "temperature", "top_p", "user"}
 )
+_DIRECT_SOURCE_NEUTRAL_FIELDS = frozenset({"background", "max_tool_calls", "stream_options", "top_logprobs"})
 # Items every OpenAI-compatible Responses source accepts without a tool declaration.
 _PROVIDER_UNIVERSAL_ITEM_TYPES = frozenset({"message", "function_call", "function_call_output"})
 # Items a source serves only when the model declares the tool type
@@ -1177,7 +1189,12 @@ def responses_payload_is_provider_portable(
     return PortabilityVerdict(True)
 
 
-def transcript_is_source_free(view: PortabilityView, *, supported_tool_types: frozenset[str] = frozenset()) -> bool:
+def transcript_is_source_free(
+    view: PortabilityView,
+    *,
+    supported_tool_types: frozenset[str] = frozenset(),
+    allow_direct_source_tools: bool = False,
+) -> bool:
     """Steps 1-2 of ``responses_payload_is_provider_portable`` only.
 
     True when the viewed transcript carries no account-scoped upstream state:
@@ -1197,10 +1214,50 @@ def transcript_is_source_free(view: PortabilityView, *, supported_tool_types: fr
         not isinstance(item, dict) or ("type" in item and not isinstance(item["type"], str)) for item in input_items
     ):
         return False
-    classification_view = _classification_view(view, supported_tool_types=supported_tool_types)
+    direct_source_view = view
+    if allow_direct_source_tools:
+        direct_source_body = dict(view.body)
+        local_call_ids = self_contained_tool_call_ids(input_items)
+        if local_call_ids:
+            direct_source_body["input"] = [
+                {key: value for key, value in item.items() if key != "id"}
+                if isinstance(item, dict)
+                and isinstance(call_id := item.get("call_id"), str)
+                and call_id in local_call_ids
+                else item
+                for item in input_items
+            ]
+        for field_name in _DIRECT_SOURCE_NEUTRAL_FIELDS:
+            value = direct_source_body.get(field_name)
+            if _direct_source_neutral_control_is_safe(field_name, value):
+                direct_source_body.pop(field_name, None)
+        direct_source_view = PortabilityView(direct_source_body)
+    classification_view = _classification_view(
+        direct_source_view,
+        supported_tool_types=supported_tool_types,
+        allow_direct_source_tools=allow_direct_source_tools,
+    )
     if classification_view is None or not responses_payload_is_account_neutral_fresh_replay(classification_view):
         return False
     return not any(_item_type(item) in ("compaction", "reasoning") for item in input_items)
+
+
+def _direct_source_neutral_control_is_safe(field_name: str, value: JsonValue | None) -> bool:
+    if value is None:
+        return True
+    if field_name == "background":
+        return isinstance(value, bool)
+    if field_name == "max_tool_calls":
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    if field_name == "top_logprobs":
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 20
+    if field_name == "stream_options":
+        return (
+            isinstance(value, dict)
+            and set(value) <= {"include_obfuscation"}
+            and (not value or isinstance(value.get("include_obfuscation"), bool))
+        )
+    return False
 
 
 def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
@@ -1214,7 +1271,10 @@ def is_binding_turn_state(headers: Mapping[str, str]) -> bool:
 
 
 def _classification_view(
-    view: PortabilityView, *, supported_tool_types: frozenset[str] = frozenset()
+    view: PortabilityView,
+    *,
+    supported_tool_types: frozenset[str] = frozenset(),
+    allow_direct_source_tools: bool = False,
 ) -> dict[str, JsonValue] | None:
     """The view restricted to what the account-neutral predicate validates, or ``None`` when it cannot be neutral.
 
@@ -1232,23 +1292,46 @@ def _classification_view(
 
     body = {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
     stateless_types = supported_tool_types & _STATELESS_DECLARABLE_TOOL_TYPES
-    if not stateless_types:
-        return body
-    tools = body.get("tools")
-    if isinstance(tools, list):
-        kept: list[JsonValue] = []
-        for tool in tools:
-            if (
-                isinstance(tool, dict)
-                and _is_one_of(tool.get("type"), stateless_types)
-                and _is_portable_stateless_declaration(tool)
-            ):
-                # Defense in depth: the shape admits no reference-bearing field.
-                if _contains_account_scoped_tool_state(tool):
-                    return None
-                continue
-            kept.append(tool)
-        body["tools"] = kept
+    if stateless_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            kept: list[JsonValue] = []
+            for tool in tools:
+                if (
+                    isinstance(tool, dict)
+                    and _is_one_of(tool.get("type"), stateless_types)
+                    and _is_portable_stateless_declaration(tool)
+                ):
+                    # Defense in depth: the shape admits no reference-bearing field.
+                    if _contains_account_scoped_tool_state(tool):
+                        return None
+                    continue
+                kept.append(tool)
+            body["tools"] = kept
+    if allow_direct_source_tools and "namespace" in supported_tool_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            kept = []
+            for tool in tools:
+                if (
+                    isinstance(tool, dict)
+                    and tool.get("type") == "namespace"
+                    and _direct_namespace_declaration_is_safe(tool)
+                ):
+                    continue
+                kept.append(tool)
+            body["tools"] = kept
+    if allow_direct_source_tools and "web_search" in supported_tool_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            body["tools"] = [
+                {key: value for key, value in tool.items() if key != "external_web_access"}
+                if isinstance(tool, dict)
+                and tool.get("type") == "web_search"
+                and isinstance(tool.get("external_web_access"), bool)
+                else tool
+                for tool in tools
+            ]
     tool_choice = body.get("tool_choice")
     if (
         isinstance(tool_choice, dict)
@@ -1256,7 +1339,41 @@ def _classification_view(
         and _is_one_of(tool_choice["type"], stateless_types)
     ):
         body.pop("tool_choice")
+    if (
+        allow_direct_source_tools
+        and "namespace" in supported_tool_types
+        and isinstance(tool_choice, dict)
+        and tool_choice.get("type") == "namespace"
+        and set(tool_choice) == {"type"}
+    ):
+        body.pop("tool_choice")
     return body
+
+
+def _direct_namespace_declaration_is_safe(tool: Mapping[str, JsonValue]) -> bool:
+    """Validate the stateless collaboration declaration before dropping it."""
+    if set(tool) - {"description", "name", "tools", "type"} or not _is_nonblank_string(tool.get("name")):
+        return False
+    description = tool.get("description")
+    if description is not None and not isinstance(description, str):
+        return False
+    nested = tool.get("tools")
+    if not isinstance(nested, list):
+        return False
+    for item in nested:
+        if not isinstance(item, dict) or item.get("type") != "function":
+            return False
+        if set(item) - {"description", "name", "parameters", "strict", "type"}:
+            return False
+        if not _is_nonblank_string(item.get("name")):
+            return False
+        if item.get("description") is not None and not isinstance(item.get("description"), str):
+            return False
+        if item.get("parameters") is not None and not isinstance(item.get("parameters"), dict):
+            return False
+        if item.get("strict") is not None and not isinstance(item.get("strict"), bool):
+            return False
+    return True
 
 
 def _view_input_items(view: PortabilityView) -> list[JsonValue]:

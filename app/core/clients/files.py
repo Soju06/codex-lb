@@ -336,6 +336,7 @@ async def finalize_file(
             finalize_budget = min(_DEFAULT_FILE_FINALIZE_BUDGET_SECONDS, effective_per_poll_total)
             deadline = time.monotonic() + finalize_budget
             parsed: dict[str, JsonValue] = {"status": "retry"}
+            poll_returned = False
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -350,6 +351,7 @@ async def finalize_file(
                     headers=upstream_headers,
                     timeout=min(effective_per_poll_total, remaining),
                 )
+                poll_returned = True
                 parsed = await _parse_file_response(response, f"/files/{file_id}/uploaded")
                 status = parsed.get("status")
                 if status != "retry":
@@ -361,6 +363,8 @@ async def finalize_file(
                     return parsed
         except Exception as exc:
             if isinstance(exc, FileProxyError):
+                if poll_returned:
+                    exc.retryable_same_contract = False
                 raise
             message = str(exc) or "Request to upstream timed out"
             raise FileProxyError(

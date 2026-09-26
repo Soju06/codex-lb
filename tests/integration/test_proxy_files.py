@@ -1223,3 +1223,63 @@ async def test_backend_files_routed_transport_failover(async_client, monkeypatch
         assert len(calls) == 1
         expected_code = "proxy_network_unavailable" if failure == "process_network" else "upstream_unavailable"
         assert response.json()["error"]["code"] == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_backend_files_late_finalize_connect_failure_stays_with_first_account(async_client, monkeypatch, pinned):
+    import errno
+    from types import SimpleNamespace
+
+    import aiohttp
+    from aiohttp.client_reqrep import ConnectionKey
+
+    import app.core.clients.codex as codex_module
+    import app.core.clients.files as files_module
+    from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+    from app.dependencies import get_proxy_service_for_app
+
+    first_id = await _import_account(async_client, "late_poll_a", "late-poll-a@example.com")
+    await _import_account(async_client, "late_poll_b", "late-poll-b@example.com")
+    if pinned:
+        service = get_proxy_service_for_app(async_client._transport.app)
+        await service._pin_file_account("file_late_poll", first_id)
+    calls: list[str] = []
+
+    class Session:
+        async def request(self, method, url, **kwargs):
+            account_id = kwargs["headers"]["chatgpt-account-id"]
+            calls.append(account_id)
+            if account_id != calls[0]:
+                return SimpleNamespace(status=200, text='{"status":"success"}')
+            if len(calls) == 1:
+                return SimpleNamespace(status=200, text='{"status":"retry"}')
+            key = ConnectionKey("proxy.invalid", 8080, False, False, None, None, None)
+            raise aiohttp.ClientProxyConnectionError(key, ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
+
+        async def close(self):
+            pass
+
+    async def route(self, account, **kwargs):
+        return ResolvedUpstreamRoute(
+            "pool", "files-pool", ResolvedProxyEndpoint(f"timeout-{account.id}", "http", "proxy.invalid", 8080)
+        )
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(codex_module, "discover_native_egress_client", lambda: None)
+    monkeypatch.setattr(files_module, "create_codex_session", Session)
+    monkeypatch.setattr(files_module, "_FILE_FINALIZE_POLL_DELAY_SECONDS", 0)
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", route)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fresh)
+
+    response = await async_client.post("/backend-api/files/file_late_poll/uploaded")
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    if pinned:
+        assert calls[0] == "late_poll_a"
+        async with SessionLocal() as session:
+            assert await FileAccountPinRepository(session).get_live_account_id("file_late_poll") == first_id

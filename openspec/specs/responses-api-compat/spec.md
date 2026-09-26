@@ -3049,7 +3049,7 @@ the failed account, exclude it from the current request, and retry the unary
 operation on the fallback account. The proxy MUST NOT fail over strict
 account-owner requests whose upstream resource is bound to the selected account.
 
-For account-routed file operations, the client and service MUST preserve typed transport phase and replay eligibility. Confirmed pre-dispatch connection failures MUST use the existing account failover policy even when the credential-safe message contains no transient-error phrase. Typed transport errors MUST NOT gain replay eligibility from message text. TLS verification failures, ambiguous request failures, response-body failures, and process-wide network failures MUST NOT cause cross-account file retries.
+For account-routed file operations, the client and service MUST preserve typed transport phase and replay eligibility. Confirmed pre-dispatch connection failures MUST use the existing account failover policy even when the credential-safe message contains no transient-error phrase. Typed transport errors MUST NOT gain replay eligibility from message text. TLS verification failures, ambiguous request failures, response-body failures, and process-wide network failures MUST NOT cause cross-account file retries. A file-finalize operation MUST NOT fail over to another account after any of its polls has returned an upstream response, even if a later poll fails before dispatch.
 
 #### Scenario: Unary refresh transport failure uses another account
 
@@ -3085,6 +3085,24 @@ For account-routed file operations, the client and service MUST preserve typed t
 - **WHEN** the transport reports a TLS verification failure, ambiguous request failure, response-body failure, or process-wide network failure
 - **THEN** the proxy returns the transport error without invoking the file operation through another account
 - **AND** transient-looking text in the sanitized message does not permit replay
+
+#### Scenario: First file-finalize poll fails before dispatch
+
+- **GIVEN** an unpinned file-finalize operation with another eligible account and no completed upstream poll
+- **WHEN** its first routed poll fails with a confirmed pre-dispatch connection refusal
+- **THEN** the proxy MAY complete the operation on the eligible fallback account within the existing budget
+
+#### Scenario: Later file-finalize poll fails before dispatch
+
+- **GIVEN** an unpinned file-finalize operation whose first upstream poll returned `status: retry`
+- **WHEN** a later routed poll fails with a confirmed pre-dispatch connection refusal
+- **THEN** the proxy MUST return an upstream-unavailable error without invoking any poll through another account
+
+#### Scenario: Pinned file-finalize poll fails
+
+- **GIVEN** a file-finalize operation pinned to its owner account
+- **WHEN** its first or a later poll fails before dispatch
+- **THEN** the proxy MUST fail closed without invoking a poll through another account
 
 ### Requirement: Responses input images bypass the HTTP bridge
 

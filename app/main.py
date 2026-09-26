@@ -1016,6 +1016,7 @@ def create_app() -> FastAPI:
     app.include_router(firewall_api.router)
     app.include_router(fleet_api.router)
     app.include_router(key_dashboard_api.router)
+    app.include_router(proxy_api.key_catalog_router)
     app.include_router(sticky_sessions_api.router)
     app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)

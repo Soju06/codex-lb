@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Literal
 
+from app.modules.key_dashboard.install_catalog import UNIX_CATALOG_SETUP, WINDOWS_CATALOG_SETUP
+
 InstallPlatform = Literal["macos", "linux", "windows"]
 
 
@@ -18,37 +20,39 @@ def _toml_string(value: str) -> str:
 def build_install_script(*, platform: InstallPlatform, api_key: str, base_url: str, model: str | None) -> str:
     """Render credentials as inert file contents, never as interpolated shell code."""
     config = (
-        (f"model = {_toml_string(model)}\n" if model else "") + 'model_provider = "codex-lb"\n'
+        'model_provider = "codex-lb"\n'
         'cli_auth_credentials_store = "file"\n\n'
         "[model_providers.codex-lb]\n"
         'name = "openai"\n'
         f"base_url = {_toml_string(base_url)}\n"
         'wire_api = "responses"\n'
-        "supports_websockets = true\n"
         "requires_openai_auth = true\n"
     )
     auth = json.dumps({"OPENAI_API_KEY": api_key}, indent=2) + "\n"
+    catalog_url = base_url.removesuffix("/backend-api/codex") + "/api/key-dashboard/models"
+    setup = json.dumps({"catalog_url": catalog_url, "model": model}, indent=2) + "\n"
     if platform == "windows":
-        return _powershell_script(config, auth)
-    return _bash_script(config, auth)
+        return _powershell_script(config, auth, setup)
+    return _bash_script(config, auth, setup)
 
 
-def _bash_script(config: str, auth: str) -> str:
+def _bash_script(config: str, auth: str, setup: str) -> str:
     return (
         """#!/usr/bin/env bash
 # Configure installed Codex clients. Contains a private API key; do not share.
 set -euo pipefail
 umask 077
+command -v python3 >/dev/null 2>&1 || { printf 'Install Python 3 before running this installer.\\n' >&2; exit 1; }
 codex_dir="${CODEX_HOME:-$HOME/.codex}"
 mkdir -p "$codex_dir"
-for name in config.toml auth.json; do
+for name in config.toml auth.json codex-lb-models.json; do
   if [ -L "$codex_dir/$name" ] || { [ -e "$codex_dir/$name" ] && [ ! -f "$codex_dir/$name" ]; }; then
     printf 'Refusing to replace a symlink or non-file: %s\\n' "$codex_dir/$name" >&2
     exit 1
   fi
 done
 backup_dir=$(mktemp -d "$codex_dir/backup-codex-lb-$(date +%Y%m%d-%H%M%S)-XXXXXX")
-for name in config.toml auth.json; do
+for name in config.toml auth.json codex-lb-models.json; do
   if [ -f "$codex_dir/$name" ]; then
     cp -p "$codex_dir/$name" "$backup_dir/$name"
   fi
@@ -61,7 +65,16 @@ cat > "$backup_dir/auth.new" <<'CODEX_LB_AUTH'
 """
         + auth
         + """CODEX_LB_AUTH
-chmod 600 "$backup_dir/config.new" "$backup_dir/auth.new"
+cat > "$backup_dir/setup.json" <<'CODEX_LB_SETUP'
+"""
+        + setup
+        + """CODEX_LB_SETUP
+python3 - "$codex_dir" "$backup_dir" <<'CODEX_LB_CATALOG'
+"""
+        + UNIX_CATALOG_SETUP
+        + """CODEX_LB_CATALOG
+chmod 600 "$backup_dir/config.new" "$backup_dir/auth.new" "$backup_dir/catalog.new"
+mv -f "$backup_dir/catalog.new" "$codex_dir/codex-lb-models.json"
 mv -f "$backup_dir/config.new" "$codex_dir/config.toml"
 mv -f "$backup_dir/auth.new" "$codex_dir/auth.json"
 printf 'Codex configured. Restart your App, CLI or extension. Backup: %s\\n' "$backup_dir"
@@ -69,7 +82,7 @@ printf 'Codex configured. Restart your App, CLI or extension. Backup: %s\\n' "$b
     )
 
 
-def _powershell_script(config: str, auth: str) -> str:
+def _powershell_script(config: str, auth: str, setup: str) -> str:
     return (
         """# Configure installed Codex clients. Contains a private API key; do not share.
 $ErrorActionPreference = 'Stop'
@@ -78,10 +91,10 @@ $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else {
 }
 $null = New-Item -ItemType Directory -Force -Path $codexDir
 $codexDir = (Get-Item -LiteralPath $codexDir).FullName
-foreach ($name in @('config.toml', 'auth.json')) {
+foreach ($name in @('config.toml', 'auth.json', 'codex-lb-models.json')) {
     $path = Join-Path $codexDir $name
-    if (Test-Path -LiteralPath $path) {
-        $item = Get-Item -Force -LiteralPath $path
+    $item = Get-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
+    if ($null -ne $item) {
         if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Refusing to replace a symlink or non-file: $path"
         }
@@ -98,7 +111,7 @@ $backupName = 'backup-codex-lb-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + 
 $backupDir = Join-Path $codexDir $backupName
 $null = New-Item -ItemType Directory -Path $backupDir
 Set-Acl -LiteralPath $backupDir -AclObject $acl
-foreach ($name in @('config.toml', 'auth.json')) {
+foreach ($name in @('config.toml', 'auth.json', 'codex-lb-models.json')) {
     $path = Join-Path $codexDir $name
     if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $backupDir $name) }
 }
@@ -107,18 +120,23 @@ $config = @'
         + config
         + "'@\n$auth = @'\n"
         + auth
-        + """'@
-$utf8 = [Text.UTF8Encoding]::new($false)
+        + "'@\n$setupJson = @'\n"
+        + setup
+        + "'@\n"
+        + WINDOWS_CATALOG_SETUP
+        + """$utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllText((Join-Path $backupDir 'config.new'), $config, $utf8)
 [IO.File]::WriteAllText((Join-Path $backupDir 'auth.new'), $auth, $utf8)
+[IO.File]::WriteAllText((Join-Path $backupDir 'catalog.new'), $catalogJson, $utf8)
 # Protect the new files explicitly; keep unrelated Codex files and ACLs unchanged.
 $fileAcl = [Security.AccessControl.FileSecurity]::new()
 $fileAcl.SetOwner($sid)
 $fileAcl.SetAccessRuleProtection($true, $false)
 $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
-foreach ($name in @('config', 'auth')) {
+foreach ($name in @('config', 'auth', 'catalog')) {
     Set-Acl -LiteralPath (Join-Path $backupDir ($name + '.new')) -AclObject $fileAcl
 }
+Move-Item -Force -LiteralPath (Join-Path $backupDir 'catalog.new') -Destination $catalogPath
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'config.new') -Destination (Join-Path $codexDir 'config.toml')
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'auth.new') -Destination (Join-Path $codexDir 'auth.json')
 Write-Output "Codex configured. Restart your App, CLI or extension. Backup: $backupDir"

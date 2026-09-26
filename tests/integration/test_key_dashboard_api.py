@@ -235,6 +235,7 @@ async def test_key_dashboard_endpoints_reject_inactive_key(async_client, db_setu
         "/api/key-dashboard/profile",
         "/api/key-dashboard/request-logs",
         "/api/key-dashboard/install-script?platform=linux",
+        "/api/key-dashboard/models",
     ):
         response = await async_client.get(
             path,
@@ -257,6 +258,7 @@ async def test_key_dashboard_endpoints_reject_expired_key(async_client, db_setup
         "/api/key-dashboard/profile",
         "/api/key-dashboard/request-logs",
         "/api/key-dashboard/install-script?platform=linux",
+        "/api/key-dashboard/models",
     ):
         response = await async_client.get(
             path,
@@ -291,7 +293,7 @@ async def test_key_installer_requires_own_key_and_is_not_cacheable(async_client,
     assert own.id not in response.text
     assert "https://installer.example.test/backend-api/codex" in response.text
     assert "auth.json" in response.text
-    assert "model = " not in response.text
+    assert '"model": null' in response.text
 
 
 @pytest.mark.asyncio
@@ -310,7 +312,7 @@ async def test_key_installer_uses_key_model_policy(async_client, db_setup, enfor
     headers = {"Authorization": f"Bearer {key.key}"}
     response = await async_client.get("/api/key-dashboard/install-script?platform=linux", headers=headers)
     assert response.status_code == 200
-    assert f'model = "{enforced or "gpt-5.6-sol"}"' in response.text
+    assert f'"model": "{enforced or "gpt-5.6-sol"}"' in response.text
     unsupported = await async_client.get("/api/key-dashboard/install-script?platform=android", headers=headers)
     assert unsupported.status_code == 422
     assert key.key not in unsupported.text

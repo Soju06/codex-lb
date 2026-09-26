@@ -36,6 +36,7 @@ from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
 from app.core.auth.dependencies import (
+    set_dashboard_error_format,
     set_openai_error_format,
     validate_codex_provider_usage_identity,
     validate_proxy_api_key,
@@ -449,6 +450,11 @@ v1_ws_router = APIRouter(
 usage_router = APIRouter(
     tags=["proxy"],
     dependencies=[Depends(set_openai_error_format)],
+)
+key_catalog_router = APIRouter(
+    prefix="/api/key-dashboard",
+    tags=["key-dashboard"],
+    dependencies=[Depends(set_dashboard_error_format)],
 )
 transcribe_router = APIRouter(
     prefix="/backend-api",
@@ -1703,6 +1709,18 @@ async def models(
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
     return await _build_codex_models_response(api_key)
+
+
+@key_catalog_router.get("/models", response_model=CodexModelsResponse)
+async def key_dashboard_models(
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> Response:
+    # Setup remains key-scoped even when ordinary proxy requests need no key.
+    # Catalog refresh does not make an inference request or reserve its limits.
+    response = await _build_codex_models_response_body(api_key)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization"
+    return response
 
 
 @v1_router.get("/models", response_model=None)

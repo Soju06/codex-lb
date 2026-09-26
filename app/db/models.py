@@ -2923,6 +2923,13 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
+# Two indexes the 0.5 s slow log asked for (2026-09-26): the dashboard facet pager
+# enumerated distinct ``account_id`` with a recursive ``min()`` over a full scan
+# (37.6 M rows examined across 129 calls), and the earliest-request aggregate
+# filtered ``request_kind`` out of a `NOT IN` the plan could not narrow, reading
+# every row of the ``deleted_at IS NULL`` range.
+Index("idx_logs_facet_accounts", RequestLog.deleted_at, RequestLog.status, RequestLog.account_id)
+Index("idx_logs_min_requested", RequestLog.deleted_at, RequestLog.request_kind, RequestLog.requested_at)
 Index(
     "idx_logs_account_kind_deleted_latest",
     RequestLog.account_id,

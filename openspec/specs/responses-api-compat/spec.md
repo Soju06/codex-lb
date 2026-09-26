@@ -3847,6 +3847,12 @@ source model has not declared support for. A source model declares support in
 its `raw_metadata_json`: `"supports_search_tool": true` keeps web-search tools
 (`web_search`, including the `web_search_preview` alias), and
 `"experimental_supported_tools"` MAY list additional supported tool types.
+A source model that declares `"tool_mode": "code_mode_only"` or
+`"apply_patch_tool_type": "freeform"` MUST also be treated as supporting
+`custom` tools. Custom tool definitions (including grammar), matching named
+or `allowed_tools` choices, and `parallel_tool_calls` MUST be preserved when
+those tools survive filtering. A model with neither declaration nor an
+explicit `custom` opt-in MUST continue to drop custom tools.
 When only some tools are dropped, a `tool_choice` that references a dropped
 tool MUST be removed so the forwarded payload never names a tool that is not
 present; `function`-typed choices MUST be preserved. When all tools are
@@ -3893,6 +3899,26 @@ source-routed Responses surface (`/backend-api/codex/responses` and
 - **GIVEN** a source model with no tool capability opt-ins
 - **WHEN** a Responses request whose tools are all unsupported is forwarded to it
 - **THEN** the forwarded payload contains no `tools`, `tool_choice`, or `parallel_tool_calls` keys
+
+#### Scenario: Code-mode sources retain execution tools
+
+- **GIVEN** a source model declares `tool_mode` as `code_mode_only` without listing `custom` in `experimental_supported_tools`
+- **WHEN** a request contains the custom `exec` tool, function `wait` tool, and an unsupported hosted tool
+- **THEN** the custom and function definitions, including the custom grammar, are forwarded unchanged
+- **AND** choices naming the retained custom tool and `parallel_tool_calls` are preserved
+- **AND** the unsupported hosted tool is dropped
+
+#### Scenario: Freeform apply-patch sources retain custom tools
+
+- **GIVEN** a source model declares `apply_patch_tool_type` as `freeform` without listing `custom` in `experimental_supported_tools`
+- **WHEN** a request contains a custom `apply_patch` tool with a matching named or allowed-tools choice
+- **THEN** the custom definition and matching choice are forwarded unchanged
+
+#### Scenario: Plain source models still require an explicit custom opt-in
+
+- **GIVEN** a source model declares neither code mode nor freeform apply-patch and has no explicit `custom` opt-in
+- **WHEN** a request contains a custom tool, a function tool, and a choice naming the custom tool
+- **THEN** the custom tool and its dangling choice are removed while the function tool is retained
 
 ### Requirement: Source request overrides apply without clobbering proxy-owned keys
 

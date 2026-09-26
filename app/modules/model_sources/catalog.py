@@ -232,7 +232,8 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     Function tools are always forwarded to OpenAI-compatible sources; hosted
     tool types are dropped unless the model opts in via
     ``"supports_search_tool": true`` (web search) or lists the tool type in
-    ``"experimental_supported_tools"`` in ``raw_metadata_json``. A source
+    ``"experimental_supported_tools"`` in ``raw_metadata_json``. Code-mode
+    and freeform apply-patch declarations also opt into ``custom`` tools. A source
     that declares ``multi_agent_version`` also opts into the Responses
     ``namespace`` collaboration tool used by Codex ``spawn_agent``.
     """
@@ -249,6 +250,8 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     experimental = raw.get("experimental_supported_tools")
     if is_json_list(experimental):
         supported.update(item for item in experimental if isinstance(item, str))
+    if raw.get("tool_mode") == "code_mode_only" or raw.get("apply_patch_tool_type") == "freeform":
+        supported.add("custom")
     multi_agent_version = raw.get("multi_agent_version")
     if isinstance(multi_agent_version, str) and multi_agent_version.strip():
         supported.add("namespace")

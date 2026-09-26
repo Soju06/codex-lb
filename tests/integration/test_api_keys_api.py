@@ -1635,6 +1635,114 @@ async def test_responses_preserves_collaboration_namespace_for_multi_agent_sourc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/backend-api/codex/responses", "/backend-api/codex/responses/", "/v1/responses", "/v1/responses/"],
+)
+@pytest.mark.parametrize(
+    ("metadata", "supports_custom"),
+    [
+        pytest.param({"tool_mode": "code_mode_only"}, True, id="code-mode"),
+        pytest.param({"apply_patch_tool_type": "freeform"}, True, id="freeform-patch"),
+        pytest.param({"experimental_supported_tools": ["custom"]}, True, id="explicit"),
+        pytest.param({}, False, id="plain"),
+        pytest.param({"tool_mode": True, "apply_patch_tool_type": "function"}, False, id="other-capabilities"),
+    ],
+)
+@pytest.mark.parametrize("allowed_choice", [False, True], ids=["named", "allowed"])
+async def test_responses_custom_tools_follow_source_capabilities(
+    async_client, monkeypatch, path, metadata, supports_custom, allowed_choice
+):
+    model = "external-custom-tools"
+    await _create_model_source(
+        async_client,
+        name="custom-tools",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=json.dumps(metadata),
+    )
+    observed: dict[str, object] = {}
+    tool_call = {
+        "id": "ctc_exec",
+        "type": "custom_tool_call",
+        "call_id": "call_exec",
+        "name": "exec",
+        "input": "text(await tools.exec_command({cmd: 'pwd'}));",
+        "status": "completed",
+    }
+
+    async def fake_stream(source, payload, **_kwargs):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            if supports_custom:
+                yield (
+                    b'data: {"type":"response.created","response":{"id":"resp_custom_tools",'
+                    b'"status":"in_progress","output":[]}}\n\n'
+                )
+                added = {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {**tool_call, "status": "in_progress", "input": ""},
+                }
+                yield f"data: {json.dumps(added)}\n\n".encode()
+                event = {"type": "response.output_item.done", "output_index": 0, "item": tool_call}
+                yield f"data: {json.dumps(event)}\n\n".encode()
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_custom_tools",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+    custom_tools = [
+        {
+            "type": "custom",
+            "name": name,
+            "description": "Execute a client-side tool.",
+            "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+        }
+        for name in ("exec", "apply_patch")
+    ]
+    function_tool = {"type": "function", "name": "wait", "parameters": {"type": "object", "properties": {}}}
+    custom_choice = {"type": "custom", "name": "exec"}
+    function_choice = {"type": "function", "name": "wait"}
+    tool_choice = (
+        {"type": "allowed_tools", "mode": "auto", "tools": [custom_choice, function_choice]}
+        if allowed_choice
+        else custom_choice
+    )
+    response = await async_client.post(
+        path,
+        json={
+            "model": model,
+            "instructions": "Use exec to read the workspace.",
+            "input": [],
+            "stream": True,
+            "tools": [*custom_tools, function_tool, {"type": "web_search"}],
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": True,
+        },
+    )
+
+    assert response.status_code == 200
+    forwarded = cast("dict[str, object]", observed["payload"])
+    assert forwarded["tools"] == ([*custom_tools, function_tool] if supports_custom else [function_tool])
+    assert forwarded["parallel_tool_calls"] is True
+    if supports_custom:
+        assert forwarded["tool_choice"] == tool_choice
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+        assert any(event.get("item") == tool_call for event in events), events
+    elif allowed_choice:
+        assert forwarded["tool_choice"] == {"type": "allowed_tools", "mode": "auto", "tools": [function_choice]}
+    else:
+        assert "tool_choice" not in forwarded
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_keeps_search_tools_for_capable_model_source(async_client, monkeypatch):
     model = "external-codex-responses-search"
     await _create_model_source(

@@ -377,3 +377,25 @@ is not cancellation of accepted work; request-log completion times can occur
 after pause for work already in progress. These checks take effect when the
 availability snapshot receives the update, rather than synchronously with a
 remote replica's database commit. See [spec.md](spec.md).
+
+## Custom execution tools on model sources
+
+Codex models declaring `tool_mode: "code_mode_only"` call `exec` as a custom
+tool to access shell and file operations. A freeform apply-patch declaration
+also selects the custom-tool protocol. These declarations therefore imply
+custom-tool support in the source capability resolver; plain sources still
+use explicit capability opt-ins. See the source-tool filtering requirement
+in [spec.md](spec.md).
+
+If the execution tool is filtered out, a session can retain `wait` and
+collaboration tools while being unable to start any shell operation. More
+filesystem permissions cannot repair a missing tool declaration. For example,
+a code-mode request with custom `exec`, function `wait`, and undeclared
+`web_search` retains the first two tools and drops only web search.
+
+Before deploying this resolver fix, an operator can append `custom` to the
+model's server-side `experimental_supported_tools`, preserving existing
+entries, for example `["send_user_message_async", "clock", "namespace", "custom"]`.
+Editing only the local Codex catalog does not update proxy egress filtering.
+Verify the repair with an actual CLI shell read and apply-patch write in a
+disposable workspace; a textual success claim is insufficient evidence.

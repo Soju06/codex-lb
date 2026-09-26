@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-15T06:47:03.622218+00:00",
+  "updated_at": "2026-09-23T06:47:31.282574+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -628,6 +628,48 @@
       "flex_long_context_input_per_1m": 10.0,
       "flex_long_context_output_per_1m": 37.5,
       "flex_long_context_cached_input_per_1m": 1.0
+    },
+    "gpt-6-luna": {
+      "input_per_1m": 0.1,
+      "output_per_1m": 0.5,
+      "cached_input_per_1m": 0.01,
+      "priority_input_per_1m": 0.2,
+      "priority_output_per_1m": 1.0,
+      "priority_cached_input_per_1m": 0.02,
+      "flex_input_per_1m": 0.049999999999999996,
+      "flex_output_per_1m": 0.25,
+      "flex_cached_input_per_1m": 0.005,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 0.2,
+      "long_context_output_per_1m": 0.75,
+      "long_context_cached_input_per_1m": 0.02,
+      "priority_long_context_input_per_1m": 0.39999999999999997,
+      "priority_long_context_output_per_1m": 1.5,
+      "priority_long_context_cached_input_per_1m": 0.04,
+      "flex_long_context_input_per_1m": 0.09999999999999999,
+      "flex_long_context_output_per_1m": 0.375,
+      "flex_long_context_cached_input_per_1m": 0.01
+    },
+    "gpt-6-sol": {
+      "input_per_1m": 2.0,
+      "output_per_1m": 10.0,
+      "cached_input_per_1m": 0.2,
+      "priority_input_per_1m": 4.0,
+      "priority_output_per_1m": 20.0,
+      "priority_cached_input_per_1m": 0.4,
+      "flex_input_per_1m": 1.0,
+      "flex_output_per_1m": 5.0,
+      "flex_cached_input_per_1m": 0.09999999999999999,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 4.0,
+      "long_context_output_per_1m": 15.0,
+      "long_context_cached_input_per_1m": 0.4,
+      "priority_long_context_input_per_1m": 8.0,
+      "priority_long_context_output_per_1m": 30.0,
+      "priority_long_context_cached_input_per_1m": 0.7999999999999999,
+      "flex_long_context_input_per_1m": 2.0,
+      "flex_long_context_output_per_1m": 7.5,
+      "flex_long_context_cached_input_per_1m": 0.19999999999999998
     },
     "gpt-rosalind-research": {
       "input_per_1m": 5.0,

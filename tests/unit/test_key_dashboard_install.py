@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,7 @@ import pytest
 
 from app.core.types import JsonValue
 from app.modules.key_dashboard.install import InstallPlatform, build_install_script
+from app.modules.key_dashboard.install_restore_windows import WINDOWS_PRIVATE_BACKUP
 
 pytestmark = pytest.mark.unit
 
@@ -99,6 +101,7 @@ def test_installer_writes_safe_private_files_and_recoverable_backups(
     assert config["model_catalog_json"] == str(codex_dir / "codex-lb-models.json")
     assert json.loads((codex_dir / "codex-lb-models.json").read_text()) == {"models": [entry]}
     assert config["model_provider"] == "codex-lb"
+    assert config["openai_base_url"] == endpoint
     assert config["cli_auth_credentials_store"] == "file"
     assert config["model_providers"]["codex-lb"] == {
         "name": "openai",
@@ -300,3 +303,166 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
     assert config["model_catalog_json"] == str(tmp_path / "Codex 'quoted' 😀/codex-lb-models.json")
     assert config["model_providers"]["codex-lb"]["supports_websockets"] is False
     assert json.loads(output["catalog"]) == {"models": [native, custom]}
+
+
+def _run_lifecycle(
+    script: str, home: Path, platform: InstallPlatform, *, uninstall: bool = False
+) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "CODEX_HOME": str(home if not uninstall else home / "wrong-home")}
+    if platform == "windows":
+        # Execute the exported PowerShell lifecycle on Linux, replacing ONLY the
+        # Windows ACL primitives. Native Windows ACL behavior requires Windows.
+        script = script.replace(
+            WINDOWS_PRIVATE_BACKUP,
+            """
+$backupName = 'backup-codex-lb-' + [Guid]::NewGuid().ToString('N')
+$backupDir = Join-Path $codexDir $backupName
+$null = New-Item -ItemType Directory -Path $backupDir
+""",
+        )
+        script = re.sub(r"\$fileAcl = .*?\n}\n", "", script, flags=re.DOTALL)
+        path = home / "lifecycle.ps1"
+        command = ["pwsh", "-NoProfile", "-File", str(path)]
+    else:
+        path = home / "lifecycle.sh"
+        command = ["bash", str(path)]
+    path.write_text(script)
+    return subprocess.run(command, text=True, capture_output=True, env=env, timeout=30)
+
+
+LIFECYCLE_PLATFORMS = [
+    "linux",
+    pytest.param("windows", marks=pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell unavailable")),
+]
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize("has_original", [True, False])
+def test_offline_uninstall_restores_baseline_after_reinstall(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, has_original: bool
+) -> None:
+    home = tmp_path / "codex 'quoted' $literal 😀"
+    home.mkdir()
+    suffix = "ps1" if platform == "windows" else "sh"
+    uninstaller = home / f"codex-lb-uninstall.{suffix}"
+    originals = {
+        "config.toml": b'openai_base_url = "http://old.invalid"\r\n',
+        "auth.json": b'{"old":"key"}',
+        uninstaller.name: b"original script\n",
+    }
+    if has_original:
+        for name, content in originals.items():
+            (home / name).write_bytes(content)
+    session = home / "sessions" / "chat.jsonl"
+    session.parent.mkdir()
+    session.write_text("old chat")
+    state_path = home / ".codex-lb-install-state.json"
+    baseline = None
+    for key in ("first-key", "second-key"):
+        script = build_install_script(platform=platform, api_key=key, base_url=catalog_server.base_url, model=None)
+        result = _run_lifecycle(script, home, platform)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Uninstall offline:" in result.stdout
+        config = tomllib.loads((home / "config.toml").read_text())
+        assert config["openai_base_url"] == catalog_server.base_url
+        assert json.loads((home / "auth.json").read_text())["OPENAI_API_KEY"] == key
+        state = json.loads(state_path.read_text())
+        if baseline is None:
+            baseline = state
+        assert state == baseline
+    uninstall_script = uninstaller.read_text()
+    assert "first-key" not in uninstall_script and "second-key" not in uninstall_script
+    (home / "config.toml").write_text("edited after installation")
+    catalog_server.status = 401  # Expired key must not prevent offline uninstall.
+    request_count = len(catalog_server.requests)
+    result = _run_lifecycle(uninstall_script, home, platform, uninstall=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name, content in originals.items():
+        assert (home / name).read_bytes() == content if has_original else not (home / name).exists()
+    assert not (home / "codex-lb-models.json").exists()
+    assert not state_path.exists()
+    assert session.read_text() == "old chat"
+    backups = list(home.glob("backup-codex-lb-*"))
+    assert any(
+        (backup / "config.toml").read_text() == "edited after installation"
+        for backup in backups
+        if (backup / "config.toml").exists()
+    )
+    if platform == "linux":
+        assert all(stat.S_IMODE(backup.stat().st_mode) == 0o700 for backup in backups)
+    result = _run_lifecycle(uninstall_script, home, platform, uninstall=True)
+    assert result.returncode == 0, result.stderr
+    assert "nothing to restore" in result.stdout
+    assert len(catalog_server.requests) == request_count
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+@pytest.mark.parametrize(
+    "damage", ["traversal", "schema", "missing", "changed", "backup_link", "target_link", "extra_file", "null_to_file"]
+)
+def test_damaged_restore_state_blocks_install_and_uninstall(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform, damage: str
+) -> None:
+    (tmp_path / "config.toml").write_text("original config")
+    script = build_install_script(platform=platform, api_key="first-key", base_url=catalog_server.base_url, model=None)
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stderr
+    suffix = "ps1" if platform == "windows" else "sh"
+    uninstall_script = (tmp_path / f"codex-lb-uninstall.{suffix}").read_text()
+    state_path = tmp_path / ".codex-lb-install-state.json"
+    state = json.loads(state_path.read_text())
+    original = tmp_path / state["backup"]
+    if damage == "traversal":
+        state["backup"] = "../outside"
+    elif damage == "schema":
+        state["version"] = True
+    elif damage == "missing":
+        (original / "config.toml").unlink()
+    elif damage == "changed":
+        (original / "config.toml").write_text("corrupt")
+    elif damage == "backup_link":
+        path = original / "config.toml"
+        path.unlink()
+        path.symlink_to(tmp_path / "config.toml")
+    elif damage == "target_link":
+        path = tmp_path / "auth.json"
+        path.unlink()
+        path.symlink_to(tmp_path / "config.toml")
+    elif damage == "extra_file":
+        state["files"]["../outside"] = None
+    elif damage == "null_to_file":
+        (original / "auth.json").write_text("unexpected")
+    state_path.write_text(json.dumps(state))
+    before = {name: (tmp_path / name).read_bytes() for name in ("config.toml", "auth.json", "codex-lb-models.json")}
+    for source, uninstall in ((uninstall_script, True), (script, False)):
+        result = _run_lifecycle(source, tmp_path, platform, uninstall=uninstall)
+        assert result.returncode != 0
+        assert "first-key" not in result.stdout + result.stderr
+        for name, content in before.items():
+            assert (tmp_path / name).read_bytes() == content
+        assert state_path.exists()
+
+
+@pytest.mark.parametrize("platform", LIFECYCLE_PLATFORMS)
+def test_uninstall_backup_failure_preserves_current_files_and_state(
+    tmp_path: Path, catalog_server: _CatalogServer, platform: InstallPlatform
+) -> None:
+    script = build_install_script(platform=platform, api_key="own-key", base_url=catalog_server.base_url, model=None)
+    result = _run_lifecycle(script, tmp_path, platform)
+    assert result.returncode == 0, result.stderr
+    suffix = "ps1" if platform == "windows" else "sh"
+    uninstaller = tmp_path / f"codex-lb-uninstall.{suffix}"
+    names = ("config.toml", "auth.json", "codex-lb-models.json", ".codex-lb-install-state.json", uninstaller.name)
+    before = {name: (tmp_path / name).read_bytes() for name in names}
+    script = uninstaller.read_text()
+    if platform == "windows":
+        script = "function Copy-Item { throw 'Simulated disk failure' }\n" + script
+    else:
+        script = script.replace(
+            "state = load_state()",
+            "def fail(*args):\n    raise OSError('Simulated disk failure')\nshutil.copy2 = fail\nstate = load_state()",
+        )
+    result = _run_lifecycle(script, tmp_path, platform, uninstall=True)
+    assert result.returncode != 0
+    for name, content in before.items():
+        assert (tmp_path / name).read_bytes() == content

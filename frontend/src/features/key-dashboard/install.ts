@@ -26,3 +26,10 @@ export function downloadInstallScript(script: string, platform: InstallPlatform)
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+export function uninstallCommand(platform: InstallPlatform): string {
+  if (platform === "windows") {
+    return "$codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex' }; powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $codexDir 'codex-lb-uninstall.ps1')";
+  }
+  return 'bash "${CODEX_HOME:-$HOME/.codex}/codex-lb-uninstall.sh"';
+}

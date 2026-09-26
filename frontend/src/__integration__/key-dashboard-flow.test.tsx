@@ -352,6 +352,9 @@ describe("API key dashboard integration", () => {
     expect(within(guidance).getByText(/Install the Codex client first/)).toBeVisible();
     expect(within(guidance).getByText(/Backs up and replaces/)).toBeVisible();
     expect(within(guidance).getByText(/commands may remain in shell history/)).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Restore previous setup" })).toBeVisible();
+    expect(screen.getByText(/Restores the files saved before the first install with uninstall support/)).toBeVisible();
+    expect(screen.getByText(/-File \(Join-Path \$codexDir 'codex-lb-uninstall.ps1'\)/)).toBeVisible();
     const preview = screen.getByText("Preview script", { selector: "summary" });
     expect(preview.closest("details")).not.toHaveAttribute("open");
     await user.click(preview);
@@ -398,6 +401,10 @@ describe("API key dashboard integration", () => {
       expect(command).toContain(`Authorization: Bearer ${TEST_KEY}`);
       expect(command).toContain(`platform=${platform}`);
       expect(command).toContain(platform === "windows" ? "curl.exe" : "curl -fsS");
+      await user.click(screen.getByRole("button", { name: "Copy uninstall command" }));
+      const uninstall = clipboard.mock.calls.at(-1)![0];
+      expect(uninstall).toContain(`codex-lb-uninstall.${platform === "windows" ? "ps1" : "sh"}`);
+      expect(uninstall).not.toContain(TEST_KEY);
       await user.click(screen.getByRole("button", { name: "Download script" }));
       expect(anchorClick.mock.instances.at(-1)).toHaveAttribute("download", `codex-lb-${platform}.${platform === "windows" ? "ps1" : "sh"}`);
       const blob = createObjectURL.mock.calls.at(-1)![0] as Blob;

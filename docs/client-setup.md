@@ -31,6 +31,18 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Setup scripts and restoring previous configuration
+
+API key holders can open `/key-dashboard` → **Install** to configure their installed Codex clients and download their authorized models and aliases. Setup writes both the custom provider endpoint and root `openai_base_url`, so chats using the built-in OpenAI provider can resume with the new endpoint and file-backed API key. Restart clients after setup; explicit profiles or CLI overrides may still select other settings.
+
+Setup saves an offline uninstaller in the same Codex home. The Install tab and installer output show its command. On macOS/Linux:
+
+```bash
+bash "${CODEX_HOME:-$HOME/.codex}/codex-lb-uninstall.sh"
+```
+
+On Windows, run the displayed PowerShell command for `codex-lb-uninstall.ps1`. Close clients first. Uninstall restores the configuration, credentials and catalog from before the first installation with uninstall support, retains a backup of current files, and preserves chats. Installing again with another key keeps the original restore point. Older untracked backups require manual recovery. See the [client setup contract and context](../openspec/specs/api-key-dashboard/).
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token

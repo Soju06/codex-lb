@@ -7,7 +7,7 @@ import { CopyButton } from "@/components/copy-button";
 import { Button } from "@/components/ui/button";
 import { SpinnerBlock } from "@/components/ui/spinner";
 import { getInstallScript, type InstallPlatform } from "@/features/key-dashboard/api";
-import { downloadInstallScript, installCommand } from "@/features/key-dashboard/install";
+import { downloadInstallScript, installCommand, uninstallCommand } from "@/features/key-dashboard/install";
 import { ApiError } from "@/lib/api-client";
 
 type KeyInstallPanelProps = {
@@ -84,6 +84,14 @@ export function KeyInstallPanel({ apiKey, onUnauthorized }: KeyInstallPanelProps
             </fieldset>
           </div>
           <InstallerActions key={platform} platform={platform} apiKey={apiKey} onUnauthorized={onUnauthorized} />
+          <div className="space-y-3 rounded-xl border bg-card p-5 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold">{t("keyDashboard.install.uninstallTitle")}</h3>
+              <CopyButton key={platform} value={uninstallCommand(platform)} label={t("keyDashboard.install.copyUninstall")} />
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">{t("keyDashboard.install.uninstallNotice")}</p>
+            <code className="block rounded-lg bg-muted/60 px-3 py-2.5 text-xs leading-relaxed [overflow-wrap:anywhere]">{uninstallCommand(platform)}</code>
+          </div>
         </div>
 
         <aside className="min-w-0 space-y-4" aria-labelledby="key-install-guidance">

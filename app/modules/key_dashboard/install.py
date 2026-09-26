@@ -4,6 +4,13 @@ import json
 from typing import Literal
 
 from app.modules.key_dashboard.install_catalog import UNIX_CATALOG_SETUP, WINDOWS_CATALOG_SETUP
+from app.modules.key_dashboard.install_restore import UNIX_RECORD_STATE, UNIX_UNINSTALL_SCRIPT
+from app.modules.key_dashboard.install_restore_windows import (
+    WINDOWS_PRIVATE_BACKUP,
+    WINDOWS_RECORD_STATE,
+    WINDOWS_RESTORE_COMMON,
+    WINDOWS_UNINSTALL_SCRIPT,
+)
 
 InstallPlatform = Literal["macos", "linux", "windows"]
 
@@ -20,6 +27,7 @@ def _toml_string(value: str) -> str:
 def build_install_script(*, platform: InstallPlatform, api_key: str, base_url: str, model: str | None) -> str:
     """Render credentials as inert file contents, never as interpolated shell code."""
     config = (
+        f"openai_base_url = {_toml_string(base_url)}\n"
         'model_provider = "codex-lb"\n'
         'cli_auth_credentials_store = "file"\n\n'
         "[model_providers.codex-lb]\n"
@@ -45,14 +53,14 @@ umask 077
 command -v python3 >/dev/null 2>&1 || { printf 'Install Python 3 before running this installer.\\n' >&2; exit 1; }
 codex_dir="${CODEX_HOME:-$HOME/.codex}"
 mkdir -p "$codex_dir"
-for name in config.toml auth.json codex-lb-models.json; do
+for name in config.toml auth.json codex-lb-models.json codex-lb-uninstall.sh .codex-lb-install-state.json; do
   if [ -L "$codex_dir/$name" ] || { [ -e "$codex_dir/$name" ] && [ ! -f "$codex_dir/$name" ]; }; then
     printf 'Refusing to replace a symlink or non-file: %s\\n' "$codex_dir/$name" >&2
     exit 1
   fi
 done
 backup_dir=$(mktemp -d "$codex_dir/backup-codex-lb-$(date +%Y%m%d-%H%M%S)-XXXXXX")
-for name in config.toml auth.json codex-lb-models.json; do
+for name in config.toml auth.json codex-lb-models.json codex-lb-uninstall.sh; do
   if [ -f "$codex_dir/$name" ]; then
     cp -p "$codex_dir/$name" "$backup_dir/$name"
   fi
@@ -73,11 +81,24 @@ python3 - "$codex_dir" "$backup_dir" <<'CODEX_LB_CATALOG'
 """
         + UNIX_CATALOG_SETUP
         + """CODEX_LB_CATALOG
-chmod 600 "$backup_dir/config.new" "$backup_dir/auth.new" "$backup_dir/catalog.new"
+python3 - "$codex_dir" "$backup_dir" <<'CODEX_LB_STATE'
+"""
+        + UNIX_RECORD_STATE
+        + """CODEX_LB_STATE
+cat > "$backup_dir/uninstall.new" <<'CODEX_LB_UNINSTALL'
+"""
+        + UNIX_UNINSTALL_SCRIPT
+        + """CODEX_LB_UNINSTALL
+for name in config auth catalog state uninstall; do
+  chmod 600 "$backup_dir/$name.new"
+done
+mv -f "$backup_dir/state.new" "$codex_dir/.codex-lb-install-state.json"
+mv -f "$backup_dir/uninstall.new" "$codex_dir/codex-lb-uninstall.sh"
 mv -f "$backup_dir/catalog.new" "$codex_dir/codex-lb-models.json"
 mv -f "$backup_dir/config.new" "$codex_dir/config.toml"
 mv -f "$backup_dir/auth.new" "$codex_dir/auth.json"
 printf 'Codex configured. Restart your App, CLI or extension. Backup: %s\\n' "$backup_dir"
+printf 'Uninstall offline: bash %q\\n' "$codex_dir/codex-lb-uninstall.sh"
 """
     )
 
@@ -91,27 +112,11 @@ $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else {
 }
 $null = New-Item -ItemType Directory -Force -Path $codexDir
 $codexDir = (Get-Item -LiteralPath $codexDir).FullName
-foreach ($name in @('config.toml', 'auth.json', 'codex-lb-models.json')) {
-    $path = Join-Path $codexDir $name
-    $item = Get-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
-    if ($null -ne $item) {
-        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw "Refusing to replace a symlink or non-file: $path"
-        }
-    }
-}
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = [Security.AccessControl.DirectorySecurity]::new()
-$acl.SetOwner($sid)
-$acl.SetAccessRuleProtection($true, $false)
-$rule = [Security.AccessControl.FileSystemAccessRule]::new(
-    $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
-$acl.AddAccessRule($rule)
-$backupName = 'backup-codex-lb-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N')
-$backupDir = Join-Path $codexDir $backupName
-$null = New-Item -ItemType Directory -Path $backupDir
-Set-Acl -LiteralPath $backupDir -AclObject $acl
-foreach ($name in @('config.toml', 'auth.json', 'codex-lb-models.json')) {
+"""
+        + WINDOWS_RESTORE_COMMON
+        + "foreach ($name in $names) { Assert-RegularFile (Join-Path $codexDir $name) }\n"
+        + WINDOWS_PRIVATE_BACKUP
+        + """foreach ($name in $names) {
     $path = Join-Path $codexDir $name
     if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $backupDir $name) }
 }
@@ -125,6 +130,12 @@ $config = @'
         + "'@\n"
         + WINDOWS_CATALOG_SETUP
         + """$utf8 = [Text.UTF8Encoding]::new($false)
+"""
+        + WINDOWS_RECORD_STATE
+        + "$uninstall = @'\n"
+        + WINDOWS_UNINSTALL_SCRIPT
+        + "'@\n"
+        + """[IO.File]::WriteAllText((Join-Path $backupDir 'uninstall.new'), $uninstall, $utf8)
 [IO.File]::WriteAllText((Join-Path $backupDir 'config.new'), $config, $utf8)
 [IO.File]::WriteAllText((Join-Path $backupDir 'auth.new'), $auth, $utf8)
 [IO.File]::WriteAllText((Join-Path $backupDir 'catalog.new'), $catalogJson, $utf8)
@@ -133,12 +144,17 @@ $fileAcl = [Security.AccessControl.FileSecurity]::new()
 $fileAcl.SetOwner($sid)
 $fileAcl.SetAccessRuleProtection($true, $false)
 $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
-foreach ($name in @('config', 'auth', 'catalog')) {
+foreach ($name in @('config', 'auth', 'catalog', 'state', 'uninstall')) {
     Set-Acl -LiteralPath (Join-Path $backupDir ($name + '.new')) -AclObject $fileAcl
 }
+Move-Item -Force -LiteralPath (Join-Path $backupDir 'state.new') -Destination $statePath
+Move-Item -Force -LiteralPath (Join-Path $backupDir 'uninstall.new') `
+    -Destination (Join-Path $codexDir 'codex-lb-uninstall.ps1')
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'catalog.new') -Destination $catalogPath
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'config.new') -Destination (Join-Path $codexDir 'config.toml')
 Move-Item -Force -LiteralPath (Join-Path $backupDir 'auth.new') -Destination (Join-Path $codexDir 'auth.json')
 Write-Output "Codex configured. Restart your App, CLI or extension. Backup: $backupDir"
+$uninstallPath = (Join-Path $codexDir 'codex-lb-uninstall.ps1').Replace("'", "''")
+Write-Output "Uninstall offline: powershell -NoProfile -ExecutionPolicy Bypass -File '$uninstallPath'"
 """
     )

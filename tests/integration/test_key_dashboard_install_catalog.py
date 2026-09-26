@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -141,6 +142,7 @@ async def test_exported_installer_downloads_scoped_aliases_and_preserves_agent_m
     assert requests == ["/api/key-dashboard/models"]
     config = tomllib.loads((tmp_path / "config.toml").read_text())
     assert config["model"] == public
+    assert config["openai_base_url"] == origin + "/backend-api/codex"
     assert config["model_catalog_json"] == str(tmp_path / "codex-lb-models.json")
     assert config["model_providers"]["codex-lb"]["supports_websockets"] is False
     catalog_text = (tmp_path / "codex-lb-models.json").read_text()
@@ -182,3 +184,120 @@ async def test_installer_catalog_authentication_and_cache_headers(async_client):
     async with SessionLocal() as session:
         assert await session.scalar(select(func.count()).select_from(ApiKeyUsageReservation)) == 0
         assert await session.scalar(select(ApiKeyLimit.current_value)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("codex") is None, reason="Codex CLI is not installed")
+async def test_codex_resumes_old_chat_with_new_endpoint_key_and_offline_restore(async_client, tmp_path: Path):
+    model = "custom/resume-test"
+    await _create_model_source(
+        async_client, name="resume-test", model=model, base_url="https://unused.invalid/v1", supports_responses=True
+    )
+    created = await async_client.post(
+        "/api/api-keys/", json={"name": "resume-test", "allowedModels": [model], "limits": []}
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    headers = {"Authorization": f"Bearer {key}"}
+    native = await async_client.get("/api/key-dashboard/models", headers=headers)
+    assert native.status_code == 200
+    home = tmp_path / "codex"
+    home.mkdir()
+    project_config = tmp_path / ".codex" / "config.toml"
+    project_config.parent.mkdir()
+    project_config.write_text('openai_base_url = "http://project.invalid"\n')
+    old_catalog = home / "original-models.json"
+    old_catalog.write_bytes(native.content)
+    requests: list[tuple[str, str | None, str]] = []
+
+    async def bridge(request: web.Request) -> web.Response:
+        if request.method == "GET":
+            return web.Response(body=native.content, content_type="application/json")
+        body = await request.text()
+        requests.append((request.path, request.headers.get("Authorization"), body))
+        message = {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Test reply", "annotations": []}],
+        }
+        events = [
+            {"type": "response.output_item.done", "output_index": 0, "item": message},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_test",
+                    "status": "completed",
+                    "output": [message],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            },
+        ]
+        return web.Response(
+            text="".join("data: " + json.dumps(event) + "\n\n" for event in events), content_type="text/event-stream"
+        )
+
+    async with stub_source_upstreams() as start:
+        origin = (await start(bridge)).removesuffix("/v1")
+        old_config = (
+            f'openai_base_url = "{origin}/old"\nmodel = "{model}"\nmodel_provider = "openai"\n'
+            f'model_catalog_json = {json.dumps(str(old_catalog))}\ncli_auth_credentials_store = "file"\n'
+        )
+        (home / "config.toml").write_text(old_config)
+        (home / "auth.json").write_text('{"OPENAI_API_KEY":"old-test-key"}')
+        env = {
+            **os.environ,
+            "CODEX_HOME": str(home),
+            "HOME": str(tmp_path),
+            "OPENAI_BASE_URL": origin + "/stale-env",
+            "OPENAI_API_KEY": "stale-env-key",
+        }
+
+        async def run(*args: str, stdin: bytes | None = None) -> str:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=tmp_path,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout=45)
+            except BaseException:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+                raise
+            assert process.returncode == 0, stderr.decode()
+            return stdout.decode()
+
+        first = await run("codex", "exec", "--skip-git-repo-check", "--json", "Remember resume-sentinel-8129")
+        thread = next(
+            json.loads(line)["thread_id"] for line in first.splitlines() if json.loads(line)["type"] == "thread.started"
+        )
+        assert requests[-1][:2] == ("/old/responses", "Bearer old-test-key")
+        session_files = list((home / "sessions").rglob("*.jsonl"))
+        assert session_files
+        exported = await async_client.get(origin + "/api/key-dashboard/install-script?platform=linux", headers=headers)
+        assert exported.status_code == 200
+        await run("bash", stdin=exported.content)
+        assert project_config.read_text() == 'openai_base_url = "http://project.invalid"\n'
+        for provider in ([], ["-c", 'model_provider="openai"']):
+            requests.clear()
+            resumed = await run(
+                "codex", "exec", "resume", "--skip-git-repo-check", "--json", *provider, thread, "Continue"
+            )
+            assert '"type":"turn.completed"' in resumed
+            assert requests and all(
+                path == "/backend-api/codex/responses" and auth == f"Bearer {key}" for path, auth, _ in requests
+            )
+            assert "resume-sentinel-8129" in requests[-1][2]
+        await run("bash", str(home / "codex-lb-uninstall.sh"))
+        assert (home / "config.toml").read_text() == old_config
+        assert all(path.exists() for path in session_files)
+        assert project_config.read_text() == 'openai_base_url = "http://project.invalid"\n'
+        requests.clear()
+        await run("codex", "exec", "resume", "--skip-git-repo-check", "--json", thread, "Continue after restore")
+        assert requests[-1][:2] == ("/old/responses", "Bearer old-test-key")

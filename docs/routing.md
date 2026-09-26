@@ -82,8 +82,15 @@ containing only a user message remains HTTP. Native Codex HTTP callers follow
 this policy too; their User-Agent alone does not indicate a WebSocket failure.
 
 Real recent upstream WS failures temporarily keep requests on HTTP (the existing
-60-second cooldown). Explicit HTTP policy, image-capable requests and oversized
-payloads also bypass the bridge. Bypassing the bridge does not force upstream
+60-second cooldown). Explicit HTTP policy and oversized payloads also bypass
+the bridge. Images bypass only when they occur in the current-turn input suffix,
+when an external `http(s)` image URL survives anywhere in the input (at any depth,
+with case-insensitive schemes), or when an `image_generation` tool is requested.
+The current turn starts after the last assistant-role message or model-output
+item (`reasoning`, `function_call`, `custom_tool_call`, or `apply_patch_call`);
+without one, the whole input is current. Replayed inline `data:` images alone
+remain bridge-eligible and are forwarded unchanged below the size budget.
+Bypassing the bridge does not force upstream
 HTTP: an `input_image` request keeps upstream HTTP only when its payload exceeds
 the WebSocket frame budget or still carries an external image URL, and otherwise
 follows the ordinary transport precedence. Source-routed Chat requests keep

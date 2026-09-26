@@ -154,6 +154,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _partial_output_proxy_error_event_block,
     _response_create_client_metadata,
     _responses_request_contains_input_image,
+    _responses_request_requires_image_bridge_bypass,
     _responses_request_uses_image_generation,
     _service_get_settings,
     _service_get_settings_cache,
@@ -1035,7 +1036,9 @@ class _HTTPBridgeStreamingMixin:
             )
             else None
         )
-        if runtime_config.enabled and (image_request or image_generation_request):
+        if runtime_config.enabled and (
+            _responses_request_requires_image_bridge_bypass(payload) or image_generation_request
+        ):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "

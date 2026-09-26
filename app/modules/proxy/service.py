@@ -446,6 +446,7 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _input_image_request_requires_http_upstream,  # noqa: F401
     _responses_request_contains_input_image,  # noqa: F401
+    _responses_request_requires_image_bridge_bypass,  # noqa: F401
     _responses_request_uses_image_generation,  # noqa: F401
 )
 from app.modules.proxy._service.response_create import (

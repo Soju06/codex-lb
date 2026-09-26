@@ -181,6 +181,25 @@ def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
     return any(_json_value_contains_input_image_part(item) for item in input_value)
 
 
+def _responses_request_requires_image_bridge_bypass(payload: ResponsesRequest) -> bool:
+    """Keep new images and surviving external URLs off bridge pending slots."""
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    current_turn_has_image = False
+    for item in input_value:
+        if is_json_mapping(item) and (
+            item.get("role") == "assistant"
+            or item.get("type") in ("reasoning", "function_call", "custom_tool_call", "apply_patch_call")
+        ):
+            current_turn_has_image = False
+        elif not current_turn_has_image:
+            current_turn_has_image = _json_value_contains_input_image_part(item)
+        if _json_value_contains_external_input_image(item):
+            return True
+    return current_turn_has_image
+
+
 def _json_value_contains_external_input_image(value: JsonValue) -> bool:
     """Whether ``value`` holds an ``input_image`` part that still names an external URL.
 

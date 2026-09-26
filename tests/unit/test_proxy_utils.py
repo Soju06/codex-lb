@@ -4792,6 +4792,58 @@ def test_responses_request_contains_input_image_detects_supported_shapes() -> No
     assert proxy_service._responses_request_contains_input_image(text_only) is False
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        {"role": "assistant", "content": "seen"},
+        {"type": "reasoning", "summary": []},
+        {"type": "function_call", "name": "shot", "call_id": "call_shot", "arguments": "{}"},
+        {"type": "custom_tool_call", "name": "shot", "call_id": "call_shot", "input": ""},
+        {"type": "apply_patch_call", "call_id": "call_shot", "operation": {}},
+    ],
+)
+@pytest.mark.parametrize("new_image", [False, True])
+def test_image_bridge_bypass_current_turn_boundary(boundary, new_image):
+    image = {
+        "type": "function_call_output",
+        "call_id": "call_shot",
+        "output": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}],
+    }
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [image, boundary, *([image] if new_image else [])],
+        }
+    )
+    assert proxy_service._responses_request_requires_image_bridge_bypass(payload) is new_image
+
+
+@pytest.mark.parametrize(
+    "input_value, expected",
+    [
+        ("text", False),
+        ([], False),
+        ([{"role": "user", "content": "text"}], False),
+        ([{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}], True),
+        (
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "shot",
+                    "output": [{"nested": [{"type": "input_image", "image_url": "HTTPS://example.com/shot.png"}]}],
+                },
+                {"type": "reasoning", "summary": []},
+            ],
+            True,
+        ),
+    ],
+)
+def test_image_bridge_bypass_without_boundary_or_with_external_history(input_value, expected):
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "hi", "input": input_value})
+    assert proxy_service._responses_request_requires_image_bridge_bypass(payload) is expected
+
+
 @pytest.mark.asyncio
 async def test_core_inline_input_image_urls_converts_top_level_input_image(monkeypatch):
     data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="

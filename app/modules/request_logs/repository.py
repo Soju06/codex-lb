@@ -1586,17 +1586,21 @@ class RequestLogsRepository:
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        sqlite = self._session.get_bind().dialect.name == "sqlite"
         # SQLite can choose the deleted_at index for MIN(facet), rescanning
-        # every live row per successor. Traverse the facet index first, then
-        # check visibility with an equality probe for each candidate value.
-        scan_conditions = prefix_conditions if sqlite else conditions
+        # every live row per successor; MariaDB/MySQL pick the same plan. On all
+        # three, traverse the facet index first and check visibility with an
+        # equality probe for each candidate value. Measured on MariaDB before
+        # this: the dashboard filter panel ran 107 of these in an hour for 870 s
+        # of database time (worst 23.9 s, 37.6 M rows examined).
+        dialect_name = self._session.get_bind().dialect.name
+        emulate_skip_scan = dialect_name in {"sqlite", "mysql", "mariadb"}
+        scan_conditions = prefix_conditions if emulate_skip_scan else conditions
         seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
         successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
-        if sqlite:
+        if emulate_skip_scan:
             visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
             stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)

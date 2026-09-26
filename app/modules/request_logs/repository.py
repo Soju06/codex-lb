@@ -978,9 +978,25 @@ class RequestLogsRepository:
         return min(counts, key=lambda code: (-counts[code], code)) or None
 
     async def earliest_activity_at(self) -> datetime | None:
-        stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
-        result = await self._session.execute(stmt)
-        value = result.scalar_one_or_none()
+        # The warmup exclusion cannot be served by an index (`NOT IN` over a
+        # non-leading column), so the filtered aggregate scans: 5.8 s on a 1.45 M
+        # row production table. The globally earliest row is an index dive on
+        # ``(requested_at, id)``, and when that row is not one of the excluded
+        # kinds it *is* the minimum this method wants, so probe it first and fall
+        # back to the filtered aggregate only for the rare excluded earliest row.
+        # The probe must not filter ``deleted_at``: soft-deleted rows count here.
+        probe = (
+            select(RequestLog.requested_at, RequestLog.request_kind)
+            .order_by(RequestLog.requested_at.asc())
+            .limit(1)
+        )
+        earliest_row = (await self._session.execute(probe)).first()
+        if earliest_row is not None and earliest_row[1] not in (RequestKind.WARMUP.value, "limit_warmup"):
+            value: datetime | None = earliest_row[0]
+        else:
+            stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
+            result = await self._session.execute(stmt)
+            value = result.scalar_one_or_none()
         raw_earliest = value if isinstance(value, datetime) else None
         # Raw wins while it survives (sub-hour precision); the whole-hour
         # rollup fallback (keeps history-dependent UI like canCompare

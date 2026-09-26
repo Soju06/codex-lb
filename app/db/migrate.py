@@ -679,6 +679,12 @@ def _mysql_default_token(value: object) -> str:
     if inner is None:
         inner = value
     text = str(inner).strip().lower()
+    # ``now()`` and ``CURRENT_TIMESTAMP`` are the same default: the models spell
+    # it ``server_default=func.now()`` while reflection hands back MariaDB's
+    # ``current_timestamp(6)``, so the family has to fold to one token or every
+    # ``DATETIME(6)`` column reports ``modify_default`` drift on MariaDB (the
+    # MySQL dialect normalises this inside ``_compare_server_default``).
+    text = re.sub(r"\b(current_timestamp|localtime|localtimestamp)\b", "now", text)
     # A fractional-seconds default comes back as ``current_timestamp(6)`` (the
     # precision the port's ``DATETIME(6)`` columns declare) while the metadata
     # spells the same default ``now()``/``CURRENT_TIMESTAMP``: normalise the

@@ -334,7 +334,13 @@ def mysql_string(length: int) -> String:
 
 
 @compiles(String, "mysql")
+@compiles(String, "mariadb")
 def _compile_mysql_string(element, compiler, **kw):  # type: ignore[no-untyped-def]
+    # The MariaDB dialect has to be registered explicitly: unlike the MySQL
+    # compiler, which defaults a length-less ``VARCHAR`` to 255, the MariaDB
+    # compiler raises ``CompileError: VARCHAR requires a length``. Without this
+    # the 121 unbounded-``String`` columns in the models broke every migration
+    # and drift comparison that ran under a ``mariadb+…`` URL.
     if element.length is None:
         element = element.copy()
         element.length = MYSQL_UNBOUNDED_STRING_LENGTH
@@ -342,6 +348,7 @@ def _compile_mysql_string(element, compiler, **kw):  # type: ignore[no-untyped-d
 
 
 @compiles(Text, "mysql")
+@compiles(Text, "mariadb")
 def _compile_mysql_text(element, compiler, **kw):  # type: ignore[no-untyped-def]
     return MYSQL_TEXT_TYPE
 

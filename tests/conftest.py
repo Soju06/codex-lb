@@ -148,6 +148,42 @@ def _detach_functional_indexes():
     return detached
 
 
+def _create_mariadb_ordered_indexes(sync_conn, detached) -> None:
+    """Re-create the ordered indexes ``create_all`` skipped.
+
+    MariaDB accepts ``ASC``/``DESC`` key parts (unlike an expression), so these
+    are plain ``CREATE INDEX`` statements, the same DDL the migrations issue.
+    Indexes whose key part is a *function* yield no column list here; the
+    generated-column emulation in :func:`_create_mariadb_functional_indexes`
+    owns those instead.
+    """
+    from sqlalchemy.schema import Column as _Column
+    from sqlalchemy.sql.elements import UnaryExpression
+
+    from app.db.migration_indexes import create_mysql_index
+
+    for _, index in detached:
+        parts: list[str] = []
+        for expression in index.expressions:
+            if isinstance(expression, _Column):
+                parts.append(f"`{expression.name}`")
+            elif isinstance(expression, UnaryExpression) and isinstance(expression.element, _Column):
+                modifier = str(getattr(expression.modifier, "value", "") or "").upper()
+                parts.append(f"`{expression.element.name}`{' DESC' if modifier == 'DESC' else ' ASC'}")
+            else:
+                parts = []
+                break
+        if not parts:
+            continue
+        create_mysql_index(
+            sync_conn,
+            index_name=index.name,
+            table_name=index.table.name,
+            columns_sql=", ".join(parts),
+            unique=bool(index.unique),
+        )
+
+
 def _create_mariadb_functional_indexes(sync_conn) -> None:
     """The MariaDB spelling of the functional window and alias indexes."""
     from app.db.migration_indexes import GeneratedKeyPart, create_mysql_index
@@ -230,6 +266,7 @@ def _recreate_test_schema(sync_conn) -> None:
             for table, index in detached:
                 table.indexes.add(index)
         _create_mariadb_functional_indexes(sync_conn)
+        _create_mariadb_ordered_indexes(sync_conn, detached)
     else:
         Base.metadata.drop_all(sync_conn)
         Base.metadata.create_all(sync_conn)

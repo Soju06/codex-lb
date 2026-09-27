@@ -368,6 +368,121 @@ async def test_stream_model_capacity_top_level_response_id_surfaces_without_repl
     assert seen_account_ids == ["acc_model_capacity_accepted"]
 
 
+_USAGE_LIMIT_FRAME_ERRORS = (
+    # The code-less form, which normalizes to ``upstream_error``.
+    {"message": "The usage limit has been reached"},
+    # The same rejection in the second-person wording, still code-less.
+    {"message": "You've hit your usage limit."},
+    # The coded form, which the code table already answered for.
+    {"code": "usage_limit_reached", "message": "The usage limit has been reached"},
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_error", _USAGE_LIMIT_FRAME_ERRORS[:2])
+async def test_stream_serialized_usage_limit_frame_without_a_code_walks_the_pool(
+    async_client, monkeypatch, frame_error
+):
+    """Upstream sends the usage-limit rejection as a frame as well as a body, and the walk
+    must not depend on which one arrived. The serialized form carries no status, and the code it
+    does or does not carry is in no transport retry list, so the sentence is the only evidence
+    there is -- reading it is what keeps the two forms on one answer instead of surfacing the
+    first account's error while the body form rotates."""
+    account_a_id = await _import_account(async_client, "acc_stream_frame_limit_a", "streamframelimita@example.com")
+    await _import_account(async_client, "acc_stream_frame_limit_b", "streamframelimitb@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_stream_frame_limit_a":
+            yield _sse_event({"type": "response.failed", "response": {"error": frame_error}})
+            return
+        yield _success_sse_event("resp_stream_frame_limit_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert len([event for event in events if event.get("type") == "response.completed"]) == 1
+    assert seen_account_ids[:2] == ["acc_stream_frame_limit_a", "acc_stream_frame_limit_b"]
+
+    async with SessionLocal() as session:
+        exhausted_account = await session.get(Account, account_a_id)
+        assert exhausted_account is not None
+        assert exhausted_account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_error", _USAGE_LIMIT_FRAME_ERRORS)
+async def test_stream_usage_limit_frame_on_the_last_account_still_benches_it(async_client, monkeypatch, frame_error):
+    """The account the walk ends on is the one the next request will be handed first.
+
+    Every account rejects, so the last one is reached with no candidate left to move to and its
+    frame is terminal rather than retried. Its health still has to be recorded, or the account
+    that most recently said its window is spent is the one selection likes best -- and whether
+    upstream attached the error code decides nothing about what the account can serve.
+    """
+    account_ids = [
+        await _import_account(async_client, f"acc_stream_last_limit_{letter}", f"streamlastlimit{letter}@example.com")
+        for letter in ("a", "b", "c")
+    ]
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        yield _sse_event({"type": "response.failed", "response": {"error": frame_error}})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        [line async for line in resp.aiter_lines() if line]
+
+    async with SessionLocal() as session:
+        for account_id in account_ids:
+            account = await session.get(Account, account_id)
+            assert account is not None
+            assert account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_error", _USAGE_LIMIT_FRAME_ERRORS)
+async def test_stream_usage_limit_frame_after_a_visible_event_still_benches_the_account(
+    async_client, monkeypatch, frame_error
+):
+    """Downstream visibility forbids moving this request, not recording what upstream said.
+
+    The rejection arrives once a lifecycle event has already been relayed, so the frame is
+    surfaced as-is. That is the whole remedy available to *this* request; the account's health is
+    what protects the next one, and it must not depend on the error code being present.
+    """
+    account_id = await _import_account(async_client, "acc_stream_visible_limit", "streamvisiblelimit@example.com")
+
+    async def fake_stream(payload, headers, access_token, account_id_arg, base_url=None, raise_for_status=False):
+        yield _sse_event({"type": "response.created", "response": {"id": "resp_stream_visible_limit"}})
+        yield _sse_event({"type": "response.failed", "response": {"error": frame_error}})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert len([event for event in events if event.get("type") == "response.failed"]) == 1
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == AccountStatus.RATE_LIMITED
+
+
 @pytest.mark.asyncio
 async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
     """An untyped empty upstream stream may be post-dispatch, so it is not replayed."""

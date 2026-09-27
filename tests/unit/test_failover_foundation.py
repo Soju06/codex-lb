@@ -18,7 +18,11 @@ from app.core.balancer.logic import (
 )
 from app.core.balancer.types import FailureClass, UpstreamError
 from app.db.models import AccountStatus
-from app.modules.proxy.helpers import classify_upstream_failure, is_upstream_burst_rejection
+from app.modules.proxy.helpers import (
+    classify_upstream_failure,
+    is_upstream_burst_rejection,
+    is_upstream_usage_limit_rejection,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -232,6 +236,109 @@ class TestIsUpstreamBurstRejection:
         )
         assert coded["failure_class"] == "rate_limit"
         assert not is_upstream_burst_rejection(failure_class=coded["failure_class"], http_status=coded["http_status"])
+
+
+class TestIsUpstreamUsageLimitRejection:
+    @pytest.mark.parametrize(
+        ("error_code", "message"),
+        [
+            ("usage_limit_reached", "The usage limit has been reached"),
+            ("usage_limit_reached", None),
+            # The delivery form that carries no code: the message is the only
+            # evidence there is.
+            ("upstream_error", "The usage limit has been reached"),
+            ("upstream_error", "You've hit your usage limit."),
+            # The same sentence as upstream actually punctuates and wraps it.
+            ("upstream_error", "You’ve hit your usage limit."),
+            ("upstream_error", "The usage-limit has been reached."),
+            ("upstream_error", "The usage limit\nhas been reached"),
+        ],
+    )
+    def test_coded_and_message_derived_usage_limits_are_both_rejections(
+        self,
+        error_code: str,
+        message: str | None,
+    ) -> None:
+        assert is_upstream_usage_limit_rejection(error_code=error_code, message=message) is True
+
+    @pytest.mark.parametrize(
+        ("error_code", "message"),
+        [
+            # Plain throttling proves nothing about the subscription window.
+            ("rate_limit_exceeded", "Rate limit reached"),
+            ("upstream_error", "Account stream concurrency limit reached"),
+            ("upstream_error", None),
+            # A coded envelope keeps what its code said; the sentence may not
+            # reverse a decision the code already made.
+            ("overloaded_error", "The usage limit has been reached"),
+            ("server_error", "The usage limit has been reached"),
+            # Upstream's catch-all for request-shaped failures, whose message
+            # can quote request content back at us.
+            ("invalid_request_error", "The usage limit has been reached"),
+        ],
+    )
+    def test_the_message_decides_only_where_the_code_decided_nothing(
+        self,
+        error_code: str,
+        message: str | None,
+    ) -> None:
+        assert is_upstream_usage_limit_rejection(error_code=error_code, message=message) is False
+
+    def test_the_generic_envelope_is_never_read_from_its_message(self) -> None:
+        """``invalid_request_error`` is upstream's catch-all for request-shaped failures, whose
+        message can quote request content back. The paths that would ask about it forward their
+        HTTP status to the health write as evidence only, so nothing downstream could tell a real
+        rejection from an echo -- and a false bench is worse than the miss it would close."""
+        assert (
+            is_upstream_usage_limit_rejection(
+                error_code="invalid_request_error", message="You've hit your usage limit."
+            )
+            is False
+        )
+
+
+class TestUsageLimitClassificationDeliveryForm:
+    """Upstream picks the delivery form; the classification must not depend on which it picked."""
+
+    @pytest.mark.parametrize("http_status", [429, None])
+    def test_the_same_rejection_classifies_alike_with_and_without_a_status(self, http_status: int | None) -> None:
+        # ``http_status=None`` is the serialized ``response.failed`` frame, which
+        # carries no status at all; 429 is the HTTP body form of the same thing.
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="The usage limit has been reached"),
+            http_status=http_status,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "rate_limit"
+
+    def test_a_spent_account_is_not_filed_as_momentarily_busy(self) -> None:
+        """``upstream_error`` is a transient code, so without the message this lands in the class
+        whose remedy is waiting on the same account -- which an account with nothing left to give
+        can never satisfy."""
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="The usage limit has been reached"),
+            http_status=None,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "rate_limit"
+        assert (
+            is_upstream_burst_rejection(failure_class=result["failure_class"], http_status=result["http_status"])
+            is False
+        )
+
+    def test_an_unrelated_status_less_frame_keeps_its_transient_class(self) -> None:
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="Upstream error"),
+            http_status=None,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "retryable_transient"
 
 
 class TestFailoverDecision:

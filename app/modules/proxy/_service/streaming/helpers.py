@@ -417,6 +417,7 @@ from app.modules.proxy.helpers import (
     is_account_neutral_safety_policy_rejection,
     is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
+    is_upstream_usage_limit_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -425,7 +426,6 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
-from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.usage.updater import UsageUpdater
 
 
@@ -532,9 +532,29 @@ _REQUEST_TRANSPORT_HTTP = "http"
 
 
 def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
+    """Whether this stream failure owes the account a health write.
+
+    ``message`` is the sentence the failure carried, and every caller that
+    reads an upstream-authored one passes it: the code table cannot answer for
+    the serialized usage-limit rejection, which upstream sends with no error
+    code at all. That frame normalizes to ``upstream_error``, which is in
+    neither code set, so an account that just said its subscription window is
+    spent would be left ACTIVE and handed the next request -- while the
+    identical coded frame benches it.
+
+    Callers whose message is proxy-authored rather than upstream's own (the
+    WebSocket terminal-cleanup path, whose codes and sentences are this
+    proxy's: ``client_disconnected``, ``stream_incomplete``, an idle timeout)
+    pass no message and keep the pure code answer, because there is nothing of
+    upstream's there to read.
+    """
     if code is None:
         return False
-    should_penalize = code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    should_penalize = (
+        code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+        or code in _facade()._TRANSIENT_RETRY_CODES
+        or is_upstream_usage_limit_rejection(error_code=code, message=message)
+    )
     if not should_penalize and _is_account_neutral_request_rejection(
         code=code,
         http_status=None,
@@ -1192,7 +1212,13 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
-        if code == USAGE_LIMIT_REACHED:
+        # The refresh is owed to the account whose window is spent, and the
+        # literal code is the one piece of that evidence upstream omits at will:
+        # the serialized terminal frame asserts the same limit in its message
+        # alone. Reading only the code leaves the pool's usage picture stale for
+        # exactly the accounts it most needs to be current about. Plain
+        # throttling still asks for nothing.
+        if is_upstream_usage_limit_rejection(error_code=code, message=error.get("message")):
             _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
@@ -1262,8 +1288,20 @@ def _push_stream_attempt_timeout_overrides(
     )
 
 
-def _should_retry_stream_error(code: str) -> bool:
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+def _should_retry_stream_error(code: str, message: str | None = None) -> bool:
+    """Whether a pre-visible terminal frame may be retried on a sibling account.
+
+    The code allowlist cannot answer this for the serialized form of the
+    usage-limit rejection: upstream sends that frame with no error code, which
+    normalizes to ``upstream_error`` and is in no transport retry list -- so a
+    frame saying the account is spent gets surfaced on the first account while
+    the identical HTTP body walks the pool. The frame's sentence is put through
+    the same predicate the health write beside it uses, because that sentence
+    is the only evidence a status-less, code-less frame carries.
+    """
+    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or is_upstream_usage_limit_rejection(
+        error_code=code, message=message
+    )
 
 
 def _upstream_turn_state_from_socket(upstream: UpstreamWebSocket | None) -> str | None:

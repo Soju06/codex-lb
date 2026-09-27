@@ -309,6 +309,17 @@ def self_contained_tool_call_ids(input_items: list[JsonValue]) -> set[str]:
     }
 
 
+def client_message_id_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """An inline client message's ID is bookkeeping, not an upstream output reference."""
+
+    if "type" in item and item["type"] != "message":
+        return False
+    if not _is_one_of(item.get("role"), {"user", "system", "developer"}) or not _is_nonblank_string(item.get("id")):
+        return False
+    message = {key: value for key, value in item.items() if key != "id"}
+    return responses_payload_is_account_neutral_fresh_replay({"input": [message]})
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True
@@ -1218,12 +1229,14 @@ def transcript_is_source_free(
     if allow_direct_source_tools:
         direct_source_body = dict(view.body)
         local_call_ids = self_contained_tool_call_ids(input_items)
-        if local_call_ids:
+        if isinstance(view.body.get("input"), list):
             direct_source_body["input"] = [
                 {key: value for key, value in item.items() if key != "id"}
                 if isinstance(item, dict)
-                and isinstance(call_id := item.get("call_id"), str)
-                and call_id in local_call_ids
+                and (
+                    client_message_id_is_account_neutral(item)
+                    or (isinstance(call_id := item.get("call_id"), str) and call_id in local_call_ids)
+                )
                 else item
                 for item in input_items
             ]
@@ -1325,10 +1338,8 @@ def _classification_view(
         tools = body.get("tools")
         if isinstance(tools, list):
             body["tools"] = [
-                {key: value for key, value in tool.items() if key != "external_web_access"}
-                if isinstance(tool, dict)
-                and tool.get("type") == "web_search"
-                and isinstance(tool.get("external_web_access"), bool)
+                _direct_web_search_classification(tool)
+                if isinstance(tool, dict) and tool.get("type") == "web_search"
                 else tool
                 for tool in tools
             ]
@@ -1348,6 +1359,22 @@ def _classification_view(
     ):
         body.pop("tool_choice")
     return body
+
+
+def _direct_web_search_classification(tool: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Ignore only validated neutral controls; keep unknown fields fail-closed."""
+
+    classified = dict(tool)
+    if isinstance(tool.get("external_web_access"), bool):
+        classified.pop("external_web_access")
+    content_types = tool.get("search_content_types")
+    if (
+        isinstance(content_types, list)
+        and content_types
+        and all(_is_one_of(content_type, {"text", "image"}) for content_type in content_types)
+    ):
+        classified.pop("search_content_types")
+    return classified
 
 
 def _direct_namespace_declaration_is_safe(tool: Mapping[str, JsonValue]) -> bool:

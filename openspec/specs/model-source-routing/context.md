@@ -91,3 +91,13 @@ Direct-source requests reject `input_file` or `input_image` file references in `
 Original source reference checks use the body retained for source forwarding before overrides. Subscription cleanup must not erase a compacted-history reference from that comparison. In particular, an old local compact fallback marker followed by an external compaction item remains acceptable with one source when ownership does not conflict; known conflicting or unavailable owners still fail closed.
 
 Valid integer `top_logprobs` values from 0 to 20 are neutral direct-source controls. Adding a second source or retrying a portable request after an explicit upstream rejection preserves the value and `include: ["message.output_text.logprobs"]`, including SDK streaming. Booleans and malformed values do not gain portability through this allowance, and subscription-overflow replay rules are unchanged.
+
+## Codex client messages when expanding a source pool
+
+Codex attaches locally generated `msg_...` IDs to inline user and instruction messages. A message carrying all of its own content is different from an upstream output reference. Direct-source selection and portability share a strict classifier for user/system/developer messages: require an absent type or `type: message`, remove only `id` in a classification copy, then validate the remaining message using the existing account-neutral contract. The forwarded request still carries the ID. Assistant output IDs, encrypted reasoning, compaction, file references and malformed messages retain ownership checks. A developer-role `additional_tools` bundle is not a message; any ID it carries remains ownership evidence.
+
+For example, an owned encrypted reasoning item followed by a new user message with its own ID continues on the recorded credential after four other sources are enabled, including on a different replica. A fresh self-contained message can use the pool. An unknown encrypted item still cannot safely choose among credentials. Disabling the real owner does not authorize another token.
+
+Declared direct-source web search also accepts validated `search_content_types: ["text", "image"]`, which Codex sends alongside `external_web_access`. Both controls are retained on the wire. These allowances do not change subscription-account replay classification or introduce new settings.
+
+The motivating production 409 was not body-archived. Its one-source-versus-five-source behavior was independently reproduced using a synthetic request captured from installed Codex CLI 0.157.1 with the source catalog; the reporting client used Codex Desktop 0.158.0-alpha.2.1. Re-enabling production sources is a separate operational step after deploying the change, not part of local verification.

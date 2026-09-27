@@ -10949,3 +10949,40 @@ calls.
 - **THEN** the account-neutral proof MUST reject the replay even if the async call has no output
 - **AND** WebSocket stale-anchor recovery MUST NOT replay that malformed history to a different account
 - **AND** nonblank async IDs MUST retain the existing unresolved-call replay behavior
+
+### Requirement: Stored asynchronous pairs retain validation evidence after settlement
+
+Before either durable full-resend proof accepts asynchronous history, the proxy MUST validate every async call and matching typed output in the stored prefix using the existing self-contained tool-item rules, even when the pair is already settled. Removing a call from outstanding async state MUST NOT discard its validation evidence. Synchronous prefix validation and account-ownership requirements MUST remain unchanged.
+
+#### Scenario: Settled async work spans an intervening turn
+
+- **GIVEN** a stored prefix contains an async function or custom tool call, an intervening user turn, and its matching output
+- **WHEN** either durable full-resend proof classifies a continuation
+- **THEN** malformed call bodies, blank identities, missing output values, unsupported fields or non-self-contained callers MUST reject that proof
+- **AND** valid settled pairs and delayed suffix results MUST remain admissible under the existing boundary and ownership checks
+
+#### Scenario: Invalid prefix cannot authorize owner-bound unanchored reattachment
+
+- **GIVEN** a reconnecting HTTP client supplies full history without an explicit previous response ID
+- **AND** its stored async prefix contains a settled malformed pair
+- **WHEN** the proxy considers preserving the request as a proved owner-bound fresh full resend
+- **THEN** that malformed prefix MUST NOT authorize the unanchored fresh-reattach path
+- **AND** the existing owner-bound fallback or fail-closed response MUST remain in force
+
+### Requirement: Fixture sanitization preserves asynchronous tool-call markers
+
+The request-fixture sanitizer MUST preserve an optional boolean `async` field on `function_call` and `custom_tool_call` items. It MUST keep an absent marker absent, retain call/output pairing through identifier remapping, replace captured free text, and remain idempotent. The marker MUST NOT become an allowed field on output items or unrelated input item types.
+
+#### Scenario: A captured asynchronous call is rebuilt
+
+- **GIVEN** a function or custom tool call with a boolean async marker and its matching output
+- **WHEN** the request fixture is sanitized twice
+- **THEN** both rebuilt requests preserve the marker value and matching call IDs
+- **AND** captured input and output text are replaced on the first pass
+- **AND** the second pass does not change the rebuilt request
+
+#### Scenario: A synchronous capture has no marker
+
+- **GIVEN** a function or custom tool call with no async field
+- **WHEN** its request fixture is sanitized
+- **THEN** the sanitizer does not introduce an async field

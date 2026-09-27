@@ -63,6 +63,23 @@ nonblank call IDs. It does not restore removed optional bridge recovery modes
 or introduce anchored-turn relocation. Retiring a stale WebSocket anchor also
 retires its pending async identities through the existing shared helper.
 
+Settling a stored async pair removes it from the outstanding-call map, but
+must not erase the call and output from prefix validation. Both durable proofs
+validate the collected async prefix items under the existing self-contained
+rules before accepting a full resend; the synchronous prefix policy remains
+unchanged. For example, an async call followed by an intervening user turn
+and a matching output without an `output` field cannot prove a fresh
+owner-bound reattachment. A valid typed result in the same position can
+still participate in the existing full-resend proof.
+
+Captured request fixtures use a separate rebuild policy. Function and custom
+tool calls retain their optional `async` scalar marker while captured input
+and output text is replaced, so a custom call marked `async: true` keeps its
+flag and matching remapped call ID after sanitization. An unmarked call stays
+unmarked; output items do not acquire the flag. This does not relax production
+validation of marker values. See the settled-prefix and fixture-sanitization
+requirements in `spec.md`.
+
 This is protocol-forward behavior: the checked rust-v0.153.4 Codex binary and
 openai/codex tree do not emit `async: true` tools. Configuration-update policy
 and WebSocket steering remain separate concerns. See the normative requirement

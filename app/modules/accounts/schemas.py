@@ -52,6 +52,11 @@ class AccountAuthStatus(DashboardModel):
     id_token: AccountTokenStatus | None = None
 
 
+class AccountSubscription(DashboardModel):
+    active_until: datetime | None = None
+    last_checked_at: datetime | None = None
+
+
 class AccountLimitWarmupStatus(DashboardModel):
     window: str
     reset_at: int
@@ -114,6 +119,7 @@ class AccountSummary(DashboardModel):
     credits_balance: float | None = None
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
+    subscription: AccountSubscription | None = None
     limit_warmup_enabled: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
     # True when another account row in the same response shares this real email,

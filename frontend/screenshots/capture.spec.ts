@@ -233,140 +233,37 @@ test("accounts — dark", async ({ page }) => {
   await capture(page, { file: "accounts-dark.jpg", theme: "dark", route: "/accounts" });
 });
 
-test("accounts list keeps many rows in an internal scroll region", async ({ page }) => {
-  const manyAccounts = Array.from({ length: 40 }, (_, index) =>
-    createAccountSummary({
-      accountId: `acc_overflow_${index}`,
-      email: `overflow-${index}@example.com`,
-      displayName: `Overflow Account ${index}`,
-      planType: "plus",
-      status: "active",
-    }),
-  );
-
+test("accounts list paginates and keeps the same page across views and details", async ({ page }) => {
+  const manyAccounts = Array.from({ length: 40 }, (_, index) => createAccountSummary({
+    accountId: `acc_page_${index}`, email: `account-${index}@example.com`,
+    displayName: `Account ${String(index).padStart(2, "0")}`,
+  }));
   await applyTheme(page, "light");
   await interceptApi(page, authSession, manyAccounts);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.addInitScript((css: string) => {
-    const style = document.createElement("style");
-    style.textContent = css;
-    (document.head ?? document.documentElement).appendChild(style);
-  }, DISABLE_ANIMATIONS_CSS);
-  await page.setViewportSize({ width: 1440, height: 1200 });
   await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
-  await page.waitForSelector('[data-testid="account-list-scroll-region"]', { timeout: 10_000 });
-
-  const scrollRegion = page.getByTestId("account-list-scroll-region");
-  const listCard = page.getByTestId("accounts-list-card");
-  const addAccountButton = page.getByRole("button", { name: "Add account" });
-  const statusBar = page.locator("footer");
-
-  await expect(addAccountButton).toBeVisible();
-  const initialDimensions = await scrollRegion.evaluate((element) => ({
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight,
-  }));
-  expect(initialDimensions.clientHeight).toBeGreaterThan(512);
-  expect(initialDimensions.scrollHeight).toBeGreaterThan(initialDimensions.clientHeight);
-  const listCardBox = await listCard.boundingBox();
-  const scrollRegionBox = await scrollRegion.boundingBox();
-  const statusBarBox = await statusBar.boundingBox();
-  if (!listCardBox || !scrollRegionBox || !statusBarBox) {
-    throw new Error("Accounts list card, scroll region, or status bar is not measurable");
-  }
-  const bottomGap = listCardBox.y + listCardBox.height - (scrollRegionBox.y + scrollRegionBox.height);
-  expect(bottomGap).toBeLessThanOrEqual(18);
-  expect(scrollRegionBox.y + scrollRegionBox.height).toBeLessThanOrEqual(statusBarBox.y - 8);
-  expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBe(0);
-
-  const reachedBottom = await scrollRegion.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    const lastRow = element.lastElementChild;
-    if (!lastRow) {
-      return { scrollTop: element.scrollTop, lastRowVisible: false };
-    }
-    const rowRect = lastRow.getBoundingClientRect();
-    const regionRect = element.getBoundingClientRect();
-    return {
-      scrollTop: element.scrollTop,
-      lastRowVisible: rowRect.top >= regionRect.top && rowRect.bottom <= regionRect.bottom,
-    };
-  });
-  expect(reachedBottom.scrollTop).toBeGreaterThan(0);
-  expect(reachedBottom.lastRowVisible).toBe(true);
-  await expect(addAccountButton).toBeVisible();
-
-  await scrollRegion.evaluate((element) => {
-    element.scrollTop = 0;
-  });
+  await expect(page.getByTestId("accounts-inline-detail")).toBeVisible();
+  const selector = page.getByTestId("account-list-scroll-region");
+  const dimensions = await selector.evaluate((node) => ({ height: node.clientHeight, content: node.scrollHeight }));
+  expect(dimensions.content).toBeGreaterThan(dimensions.height);
+  expect(await selector.getByRole("button").count()).toBe(40);
+  await page.getByRole("button", { name: "List view", exact: true }).click();
+  await expect(page.getByTestId("account-list-overview-row")).toHaveCount(24);
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.getByText("25–40 of 40 accounts")).toBeVisible();
+  await expect(page.getByTestId("account-list-overview-row")).toHaveCount(16);
+  await page.getByTestId("account-list-overview-row").first().click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.getByText("25–40 of 40 accounts")).toBeVisible();
+  await page.getByRole("button", { name: "Grid view", exact: true }).click();
+  await expect(page.getByTestId("account-grid-card")).toHaveCount(16);
+  await expect(page.getByText("25–40 of 40 accounts")).toBeVisible();
+  await page.getByPlaceholder("Search accounts...").fill("account-0@");
+  await expect(page.getByTestId("account-grid-card")).toHaveCount(1);
+  await expect(page.getByText("1–1 of 1 accounts")).toBeVisible();
   await page.getByRole("button", { name: "Need help?" }).click();
   await expect(page.getByText("Windows OAuth Help")).toBeVisible();
-
-  const helpOpenDimensions = await scrollRegion.evaluate((element) => ({
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight,
-  }));
-  expect(helpOpenDimensions.clientHeight).toBeLessThan(initialDimensions.clientHeight);
-  expect(helpOpenDimensions.scrollHeight).toBeGreaterThan(helpOpenDimensions.clientHeight);
-
-  const helpOpenScrollRegionBox = await scrollRegion.boundingBox();
-  const helpOpenStatusBarBox = await statusBar.boundingBox();
-  if (!helpOpenScrollRegionBox || !helpOpenStatusBarBox) {
-    throw new Error("Help-open account scroll region or status bar is not measurable");
-  }
-  expect(helpOpenScrollRegionBox.y + helpOpenScrollRegionBox.height).toBeLessThanOrEqual(
-    helpOpenStatusBarBox.y - 8,
-  );
-  await expect(page.getByRole("button", { name: "Need help?" })).toBeVisible();
-  await expect(addAccountButton).toBeVisible();
-
-  const helpOpenReachedBottom = await scrollRegion.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    const lastRow = element.lastElementChild;
-    if (!lastRow) {
-      return { scrollTop: element.scrollTop, lastRowVisible: false };
-    }
-    const rowRect = lastRow.getBoundingClientRect();
-    const regionRect = element.getBoundingClientRect();
-    return {
-      scrollTop: element.scrollTop,
-      lastRowVisible: rowRect.top >= regionRect.top && rowRect.bottom <= regionRect.bottom,
-    };
-  });
-  expect(helpOpenReachedBottom.scrollTop).toBeGreaterThan(0);
-  expect(helpOpenReachedBottom.lastRowVisible).toBe(true);
-});
-
-test("accounts list card ends after the final row when all accounts fit", async ({ page }) => {
-  await applyTheme(page, "light");
-  await interceptApi(page, authSession, accounts.slice(0, 4));
-  await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.addInitScript((css: string) => {
-    const style = document.createElement("style");
-    style.textContent = css;
-    (document.head ?? document.documentElement).appendChild(style);
-  }, DISABLE_ANIMATIONS_CSS);
-  await page.setViewportSize({ width: 1440, height: 1200 });
-  await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
-
-  const scrollRegion = page.getByTestId("account-list-scroll-region");
-  const listCard = page.getByTestId("accounts-list-card");
-  const dimensions = await scrollRegion.evaluate((element) => ({
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight,
-  }));
-  expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.clientHeight);
-
-  const listCardBox = await listCard.boundingBox();
-  const scrollRegionBox = await scrollRegion.boundingBox();
-  if (!listCardBox || !scrollRegionBox) {
-    throw new Error("Accounts list card or scroll region is not measurable");
-  }
-  const bottomGap =
-    listCardBox.y + listCardBox.height -
-    (scrollRegionBox.y + scrollRegionBox.height);
-  expect(bottomGap).toBeLessThanOrEqual(18);
-  await expect(page.getByRole("button", { name: "Add account" })).toBeVisible();
 });
 
 test("settings — light", async ({ page }) => {
@@ -404,6 +301,7 @@ test("redeem one account keeps the list and shows pending reconciliation", async
     await fulfill(route, { ...accounts[0], availableResetCredits: 2, resetCreditFetchedAt: new Date().toISOString() });
   });
   await page.goto(`${BASE_URL}/accounts`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: /alex.research@fastlab.io/ }).click();
   const before = listRequests;
   const reset = page.getByRole("button", { name: /^Reset \(3\)/ });
   await reset.scrollIntoViewIfNeeded();

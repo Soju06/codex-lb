@@ -89,6 +89,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
 
 describe("AccountsPage", () => {
   beforeEach(() => {
+    window.localStorage.removeItem("codex-lb-accounts-view-mode");
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
     vi.spyOn(Date, "now").mockReturnValue(
       new Date("2026-01-01T12:00:00.000Z").getTime(),
@@ -96,10 +97,12 @@ describe("AccountsPage", () => {
   });
 
   afterEach(() => {
+    window.localStorage.removeItem("codex-lb-accounts-view-mode");
     vi.restoreAllMocks();
   });
 
-  it("defaults the selected account to the first account after display sorting", () => {
+  it("defaults to the original inline detail layout and keeps overview modes optional", async () => {
+    const user = userEvent.setup();
     mockedUseAccounts.mockReturnValue({
       accountsQuery: {
         data: [
@@ -145,9 +148,21 @@ describe("AccountsPage", () => {
         .getAllByText(/^(Visible First|API First)$/)
         .map((el) => el.textContent),
     ).toEqual(["Visible First", "API First", "Visible First"]);
-    expect(
-      screen.getByRole("heading", { name: "Visible First" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Detail view" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("accounts-inline-detail")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /API First/ }));
+    expect(screen.getByRole("heading", { name: "API First" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "List view" }));
+    expect(screen.queryByTestId("accounts-inline-detail")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /API First/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "API First" })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: "Detail view" }));
+    expect(within(screen.getByTestId("accounts-inline-detail")).getByRole("heading", { name: "API First" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("codex-lb-accounts-view-mode")).toBe("detail");
   });
 
   it("renders account panels with mobile-first responsive containment", () => {
@@ -185,7 +200,7 @@ describe("AccountsPage", () => {
     expect(screen.getByTestId("accounts-layout")).toHaveClass(
       "grid-cols-1",
       "min-w-0",
-      "lg:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]",
+
     );
     expect(screen.getByTestId("accounts-list-panel")).toHaveClass(
       "min-w-0",
@@ -194,10 +209,8 @@ describe("AccountsPage", () => {
     );
     expect(screen.getByTestId("accounts-list-panel")).not.toHaveClass("h-full");
     expect(screen.getByTestId("accounts-list-card")).not.toHaveClass("h-full");
-    expect(screen.getByRole("heading", { name: /very\.long\.account/i })).toHaveClass(
-      "min-w-0",
-      "truncate",
-    );
+    expect(screen.getByTestId("accounts-inline-detail")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("keeps helper instructions accessible when no accounts exist", async () => {
@@ -285,6 +298,7 @@ describe("AccountsPage", () => {
       </MemoryRouter>,
     );
 
+    await user.click(screen.getByRole("button", { name: /Resettable/ }));
     await user.click(screen.getByRole("button", { name: "Reset usage" }));
 
     const dialog = await screen.findByRole("alertdialog", { name: "Reset usage" });
@@ -297,7 +311,7 @@ describe("AccountsPage", () => {
     });
   });
 
-  it("keeps force probe as an immediate action", async () => {
+  it("opens a linked account and keeps force probe as an immediate action", async () => {
     const user = userEvent.setup();
     const probe = vi.fn().mockResolvedValue({
       status: "probed",
@@ -343,7 +357,7 @@ describe("AccountsPage", () => {
     } as unknown as ReturnType<typeof useAccounts>);
 
     render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={["/accounts?selected=acc-probe"]}>
         <AccountsPage />
       </MemoryRouter>,
     );

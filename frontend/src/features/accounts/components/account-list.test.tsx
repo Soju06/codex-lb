@@ -4,8 +4,51 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/accounts/components/account-list";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountList", () => {
+  it("bounds grid rendering, navigates pages, and resets pagination when filtering", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const accounts = Array.from({ length: 26 }, (_, i) => createAccountSummary({
+      accountId: `acc-${i}`, displayName: `Account ${String(i).padStart(2, "0")}`, email: `user${i}@example.com`,
+    }));
+    render(<AccountList accounts={accounts} viewMode="grid" selectedAccountId={null} onSelect={onSelect} onOpenImport={() => {}} onOpenOauth={() => {}} />);
+    expect(screen.getAllByTestId("account-grid-card")).toHaveLength(24);
+    expect(screen.getByText("1–24 of 26 accounts")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getAllByTestId("account-grid-card")).toHaveLength(2);
+    expect(screen.getByText("25–26 of 26 accounts")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "View details" })[0]);
+    expect(onSelect).toHaveBeenCalledWith("acc-24");
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "user0@");
+    expect(screen.getAllByTestId("account-grid-card")).toHaveLength(1);
+    expect(screen.getByText("1–1 of 1 accounts")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
+  });
+
+  it("retains the compact scrollable selector in Detail view", () => {
+    render(<AccountList viewMode="detail" accounts={Array.from({ length: 26 }, (_, i) => createAccountSummary({ accountId: `account-${i}`, displayName: `Account ${i}` }))} selectedAccountId={null} onSelect={() => {}} onOpenImport={() => {}} onOpenOauth={() => {}} />);
+    const region = screen.getByTestId("account-list-scroll-region");
+    expect(region).toHaveClass("overflow-y-auto");
+    expect(region.querySelectorAll("button")).toHaveLength(26);
+    expect(screen.queryByTestId("account-list-overview-row")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
+    expect(region).not.toContainElement(screen.getByRole("button", { name: "Add account" }));
+  });
+
+  it("places compact plan time beneath status only in the original selector", () => {
+    const account = createAccountSummary({ subscription: { activeUntil: "2026-01-19T20:00:00Z", lastCheckedAt: null } });
+    const props = { accounts: [account], selectedAccountId: null, onSelect: () => {}, onOpenImport: () => {}, onOpenOauth: () => {} };
+    const view = render(<AccountList {...props} viewMode="detail" />);
+    const remaining = screen.getByText("18d 08h");
+    expect(remaining.previousElementSibling).toHaveTextContent("Active");
+    expect(screen.queryByText("18d 8h remaining")).not.toBeInTheDocument();
+    view.rerender(<AccountList {...props} viewMode="grid" />);
+    expect(screen.queryByTestId("account-plan-remaining")).not.toBeInTheDocument();
+    expect(screen.getByText("18d 8h remaining")).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
     vi.spyOn(Date, "now").mockReturnValue(
@@ -394,7 +437,7 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(screen.getAllByText(/^(Latest|Earlier|Stale|Unknown)$/).map((el) => el.textContent)).toEqual([
+    expect(screen.getAllByText(/^(Latest|Earlier|Stale|Unknown)$/, { selector: "p.font-semibold" }).map((el) => el.textContent)).toEqual([
       "Latest",
       "Earlier",
       "Stale",
@@ -504,10 +547,11 @@ describe("AccountList", () => {
     expect(scrollRegion).not.toContainElement(addAccountButton);
   });
 
-  it("keeps the account rows inside a viewport-bounded scroll region", () => {
+  it("paginates the full-width list without losing remaining accounts", async () => {
+    const user = userEvent.setup();
     render(
       <AccountList
-        accounts={Array.from({ length: 20 }, (_, index) => ({
+        accounts={Array.from({ length: 26 }, (_, index) => ({
           accountId: `acc-${index}`,
           email: `account-${index}@example.com`,
           displayName: `Account ${index}`,
@@ -523,12 +567,11 @@ describe("AccountList", () => {
       />,
     );
 
-    const scrollRegion = screen.getByTestId("account-list-scroll-region");
-
-    expect(scrollRegion).toHaveClass("overflow-y-auto");
-    expect(scrollRegion.parentElement).toHaveClass("max-h-[calc(100dvh-15rem)]");
-    expect(scrollRegion).not.toHaveClass("max-h-[calc(100dvh-23rem)]");
-    expect(scrollRegion).not.toHaveClass("lg:max-h-none");
+    expect(screen.getAllByTestId("account-list-overview-row")).toHaveLength(24);
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getAllByTestId("account-list-overview-row")).toHaveLength(2);
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "account-0@");
+    expect(screen.getAllByTestId("account-list-overview-row")).toHaveLength(1);
   });
 
   it("filters re-auth required accounts by status", async () => {
@@ -616,7 +659,7 @@ describe("AccountList", () => {
         (_content, el) =>
           el?.tagName === "P" &&
           !!el.textContent?.match(
-            /dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/,
+            /ID d48f0bfc\.\.\.12b5d5/,
           ),
       ),
     ).not.toBeInTheDocument();
@@ -625,7 +668,7 @@ describe("AccountList", () => {
         (_content, el) =>
           el?.tagName === "P" &&
           !!el.textContent?.match(
-            /dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/,
+            /ID 7f9de2ad\.\.\.a95cee/,
           ),
       ),
     ).toBeInTheDocument();

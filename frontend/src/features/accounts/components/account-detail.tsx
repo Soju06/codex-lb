@@ -10,6 +10,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
+import { AccountSubscription } from "@/features/accounts/components/account-subscription";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type {
   AccountRoutingPolicy,
@@ -162,6 +163,7 @@ export function AccountDetail({
           onTestEndpoint={onProxyEndpointTest}
         />
       ) : null}
+      <AccountSubscription account={account} />
       <AccountUsagePanel
         account={account}
         trends={trends}

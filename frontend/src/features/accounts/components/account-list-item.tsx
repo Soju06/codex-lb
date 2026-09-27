@@ -9,6 +9,7 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { StatusBadge } from "@/components/status-badge";
+import { AccountSubscription } from "@/features/accounts/components/account-subscription";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type {
   AccountRoutingPolicy,
@@ -28,6 +29,8 @@ export type AccountListItemProps = {
   selected: boolean;
   showAccountId?: boolean;
   showResetCreditBadge?: boolean;
+  showQuota?: boolean;
+  showPlanRemaining?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -36,25 +39,44 @@ export function AccountListItem({
   selected,
   showAccountId = false,
   showResetCreditBadge = true,
+  showQuota = true,
+  showPlanRemaining = false,
   onSelect,
 }: AccountListItemProps) {
   const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
-  const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
+  const dateDisplayFormat = useDateDisplayFormatStore(
+    (s) => s.dateDisplayFormat,
+  );
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
-  const emailSubtitle = account.displayName && account.displayName !== account.email
-    ? account.email
-    : null;
-  const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
-  const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
+  const emailSubtitle =
+    account.displayName && account.displayName !== account.email
+      ? account.email
+      : null;
+  const workspaceLabel =
+    account.chatgptAccountId ||
+    account.workspaceLabel ||
+    account.workspaceId ||
+    t("accounts.detail.unknownWorkspace");
+  const seatLabel = account.seatType
+    ? ` | ${formatSlug(account.seatType)}`
+    : "";
   const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
-  const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
-  const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
-  const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
-  const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
+  const idSuffix = showAccountId
+    ? ` | ID ${formatCompactAccountId(account.accountId)}`
+    : "";
+  const primaryState = useSmoothPercent(
+    account.usage?.primaryRemainingPercent ?? null,
+  );
+  const secondaryState = useSmoothPercent(
+    account.usage?.secondaryRemainingPercent ?? null,
+  );
+  const monthlyState = useSmoothPercent(
+    account.usage?.monthlyRemainingPercent ?? null,
+  );
   const primary = primaryState.percent;
   const secondary = secondaryState.percent;
   const monthly = monthlyState.percent;
@@ -73,21 +95,31 @@ export function AccountListItem({
     monthly !== null ||
     account.resetAtMonthly != null ||
     monthlyState.everKnown;
-  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
+  const monthlyOnly =
+    hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const showMonthlyRow = monthlyOnly;
   const showPrimaryRow =
-    !monthlyOnly && hasPrimaryWindow && (quotaDisplay !== "weekly" || !hasSecondaryWindow);
+    !monthlyOnly &&
+    hasPrimaryWindow &&
+    (quotaDisplay !== "weekly" || !hasSecondaryWindow);
   const showSecondaryRow =
-    !monthlyOnly && hasSecondaryWindow && (quotaDisplay !== "5h" || !hasPrimaryWindow);
-  const visibleQuotaRows = Number(showPrimaryRow) + Number(showSecondaryRow) + Number(showMonthlyRow);
+    !monthlyOnly &&
+    hasSecondaryWindow &&
+    (quotaDisplay !== "5h" || !hasPrimaryWindow);
+  const visibleQuotaRows =
+    Number(showPrimaryRow) + Number(showSecondaryRow) + Number(showMonthlyRow);
   const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
-  const warmupLabel = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
+  const warmupLabel = account.limitWarmupEnabled
+    ? t("accounts.listItem.warmupOn")
+    : t("accounts.listItem.warmupOff");
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
-  const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
-  const statusEligibilityHint = status === "active" ? t("accounts.listItem.statusActiveHint") : undefined;
+  const resetBadgeLabel =
+    availableResetCredits > 99 ? "99+" : String(availableResetCredits);
+  const statusEligibilityHint =
+    status === "active" ? t("accounts.listItem.statusActiveHint") : undefined;
 
   return (
     <button
@@ -116,8 +148,30 @@ export function AccountListItem({
               title
             )}
           </p>
-          <p className="truncate text-xs text-muted-foreground" title={showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
+          <p
+            className="truncate text-xs text-muted-foreground"
+            title={
+              showAccountId
+                ? t("accounts.detail.accountIdTitle", {
+                    accountId: account.accountId,
+                  })
+                : undefined
+            }
+          >
+            {emailSubtitle ? (
+              <>
+                <span className={blurred ? "privacy-blur" : undefined}>
+                  {emailSubtitle}
+                </span>{" "}
+                | {slotSubtitle}
+                {idSuffix}
+              </>
+            ) : (
+              <>
+                {slotSubtitle}
+                {idSuffix}
+              </>
+            )}
           </p>
         </div>
         {showRoutingPolicy ? (
@@ -131,36 +185,43 @@ export function AccountListItem({
             aria-label={t("accounts.actions.trustedAccess")}
           />
         ) : null}
-        <StatusBadge status={status} title={statusEligibilityHint} />
+        <div className="flex shrink-0 flex-col items-end gap-0.5">
+          <StatusBadge status={status} title={statusEligibilityHint} />
+          {showPlanRemaining ? (
+            <AccountSubscription account={account} compact />
+          ) : null}
+        </div>
       </div>
-      <div
-        className={cn(
-          "mt-2 grid gap-2",
-          visibleQuotaRows > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
-        )}
-      >
-        {showMonthlyRow ? (
-          <MiniQuotaRow
-            label={t("common.quota.monthly")}
-            percent={monthly}
-            resetAt={account.resetAtMonthly}
-          />
-        ) : null}
-        {showPrimaryRow ? (
-          <MiniQuotaRow
-            label="5h"
-            percent={primary}
-            resetAt={account.resetAtPrimary}
-          />
-        ) : null}
-        {showSecondaryRow ? (
-          <MiniQuotaRow
-            label={t("common.quota.weekly")}
-            percent={secondary}
-            resetAt={account.resetAtSecondary}
-          />
-        ) : null}
-      </div>
+      {showQuota ? (
+        <div
+          className={cn(
+            "mt-2 grid gap-2",
+            visibleQuotaRows > 1 ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1",
+          )}
+        >
+          {showMonthlyRow ? (
+            <MiniQuotaRow
+              label={t("common.quota.monthly")}
+              percent={monthly}
+              resetAt={account.resetAtMonthly}
+            />
+          ) : null}
+          {showPrimaryRow ? (
+            <MiniQuotaRow
+              label="5h"
+              percent={primary}
+              resetAt={account.resetAtPrimary}
+            />
+          ) : null}
+          {showSecondaryRow ? (
+            <MiniQuotaRow
+              label={t("common.quota.weekly")}
+              percent={secondary}
+              resetAt={account.resetAtSecondary}
+            />
+          ) : null}
+        </div>
+      ) : null}
       <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[10px] text-muted-foreground">
         <span className="shrink-0">{warmupLabel}</span>
         <span className="min-w-0 truncate">{warmupMeta}</span>
@@ -169,7 +230,7 @@ export function AccountListItem({
   );
 }
 
-function RoutingPolicyBadge({
+export function RoutingPolicyBadge({
   policy,
 }: {
   policy: AccountRoutingPolicy | undefined;
@@ -237,7 +298,12 @@ function MiniQuotaRow({
   );
 }
 
-function formatMiniQuotaResetLabel(resetAt: string | null, t: ReturnType<typeof useTranslation>["t"]): string {
+function formatMiniQuotaResetLabel(
+  resetAt: string | null,
+  t: ReturnType<typeof useTranslation>["t"],
+): string {
   const label = formatQuotaResetLabel(resetAt);
-  return label.startsWith("Reset ") ? label : t("accounts.listItem.resetAt", { label });
+  return label.startsWith("Reset ")
+    ? label
+    : t("accounts.listItem.resetAt", { label });
 }

@@ -96,6 +96,15 @@ export const AccountSummarySchema = z.object({
   creditsBalance: z.number().nullable().optional(),
   requestUsage: AccountRequestUsageSchema.nullable().optional(),
   auth: AccountAuthSchema.nullable().optional(),
+  subscription: z.object({
+    activeUntil: z.iso.datetime({ offset: true }).nullable(),
+    lastCheckedAt: z.iso.datetime({ offset: true }).nullable(),
+  }).nullable().optional(),
+  lastRefreshAt: z.iso.datetime({ offset: true, local: true })
+    // Older backends serialize this UTC value without an offset during a rolling deploy.
+    .transform((value) => /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`)
+    .nullable().optional(),
+  deactivationReason: z.string().nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),

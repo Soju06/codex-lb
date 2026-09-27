@@ -88,11 +88,11 @@ visible without expanding the group.
 
 ### Requirement: Accounts page
 
-The Accounts page SHALL display a two-column layout: left panel with searchable account list, import button, and add account button; right panel with selected account details including usage, token info, and actions (pause/resume/delete/re-authenticate). The Accounts page SHALL also let operators view and update whether an account is authorized for upstream cybersecurity work without losing existing account actions such as pause, resume, re-authenticate, export, and delete.
+The Accounts page SHALL offer Detail, List and Grid views with shared search, import and add account actions. Detail view SHALL preserve the original two-column layout on desktop: compact account selector on the left and the selected account statistics, quota trend charts, subscription term, token information and management actions inline on the right. Selecting an account in Detail view SHALL update the right panel without opening a dialog. List and Grid SHALL remain optional full-width account overviews; selecting an overview account SHALL open its details in a responsive dialog. A valid `selected` account URL parameter SHALL select that account on initial load, inline in Detail or in the overview dialog; closing the dialog SHALL remove that parameter without clearing search, filters, sort or pagination. The Accounts page SHALL also let operators view and update whether an account is authorized for upstream cybersecurity work without losing existing account actions such as pause, resume, re-authenticate, export, and delete.
 
 The layout SHALL fit mobile, tablet, and desktop dashboard widths without horizontal page overflow caused by fixed-width account controls.
 
-The Accounts page SHALL keep the add account button outside the scrollable account list so it remains reachable without scrolling through existing accounts, and SHALL keep long account lists in a bounded internal scroll region on desktop so account rows do not push the page layout past the selected-account detail panel.
+The Accounts page SHALL keep Add account and filters outside account rows. In Detail view the selector SHALL use a bounded internal scroll region and a content-sized left card. In List and Grid the number of rendered accounts SHALL be bounded through pagination.
 
 Account status displays and filters SHALL distinguish `reauth_required` accounts from `deactivated` accounts: `reauth_required` means the local credential/session must be refreshed by operator re-authentication, while `deactivated` means the upstream account is disabled, suspended, deleted, or explicitly deactivated.
 
@@ -127,20 +127,20 @@ Account status displays and filters SHALL distinguish `reauth_required` accounts
 #### Scenario: Responsive account management layout
 
 - **WHEN** the Accounts page is rendered at a mobile-width viewport
-- **THEN** the account list and selected account detail stack vertically
+- **THEN** Detail view stacks the account selector above the inline account detail; List and Grid fill the available width with responsive detail dialogs
 - **AND** account list filters, quota rows, proxy controls, routing policy controls, token status, and action buttons fit within the viewport without horizontal document overflow
 
-#### Scenario: Add account remains outside account list scrolling
+#### Scenario: Add account remains outside account rows
 
 - **WHEN** the Accounts page renders the account list controls
-- **THEN** the add account button is not a child of the scrollable account list
-- **AND** the button remains available without scrolling through existing accounts
+- **THEN** the add account button is not a child of the account rows
+- **AND** the button remains available in the overview controls without opening account details
 
-#### Scenario: Long account list scrolls inside the left panel
+#### Scenario: Long account list uses pagination
 
-- **WHEN** the Accounts page renders more account rows than fit in the visible left panel
-- **THEN** the account rows scroll inside the account list region
-- **AND** the add account action remains visible outside that scroll region
+- **WHEN** more than 24 accounts match the List filters
+- **THEN** at most 24 account rows are rendered with navigation and a matching-results count
+- **AND** add account remains outside the account rows
 
 #### Scenario: Re-authentication-required account is labeled separately
 
@@ -150,6 +150,65 @@ Account status displays and filters SHALL distinguish `reauth_required` accounts
 - **AND** the account detail exposes the re-authenticate action
 - **AND** the account detail does not expose pause or resume actions that could bypass re-authentication
 - **AND** the account list and account detail do not expose routing-policy controls that imply the account is selectable while operator recovery is required
+
+### Requirement: Accounts grid overview
+
+The Accounts page MUST offer accessible Detail, List and Grid choices, default to Detail when no valid preference is stored, and remember the selected view locally independently of Dashboard appearance. Valid stored List/Grid preferences MUST remain supported. All views MUST share search, status filters, sorting and account selection. All views MUST fit mobile and desktop widths without horizontal overflow. List and Grid MUST render at most 24 accounts per page with navigation and a matching-results count. Grid cards MUST show identity/workspace, plan, status, quota and reset timing, subscription term, request usage totals, token status, routing/warm-up, and available credits using existing summary data. List rows MUST show only identity/workspace context, plan/status, a compact recorded-plan duration and primary/weekly or monthly-only quota/reset timing, with an affordance to open details and a compact available-reset-count badge when enabled. List rows MUST omit request/token totals, cost, credentials, purchased credits, routing/warm-up details and long subscription timestamps. The desktop List MUST place short and weekly quota windows side by side and use compact spacing; narrow screens MUST wrap its groups within the viewport. Selecting a card or list row MUST open the existing account detail/actions and preserve read-only restrictions. Grid and List rendering MUST NOT fetch trends or credit details separately for each account.
+
+#### Scenario: Switch views with active filters
+
+- **WHEN** the operator filters accounts and switches between Detail, List and Grid
+- **THEN** the search/filter/sort values and matching account set are preserved
+- **AND** reloading restores the selected view
+
+#### Scenario: Many accounts match
+
+- **WHEN** more than 24 accounts match the List or Grid filters
+- **THEN** at most 24 cards or list rows are rendered and the operator can navigate to remaining results
+- **AND** filtering or sorting restarts pagination from the first page
+
+#### Scenario: Manage an account from a grid card
+
+- **WHEN** an operator opens a grid card
+- **THEN** the selected account's existing details and permitted actions are available
+- **AND** closing the detail returns to the same filtered grid page
+
+#### Scenario: List view scans essential account information
+
+- **WHEN** the operator switches to List view
+- **THEN** each row shows identity/workspace, plan/status, compact subscription duration, quota/reset timing and a way to open existing details
+- **AND** request/token totals, credentials, purchased credits and long metadata blocks are absent from the row
+- **AND** the row uses the already loaded account summary without per-row network requests
+
+#### Scenario: Open and close account details from a list row
+
+- **WHEN** the operator opens an account row using a pointer or keyboard
+- **THEN** the account details dialog shows that account and permitted actions
+- **AND** closing it returns to the same filtered, sorted and paginated list
+
+#### Scenario: Default view retains original account statistics and charts
+
+- **WHEN** Accounts opens without a valid stored view preference
+- **THEN** Detail view shows the compact selector and selected-account statistics and quota trend charts inline
+- **AND** no account detail dialog opens merely from selecting a compact account row
+
+#### Scenario: Return to the original layout
+
+- **WHEN** an operator switches from an overview to Detail
+- **THEN** the selected account, search, status and sort remain preserved
+- **AND** the original inline statistics and charts appear for that selected account
+- **AND** only the selected account requests trend/credit details
+
+#### Scenario: Long selector remains bounded in Detail view
+
+- **WHEN** the Detail selector has more rows than its available height
+- **THEN** rows scroll inside the left selector
+- **AND** filters and Add account remain outside that scroll region
+
+#### Scenario: Full information remains available on selection
+
+- **WHEN** an operator opens a compact List row
+- **THEN** selected details retain complete subscription metadata, token information, request totals and management actions
 
 ### Requirement: Request logs display account plan tier
 When a request log entry is associated with an account, the dashboard request-log API response MUST expose the persisted request-log `planType` snapshot, and the recent-requests table MUST render the plan tier in a visible request-log column or badge.
@@ -1059,14 +1118,16 @@ The accounts dashboard MUST allow operators to bind an account to a proxy pool a
 
 The Accounts page account list SHALL expose sort modes for reset time
 soonest-first, reset time latest-first, account name ascending, and account name
-descending. The default sort mode SHALL remain reset time soonest-first. The
+descending, plan alphabetically ascending/descending, recorded subscription deadline soonest/latest, and remaining 5h/7d quota percent lowest/highest. The default sort mode SHALL remain most reset credits first. The
 same selected sort mode SHALL apply to both the rendered account list and the
 page-level selected-account fallback.
 
-#### Scenario: Reset soonest remains the default
+Plan sorting SHALL compare plan labels case-insensitively and place empty/unknown plans last. Subscription sorting SHALL compare explicit recorded deadlines without substituting token expiry or reset times. Quota sorts SHALL independently compare their selected window's remaining percentage regardless of the quota appearance preference; absent windows SHALL remain unknown. Unknown values SHALL sort last in both directions, zero quota SHALL remain valid, and equal values SHALL retain deterministic tie breakers. Sorting SHALL precede pagination and changing the sort through either control SHALL reset pagination to the first page while preserving filters and selection. The selected sort SHALL remain shared across Detail, List and Grid.
+
+#### Scenario: Most reset credits remains the default
 
 - **WHEN** the account list renders without an explicit sort mode
-- **THEN** accounts with the earliest upcoming visible quota reset sort first
+- **THEN** accounts with the most available reset credits sort first
 
 #### Scenario: Reset latest sorts finite resets descending
 
@@ -1081,6 +1142,21 @@ page-level selected-account fallback.
 - **WHEN** a user selects account name ascending or descending
 - **THEN** the account list orders accounts by display name, email, or account
   identifier in the selected direction
+
+#### Scenario: Plan and subscription ordering
+- **WHEN** an operator selects a Plan or Subscription sort direction
+- **THEN** rows order by plan label or recorded deadline in that direction
+- **AND** unavailable values remain last without inferring subscription time from credentials
+
+#### Scenario: Independent quota sorting
+- **WHEN** an operator sorts by 5h or 7d remaining quota
+- **THEN** rows order numerically by that window in the selected direction, including zero percent
+- **AND** absent windows remain last without substituting monthly or the other window
+
+#### Scenario: Sort from a later filtered page
+- **WHEN** the operator changes sorting on a later page of filtered List results
+- **THEN** the full matching collection is sorted before rendering its first page
+- **AND** filters and account selection remain intact when changing views
 
 ### Requirement: API key overview SHALL show lifetime usage aggregates
 
@@ -1899,48 +1975,6 @@ including extended GPT-5.6 efforts such as `max` and `ultra`.
 - **WHEN** a selected model advertises `max` or `ultra` in `supportedReasoningEfforts`
 - **THEN** the automation create/edit dialog offers those efforts as selectable values
 
-### Requirement: Accounts list uses available tall-viewport space
-
-The Accounts page MUST size its scrollable account rows from the available
-viewport height without imposing a smaller fixed height ceiling. The bound MUST
-leave the page controls and fixed status bar visible, so account rows cannot
-extend below the viewport even when the selected-account detail panel makes the
-page taller. Optional controls MUST consume space from that bound according to
-their rendered height. The search, filter, sort, help, and Add account controls
-MUST remain outside the rows scroll region, and a list longer than the available
-region MUST continue to scroll internally. When the controls and rows require
-less height than the selected account details, the left card MUST remain
-content-sized instead of stretching an empty bordered area to the bottom of the
-details column.
-
-#### Scenario: Tall desktop viewport expands the rows region
-
-- **WHEN** the Accounts page renders a long account list in a 1200px-tall desktop viewport
-- **THEN** the account rows region is taller than 32rem
-- **AND** the region uses the otherwise-empty space beneath the list controls
-- **AND** the final visible account row region ends above the fixed status bar
-
-#### Scenario: Expanded help panel consumes rows space
-
-- **WHEN** a user expands Windows OAuth Help above a long account list in a 1200px-tall desktop viewport
-- **THEN** the help panel remains visible outside the rows scroll region
-- **AND** the rows region shrinks by the rendered help-panel height
-- **AND** the rows region still ends above the fixed status bar
-- **AND** the final account remains reachable through internal scrolling
-
-#### Scenario: Shorter account list does not stretch its card
-
-- **WHEN** all account rows fit within the viewport-aware region
-- **AND** the selected-account details are taller than the list controls and rows
-- **THEN** the left card ends after the account rows and its normal bottom padding
-- **AND** it does not render a large empty bordered area beneath the final account
-
-#### Scenario: Account pool still exceeds the available height
-
-- **WHEN** the account rows require more space than the viewport-aware region provides
-- **THEN** the rows remain internally scrollable through the final account
-- **AND** the Add account action remains visible outside the scroll region
-
 ### Requirement: Account management page supports account import and OAuth add flows
 
 The Accounts page SHALL support account import, untargeted OAuth account
@@ -2239,7 +2273,7 @@ The Accounts page per-account action bar SHALL render a `Reset (N)` button next 
 
 ### Requirement: AccountListItem displays a reset-credits count badge
 
-The Accounts page `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0` and dashboard setting `show_reset_credit_badges` is enabled. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0` or `show_reset_credit_badges` is disabled.
+The compact `AccountListItem` SHALL render a count badge pinned to the right-upper radius of the item whenever the account reports `available_reset_credits > 0` and dashboard setting `show_reset_credit_badges` is enabled. The badge SHALL display the integer count, capped visually at `"99+"` when the count exceeds 99. The badge SHALL be absent when `available_reset_credits` is `0` or `show_reset_credit_badges` is disabled. The full-width Accounts List SHALL show a compact labeled count of available resets when positive and show_reset_credit_badges is enabled. It SHALL omit zero/missing counts and disabled badges. The compact selector and Grid header SHALL retain their existing badges. The List badge SHALL use summary data without extra credit requests or a direct redemption action.
 
 #### Scenario: Badge shows the available count
 - **WHEN** an `AccountListItem` renders for an account with `available_reset_credits: 3`
@@ -2258,6 +2292,12 @@ The Accounts page `AccountListItem` SHALL render a count badge pinned to the rig
 - **AND** an account reports `available_reset_credits: 3`
 - **WHEN** an `AccountListItem` renders
 - **THEN** the reset-credit count badge is absent
+
+#### Scenario: List shows available reset count
+- **WHEN** an Accounts List row has three available reset credits and badges are enabled
+- **THEN** a compact Reset (3) indicator appears beside plan/status
+- **AND** disabling badges or having zero/missing credits hides the indicator
+- **AND** selecting the row opens details without redeeming credits
 
 ### Requirement: Accounts page can sort by available reset credits
 
@@ -4295,3 +4335,16 @@ The dashboard SHALL retain unresolved reset request identity per account in the 
 - **WHEN** a consume fails and the operator closes and reopens the dialog for the same account
 - **THEN** the next confirmation SHALL reuse the original request ID
 - **AND** it SHALL NOT reuse that request ID for another account
+
+### Requirement: Accounts List headers control sorting
+
+Desktop List SHALL offer keyboard-operable Plan, Subscription, Quota 5h and Quota 7d header controls. Selecting an inactive header SHALL sort ascending; selecting it again SHALL toggle direction. Active controls SHALL expose visible direction arrows and an accessible direction description. The same ascending/descending modes SHALL be available from the existing sort dropdown at all viewport sizes. Header sorting SHALL preserve the compact row layout.
+
+#### Scenario: Toggle header direction
+- **WHEN** an operator activates a List sort header by pointer or keyboard
+- **THEN** its ascending order appears with a visible and accessible direction
+- **AND** activating it again reverses that order and updates the sort dropdown
+
+#### Scenario: Mobile sorting
+- **WHEN** desktop headers are hidden at narrow widths
+- **THEN** the operator can select every new sort mode from the sort dropdown

@@ -9,13 +9,14 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
-from app.core.utils.time import from_epoch_seconds
+from app.core.utils.time import from_epoch_seconds, to_utc_naive
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
     AccountLimitWarmupStatus,
     AccountRequestUsage,
+    AccountSubscription,
     AccountSummary,
     AccountTokenStatus,
     AccountUsage,
@@ -116,7 +117,7 @@ def _account_to_summary(
     reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
-    auth_status = _build_auth_status(account, encryptor) if include_auth else None
+    auth_status, subscription = _build_credential_summary(account, encryptor) if include_auth else (None, None)
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
         primary_usage,
         secondary_usage,
@@ -280,7 +281,7 @@ def _account_to_summary(
         window_minutes_primary=window_minutes_primary,
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,
-        last_refresh_at=account.last_refresh,
+        last_refresh_at=to_utc_naive(account.last_refresh).replace(tzinfo=timezone.utc),
         usage_refreshed_at=usage_refreshed_at,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
@@ -295,6 +296,7 @@ def _account_to_summary(
         additional_quotas=additional_quotas or [],
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
+        subscription=subscription,
         limit_warmup_enabled=bool(account.limit_warmup_enabled),
         limit_warmup=_limit_warmup_to_status(limit_warmup),
         is_email_duplicate=is_email_duplicate,
@@ -449,7 +451,9 @@ def _effective_usage_windows(
     return None, secondary_usage
 
 
-def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAuthStatus:
+def _build_credential_summary(
+    account: Account, encryptor: TokenEncryptor
+) -> tuple[AccountAuthStatus, AccountSubscription]:
     access_token = _decrypt_token(encryptor, account.access_token_encrypted)
     refresh_token = _decrypt_token(encryptor, account.refresh_token_encrypted)
     id_token = _decrypt_token(encryptor, account.id_token_encrypted)
@@ -457,16 +461,25 @@ def _build_auth_status(account: Account, encryptor: TokenEncryptor) -> AccountAu
     access_expires = _token_expiry(access_token)
     refresh_state = "stored" if refresh_token else "missing"
     id_state = "unknown"
+    subscription = AccountSubscription()
     if id_token:
         claims = extract_id_token_claims(id_token)
         if claims.model_dump(exclude_none=True):
             id_state = "parsed"
+        plan = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
+        if claims.auth and plan not in {"free", "unknown"}:
+            token_plan = coerce_account_plan_type(claims.auth.chatgpt_plan_type, DEFAULT_PLAN)
+            if token_plan == plan:
+                subscription = AccountSubscription(
+                    active_until=claims.auth.chatgpt_subscription_active_until,
+                    last_checked_at=claims.auth.chatgpt_subscription_last_checked,
+                )
 
     return AccountAuthStatus(
         access=AccountTokenStatus(expires_at=access_expires),
         refresh=AccountTokenStatus(state=refresh_state),
         id_token=AccountTokenStatus(state=id_state),
-    )
+    ), subscription
 
 
 def _decrypt_token(encryptor: TokenEncryptor, encrypted: bytes | None) -> str | None:

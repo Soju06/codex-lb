@@ -4,10 +4,12 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+
+from app.core.types import JsonValue
 
 DEFAULT_EMAIL = "unknown@example.com"
 DEFAULT_PLAN = "unknown"
@@ -48,6 +50,8 @@ class OpenAIAuthClaims(BaseModel):
         ),
     )
     chatgpt_plan_type: str | None = None
+    chatgpt_subscription_active_until: datetime | None = None
+    chatgpt_subscription_last_checked: datetime | None = None
     workspace_id: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -76,6 +80,23 @@ class OpenAIAuthClaims(BaseModel):
             "entitlement_type",
         ),
     )
+
+    @field_validator("chatgpt_subscription_active_until", "chatgpt_subscription_last_checked", mode="before")
+    @classmethod
+    def _subscription_timestamp(cls, value: JsonValue | datetime) -> datetime | None:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and ("T" in value or " " in value):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+        try:
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            return None
 
 
 class IdTokenClaims(BaseModel):

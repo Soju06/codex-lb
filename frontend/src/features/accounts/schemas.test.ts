@@ -13,6 +13,19 @@ import {
 const ISO = "2026-01-01T00:00:00+00:00";
 
 describe("AccountSummarySchema", () => {
+  it.each([
+    ["2026-09-27T12:00:00", "2026-09-27T12:00:00Z"],
+    ["2026-09-27T12:00:00Z", "2026-09-27T12:00:00Z"],
+    ["2026-09-27T19:00:00+07:00", "2026-09-27T19:00:00+07:00"],
+  ])("accepts old and new token refresh timestamps: %s", (lastRefreshAt, expected) => {
+    const account = AccountSummarySchema.parse({
+      accountId: "compat", email: "compat@example.com", displayName: "Compat",
+      planType: "plus", status: "active", lastRefreshAt,
+    });
+    expect(account.lastRefreshAt).toBe(expected);
+    expect(account.subscription).toBeUndefined();
+  });
+
   it("parses lightweight account payload", () => {
     const parsed = AccountSummarySchema.parse({
       accountId: "acc-1",

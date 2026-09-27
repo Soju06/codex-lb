@@ -5,4 +5,4 @@
 
 ## Verification
 - [x] Run route/transport and PostgreSQL concurrency regressions.
-- [ ] Validate specs, independent review, and required local CI.
+- [x] Validate specs, independent review, and required local CI.

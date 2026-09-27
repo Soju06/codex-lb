@@ -42,7 +42,7 @@ matching behavior. It now describes the actual protected case: an undispatched
 explicit replacement with no eligible live request. No implementation behavior
 changed for that documentation correction.
 
-## Local checks and remaining integration gate
+## Historical scoped checks
 
 These checks passed with run-owned database configuration established before
 any application import:
@@ -53,18 +53,40 @@ any application import:
 - Strict validation of this OpenSpec change.
 - Proxy architecture, cancellation safety and timing-seam checks.
 
-The main API-key specification validates strictly. The main Responses
-specification still reports 34 pre-existing missing SHALL/MUST errors, with
-identical error paths/messages before and after synchronization. Its three new
-requirements add informational long-text hints only. Automatic archival stopped
-on those baseline errors after writing the API-key additions. The Responses
-additions were synchronized manually and both complete delta bodies were
-confirmed present exactly once. Archival therefore uses `--skip-specs` after
-synchronization, with change validation enabled; the main-spec failures are not
-claimed fixed or green.
+The initial archive encountered 34 baseline Responses-spec validation errors;
+its additions were synchronized manually and confirmed present exactly once.
+That historical limitation is superseded by the refreshed verification below:
+pinned OpenSpec 1.11.0 strictly validates all 66 main specifications.
 
-The full repository `local-ci` gate, including PostgreSQL, packaging, Rust,
-Docker and Helm, is intentionally run by the coordinating task after the code
-and synchronized specifications are committed. Archival records completed
-scoped implementation verification, not a full-gate pass, cloud CI success,
-review approval, live-provider validation, merge or deployment.
+## Refreshed full verification, 2026-09-27
+
+Candidate `c878953a971276bd55b5b5d31def8038e1d1d4be` contains repaired main
+`09a140fa9979a908e60acc97232367e0a08ef32c`. The complete
+`uv run pre-commit run local-ci --hook-stage manual --all-files --verbose`
+passed on Linux/arm64 with dedicated SQLite and PostgreSQL databases.
+Frontend: 181 files and 1643 tests passed. Python stages: 10576 unit,
+3021 integration-core, 356 bridge/WebSocket, 27 PostgreSQL-core and
+257 PostgreSQL integration tests passed. Existing skips and expected failures
+remain reported; no gate stage was filtered out.
+
+The gate also passed lint/type checks, migration topology, Rust, packaging,
+Docker, Helm lint/template and both kind smoke configurations. The external
+database smoke verified a two-member bridge ring and successful Helm tests.
+Gate and cleanup both exited zero; disposable containers and kind nodes were
+removed, and pre-existing image tags restored.
+
+The refreshed focused route/transport selection passed 83 tests. A separate
+four-case real aiohttp/ASGI trace covered accepted and rejected steers with
+completed and failed explicit continuations, preserving explicit ownership
+through compression and transport drain. The sequential-WebSocket fixture
+correction passed three related integrations and retained both account-owner
+and upstream-payload assertions.
+
+The independent committed-diff reviews of the hot-path repair and subsequent
+reservation-cleanup test alignment remain applicable; the refresh adds main,
+spec context and the narrowly reviewed fixture correction. The follow-up is
+archived at `../2026-09-27-defer-astra-steering-overhead/`. Its normative delta
+already appears exactly once in the owning main spec.
+
+This receipt establishes local verification, not hosted-CI success, fresh
+automated review approval, live-provider validation, merge or deployment.

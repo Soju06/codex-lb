@@ -353,6 +353,40 @@ def standalone_function_output_is_account_neutral(item: Mapping[str, JsonValue])
     )
 
 
+def inline_agent_message_is_source_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Codex delegates inline task content, with a client-generated message ID.
+
+    Encrypted agent text is message content understood by the receiving model,
+    not an encrypted reasoning/compaction item or an upstream object reference.
+    Keep this exception restricted to the exact agent-message wire shape.
+    """
+
+    if (
+        item.get("type") != "agent_message"
+        or not set(item) <= {"type", "id", "author", "recipient", "content", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}
+        or not _is_nonblank_string(item.get("author"))
+        or not _is_nonblank_string(item.get("recipient"))
+        or ("id" in item and not _is_nonblank_string(item["id"]))
+        or not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+    ):
+        return False
+    content = item.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return all(
+        isinstance(part, dict)
+        and (
+            (set(part) == {"type", "text"} and part["type"] == "input_text" and isinstance(part["text"], str))
+            or (
+                set(part) == {"type", "encrypted_content"}
+                and part["type"] == "encrypted_content"
+                and _is_nonblank_string(part["encrypted_content"])
+            )
+        )
+        for part in content
+    )
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True
@@ -1272,7 +1306,13 @@ def transcript_is_source_free(
                 )
                 else item
                 for item in input_items
-                if not (isinstance(item, dict) and standalone_function_output_is_account_neutral(item))
+                if not (
+                    isinstance(item, dict)
+                    and (
+                        standalone_function_output_is_account_neutral(item)
+                        or inline_agent_message_is_source_neutral(item)
+                    )
+                )
             ]
         for field_name in _DIRECT_SOURCE_NEUTRAL_FIELDS:
             value = direct_source_body.get(field_name)

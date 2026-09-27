@@ -22,6 +22,7 @@ from app.modules.model_sources.ownership_repository import SourceOwnershipReposi
 from app.modules.proxy.replay_safety import (
     client_message_id_is_account_neutral,
     client_tool_output_id_is_account_neutral,
+    inline_agent_message_is_source_neutral,
     self_contained_tool_call_ids,
     standalone_function_output_is_account_neutral,
 )
@@ -81,8 +82,10 @@ class OwnershipScope:
             local_call_ids = self_contained_tool_call_ids(items)
             for item in items:
                 if isinstance(item, dict):
-                    if client_message_id_is_account_neutral(item) or standalone_function_output_is_account_neutral(
-                        item
+                    if (
+                        client_message_id_is_account_neutral(item)
+                        or standalone_function_output_is_account_neutral(item)
+                        or inline_agent_message_is_source_neutral(item)
                     ):
                         continue
                     call_id = item.get("call_id")

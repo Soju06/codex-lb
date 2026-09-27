@@ -23,6 +23,8 @@ The main workspace contains unrelated edits, including an unrelated type diagnos
 
 The independent Codex CLI review completed with no actionable correctness or security findings. The reviewer also ran the new tests and related regression coverage.
 
-## Pending operational verification
+## Production validation
 
-The HA rollout and final archive are tracked in tasks.md. Production validation uses synthetic fresh messages, a function call/result and follow-up messages with the new metadata across all three backends and local/public endpoints. A genuinely old transcript with unknown upstream-owned reasoning remains outside this fix and still requires its original source.
+Commit `3cdd18fa` was pushed and deployed from a clean release checkout. Synthetic fresh messages, a function call/result and follow-up messages with the new metadata returned HTTP 200 and the expected marker successively on blue, green, amber, local HAProxy and the public endpoint. All three base backends run the same image and matching reviewed code hashes. The HA deploy command completed successfully. Final status: blue/green/amber UP at weight 1, exactly three eligible backends, surge stopped at weight 0, rollout phase none. Public-port readiness reports a healthy database and a three-member bridge ring. Blue, green and amber reached their drain bounds with two, four and one sessions respectively; long-lived clients may have reconnected. A genuinely old transcript with unknown upstream-owned reasoning remains outside this fix and still requires its original source.
+
+The independently verified code and tests match the deployed files. No actionable verification findings remain. Actual user-chat retry confirmation is pending; the original request was correlated precisely and its fresh metadata shape was reproduced independently.

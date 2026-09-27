@@ -6,5 +6,5 @@
 ## 2. Verification
 
 - [x] 2.1 Run mapped regressions, lint, formatting, type checks and strict OpenSpec validation.
-- [ ] 2.2 Complete independent review, fix findings, sync stable specs/context and archive verified artifacts.
-- [ ] 2.3 Commit and push the scoped fix, deploy through HA surge, and verify pooled synthetic continuity on all backends.
+- [x] 2.2 Complete independent review, fix findings, sync stable specs/context and archive verified artifacts.
+- [x] 2.3 Commit and push the scoped fix, deploy through HA surge, and verify pooled synthetic continuity on all backends.

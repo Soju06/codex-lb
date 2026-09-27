@@ -23,6 +23,7 @@ from app.modules.proxy.replay_safety import (
     client_message_id_is_account_neutral,
     client_tool_output_id_is_account_neutral,
     inline_agent_message_is_source_neutral,
+    project_direct_source_input_metadata,
     self_contained_tool_call_ids,
     standalone_function_output_is_account_neutral,
 )
@@ -79,6 +80,7 @@ class OwnershipScope:
                             self._add(keys, "vector_store", vector_store_id)
         items = payload.get("input")
         if isinstance(items, list):
+            items = project_direct_source_input_metadata(items)
             local_call_ids = self_contained_tool_call_ids(items)
             for item in items:
                 if isinstance(item, dict):

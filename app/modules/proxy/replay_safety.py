@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -395,6 +396,40 @@ def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) 
         and set(value) == _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS
         and _is_nonblank_string(value.get("turn_id"))
     )
+
+
+def project_direct_source_input_metadata(input_items: list[JsonValue]) -> list[JsonValue]:
+    """Normalize proven client bookkeeping only in a classification copy.
+
+    Ownership and portability share this view; forwarding and subscription
+    replay keep their original input and metadata contract.
+    """
+    projected: list[JsonValue] = []
+    for item in input_items:
+        metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD) if isinstance(item, dict) else None
+        if isinstance(item, dict) and isinstance(metadata, dict) and _direct_source_metadata_is_neutral(metadata):
+            projected.append({**item, _INTERNAL_CHAT_MESSAGE_METADATA_FIELD: {"turn_id": metadata["turn_id"]}})
+        else:
+            projected.append(item)
+    return projected
+
+
+def _direct_source_metadata_is_neutral(metadata: Mapping[str, JsonValue]) -> bool:
+    if not set(metadata) <= {"turn_id", "create_time", "content_item_kinds"} or not _is_nonblank_string(
+        metadata.get("turn_id")
+    ):
+        return False
+    if "create_time" in metadata:
+        created = metadata["create_time"]
+        if isinstance(created, bool) or not isinstance(created, (int, float)):
+            return False
+        if isinstance(created, float) and not isfinite(created):
+            return False
+    if "content_item_kinds" in metadata:
+        kinds = metadata["content_item_kinds"]
+        if not isinstance(kinds, list) or not all(_is_nonblank_string(kind) for kind in kinds):
+            return False
+    return True
 
 
 def responses_input_suffix_retains_prior_output(
@@ -1294,6 +1329,7 @@ def transcript_is_source_free(
         return False
     direct_source_view = view
     if allow_direct_source_tools:
+        input_items = project_direct_source_input_metadata(input_items)
         direct_source_body = dict(view.body)
         local_call_ids = self_contained_tool_call_ids(input_items)
         if isinstance(view.body.get("input"), list):

@@ -590,9 +590,13 @@ def test_the_observation_reports_loopback_only_inside_a_real_namespace() -> None
     if observed_network_interfaces() == ("lo",):  # pragma: no cover - the suite is already isolated
         pytest.skip("this host is already loopback-only, so the comparison would be vacuous")
     snippet = (
-        "import json;"
+        "import json, os, socket;"
         "from scripts.traffic_analysis.codex_body_capture import observed_network_interfaces;"
-        "print(json.dumps(list(observed_network_interfaces())))"
+        "print(json.dumps({"
+        "'observed': sorted(observed_network_interfaces()),"
+        "'namespace': sorted(name for _index, name in socket.if_nameindex()),"
+        "'sysfs': sorted(os.listdir('/sys/class/net')),"
+        "}))"
     )
     command: Sequence[str] = [
         "unshare",
@@ -617,7 +621,19 @@ def test_the_observation_reports_loopback_only_inside_a_real_namespace() -> None
         stdin=subprocess.DEVNULL,
     )
 
-    assert json.loads(completed.stdout.strip().splitlines()[-1]) == ["lo"]
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    # A fresh namespace is not guaranteed to be loopback-only: once the tunnel
+    # modules are loaded the kernel creates gre0/gretap0/erspan0/ip6tnl0/tunl0 in
+    # every namespace as well, so the portable invariant is about where the answer
+    # comes from, not about the namespace carrying no such devices. The observation
+    # must answer from this namespace's kernel view (netlink), and must not be the
+    # host's /sys/class/net listing -- which, because unshare --net creates no
+    # mount namespace, still shows the host's interfaces inside here; that last
+    # comparison is only made when the two views actually differ.
+    assert payload["observed"] == payload["namespace"], payload
+    assert "lo" in payload["observed"], payload
+    if payload["sysfs"] != payload["namespace"]:
+        assert payload["observed"] != payload["sysfs"], payload
 
 
 def test_the_body_summary_reports_the_facts_an_operator_checks() -> None:

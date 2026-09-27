@@ -337,6 +337,22 @@ def client_tool_output_id_is_account_neutral(item: Mapping[str, JsonValue]) -> b
     )
 
 
+def standalone_function_output_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Codex can inject a named notification without an originating tool call."""
+
+    return (
+        item.get("type") == "function_call_output"
+        and "call_id" not in item
+        and set(item) <= {"type", "id", "name", "namespace", "output", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}
+        and _is_nonblank_string(item.get("name"))
+        and ("id" not in item or _is_nonblank_string(item["id"]))
+        and ("namespace" not in item or isinstance(item["namespace"], str))
+        and _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+        and _tool_output_is_self_contained("function_call_output", item)
+        and not _contains_account_scoped_input_state(dict(item))
+    )
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True
@@ -1256,6 +1272,7 @@ def transcript_is_source_free(
                 )
                 else item
                 for item in input_items
+                if not (isinstance(item, dict) and standalone_function_output_is_account_neutral(item))
             ]
         for field_name in _DIRECT_SOURCE_NEUTRAL_FIELDS:
             value = direct_source_body.get(field_name)

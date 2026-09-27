@@ -109,3 +109,22 @@ Codex can attach a new local `id` to a `function_call_output` while its `call_id
 Direct-source ownership now treats only the local result ID on a strictly validated function/custom/apply-patch result as bookkeeping. For example, `{"type":"function_call_output","id":"local-result","call_id":"owned-call","output":"done"}` continues on the recorded owner of `owned-call`, including on another backend. The forwarded result retains its ID and content. A result-only continuation remains bound through its call ID; a response anchor cannot authorize an unknown call. Opaque state, file-backed content, unknown fields and unsupported result kinds retain conservative checks. Upstream output publication and subscription replay are unchanged.
 
 The September 27 retry diagnostic found nineteen references with one current source owner and one unknown client result ID whose call ID had that same owner. It did not show mixed encrypted owners, so changing session affinity or discarding reasoning was not necessary for this failure. Deploy the correction to all HA backends; no source reconfiguration or schema migration is needed. See [spec.md](spec.md) for the contract.
+
+## Standalone Codex subtask notifications
+
+Codex can inject a named `function_call_output` with no `call_id`, for example
+`{"type":"function_call_output","id":"fco_local","name":"send_message_to_thread","namespace":"codex_app","output":"Delegated task context"}`.
+This is a self-contained notification, not a result referring to an upstream call.
+The Codex protocol explicitly tests named unpaired output serialization in
+[models.rs](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/models.rs).
+The affected configured endpoint accepts this shape; strict providers can still reject
+it as described in [upstream issue 45914](https://github.com/openai/codex/issues/45914).
+
+Direct-source routing validates the complete known shape before excluding it from
+ownership and portability classification. The forwarding body stays unchanged to
+preserve the notification, ordering and cache prefix. A present `call_id` (including
+null or blank), unknown fields, opaque state or account-owned file content does not
+qualify. Existing response/call ownership still pins continuations across replicas;
+subscription replay remains stricter. This does not create a synthetic call or
+convert tool output into system/developer instructions, and it does not guarantee
+compatibility with every third-party Responses implementation.

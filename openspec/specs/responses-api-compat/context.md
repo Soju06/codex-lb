@@ -366,3 +366,14 @@ send needs observation. Missing private transport support produces a local
 `steering_not_supported` failure before dispatch; the normal request cleanup
 releases its reservation and permits a corrected continuation or unrelated
 request. The connection itself is not broken by capability detection.
+
+For example, an ordinary Astra create that completes as `r1` uses its existing
+serialized request without installing a transport observer. Retention keeps
+the effective settings but discards the original input. A later
+`{"type":"response.steer","previous_response_id":"r1","input":"Use the corrected value."}`
+derives its configuration from those retained settings. If an explicit
+tool-input continuation then needs handoff observation and aiohttp's private
+transport interface is unavailable, only that explicit send fails locally
+before dispatch; unrelated ordinary traffic remains usable. This example
+illustrates the [deferred instrumentation requirement](spec.md#requirement-steering-instrumentation-is-deferred-until-needed),
+not a guarantee of live provider steering support.

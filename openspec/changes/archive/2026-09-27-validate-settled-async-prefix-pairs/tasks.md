@@ -4,5 +4,5 @@
 - [x] Capture failing-first unit and HTTP reattachment regressions with valid controls.
 - [x] Validate all async prefix pairs independently of outstanding identities.
 - [x] Run focused regression, static checks and real transport proof.
-- [ ] Run the full local gate with isolated resources.
-- [ ] Sync verified requirements and context, then archive.
+- [x] Run the full local gate with isolated resources.
+- [x] Sync verified requirements and context, then archive.

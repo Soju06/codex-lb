@@ -320,3 +320,22 @@ Canonical background JSON acknowledgements with status `queued` or `in_progress`
 ## Detached retirement sweep deadline
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
+
+## Subscription Astra update history
+
+The subscription wire schema is selected from recorded response ownership,
+not solely the model name: a configured external source can also claim
+`gpt-6-astra` with its own input schema. Once subscription ownership is known,
+validate the full prepared history before connecting or sending upstream.
+Do not locally enumerate valid effort strings; the subscription client uses
+`disabled` and `none`, and a locally restricted list would reject supported
+wire values. Preserve non-Ultra strings exactly, including whitespace, while
+mapping client-plane Ultra to Max only at final subscription serialization.
+
+For example, a request can select Low at the request level, then include a
+High `configuration_update` between two messages. The subscription payload
+retains both values and the update's position. If that history also requests
+automatic compaction or truncation, validation rejects the combination
+before upstream work rather than dropping the update. A source-owned model
+with the same name continues to use its source schema and transport fallback.
+See the [Astra history requirement](spec.md#requirement-astra-configuration-updates-preserve-compatible-history).

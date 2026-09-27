@@ -384,6 +384,7 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
         cached_input_tokens: int = 0,
         service_tier: str | None = None,
         cost_microdollars: int | None = None,
+        cache_write_input_tokens: int = 0,
     ) -> None:
         settlement_started.set()
         await asyncio.to_thread(settlement_release.wait)
@@ -396,6 +397,7 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
             cached_input_tokens=cached_input_tokens,
             service_tier=service_tier,
             cost_microdollars=cost_microdollars,
+            cache_write_input_tokens=cache_write_input_tokens,
         )
 
     async def prepare_persistence_rows() -> tuple[ApiKeyData, ApiKeyUsageReservationData]:
@@ -2495,7 +2497,12 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                         "object": "response",
                         "status": "completed",
                         "service_tier": "fast",
-                        "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
+                        "usage": {
+                            "input_tokens": 3,
+                            "output_tokens": 5,
+                            "total_tokens": 8,
+                            "input_tokens_details": {"cached_tokens": 1, "cache_write_tokens": 2},
+                        },
                     },
                 },
                 separators=(",", ":"),
@@ -2665,6 +2672,8 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     assert log["conversation_id"] == "conv-ws-response-create"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5
+    assert log["cached_input_tokens"] == 1
+    assert log["cache_write_input_tokens"] == 2
     latency_first_upstream_event_ms = log["latency_first_upstream_event_ms"]
     latency_response_created_ms = log["latency_response_created_ms"]
     latency_first_token_ms = log["latency_first_token_ms"]

@@ -1044,6 +1044,7 @@ class RequestLogsRepository:
         sticky_key_source: str | None = None,
         sticky_kind: str | None = None,
         sticky_key_hash: str | None = None,
+        cache_write_input_tokens: int | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
@@ -1088,6 +1089,7 @@ class RequestLogsRepository:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,
+                cache_write_input_tokens=cache_write_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 cost_usd=None,
                 reasoning_effort=reasoning_effort,

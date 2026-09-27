@@ -46,7 +46,7 @@ def _price(values: dict[str, float]) -> ModelPrice:
         raise ValueError("Incomplete base prices")
     for prefix in ("priority_", "flex_", "long_context_", "priority_long_context_", "flex_long_context_"):
         group = {prefix + part + "_per_1m" for part in ("input", "output")}
-        present = (group | {prefix + "cached_input_per_1m"}) & values.keys()
+        present = (group | {prefix + "cached_input_per_1m", prefix + "cache_write_input_per_1m"}) & values.keys()
         if present and not group <= values.keys():
             raise ValueError("Incomplete tier prices")
         if present and "long_context_" in prefix and values.get("long_context_threshold_tokens", 0) <= 0:
@@ -57,7 +57,12 @@ def _price(values: dict[str, float]) -> ModelPrice:
 def parse_models_dev(payload: JsonValue) -> dict[str, ModelPrice]:
     models = _object(_object(_object(payload).get("openai")).get("models"))
     result: dict[str, ModelPrice] = {}
-    names = {"input": "input_per_1m", "output": "output_per_1m", "cache_read": "cached_input_per_1m"}
+    names = {
+        "input": "input_per_1m",
+        "output": "output_per_1m",
+        "cache_read": "cached_input_per_1m",
+        "cache_write": "cache_write_input_per_1m",
+    }
     for model, raw in models.items():
         entry = _object(raw)
         # The bare personality alias must keep resolving to the canonical Sol entry.
@@ -99,6 +104,7 @@ def parse_litellm(payload: JsonValue) -> dict[str, ModelPrice]:
         "input_cost_per_token": "input_per_1m",
         "output_cost_per_token": "output_per_1m",
         "cache_read_input_token_cost": "cached_input_per_1m",
+        "cache_creation_input_token_cost": "cache_write_input_per_1m",
     }
     for model, raw in _object(payload).items():
         entry = _object(raw)

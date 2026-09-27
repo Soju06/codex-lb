@@ -345,6 +345,7 @@ class TestImagePricingPresent:
             input_tokens = 1000
             output_tokens = 500
             cached_input_tokens = None
+            cache_write_input_tokens = None
             reasoning_tokens = None
             cost_usd = None
 

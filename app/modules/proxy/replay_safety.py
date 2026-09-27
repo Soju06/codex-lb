@@ -320,6 +320,23 @@ def client_message_id_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
     return responses_payload_is_account_neutral_fresh_replay({"input": [message]})
 
 
+def client_tool_output_id_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Only the local result ID is bookkeeping; its call ID still needs an owner."""
+
+    item_type = item.get("type")
+    return (
+        isinstance(item_type, str)
+        and item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE
+        and _is_nonblank_string(item.get("id"))
+        and _is_nonblank_string(item.get("call_id"))
+        and _input_item_has_only_known_fields(item, item_type)
+        and _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+        and _caller_is_self_contained(item)
+        and _tool_output_is_self_contained(item_type, item)
+        and not _contains_account_scoped_input_state(dict(item))
+    )
+
+
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
     if value is None:
         return True

@@ -101,3 +101,11 @@ For example, an owned encrypted reasoning item followed by a new user message wi
 Declared direct-source web search also accepts validated `search_content_types: ["text", "image"]`, which Codex sends alongside `external_web_access`. Both controls are retained on the wire. These allowances do not change subscription-account replay classification or introduce new settings.
 
 The motivating production 409 was not body-archived. Its one-source-versus-five-source behavior was independently reproduced using a synthetic request captured from installed Codex CLI 0.157.1 with the source catalog; the reporting client used Codex Desktop 0.158.0-alpha.2.1. Re-enabling production sources is a separate operational step after deploying the change, not part of local verification.
+
+## Client-generated tool-result IDs
+
+Codex can attach a new local `id` to a `function_call_output` while its `call_id` names a call already emitted by the model. This is especially visible with retained namespaced calls: the original call/result group does not qualify for the existing complete-pair shortcut, even when source forwarding removes the call namespace. Requiring the upstream to have previously emitted the client's result ID caused an old conversation to fail with 409.
+
+Direct-source ownership now treats only the local result ID on a strictly validated function/custom/apply-patch result as bookkeeping. For example, `{"type":"function_call_output","id":"local-result","call_id":"owned-call","output":"done"}` continues on the recorded owner of `owned-call`, including on another backend. The forwarded result retains its ID and content. A result-only continuation remains bound through its call ID; a response anchor cannot authorize an unknown call. Opaque state, file-backed content, unknown fields and unsupported result kinds retain conservative checks. Upstream output publication and subscription replay are unchanged.
+
+The September 27 retry diagnostic found nineteen references with one current source owner and one unknown client result ID whose call ID had that same owner. It did not show mixed encrypted owners, so changing session affinity or discarding reasoning was not necessary for this failure. Deploy the correction to all HA backends; no source reconfiguration or schema migration is needed. See [spec.md](spec.md) for the contract.

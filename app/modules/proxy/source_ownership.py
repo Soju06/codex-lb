@@ -19,7 +19,11 @@ from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.model_sources.catalog import source_model_upstream_id
 from app.modules.model_sources.forwarding import ModelSourceForwardingError
 from app.modules.model_sources.ownership_repository import SourceOwnershipRepository
-from app.modules.proxy.replay_safety import client_message_id_is_account_neutral, self_contained_tool_call_ids
+from app.modules.proxy.replay_safety import (
+    client_message_id_is_account_neutral,
+    client_tool_output_id_is_account_neutral,
+    self_contained_tool_call_ids,
+)
 
 OWNERSHIP_TTL = timedelta(days=30)
 MAX_OWNED_REFERENCES = 2048
@@ -81,6 +85,8 @@ class OwnershipScope:
                     call_id = item.get("call_id")
                     if isinstance(call_id, str) and call_id in local_call_ids:
                         continue
+                    if client_tool_output_id_is_account_neutral(item):
+                        item = {key: value for key, value in item.items() if key != "id"}
                     keys.update(self.item_keys(item))
         return keys
 

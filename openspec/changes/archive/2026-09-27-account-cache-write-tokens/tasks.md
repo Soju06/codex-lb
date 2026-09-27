@@ -20,4 +20,4 @@
 ## 4. Documentation
 
 - [x] 4.1 Sync verified requirements and record local verification.
-- [ ] 4.2 Archive the verified change.
+- [x] 4.2 Archive the verified change.

@@ -12,4 +12,4 @@
 
 - [x] 3.1 Pass focused route/client/unary tests, diagnostics, and strict OpenSpec validation.
 - [x] 3.2 Prove first-poll fallback and later-poll fail-closed behavior through live HTTP, and clean owned resources.
-- [ ] 3.3 Hand the committed candidate to the lead for the serial full Linux gate; do not publish or archive before that gate.
+- [x] 3.3 Pass the serial full Linux gate before publication and archive; record the exact tested commit and verification evidence.

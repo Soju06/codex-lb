@@ -3379,3 +3379,93 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 
 # end bridge continuity abandonment
+
+
+# begin scim/overflow merge lineage
+
+
+@pytest.mark.asyncio
+async def test_scim_and_overflow_retirement_lineage_is_single_and_round_trips(tmp_path):
+    """The SCIM-token and subscription-overflow-retirement histories forked from
+    a shared parent and converge at ``20260918_000000_merge_scim_and_overflow_heads``.
+    The graph must have a single head; upgrading to head from a DB stamped at
+    either parent branch must converge on the same schema; and downgrading from
+    head back to either parent must demultiplex the merge back into both parent
+    revisions as current heads, from which upgrading to head again reconverges."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    merge_revision = "20260918_000000_merge_scim_and_overflow_heads"
+    scim_revision = "20260914_000000_add_scim_tokens"
+    overflow_revision = "20260914_000000_drop_subscription_overflow_schema"
+
+    probe_db_url = f"sqlite+aiosqlite:///{tmp_path / 'scim-overflow-graph-probe.sqlite'}"
+    config = _build_alembic_config(probe_db_url)
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == [merge_revision]
+    # Read the parents from the graph, not from a second literal pair: a rebase
+    # onto a newer main re-chains ``down_revision``.
+    parents = script.get_revision(merge_revision).down_revision
+    assert isinstance(parents, tuple)
+    assert set(parents) == {scim_revision, overflow_revision}
+
+    async def _schema_state(engine) -> dict[str, set[str]]:
+        async with engine.connect() as conn:
+            table_rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'"))
+            tables = {row[0] for row in table_rows.fetchall()}
+            identity_rows = await conn.execute(text("PRAGMA table_info('dashboard_identities')"))
+            identity_columns = {row[1] for row in identity_rows.fetchall()}
+            settings_rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            settings_columns = {row[1] for row in settings_rows.fetchall()}
+            return {
+                "tables": tables,
+                "identity_columns": identity_columns,
+                "settings_columns": settings_columns,
+            }
+
+    async def _current_heads(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            return {row[0] for row in rows.fetchall()}
+
+    converged_state: dict[str, set[str]] | None = None
+
+    for start_parent in (scim_revision, overflow_revision):
+        db_url = f"sqlite+aiosqlite:///{tmp_path / f'scim-overflow-{start_parent}.sqlite'}"
+        await to_thread.run_sync(lambda p=start_parent: run_upgrade(db_url, p, bootstrap_legacy=False))
+        engine = create_async_engine(db_url, future=True)
+        try:
+            first = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            assert first.current_revision == merge_revision
+            at_head = await _schema_state(engine)
+            assert "dashboard_scim_tokens" in at_head["tables"]
+            assert "user_name" in at_head["identity_columns"]
+            assert "model_source_pins" not in at_head["tables"]
+            assert "subscription_overflow_source_id" not in at_head["settings_columns"]
+            assert "subscription_overflow_drain_until" not in at_head["settings_columns"]
+            if converged_state is None:
+                converged_state = at_head
+            else:
+                # Both parent branches must upgrade to the identical merged schema.
+                assert at_head == converged_state
+
+            # The merge revision's own upgrade()/downgrade() are no-ops by design
+            # (it exists only to declare topology), so downgrading past it changes
+            # no schema -- but it must split the single merge head back into both
+            # parent revisions as current heads, one per branch.
+            parent_config = _build_alembic_config(db_url)
+            await to_thread.run_sync(lambda: command.downgrade(parent_config, start_parent))
+            assert await _current_heads(engine) == {scim_revision, overflow_revision}
+            assert await _schema_state(engine) == at_head
+
+            second = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+            assert second.current_revision == merge_revision
+            assert await _schema_state(engine) == converged_state
+        finally:
+            await engine.dispose()
+
+
+# end scim/overflow merge lineage

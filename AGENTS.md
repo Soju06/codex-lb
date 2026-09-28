@@ -6,6 +6,20 @@
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
+## Execution and ownership
+
+Carry authorized work through implementation, required verification and the requested delivery. Resolve routine choices from the repository and session context. When a decision still belongs to the user, complete the authorized preparation and present the concrete result they need to approve. Existing user authorization takes precedence over generic skill defaults.
+
+Delegate independent work only when it helps. Give each worker a bounded outcome, write boundary and completion checks. Keep one owner per change or live operation, integrate returned evidence, and transfer remaining obligations before ending a worker task.
+
+When a step fails, compare the candidate, failure and operating conditions before retrying. Do not repeat the same failed action when all three are unchanged. Change the diagnostic only when it can produce new evidence. Stop that line of work and escalate when no justified next step remains or progress requires external action; record the recovery point and exact blocker. Continue independent authorized work.
+
+## Protect the running service
+
+The contributor may be using CodexLB to run this agent. Use isolated test state and retain ownership of the processes you start. Identify exact process or container IDs before stopping anything. Live runtime changes belong to the explicitly designated deployment owner.
+
+Before importing the app for tests, set `CODEX_LB_DATABASE_URL` and `CODEX_LB_TEST_DATABASE_URL` to the same dedicated disposable database. Verify foreground, background and fixture engines before any reset. Rehearse migrations against a consistent snapshot or restored backup, preserving the original data and keys. Keep secrets and request contents out of logs and published evidence.
+
 ## Code Conventions
 
 The `/project-conventions` skill is auto-activated on code edits (PreToolUse guard).
@@ -15,49 +29,27 @@ The `/project-conventions` skill is auto-activated on code edits (PreToolUse gua
 | Code Conventions (Full) | `/project-conventions` skill | On code edit (auto-enforced) |
 | Git Workflow | `.agents/conventions/git-workflow.md` | Commit / PR |
 
-## Workflow (OpenSpec-first)
+## OpenSpec and documentation
 
-This repo uses **OpenSpec as the primary workflow and SSOT** for change-driven development.
+OpenSpec is the source of truth for behavior, API, schema, CLI, dashboard-visible, routing, operator and compatibility requirements.
 
-### How to work (default)
+1. Read the relevant capability under `openspec/specs/`.
+2. Before changing its behavior or contract, create `openspec/changes/<slug>/` with proposal, design where needed, delta requirements and tasks.
+3. Implement against the requirements. Keep testable MUST/SHALL requirements in `spec.md`; put rationale, constraints and concrete examples in `context.md` or change notes.
+4. Sync stable requirements and context to the capability. Run strict change and canonical-spec validation before readiness.
+5. Verify the completed change before archiving it under `openspec/changes/archive/`.
 
-1) Find the relevant spec(s) in `openspec/specs/**` and treat them as source-of-truth.
-2) If the work changes behavior, requirements, contracts, or schema: create an OpenSpec change in `openspec/changes/**` first (proposal -> tasks).
-3) Implement the tasks; keep code + specs in sync (update `spec.md` as needed).
-4) Validate specs locally: `openspec validate --specs`
-5) When done: verify + archive the change (do not archive unverified changes).
+Use the installed `openspec-*` skills for the corresponding workflow step. The `/opsx:new`, `/opsx:continue`, `/opsx:ff`, `/opsx:apply`, `/opsx:verify`, `/opsx:sync` and `/opsx:archive` commands expose those steps.
 
-### Source of Truth
+User-facing feature documentation belongs in `docs/` and links to its owning OpenSpec capability. Keep one durable explanation per decision; update or remove stale guidance when the decision changes. Add feature docs through OpenSpec and `docs/`, never a new README feature section. Leave `CHANGELOG.md` to the release process.
 
-- **Specs/Design/Tasks (SSOT)**: `openspec/`
-  - Active changes: `openspec/changes/<change>/`
-  - Main specs: `openspec/specs/<capability>/spec.md`
-  - Archived changes: `openspec/changes/archive/YYYY-MM-DD-<change>/`
+## Verification
 
-## Documentation & Release Notes
+Start with regression coverage at the failing public entry point. Complete the repository checks required for the change. Broaden or repeat verification when a relevant edit, failure or unresolved risk warrants it; reuse evidence tied to an unchanged candidate and scope.
 
-- **OpenSpec is the SSOT for feature/behavior documentation.** User-facing rendering lives under `docs/` (the published docs pages), and each spec-governed page MUST link back to the owning `openspec/specs/<capability>/` entry. Do not create `docs/` content that has no OpenSpec counterpart, and do not add feature docs as new README sections. Keep normative requirements in `openspec/specs/<capability>/spec.md` and free-form rationale in the capability's `context.md` (or change-level context under `openspec/changes/<change>/context.md`).
-- **Do not edit `CHANGELOG.md` directly.** Leave changelog updates to the release process; record change notes in OpenSpec artifacts instead.
+For routing or compatibility changes, account for each affected path: native and `/v1` routes, HTTP bridge, forced HTTP and direct WebSocket. Prove both the successful case and the ownership, error or cleanup constraint that must remain intact.
 
-### Documentation Model (Spec + Context)
-
-- `spec.md` is the **normative SSOT** and should contain only testable requirements.
-- Use `openspec/specs/<capability>/context.md` for **free-form context** (purpose, rationale, examples, ops notes).
-- If context grows, split into `overview.md`, `rationale.md`, `examples.md`, or `ops.md` within the same capability folder.
-- Change-level notes live in `openspec/changes/<change>/context.md` or `notes.md`, then **sync stable context** back into the main context docs.
-
-Prompting cue (use when writing docs):
-"Keep `spec.md` strictly for requirements. Add/update `context.md` with purpose, decisions, constraints, failure modes, and at least one concrete example."
-
-### Commands (recommended)
-
-- Start a change: `/opsx:new <kebab-case>`
-- Create artifacts (step): `/opsx:continue <change>`
-- Create artifacts (fast): `/opsx:ff <change>`
-- Implement tasks: `/opsx:apply <change>`
-- Verify before archive: `/opsx:verify <change>`
-- Sync delta specs → main specs: `/opsx:sync <change>`
-- Archive: `/opsx:archive <change>`
+Record the reviewed base, candidate and diff boundary. Report local tests, hosted checks, live acceptance and upstream merge as separate states. A passing helper test or startup probe does not prove the end-to-end request worked.
 
 ## Contributing & Merge Gates
 
@@ -89,13 +81,6 @@ are encouraged but not substitutes for the cloud gates.
 
 These rules encode recurring review blockers observed across codex-lb PRs.
 
-- OpenSpec is a hard gate for behavior, API, schema, CLI,
-  dashboard-visible, proxy-routing, operator-contract, and compatibility
-  changes. Create or update `openspec/changes/<slug>/` before coding, keep
-  `spec.md` normative with MUST/SHALL-style requirements, put rationale and
-  examples in `context.md` or change notes, and run strict OpenSpec validation
-  before calling the PR ready. Code/tests alone are not enough when OpenSpec is
-  required.
 - CodeRabbit review state must come from current-head GitHub evidence.
   Unresolved, non-outdated actionable review threads block readiness until
   their findings are fixed or explicitly addressed or dismissed in-thread;

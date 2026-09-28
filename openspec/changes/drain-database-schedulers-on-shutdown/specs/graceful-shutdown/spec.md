@@ -7,8 +7,11 @@ leader-lease keeper and the periodic scheduler loops), it MUST first signal the
 task to stop and then wait up to a fixed grace of 2 seconds for the task to
 finish the unit of work in progress. It MUST cancel the task only if it is
 still running after that grace, and MUST log a WARNING naming the task when it
-does. A task that is idle between ticks MUST exit on the stop signal without
-waiting out the grace.
+does. It MUST then wait at most the same grace for the cancellation to take
+effect. A task still running after that MUST be logged and tracked rather than
+awaited indefinitely, and while any such task is still running the shutdown
+MUST NOT be recorded as clean. A task that is idle between ticks MUST exit on
+the stop signal without waiting out the grace.
 
 #### Scenario: Prompt shutdown after startup leaves no pool errors
 
@@ -29,6 +32,20 @@ waiting out the grace.
 - **WHEN** the grace expires
 - **THEN** the task is cancelled
 - **AND** a WARNING log names the task
+
+#### Scenario: A task deferring cancellation does not block shutdown
+
+- **GIVEN** a cancelled task that is still running 2 seconds after cancellation
+- **WHEN** the bounded wait expires
+- **THEN** shutdown proceeds without awaiting it further
+- **AND** a WARNING names the task
+- **AND** the SQLite run-state is not recorded clean while it is still running
+
+#### Scenario: An in-flight scheduler read completes during shutdown
+
+- **GIVEN** the cache-invalidation poller is inside its database read when shutdown stops it
+- **WHEN** the read finishes within the grace
+- **THEN** the read completes instead of being cancelled
 
 #### Scenario: Idle tasks stop immediately
 

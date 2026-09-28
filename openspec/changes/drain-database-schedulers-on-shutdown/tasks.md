@@ -9,6 +9,11 @@
 - [x] 2.2 Test the fallback: a task busy past the grace is cancelled and the WARNING names it; an idle task exits without waiting. Verify it passes.
 - [x] 2.3 Existing shutdown and scheduler suites pass: `tests/integration/test_graceful_websocket_process_shutdown.py`, `tests/integration/test_cache_invalidation_bus.py`, and the full suite.
 
+## 4. Review follow-ups (CodeRabbit on PR #2506)
+
+- [x] 4.1 Bound the post-cancel wait by the same grace; log and track a task still running afterwards, and exclude the clean SQLite shutdown record while any tracked task is still running (`undrained_tasks()` in `app/main.py`'s `database_tasks_drained`). Verify with the deferring-cancellation unit test.
+- [x] 4.2 Add a deterministic barrier test: a `sitecustomize` injected into the server holds the cache-invalidation poller's own read via `await_only` until the poller's stop is requested. Verify it fails on `main` (3/3, read cancelled) and passes with the fix (3/3).
+
 ## 3. Validation
 
 - [x] 3.1 `npx --yes @fission-ai/openspec@1.11.0 validate drain-database-schedulers-on-shutdown --strict`, `make lint`, and `uv run ty check` pass.

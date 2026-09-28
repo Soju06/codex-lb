@@ -68,3 +68,32 @@ async def test_cancelling_the_caller_propagates_and_leaves_the_task_running(monk
     assert not task.done()
     release.set()
     await task
+
+
+@pytest.mark.asyncio
+async def test_task_deferring_cancellation_is_tracked_not_awaited_forever(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(task_shutdown, "DATABASE_TASK_STOP_GRACE_SECONDS", 0.05)
+    caplog.set_level(logging.WARNING, logger=task_shutdown.__name__)
+    cleanup_may_finish = asyncio.Event()
+
+    async def shielded_database_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await cleanup_may_finish.wait()  # defers cancellation, like shielded session teardown
+            raise
+
+    task = asyncio.create_task(shielded_database_cleanup())
+    await task_shutdown.stop_task_after_grace(task)  # returns despite the task still running
+
+    assert not task.done()
+    assert task in task_shutdown.undrained_tasks()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("still running" in m and "shielded_database_cleanup" in m for m in messages)
+
+    cleanup_may_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task not in task_shutdown.undrained_tasks()

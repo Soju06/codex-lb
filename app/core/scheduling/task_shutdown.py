@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # grace only applies to a task caught mid-tick.
 DATABASE_TASK_STOP_GRACE_SECONDS = 2.0
 
+_undrained: set[asyncio.Task[Any]] = set()
+
 
 def _describe(task: asyncio.Task[Any]) -> str:
     coro = task.get_coro()
@@ -48,7 +50,24 @@ async def stop_task_after_grace(task: asyncio.Task[Any]) -> None:
     )
     task.cancel()
     try:
-        await wait_on_shared_future(task)
+        await wait_on_shared_future(task, timeout=DATABASE_TASK_STOP_GRACE_SECONDS)
+    except TimeoutError:
+        # The task is deferring cancellation (e.g. inside shielded DB cleanup).
+        # Do not block shutdown on it, but keep it visible: while it runs, the
+        # shutdown must not be recorded as clean (see undrained_tasks()).
+        logger.warning(
+            "Background task still running %.1fs after cancellation; leaving it tracked task=%s",
+            DATABASE_TASK_STOP_GRACE_SECONDS,
+            _describe(task),
+        )
+        _undrained.add(task)
+        task.add_done_callback(_undrained.discard)
     except asyncio.CancelledError:
         if not task.cancelled():
             raise
+
+
+def undrained_tasks() -> frozenset[asyncio.Task[Any]]:
+    """Stopped tasks that were still running after cancellation and its bounded wait."""
+
+    return frozenset(task for task in _undrained if not task.done())

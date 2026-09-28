@@ -857,6 +857,10 @@ async def test_client_leaving_after_the_stall_window_is_a_stall_abandonment(
         body=json.dumps(_request_body(model)).encode(),
     )
     runner = asyncio.create_task(stream.run())
+    deadline = time.monotonic() + 5
+    while not state.requests and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert state.requests, "the stub never received the open"
     await asyncio.sleep(0.6)
     stream.disconnect()
     await asyncio.wait_for(runner, timeout=10)

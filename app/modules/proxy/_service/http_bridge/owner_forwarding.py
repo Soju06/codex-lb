@@ -199,6 +199,15 @@ def _owner_forward_failure_allows_local_recovery(exc: ProxyResponseError) -> boo
     }
 
 
+def _owner_forward_failure_was_pre_dispatch(exc: ProxyResponseError) -> bool:
+    """Return whether the owner failed before accepting the request upstream."""
+
+    return isinstance(exc, _OwnerForwardRequestError) and exc.outcome in {
+        _OwnerForwardOutcome.NOT_DISPATCHED,
+        _OwnerForwardOutcome.RECEIVER_REJECTED,
+    }
+
+
 def _durable_recovery_supersedes_local_session(
     durable_lookup: DurableBridgeLookup | None,
     session: _HTTPBridgeSession,
@@ -398,6 +407,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         downstream_turn_state: str | None,
         request_started_at: float,
         proxy_api_authorization: str | None,
+        downstream_turn_state_synthesized: bool = False,
         file_owner_account_id: str | None = None,
         client_ip: str | None = None,
     ) -> AsyncIterator[str]:
@@ -420,6 +430,9 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            downstream_turn_state_synthesized=(
+                downstream_turn_state_synthesized and forwarded_turn_state == downstream_turn_state
+            ),
             original_request_unanchored=(
                 recovery_forward
                 or (

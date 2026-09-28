@@ -67,7 +67,7 @@ def _settings(**overrides: object) -> DashboardSettings:
         "limit_warmup_model": "gpt-5.1-codex-mini",
         "limit_warmup_prompt": "Say OK.",
         "limit_warmup_cooldown_seconds": 3600,
-        "limit_warmup_exhausted_threshold_percent": 99.0,
+        "limit_warmup_exhausted_threshold_percent": 0.0,
         "limit_warmup_idle_threshold_percent": 1.0,
         "limit_warmup_min_available_percent": 100.0,
         "limit_warmup_staggered_idle_enabled": False,
@@ -694,7 +694,7 @@ async def test_reset_warms_after_pre_reset_99_percent_usage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
+async def test_zero_threshold_warms_regardless_of_pre_reset_usage() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
@@ -702,8 +702,48 @@ async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
 
     await service.run_after_usage_refresh(
         accounts=[account],
-        settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
+        settings=_settings(limit_warmup_exhausted_threshold_percent=0.0),
         before_primary={account.id: _usage(account.id, used_percent=15.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_reset_respects_configured_pre_reset_usage_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_exhausted_threshold_percent=50.0),
+        before_primary={account.id: _usage(account.id, used_percent=15.0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_reset_accepts_usage_at_configured_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_exhausted_threshold_percent=50.0),
+        before_primary={account.id: _usage(account.id, used_percent=50.0, reset_at=1000)},
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
@@ -1425,6 +1465,76 @@ async def test_confirmed_paid_to_free_transition_warms_fresh_monthly_window() ->
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
     assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("monthly", monthly_reset_at, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_paid_to_free_transition_respects_pre_reset_usage_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 8, 18, 18, 8, tzinfo=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_exhausted_threshold_percent=50.0,
+        ),
+        before_primary={},
+        before_secondary={account.id: _usage(account.id, used_percent=37, reset_at=10_000, window="secondary")},
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2_000_000_000,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "plus"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_paid_to_free_transition_does_not_use_non_monthly_history_for_threshold() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+    refresh_started_at = datetime(2026, 8, 18, 18, 8, tzinfo=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(
+            limit_warmup_windows="secondary",
+            limit_warmup_exhausted_threshold_percent=50.0,
+        ),
+        before_primary={},
+        before_secondary={account.id: _usage(account.id, used_percent=75, reset_at=10_000, window="secondary")},
+        after_primary={},
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2_000_000_000,
+                window="monthly",
+                recorded_at=refresh_started_at,
+            )
+        },
+        previous_plan_types={account.id: "plus"},
+        refresh_started_at=refresh_started_at,
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from sqlalchemy import Float, Result, bindparam, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.db.models import SchedulerLeader
 from app.db.session import get_background_session
 from app.db.sqlite_lock_retry import is_sqlite_lock_error, sqlite_error_name
@@ -534,11 +535,8 @@ class LeaderElection:
             return
         if stop is not None:
             stop.set()
-        keeper.cancel()
         try:
-            await keeper
-        except asyncio.CancelledError:
-            pass
+            await stop_task_after_grace(keeper)
         except Exception:
             logger.warning("Scheduler leader lease keeper failed during shutdown", exc_info=True)
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -13,6 +12,7 @@ from app.core.clients.codex_version import get_codex_version_cache
 from app.core.config.settings import get_settings
 from app.core.metadata_store import write_metadata
 from app.core.scheduling.leader_election_handle import get_leader_election
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.core.usage.pricing_catalog import (
     BUNDLE_PATH,
     decode_snapshot,
@@ -60,9 +60,7 @@ class MetadataRefreshScheduler:
     async def stop(self) -> None:
         self._stop.set()
         if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            await stop_task_after_grace(self._task)
             self._task = None
 
     async def _refresh(self) -> None:

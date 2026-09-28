@@ -25,6 +25,7 @@ from app.core.metrics.prometheus import (
 )
 from app.core.rate_limiter.db_rate_limiter import get_rate_limit_attempt_sweeper
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
@@ -266,9 +267,7 @@ class StickySessionCleanupScheduler:
         if not self._task:
             return
         self._stop.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        await stop_task_after_grace(self._task)
         self._task = None
 
     async def _run_loop(self) -> None:

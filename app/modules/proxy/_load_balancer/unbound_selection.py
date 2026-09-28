@@ -217,6 +217,14 @@ async def run_unbound_selection_path(
                 def _select_from(candidates: list[AccountState]) -> SelectionResult:
                     return _select_account_preferring_budget_safe(
                         candidates,
+                        # ``_prepare_sticky_selection_states`` above narrowed
+                        # ``states`` to ``required_account_id`` when the caller
+                        # resolved a continuity owner, so this pool is one
+                        # account by construction and has no sibling to fail
+                        # over to. Without the flag that owner's bounded
+                        # transient backoff empties the pool and the turn dies
+                        # as ``continuity_owner_unavailable``.
+                        hard_owner_pool=required_account_id is not None,
                         prefer_earlier_reset=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,

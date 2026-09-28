@@ -86,6 +86,7 @@ async def _invoke_stickiness(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+    hard_owner_pool: bool = False,
     clock: Clock = REAL_CLOCK,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
@@ -119,6 +120,7 @@ async def _invoke_stickiness(
         routing_costs_by_account_id=routing_costs_by_account_id,
         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
         sticky_existing_account_id=sticky_existing_account_id,
+        hard_owner_pool=hard_owner_pool,
     )
     # Mirror the production persist site (run_sticky_selection_path): a pure
     # same-owner freshness rewrite is omitted only after revalidating its
@@ -1314,3 +1316,127 @@ def test_refresh_write_skippable_guards_seed_and_delete_and_deadline():
     # Mutations without an observed deadline always write through.
     plain = _StickyMutation(account_id="a")
     assert _sticky_refresh_write_skippable(plain, initialize_seed_key=None) is False
+
+
+@pytest.mark.asyncio
+async def test_hard_owner_pool_admits_backed_off_owner_through_stickiness():
+    """The bridge path narrows ``states`` to the required owner before this runs.
+
+    That pool never reaches the ``hard_sticky`` branch, so without
+    ``hard_owner_pool`` its sole account's transient backoff surfaces as
+    ``continuity_owner_unavailable`` with "No available accounts".
+    """
+    now = time.time()
+    owner = AccountState(
+        "owner",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+    repo = _make_sticky_repo("owner")
+
+    without = await _invoke_stickiness([owner], "k", repo, sticky_existing_account_id="owner")
+    assert without.account is None
+
+    owner_again = AccountState(
+        "owner",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+    with_flag = await _invoke_stickiness(
+        [owner_again],
+        "k",
+        _make_sticky_repo("owner"),
+        sticky_existing_account_id="owner",
+        hard_owner_pool=True,
+    )
+    assert with_flag.account is not None
+    assert with_flag.account.account_id == "owner"
+
+
+@pytest.mark.asyncio
+async def test_hard_owner_pool_keeps_healthy_sibling_preference():
+    now = time.time()
+    backed_off = AccountState(
+        "backed_off",
+        AccountStatus.ACTIVE,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+    healthy = AccountState("healthy", AccountStatus.ACTIVE, used_percent=50.0)
+
+    outcome = await _invoke_stickiness(
+        [backed_off, healthy],
+        "k",
+        _make_sticky_repo(None),
+        hard_owner_pool=True,
+    )
+
+    assert outcome.account is not None
+    assert outcome.account.account_id == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_hard_owner_pool_retains_backed_off_pinned_owner():
+    """The pinned-owner retention path is a third single-account pool.
+
+    A resumed conversation arrives as a follow_up whose sticky row already
+    names the owner, so selection retains the pin rather than taking the
+    seed-preference or no-sticky branch. That retention call also disabled
+    the backoff fallback, so the owner's transient backoff failed the turn
+    with ``continuity_owner_unavailable`` / "No available accounts".
+    """
+    now = time.time()
+
+    def _owner() -> AccountState:
+        return AccountState(
+            "owner",
+            AccountStatus.ACTIVE,
+            used_percent=5.0,
+            error_count=5,
+            last_error_at=now - 60,
+        )
+
+    without = await _invoke_stickiness(
+        [_owner()],
+        "k",
+        _make_sticky_repo("owner"),
+        sticky_existing_account_id="owner",
+    )
+    assert without.account is None
+
+    with_flag = await _invoke_stickiness(
+        [_owner()],
+        "k",
+        _make_sticky_repo("owner"),
+        sticky_existing_account_id="owner",
+        hard_owner_pool=True,
+    )
+    assert with_flag.account is not None
+    assert with_flag.account.account_id == "owner"
+
+
+@pytest.mark.asyncio
+async def test_hard_owner_pool_does_not_retain_a_persistently_blocked_owner():
+    now = time.time()
+    owner = AccountState(
+        "owner",
+        AccountStatus.PAUSED,
+        used_percent=5.0,
+        error_count=5,
+        last_error_at=now - 60,
+    )
+
+    outcome = await _invoke_stickiness(
+        [owner],
+        "k",
+        _make_sticky_repo("owner"),
+        sticky_existing_account_id="owner",
+        hard_owner_pool=True,
+    )
+
+    assert outcome.account is None

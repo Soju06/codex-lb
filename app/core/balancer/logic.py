@@ -471,6 +471,7 @@ def select_account(
     prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
     routing_strategy: RoutingStrategy = "capacity_weighted",
     allow_backoff_fallback: bool = True,
+    hard_owner_pool: bool = False,
     deterministic_probe: bool = False,
     recovery_probe_only: bool = False,
     relative_availability_power: float = DEFAULT_RELATIVE_AVAILABILITY_POWER,
@@ -511,6 +512,10 @@ def select_account(
         allow_backoff_fallback: Whether to allow a fallback attempt with the
             backoff account nearest to recovery when no fully available
             account exists.
+        hard_owner_pool: Whether ``states`` is a pool the caller already
+            narrowed to a resolved hard continuity owner. Such a pool has no
+            other accounts to compare against, so the backoff fallback admits
+            its sole backed-off candidate instead of failing the turn.
         deterministic_probe: Whether weighted strategies should use a
             deterministic probe order instead of random weighted choice.
         recovery_probe_only: Whether to return only a due probing-account
@@ -634,7 +639,22 @@ def select_account(
             and state.account_id not in in_error_backoff_ids
             for state in all_states
         )
-        if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
+        # Both clauses above answer one question -- "is this pool empty for a
+        # reason other than the backoff?" -- by inspecting the *other*
+        # accounts. A resolved hard continuity owner has none: the caller
+        # narrows the pool to that single account before selecting, so the
+        # question is unanswerable and both clauses are unreachable, and a
+        # transient backoff on the owner fails the turn outright. ``Local
+        # caps, retry exclusions, transient runtime health, and budget
+        # pressure never authorize hard-owner abandonment``
+        # (sticky-session-operations), and the overload-isolation window
+        # already honours that by dropping an account only while another
+        # candidate remains. ``hard_owner_pool`` extends the same rule here.
+        if allow_backoff_fallback and (
+            len(in_error_backoff) > 1
+            or (in_error_backoff and hard_blocked_exists)
+            or (in_error_backoff and hard_owner_pool)
+        ):
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - ERROR_BACKOFF_THRESHOLD)))

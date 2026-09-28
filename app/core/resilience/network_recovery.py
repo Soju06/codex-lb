@@ -31,6 +31,10 @@ _ROUTE_ERROR_NUMBERS = frozenset(
     for name in ("ENETDOWN", "ENETUNREACH", "EHOSTDOWN", "EHOSTUNREACH", "ENONET")
     if isinstance((value := getattr(errno, name, None)), int)
 )
+# ERROR_NETWORK_UNREACHABLE / ERROR_HOST_UNREACHABLE. IOCP reports route loss
+# with these Win32 codes, which CPython maps to errno EINVAL. Peer resets and
+# timeouts (64, 121) stay endpoint-attributed, as ECONNRESET/ETIMEDOUT do.
+_WINDOWS_ROUTE_ERROR_NUMBERS = frozenset({1231, 1232})
 _MAX_RETRY_DELAY_SECONDS = 5.0
 # Retiring a known-bad generation protects later callers rather than retrying
 # the failed request, so it cannot inherit an already-expired request deadline.
@@ -68,6 +72,8 @@ def is_process_network_failure(exc: BaseException, *, include_permanent_dns: boo
             if include_permanent_dns and current.errno in _PERMANENT_DNS_ERROR_NUMBERS:
                 return True
         if isinstance(current, OSError) and current.errno in _ROUTE_ERROR_NUMBERS:
+            return True
+        if isinstance(current, OSError) and getattr(current, "winerror", None) in _WINDOWS_ROUTE_ERROR_NUMBERS:
             return True
     return False
 

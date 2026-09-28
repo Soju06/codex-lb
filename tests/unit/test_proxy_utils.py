@@ -113,7 +113,7 @@ from app.modules.request_logs.repository import PreviousResponseOwnerRecord, Req
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
 from tests.simulation.virtual_time import VirtualClock
-from tests.unit._proxy_test_helpers import runtime_basic_auth_url
+from tests.unit._proxy_test_helpers import WindowsOSError, runtime_basic_auth_url
 from tests.unit.hypothesis_strategies import json_objects, json_values
 
 pytestmark = pytest.mark.unit
@@ -9201,7 +9201,8 @@ async def test_stream_responses_maps_typed_dns_failure_with_failed_session_prove
 
 
 @pytest.mark.asyncio
-async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(monkeypatch):
+@pytest.mark.parametrize("winerror", [None, 1231, 1232])
+async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(monkeypatch, winerror):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
@@ -9213,12 +9214,25 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
     class _AmbiguousRouteFailureSession:
         def post(self, url: str, **kwargs: object):
             del url, kwargs
-            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+            if winerror is None:
+                raise OSError(errno.ENETUNREACH, "Network is unreachable")
+            raise WindowsOSError(winerror)
+
+    failures: list[Exception] = []
+
+    class _CircuitBreakerStub:
+        async def pre_call_check(self) -> bool:
+            return False
+
+        async def _record_failure(self, exc: Exception) -> None:
+            failures.append(exc)
 
     session = _AmbiguousRouteFailureSession()
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: _CircuitBreakerStub())
+    bind_resilience_toggles(SimpleNamespace(circuit_breaker_enabled=True))
     payload = ResponsesRequest.model_validate(
         {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
     )
@@ -9239,6 +9253,61 @@ async def test_stream_responses_raw_route_oserror_is_neutral_but_not_replayed(mo
     assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
     assert exc_info.value.retryable_same_contract is False
     assert exc_info.value.failed_session is session
+    assert failures == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("winerror", [64, 121])
+async def test_stream_responses_windows_reset_and_timeout_stay_account_attributed(monkeypatch, winerror):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 5.0
+        trace_channels = frozenset()
+
+    class _EndpointFailureSession:
+        def post(self, url: str, **kwargs: object):
+            del url, kwargs
+            raise WindowsOSError(winerror)
+
+    failures: list[Exception] = []
+
+    class _CircuitBreakerStub:
+        async def pre_call_check(self) -> bool:
+            return False
+
+        async def _record_failure(self, exc: Exception) -> None:
+            failures.append(exc)
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid: _CircuitBreakerStub())
+    bind_resilience_toggles(SimpleNamespace(circuit_breaker_enabled=True))
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _EndpointFailureSession()),
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert len(events) == 1
+    failed = cast(dict[str, object], parse_sse_data_json(events[0]))
+    response = cast(dict[str, object], failed["response"])
+    error = cast(dict[str, object], response["error"])
+    assert error["code"] == "upstream_unavailable"
+    assert [getattr(failure, "winerror", None) for failure in failures] == [winerror]
 
 
 @pytest.mark.asyncio

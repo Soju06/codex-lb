@@ -47,6 +47,54 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
 
+## Asynchronous tool continuity
+
+Async function and custom tool calls can outlive an anchored turn. Continuity
+tracking keeps their identities separate from synchronous pending work, and
+matching typed results complete only their own calls. For example, if a response
+emits async `call_a` and sync `call_b`, an intervening user turn synthesizes an
+interrupted result only for `call_b`; a later real `call_a` result is forwarded
+unchanged.
+
+The durable pending-tool manifest contains the synchronous subset. Full-history
+replay uses the existing self-contained and retained-output proofs, including
+completed-assistant boundaries, ownership checks, boolean async markers and
+nonblank call IDs. It does not restore removed optional bridge recovery modes
+or introduce anchored-turn relocation. Retiring a stale WebSocket anchor also
+retires its pending async identities through the existing shared helper.
+
+The manifest is upstream-derived: a client cannot relabel a recorded
+synchronous `call_s` as `async: true` to skip settlement during owner loss.
+Both durable proofs reject that contradiction before releasing the anchor.
+An actual async call absent from the synchronous manifest is self-contained
+and may remain unresolved past a completed assistant message; its delayed
+typed output can supply fresh follow-up input if that prior output is retained.
+Stateless fresh replay has no previous owner, manifest, or omitted upstream
+state to authenticate, so it accepts a valid async marker under the ordinary
+strict account-neutral item checks rather than a model-name allowlist.
+
+Settling a stored async pair removes it from the outstanding-call map, but
+must not erase the call and output from prefix validation. Both durable proofs
+validate the collected async prefix items under the existing self-contained
+rules before accepting a full resend; the synchronous prefix policy remains
+unchanged. For example, an async call followed by an intervening user turn
+and a matching output without an `output` field cannot prove a fresh
+owner-bound reattachment. A valid typed result in the same position can
+still participate in the existing full-resend proof.
+
+Captured request fixtures use a separate rebuild policy. Function and custom
+tool calls retain their optional `async` scalar marker while captured input
+and output text is replaced, so a custom call marked `async: true` keeps its
+flag and matching remapped call ID after sanitization. An unmarked call stays
+unmarked; output items do not acquire the flag. This does not relax production
+validation of marker values. See the settled-prefix and fixture-sanitization
+requirements in `spec.md`.
+
+This is protocol-forward behavior: the checked rust-v0.153.4 Codex binary and
+openai/codex tree do not emit `async: true` tools. Configuration-update policy
+and WebSocket steering remain separate concerns. See the normative requirement
+"Async tool results remain pending across continuations" in `spec.md`.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

@@ -93,6 +93,47 @@ _ENVIRONMENT = (
 )
 
 
+@pytest.mark.parametrize("call_type,body_field", [("function_call", "arguments"), ("custom_tool_call", "input")])
+@pytest.mark.parametrize("marker", [True, False, None])
+def test_async_tool_call_marker_survives_sanitization(call_type: str, body_field: str, marker: bool | None) -> None:
+    call: dict[str, Any] = {
+        "type": call_type,
+        "call_id": "call_original",
+        "name": "exec_command",
+        body_field: _HOME,
+    }
+    if marker is not None:
+        call["async"] = marker
+    body = {
+        "model": "gpt-6-astra",
+        "input": [call, {"type": f"{call_type}_output", "call_id": "call_original", "output": _HOME}],
+    }
+
+    rebuilt, _ = sanitize_body(body)
+    twice, _ = sanitize_body(rebuilt)
+
+    actual_call, actual_output = rebuilt["input"]
+    if marker is None:
+        assert "async" not in actual_call
+    else:
+        assert actual_call["async"] is marker
+    assert actual_call["call_id"] == actual_output["call_id"] != "call_original"
+    assert _HOME not in json.dumps(rebuilt)
+    assert twice == rebuilt
+
+
+@pytest.mark.parametrize("item_type", ["function_call_output", "custom_tool_call_output", "apply_patch_call"])
+def test_async_marker_does_not_widen_other_item_rules(item_type: str) -> None:
+    with pytest.raises(UnsanitisableBodyError):
+        sanitize_body({"input": [{"type": item_type, "call_id": "call_original", "async": True}]})
+
+
+@pytest.mark.parametrize("call_type", ["function_call", "custom_tool_call"])
+def test_async_marker_does_not_preserve_captured_text(call_type: str) -> None:
+    with pytest.raises(UnsanitisableBodyError):
+        sanitize_body({"input": [{"type": call_type, "call_id": "call_original", "async": _HOME}]})
+
+
 def _realistic_body() -> dict[str, Any]:
     """One body carrying every leak shape and every preserve target.
 

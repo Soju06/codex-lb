@@ -11,6 +11,49 @@ SQLite is the default database backend and needs no configuration. PostgreSQL is
 
 Backup this directory to preserve your data (database, encryption key, archives).
 
+## Reclaiming SQLite file space
+
+Retention deletes make SQLite pages reusable but do not necessarily shrink the
+database file. Dry-run requires a checkpointed database with no pending WAL
+data. For a reliable result, stop every codex-lb replica first, then inspect
+the potential saving:
+
+```bash
+codex-lb-db compact --dry-run
+```
+
+To compact, stop every codex-lb replica that uses the database, then run:
+
+```bash
+codex-lb-db compact --execute --confirm-stopped
+```
+
+The command builds and verifies a same-directory replacement while preserving
+the original at the reported `pre-compact` backup path. The live database path
+is atomically replaced only after that backup link is durable. Keep the backup until
+codex-lb starts successfully and `codex-lb-db check` passes. The command is
+SQLite-file only; use PostgreSQL-native maintenance for PostgreSQL deployments.
+
+If post-compaction validation fails, stop every replica again, move the current
+database aside, then restore the reported backup and any preserved sidecars:
+
+```bash
+db=/var/lib/codex-lb/store.db
+backup=/var/lib/codex-lb/store.pre-compact-YYYYMMDDTHHMMSSZ.db
+mv "$db" "${db}.failed-$(date -u +%Y%m%dT%H%M%SZ)"
+mv "$backup" "$db"
+for suffix in -wal -shm -journal; do
+  { [ -e "${backup}${suffix}" ] || [ -L "${backup}${suffix}" ]; } && mv "${backup}${suffix}" "${db}${suffix}"
+done
+```
+
+An interrupted process can leave `store.db.compact.lock`. Remove that file only
+after verifying that no compaction process is active and all application
+replicas remain stopped.
+
+Safe compaction execution is currently unavailable on Windows because the tool
+cannot provide the required directory-entry durability guarantee there.
+
 ## PostgreSQL via Docker Compose
 
 The Docker Compose `postgres` profile uses the Postgres 18 image and mounts the named data volume at

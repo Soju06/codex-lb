@@ -105,6 +105,11 @@ _EXACT_SECTIONS: dict[str, str] = {
 # ``os.environ``-outside-Settings lint allowlist has a documented source.
 _PROCESS_ENV_CONVENTIONS: tuple[tuple[str, str], ...] = (
     (
+        "`SQLITE_TMPDIR`, `TMPDIR`",
+        "SQLite temporary-file directory precedence; the stopped-instance compaction CLI reads these "
+        "through the configuration module to check space on the filesystem SQLite will use.",
+    ),
+    (
         "`HOST`, `PORT`, `SSL_CERTFILE`, `SSL_KEYFILE`, `UVICORN_TIMEOUT_KEEP_ALIVE`, `UVICORN_WS_MAX_SIZE`",
         "Uvicorn launch defaults read once by the `codex-lb` CLI (`app/cli.py`); host runs only.",
     ),

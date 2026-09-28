@@ -19,7 +19,7 @@ from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyLimit, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
 
@@ -790,6 +790,38 @@ async def test_warmup_respects_api_key_account_scope(async_client, monkeypatch):
     assert [entry["account_id"] for entry in payload["submitted"]] == [scoped_id]
     assert payload["skipped"] == []
     assert payload["failed"] == []
+
+
+@pytest.mark.asyncio
+async def test_warmup_excludes_active_account_with_revoked_token_reason(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    revoked_id = await _import_account(async_client, "acc-warmup-revoked", "warmup-revoked@example.com")
+    healthy_id = await _import_account(async_client, "acc-warmup-healthy", "warmup-healthy@example.com")
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == revoked_id)
+            .values(
+                status=AccountStatus.ACTIVE,
+                deactivation_reason="Authentication token revoked - re-login required",
+            )
+        )
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="warmup-revoked")
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_accounts"] == 1
+    assert [entry["account_id"] for entry in payload["submitted"]] == [healthy_id]
 
 
 @pytest.mark.asyncio

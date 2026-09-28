@@ -703,6 +703,7 @@ class _HTTPBridgeRequestSubmitMixin:
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         preserve_responses_lite_client_metadata: bool = False,
+        response_create_max_bytes: int | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         # One dump feeds client-metadata derivation, the frame and the usage
         # budget; ``to_payload`` is deterministic so sharing it is exact.
@@ -724,6 +725,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             upstream_payload_base=base_payload,
+            response_create_max_bytes=response_create_max_bytes,
         )
         (
             request_state.useragent,
@@ -749,6 +751,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
+        response_create_max_bytes: int | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -841,6 +844,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_kind=request_kind,
             connection_request_kind=connection_request_kind,
             generate_false_prewarm=generate_false_prewarm,
+            response_create_max_bytes_override=response_create_max_bytes,
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count
@@ -857,30 +861,38 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         payload_size = len(text_data.encode("utf-8"))
-        max_bytes = _upstream_response_create_max_bytes()
-        if payload_size > max_bytes:
-            slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
-                upstream_payload,
-                max_bytes=max_bytes,
-                protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
-            )
-            if slim_summary is not None:
-                upstream_payload = slimmed_payload
-                text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
-                logger.warning(
-                    (
-                        "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
-                        "original_bytes=%s slimmed_bytes=%s "
-                        "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
-                    ),
-                    request_state.request_id,
-                    request_state.request_log_id,
-                    transport,
-                    payload_size,
-                    len(text_data.encode("utf-8")),
-                    slim_summary["historical_tool_outputs_slimmed"],
-                    slim_summary["historical_images_slimmed"],
+        # Inline-image bridge requests carry the whole-frame budget on the
+        # request state (the 64 MiB complete-frame cap of the default-on
+        # inline-image contract), and historical slimming MUST NOT run for
+        # them — an over-budget frame fails below with the explicit 400
+        # payload_too_large anti-retry error instead of silently losing
+        # history. Every other request keeps the stock global cap and the
+        # slimming recovery exactly as before.
+        if response_create_max_bytes is None:
+            max_bytes = _upstream_response_create_max_bytes()
+            if payload_size > max_bytes:
+                slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
+                    upstream_payload,
+                    max_bytes=max_bytes,
+                    protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
                 )
+                if slim_summary is not None:
+                    upstream_payload = slimmed_payload
+                    text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+                    logger.warning(
+                        (
+                            "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
+                            "original_bytes=%s slimmed_bytes=%s "
+                            "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
+                        ),
+                        request_state.request_id,
+                        request_state.request_log_id,
+                        transport,
+                        payload_size,
+                        len(text_data.encode("utf-8")),
+                        slim_summary["historical_tool_outputs_slimmed"],
+                        slim_summary["historical_images_slimmed"],
+                    )
         request_state.request_text = text_data
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data

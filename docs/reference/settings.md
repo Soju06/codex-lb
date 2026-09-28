@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 96 settings. Every setting is an environment
+codex-lb currently exposes 97 settings. Every setting is an environment
 variable, normally with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process); aliased settings list every accepted name.
 All defaults work with zero configuration —
@@ -132,6 +132,7 @@ anything else belongs in `app/core/config/settings.py`.
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | T1 | `str \| None` | `None` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | T3 (dashboard) | `bool` | `False` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED` | T4 | `bool` | `True` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INLINE_IMAGES_ENABLED` | T4 | `bool` | `True` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID` | T1 | `str` | process hostname |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_RING` | T1 | `list[str]` | `[]` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_MAX_SESSIONS` | T1 | `int` | `256` |

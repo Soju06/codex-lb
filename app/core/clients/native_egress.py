@@ -39,6 +39,16 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
         "websocket_send_ack",
+        # The helper splits a websocket text message that would exceed one
+        # bounded IPC line into ``websocket_text{more: true}`` chunks the
+        # pump reassembles (one upstream message may approach the bridge's
+        # 64 MiB cap, and its JSON-escaped IPC form can exceed the parent's
+        # 24 MiB readline limit). A helper WITHOUT this capability would emit
+        # such a message as one oversize line, so requiring the capability
+        # refuses it at the handshake — fail closed. Python and the helper
+        # must upgrade as a PAIR; no mixed-version wire compatibility is
+        # claimed.
+        "websocket_text_chunking_v1",
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
@@ -455,6 +465,10 @@ class NativeEgressWebSocket:
         )
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._command_sequence = 0
+        # Reassembly buffer for chunked websocket text IPC
+        # (`websocket_text_chunking_v1`): holds at most the one in-flight
+        # message, bounded by the connection's configured message cap.
+        self._text_fragments: list[str] = []
         self._completed = False
         self._closing = False
         self._remote_closed = False
@@ -590,11 +604,19 @@ class NativeEgressWebSocket:
                     continue
                 if event_type == "websocket_text":
                     text = item.get("text")
-                    if not isinstance(text, str):
+                    more = item.get("more", False)
+                    if not isinstance(text, str) or type(more) is not bool:
                         raise NativeEgressProtocolError("native websocket text event is invalid")
+                    if more:
+                        self._text_fragments.append(text)
+                        continue
+                    if self._text_fragments:
+                        text = "".join(self._text_fragments) + text
+                        self._text_fragments.clear()
                     self._queue_message(NativeWebSocketMessage(kind="text", text=text))
                     continue
                 if event_type == "websocket_responses_text":
+                    self._reject_interrupted_text_chunks("websocket_responses_text")
                     text = item.get("text")
                     kind = item.get("event_type")
                     payload = item.get("payload")
@@ -623,6 +645,7 @@ class NativeEgressWebSocket:
                     )
                     continue
                 if event_type == "websocket_binary":
+                    self._reject_interrupted_text_chunks("websocket_binary")
                     encoded = item.get("data")
                     if not isinstance(encoded, str):
                         raise NativeEgressProtocolError("native websocket binary event is invalid")
@@ -633,6 +656,7 @@ class NativeEgressWebSocket:
                     self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
                     continue
                 if event_type == "websocket_close":
+                    self._reject_interrupted_text_chunks("websocket_close")
                     code = item.get("code")
                     reason = item.get("reason")
                     if code is not None and not isinstance(code, int):
@@ -653,9 +677,11 @@ class NativeEgressWebSocket:
                     )
                     return
                 if event_type == "websocket_error":
+                    self._reject_interrupted_text_chunks("websocket_error")
                     terminal_failure = _websocket_error_from_event(item)
                     return
                 if event_type == "cancelled":
+                    self._reject_interrupted_text_chunks("cancelled")
                     terminal_failure = NativeEgressTransportError(
                         "native websocket was cancelled",
                         failure_phase="cancelled",
@@ -685,6 +711,16 @@ class NativeEgressWebSocket:
                 self._fail_pending(terminal_failure)
                 self._queue_terminal(terminal_failure)
             self._finish()
+
+    def _reject_interrupted_text_chunks(self, event_type: str) -> None:
+        """Fail closed when a non-chunk event interrupts a chunked message.
+
+        One message's ``websocket_text`` chunks arrive back to back, so any
+        other event with fragments pending proves the helper abandoned a
+        chunk sequence mid-message — reassembling would silently lose data.
+        """
+        if self._text_fragments:
+            raise NativeEgressProtocolError(f"native websocket {event_type} event interrupted a chunked text message")
 
     def _queue_message(self, message: NativeWebSocketMessage) -> None:
         try:

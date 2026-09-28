@@ -619,8 +619,18 @@ def _enforce_response_create_size_limit(request_state: _WebSocketRequestState) -
 
     payload_bytes = request_text.encode("utf-8")
     payload_size = len(payload_bytes)
-    warn_bytes = _upstream_response_create_warn_bytes()
-    max_bytes = _upstream_response_create_max_bytes()
+    # Inline-image bridge requests carry their whole-frame budget on the
+    # request state (the 64 MiB complete-frame cap of
+    # allow-bounded-inline-images-on-bridge): the exact frame measured here —
+    # already carrying the envelope and any
+    # operation/cache-identity/installation metadata — is the authoritative
+    # bound, with no derived admission headroom below it.
+    if request_state.response_create_max_bytes_override is not None:
+        max_bytes = int(request_state.response_create_max_bytes_override)
+        warn_bytes = int(max_bytes * 0.8)
+    else:
+        warn_bytes = _upstream_response_create_warn_bytes()
+        max_bytes = _upstream_response_create_max_bytes()
     if payload_size > warn_bytes:
         logger.warning(
             (

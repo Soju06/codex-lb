@@ -347,6 +347,17 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     rate_limit_reset_credits_refresh_enabled: bool = True
     http_responses_session_bridge_enabled: bool = True
+    # T4 (default ON; see the allow-bounded-inline-images-on-bridge openspec
+    # change): admit inline data-image Responses requests onto the HTTP
+    # responses bridge under two explicit budgets — each image's DECODED
+    # payload at most 5,000,000 bytes (inclusive), and the complete
+    # serialized response.create frame at most 64 MiB, exactly enforced at
+    # the final send. Oversize is the explicit 400 payload_too_large before
+    # any upstream send; historical slimming never runs for image-bearing
+    # requests; unsupported shapes keep the blanket image bypass. Setting
+    # this explicitly to ``false`` is the documented rollback restoring the
+    # pre-contract blanket image bypass for every image request.
+    http_responses_session_bridge_inline_images_enabled: bool = True
     # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor): the same-name

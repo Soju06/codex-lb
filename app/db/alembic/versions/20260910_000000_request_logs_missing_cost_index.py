@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260910_000000_request_logs_missing_cost_index"
 down_revision = "20260909_130000_add_request_logs_live_facet_indexes"
 branch_labels = None
@@ -19,6 +21,16 @@ _PREDICATE = (
 
 
 def upgrade() -> None:
+    _bind = op.get_bind()
+    if is_mysql(_bind):
+        create_mysql_index(
+            _bind,
+            index_name=_NAME,
+            table_name="request_logs",
+            columns_sql="`model_source_id`, `id`",
+        )
+        return
+
     if op.get_bind().dialect.name == "postgresql":
         with op.get_context().autocommit_block():
             invalid = (

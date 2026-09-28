@@ -3863,3 +3863,105 @@ async def test_reclaimed_detached_row_fences_prior_generation_operations(
         request_text='{"model":"gpt-5.4","input":"new turn"}',
     )
     assert accepted is not None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_cooldown_uses_the_pre_update_failure_count(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """The strike that crosses the threshold must cool down for exactly that count.
+
+    MySQL and MariaDB evaluate ``ON DUPLICATE KEY UPDATE`` assignments left to
+    right, so an incrementing assignment placed ahead of the cooldown ``CASE`` made
+    that ``CASE`` read the already-incremented count: the circuit then cooled down
+    for one failure more than the row held (``base_backoff * 2`` instead of
+    ``base_backoff`` at the threshold).
+    """
+    threshold = 3
+    base_backoff = 60.0
+    key = "key-cooldown"
+    common = {
+        "session_key_kind": "session_header",
+        "api_key_id": key,
+        "last_detail": "stream_incomplete",
+        "failure_threshold": threshold,
+        "base_backoff_seconds": base_backoff,
+        "max_backoff_seconds": 600.0,
+    }
+
+    # Two strikes below the threshold, then the strike that crosses it. The
+    # crossing write carries the base it loaded; without that it is a stale write
+    # and is dropped by design.
+    await coordinator.persist_retry_circuit(
+        session_key_value="sid-cooldown-crossing",
+        consecutive_failures=threshold - 1,
+        cooldown_until_epoch=0.0,
+        updated_at_epoch=1200.0,
+        **common,
+    )
+    await coordinator.persist_retry_circuit(
+        session_key_value="sid-cooldown-crossing",
+        consecutive_failures=threshold,
+        cooldown_until_epoch=0.0,
+        updated_at_epoch=1260.0,
+        base_updated_at_epoch=1200.0,
+        **common,
+    )
+    crossed = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header", session_key_value="sid-cooldown-crossing", api_key_id=key
+    )
+
+    assert crossed is not None
+    assert crossed.consecutive_failures == threshold
+    # The row holds `threshold` failures, so the cooldown is the threshold backoff
+    # measured from the observation that wrote it.
+    assert crossed.cooldown_until_epoch == 1260.0 + base_backoff
+    assert crossed.cooldown_until_epoch != 1260.0 + (base_backoff * 2.0)
+
+
+def test_retry_circuit_mysql_upsert_assigns_the_count_after_the_cases() -> None:
+    """Pin the emitted MySQL assignment order for a retry-circuit strike.
+
+    SQLAlchemy emits keyword ``on_duplicate_key_update`` assignments in
+    table-column order, and ``consecutive_failures`` is declared before the
+    cooldown columns in the model, so the count must be passed as an ordered
+    list: MySQL and MariaDB evaluate the clause left to right, and the cooldown
+    CASE reads the pre-update count. The count must be written after the CASEs
+    that read it and before ``updated_at_epoch``, whose CASE reads the count
+    guard.
+    """
+    import re
+
+    from sqlalchemy.dialects import mysql
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+    from app.db.models import HttpBridgeRetryCircuit
+    from app.modules.proxy.durable_bridge_repository import _retry_circuit_mysql_assignments
+
+    assignments = _retry_circuit_mysql_assignments(
+        cooldown_until_epoch="marker-cooldown",
+        last_detail="marker-detail",
+        consecutive_failures="marker-count",
+        updated_at_epoch="marker-updated",
+    )
+    statement = (
+        mysql_insert(HttpBridgeRetryCircuit)
+        .values(
+            session_key_kind="kind",
+            session_key_hash="hash",
+            api_key_scope="scope",
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=0.0,
+            admission_generation=1,
+        )
+        .on_duplicate_key_update(assignments)
+    )
+    clause = str(statement.compile(dialect=mysql.dialect())).split("ON DUPLICATE KEY UPDATE", 1)[1]
+    assert re.findall(r"([a-z_]+) = ", clause) == [
+        "cooldown_until_epoch",
+        "last_detail",
+        "consecutive_failures",
+        "updated_at_epoch",
+    ]

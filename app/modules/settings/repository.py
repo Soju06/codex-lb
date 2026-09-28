@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +14,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
+from app.db.dialect_sql import is_mysql
 from app.db.models import DashboardSettings, DashboardUser, LocalLoginPolicy, ModelContextWindowOverride
 from app.modules.dashboard_users.repository import DashboardUsersRepository
 
@@ -556,7 +558,12 @@ class SettingsRepository:
 
 
 # M4 model catalogue: dashboard rows of the per-model context window overrides.
-_UPSERT_INSERT_FNS = {"postgresql": pg_insert, "sqlite": sqlite_insert}
+_UPSERT_INSERT_FNS = {
+    "postgresql": pg_insert,
+    "sqlite": sqlite_insert,
+    "mysql": mysql_insert,
+    "mariadb": mysql_insert,
+}
 
 
 class ModelContextWindowOverridesRepository:
@@ -586,12 +593,18 @@ class ModelContextWindowOverridesRepository:
         if insert_fn is None:
             raise RuntimeError(f"model_context_window_overrides upsert unsupported for dialect={dialect!r}")
         statement = insert_fn(ModelContextWindowOverride).values(slug=slug, context_window=context_window)
-        await self._session.execute(
-            statement.on_conflict_do_update(
-                index_elements=[ModelContextWindowOverride.slug],
-                set_={"context_window": context_window, "updated_at": func.now()},
+        if is_mysql(dialect):
+            # MySQL targets the slug primary key directly.
+            await self._session.execute(
+                statement.on_duplicate_key_update(context_window=context_window, updated_at=func.now())
             )
-        )
+        else:
+            await self._session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[ModelContextWindowOverride.slug],
+                    set_={"context_window": context_window, "updated_at": func.now()},
+                )
+            )
         await self._session.commit()
 
     async def delete(self, slug: str) -> bool:

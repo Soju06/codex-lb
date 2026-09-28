@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import AccountUsageRollupState, RequestLog, RequestReportHourlyRollup
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG, _insert_fn, _locked_state, _state_bootstrap_stmt
@@ -140,11 +141,27 @@ async def rekey_report_accounts(session: AsyncSession, account_ids: list[str], t
         .where(source)
         .group_by(*keys)
     )
-    upsert = _insert_fn(session)(table).from_select([*KEYS, "first_requested_at", *MEASURES], stmt)
-    updates = {name: getattr(table, name) + getattr(upsert.excluded, name) for name in MEASURES}
-    updates["first_requested_at"] = case(
-        (table.first_requested_at < upsert.excluded.first_requested_at, table.first_requested_at),
-        else_=upsert.excluded.first_requested_at,
-    )
-    await session.execute(upsert.on_conflict_do_update(index_elements=list(KEYS), set_=updates))
+    insert_columns = [*KEYS, "first_requested_at", *MEASURES]
+    if is_mysql(session):
+        # MySQL cannot reference the would-be inserted row in an
+        # ``INSERT ... SELECT`` upsert (neither VALUES() nor the row alias is
+        # accepted there), so materialize the collision aggregates first and
+        # upsert them as a multi-row VALUES statement.
+        rows = (await session.execute(stmt)).all()
+        if rows:
+            upsert = _insert_fn(session)(table).values([dict(zip(insert_columns, row, strict=True)) for row in rows])
+            updates = {name: getattr(table, name) + getattr(upsert.inserted, name) for name in MEASURES}
+            updates["first_requested_at"] = case(
+                (table.first_requested_at < upsert.inserted.first_requested_at, table.first_requested_at),
+                else_=upsert.inserted.first_requested_at,
+            )
+            await session.execute(upsert.on_duplicate_key_update(**updates))
+    else:
+        upsert = _insert_fn(session)(table).from_select(insert_columns, stmt)
+        updates = {name: getattr(table, name) + getattr(upsert.excluded, name) for name in MEASURES}
+        updates["first_requested_at"] = case(
+            (table.first_requested_at < upsert.excluded.first_requested_at, table.first_requested_at),
+            else_=upsert.excluded.first_requested_at,
+        )
+        await session.execute(upsert.on_conflict_do_update(index_elements=list(KEYS), set_=updates))
     await session.execute(delete(table).where(source))

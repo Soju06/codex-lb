@@ -43,6 +43,7 @@ from app.core.exceptions import (
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
+from app.db.dialect_sql import is_mysql
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -269,10 +270,12 @@ async def serialize_reset_credit_redeem(
             await _acquire_postgresql_reset_credit_redeem_lock(session, account_id)
             yield
             return
-        if dialect == "sqlite":
-            # A durable claim row is the sole serializer here so processes
-            # sharing one SQLite file exclude each other, not just tasks in
-            # this process. Crashed holders are recovered via lease expiry;
+        if dialect == "sqlite" or is_mysql(dialect):
+            # A durable claim row is the sole serializer on SQLite (processes
+            # sharing one file exclude each other, not just tasks in this
+            # process) and on MySQL/MariaDB, where the row is the cross-replica
+            # mutex -- PostgreSQL keeps its advisory lock above. Crashed holders
+            # are recovered via lease expiry;
             # live holders keep the lease renewed via a heartbeat task so a
             # legitimately slow redemption is not taken over mid-section.
             holder_id = new_redeem_claim_holder_id()

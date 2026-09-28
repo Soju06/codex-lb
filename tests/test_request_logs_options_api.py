@@ -340,13 +340,15 @@ async def test_request_logs_options_unfiltered_skip_scan_covers_pair_facets(asyn
     payload = response.json()
     assert payload["accountIds"] == ["acc_pair"]
     # NULL pair placement follows the backend's ASC NULL ordering, matching
-    # the legacy DISTINCT path (SQLite: first, PostgreSQL: last).
+    # the legacy DISTINCT path (SQLite and MySQL/MariaDB: first, PostgreSQL:
+    # last).
     null_pair = {"model": "gpt-5.1", "reasoningEffort": None}
     non_null_pairs = [
         {"model": "gpt-5.1", "reasoningEffort": "high"},
         {"model": "gpt-5.1", "reasoningEffort": "low"},
     ]
-    gpt51_pairs = [null_pair, *non_null_pairs] if engine.dialect.name == "sqlite" else [*non_null_pairs, null_pair]
+    nulls_first = engine.dialect.name in ("sqlite", "mysql", "mariadb")
+    gpt51_pairs = [null_pair, *non_null_pairs] if nulls_first else [*non_null_pairs, null_pair]
     assert payload["modelOptions"] == [{"model": "gpt-4o", "reasoningEffort": "medium"}, *gpt51_pairs]
     assert payload["statuses"] == ["ok", "rate_limit", "quota"]
 

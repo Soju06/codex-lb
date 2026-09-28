@@ -153,6 +153,75 @@ def test_timestamp_prefix_collision_when_chained_reports_lost_ordering(checker: 
     assert not any(message.startswith("alembic_head_count_invalid") for message in _errors(reports))
 
 
+def test_timestamp_prefix_collision_joined_by_merge_is_repaired(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    first = "20260912_000000_first_slot"
+    second = "20260912_000000_second_slot"
+    merge = "20260913_000000_join_slots"
+    _write_revision(versions, first, head)
+    _write_revision(versions, second, "20260901_000000_fixture_base")
+    _write_revision(versions, merge, (first, second))
+
+    reports, _ = checker.run_all(versions_dir=versions, base_ref="")
+    assert not any(message.startswith("alembic_timestamp_prefix_collision") for message in _errors(reports))
+    assert not any(message.startswith("alembic_head_count_invalid") for message in _errors(reports))
+
+
+def test_timestamp_prefix_collision_chained_before_unrelated_merge_is_not_repaired(
+    checker: ModuleType, tmp_path: Path
+) -> None:
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    first = "20260912_000000_first_slot"
+    second = "20260912_000000_second_slot"
+    unrelated = "20260913_000000_unrelated_lineage"
+    merge = "20260914_000000_join_unrelated"
+    _write_revision(versions, first, head)
+    _write_revision(versions, second, first)
+    _write_revision(versions, unrelated, head)
+    _write_revision(versions, merge, (second, unrelated))
+
+    errors = _errors(checker.run_all(versions_dir=versions, base_ref="")[0])
+    collisions = [message for message in errors if message.startswith("alembic_timestamp_prefix_collision")]
+    assert len(collisions) == 1
+    assert "they are chained" in collisions[0]
+
+
+def test_timestamp_prefix_collision_same_prefix_merge_is_not_repaired(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    first = "20260912_000000_first_slot"
+    second = "20260912_000000_second_slot"
+    merge = "20260912_000000_join_slots"
+    _write_revision(versions, first, head)
+    _write_revision(versions, second, head)
+    _write_revision(versions, merge, (first, second))
+
+    errors = _errors(checker.run_all(versions_dir=versions, base_ref="")[0])
+    collisions = [message for message in errors if message.startswith("alembic_timestamp_prefix_collision")]
+    assert len(collisions) == 1
+    assert "prefix=20260912_000000 count=3" in collisions[0]
+
+
+def test_timestamp_prefix_collision_mixed_group_keeps_chained_pair(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    head = _linear_fixture(checker, versions)
+    first = "20260912_000000_first_slot"
+    second = "20260912_000000_second_slot"
+    independent = "20260912_000000_independent_slot"
+    merge = "20260913_000000_join_slots"
+    _write_revision(versions, first, head)
+    _write_revision(versions, second, first)
+    _write_revision(versions, independent, head)
+    _write_revision(versions, merge, (second, independent))
+
+    errors = _errors(checker.run_all(versions_dir=versions, base_ref="")[0])
+    collisions = [message for message in errors if message.startswith("alembic_timestamp_prefix_collision")]
+    assert len(collisions) == 1
+    assert "prefix=20260912_000000 count=3" in collisions[0]
+
+
 def test_prefix_collision_before_the_ratchet_is_grandfathered(checker: ModuleType, tmp_path: Path) -> None:
     """Existing history keeps its 36 collision groups; only new slots are enforced."""
     versions = tmp_path / "versions"

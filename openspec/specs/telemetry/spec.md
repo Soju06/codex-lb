@@ -141,7 +141,7 @@ The canonical mapping table (raw `useragent_group` → family):
 
 | Raw group(s) | Family |
 | --- | --- |
-| `codex_exec`, `codex-tui` | `codex-cli` |
+| `codex_exec`, `codex-tui`, `codex_cli_rs` | `codex-cli` |
 | `Codex Desktop` | `codex-desktop` |
 | `codex_vscode` | `codex-vscode` |
 | `AsyncOpenAI` | `openai-sdk-python` |
@@ -163,8 +163,9 @@ without ever transmitting the unmatched raw values.
 
 #### Scenario: Codex CLI variants collapse to one family
 
-- **WHEN** traffic exists from both `codex_exec` and `codex-tui`
-- **THEN** the payload reports a single `codex-cli` family combining both
+- **WHEN** traffic exists from `codex_exec`, `codex-tui`, and `codex_cli_rs` (the interactive
+  Codex CLI's native user-agent fingerprint)
+- **THEN** the payload reports a single `codex-cli` family combining all three
 
 ### Requirement: Model catalog allowlist with per-model reasoning mix
 

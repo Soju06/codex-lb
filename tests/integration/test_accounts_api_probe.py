@@ -1,19 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import inspect
 
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
+from app.core.balancer import HEALTH_TIER_HEALTHY, HEALTH_TIER_PROBING
+from app.core.balancer.logic import PROBE_SUCCESS_STREAK_REQUIRED
 from app.core.openai.model_registry import get_model_registry
 from app.core.usage.models import UsagePayload
+from app.core.utils.time import utcnow
+from app.db.models import UsageHistory
+from app.db.session import SessionLocal
+from app.db.snapshot import clone_row
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
+from app.modules.proxy.load_balancer import RuntimeState
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
 
 pytestmark = pytest.mark.integration
@@ -26,6 +36,7 @@ def _encode_jwt(payload: dict) -> str:
 
 
 async def _import_test_account(async_client, *, email: str, account_id: str, plan_type: str = "pro") -> str:
+    """Import synthetic credentials through the API and return the stored account ID."""
     payload = {
         "email": email,
         "chatgpt_account_id": account_id,
@@ -51,6 +62,183 @@ async def test_probe_missing_account_returns_404(async_client):
     assert response.status_code == 404
     body = response.json()
     assert body["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plan_type, windows",
+    [
+        ("pro", ()),
+        ("pro", ("primary",)),
+        ("pro", ("secondary",)),
+        ("pro", ("primary", "secondary")),
+        ("free", ("monthly",)),
+        ("free", ("primary", "secondary", "monthly")),
+    ],
+)
+async def test_force_probe_settles_after_repository_session_closes(
+    async_client, app_instance, monkeypatch, caplog, plan_type, windows
+):
+    """Exercise real rollback-on-close repositories, rather than a settlement mock."""
+
+    async def _fake_probe(self, **kwargs):  # noqa: ARG001
+        """Accept the upstream probe without making a network request."""
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        """Complete refresh without replacing the seeded usage-window rows."""
+        return UsagePayload(plan_type=plan_type)
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+    account_id = await _import_test_account(
+        async_client,
+        email="probe-settlement@example.com",
+        account_id="acc_probe_settlement",
+        plan_type=plan_type,
+    )
+    now = utcnow()
+    # Free accounts must ignore even exhausted legacy primary-window usage.
+    primary_used_percent = 100.0 if plan_type == "free" else 10.0
+    async with SessionLocal() as session:
+        session.add_all(
+            UsageHistory(
+                account_id=account_id,
+                window=window,
+                used_percent=primary_used_percent if window == "primary" else 10.0,
+                recorded_at=now,
+                reset_at=int(now.timestamp()) + 3600,
+                window_minutes={"primary": 300, "secondary": 10080, "monthly": 43200}[window],
+            )
+            for window in windows
+        )
+        await session.commit()
+    balancer = accounts_api.get_proxy_service_for_app(app_instance)._load_balancer
+    runtime = RuntimeState(health_tier=HEALTH_TIER_PROBING, error_count=2, last_error_at=1.0)
+    balancer._runtime[account_id] = runtime
+
+    for completed in range(1, PROBE_SUCCESS_STREAK_REQUIRED + 1):
+        response = await async_client.post(f"/api/accounts/{account_id}/probe")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["probeStatusCode"] == 200
+        assert body["accountStatusAfter"] == "active"
+        assert body["primaryUsedPercentAfter"] == (primary_used_percent if "primary" in windows else None)
+        assert body["secondaryUsedPercentAfter"] == (10.0 if "secondary" in windows else None)
+        assert runtime.error_count == 0
+        assert runtime.last_error_at is None
+        assert runtime.probe_success_streak == (completed % PROBE_SUCCESS_STREAK_REQUIRED)
+        assert runtime.health_tier == (
+            HEALTH_TIER_HEALTHY if completed == PROBE_SUCCESS_STREAK_REQUIRED else HEALTH_TIER_PROBING
+        )
+    assert "Force Probe advisory settlement failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer_observation", ["failure", "lease"])
+async def test_force_probe_settlement_keeps_health_guard_after_real_session_expiry(
+    async_client, app_instance, monkeypatch, caplog, newer_observation
+):
+    """Pause after real rollback/close so newer evidence precedes the settlement CAS."""
+
+    async def _fake_probe(self, **kwargs):  # noqa: ARG001
+        """Accept the probe before injecting a concurrent runtime observation."""
+        return 200
+
+    async def _fake_fetch_usage(**_kwargs):
+        """Leave quota unconstrained so the test isolates concurrent health evidence."""
+        return UsagePayload(plan_type="pro")
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+    account_id = await _import_test_account(async_client, email="probe-race@example.com", account_id="acc_probe_race")
+    balancer = accounts_api.get_proxy_service_for_app(app_instance)._load_balancer
+    runtime = RuntimeState(health_tier=HEALTH_TIER_PROBING, error_count=2, last_error_at=1.0)
+    balancer._runtime[account_id] = runtime
+    original_factory = balancer._repo_factory
+    snapshot_closed = asyncio.Event()
+    resume_settlement = asyncio.Event()
+    pause_once = True
+    account_snapshot = None
+
+    @asynccontextmanager
+    async def _pause_after_session_closes():
+        """Block the first settlement after real ORM expiry; let subsequent writes finish."""
+        nonlocal pause_once, account_snapshot
+        should_pause = pause_once
+        pause_once = False
+        async with original_factory() as repos:
+            if should_pause:
+                loaded_account = await repos.accounts.get_by_id(account_id)
+                assert loaded_account is not None
+                account_snapshot = clone_row(loaded_account)
+            yield repos
+        if should_pause:
+            assert inspect(loaded_account).detached
+            assert inspect(loaded_account).expired_attributes
+            snapshot_closed.set()
+            await resume_settlement.wait()
+
+    monkeypatch.setattr(balancer, "_repo_factory", _pause_after_session_closes)
+    probe_task = asyncio.create_task(async_client.post(f"/api/accounts/{account_id}/probe"))
+    try:
+        await asyncio.wait_for(snapshot_closed.wait(), timeout=5)
+        assert account_snapshot is not None
+        if newer_observation == "failure":
+            await balancer.record_error(account_snapshot)
+        else:
+            lease = await balancer.acquire_account_lease(account_id, kind="stream")
+            await balancer.release_account_lease(lease)
+    finally:
+        resume_settlement.set()
+        response = await asyncio.wait_for(probe_task, timeout=5)
+
+    assert response.status_code == 200, response.text
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    if newer_observation == "failure":
+        assert runtime.error_count == 3
+        assert runtime.last_error_at is not None
+        assert runtime.last_error_at > 1.0
+        assert runtime.probe_success_streak == 0
+    else:
+        assert runtime.error_count == 0
+        assert runtime.last_error_at is None
+        assert runtime.probe_success_streak == 1
+    assert "Force Probe advisory settlement failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe_status", [400, 503, 599])
+async def test_failed_force_probe_resets_real_balancer_streak(
+    async_client, app_instance, monkeypatch, caplog, probe_status
+):
+    """Verify rejected probes reset recovery progress without marking the account unhealthy."""
+
+    async def _fake_probe(self, **kwargs):  # noqa: ARG001
+        """Return the selected upstream rejection or network-failure status."""
+        return probe_status
+
+    async def _fake_fetch_usage(**_kwargs):
+        """Complete post-probe usage refresh without adding quota pressure."""
+        return UsagePayload(plan_type="pro")
+
+    monkeypatch.setattr(AccountsService, "_send_probe_request", _fake_probe)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fake_fetch_usage)
+    account_id = await _import_test_account(
+        async_client, email="probe-failed-settlement@example.com", account_id="acc_probe_failed_settlement"
+    )
+    balancer = accounts_api.get_proxy_service_for_app(app_instance)._load_balancer
+    runtime = RuntimeState(health_tier=HEALTH_TIER_PROBING, probe_success_streak=2)
+    balancer._runtime[account_id] = runtime
+
+    response = await async_client.post(f"/api/accounts/{account_id}/probe")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["probeStatusCode"] == probe_status
+    assert runtime.probe_success_streak == 0
+    assert runtime.health_tier == HEALTH_TIER_PROBING
+    assert runtime.error_count == 0
+    assert "Force Probe advisory settlement failed" not in caplog.text
 
 
 @pytest.mark.asyncio

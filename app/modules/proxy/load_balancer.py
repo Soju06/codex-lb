@@ -1858,6 +1858,13 @@ class LoadBalancer:
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
             )
+            # Repository teardown rolls back reads and expires ORM rows. Keep
+            # loaded snapshots for normalization after the session has closed.
+            account = _clone_account(account)
+            primary_entry = clone_row(primary_entry) if primary_entry is not None else None
+            effective_secondary_entry = (
+                clone_row(effective_secondary_entry) if effective_secondary_entry is not None else None
+            )
             now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(
                 account=account,

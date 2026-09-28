@@ -95,8 +95,13 @@ behavior can set the threshold to `100.0`.
   also contributes to that replica's probing-health recovery streak; non-2xx
   results do not restore routing health. Settlement reloads and normalizes
   weekly/monthly and zero-primary-capacity usage like ordinary routing and is
-  discarded when newer replica-local runtime activity arrives during that
-  snapshot load. The earlier `16` floor addressed
+  discarded when newer replica-local health evidence arrives during that
+  snapshot load; lease-only activity does not invalidate it. The account and
+  usage rows are copied before the read session closes because rollback
+  expires ORM attributes even with `expire_on_commit=False`. For example,
+  an HTTP 200 probe with healthy usage must advance the local recovery
+  streak after session teardown, rather than only returning a successful
+  dashboard response while settlement logs an expired-row error. The earlier `16` floor addressed
   [#1895](https://github.com/Soju06/codex-lb/issues/1895) when upstream still
   accepted the field; warmup/compact-404 is a separate path.
 - Do not manually flip the codex-lb account state to `ACTIVE` while

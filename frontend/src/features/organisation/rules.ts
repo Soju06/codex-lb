@@ -48,7 +48,7 @@ export function refusedSince(now: Date = new Date()): string {
  * "nothing configured": the one-line label says nothing it should not.
  */
 export function isOrganisationConfigured(summary: AccessSummary | null): boolean {
-  return hasCompanyLogin(summary) || isLocalLoginRestricted(summary);
+  return hasCompanyLogin(summary) || hasScimTokens(summary) || isLocalLoginRestricted(summary);
 }
 
 /** A sign-in method other than the local password, or a rule that routes one. */
@@ -57,6 +57,17 @@ export function hasCompanyLogin(summary: AccessSummary | null): boolean {
     return false;
   }
   return summary.providersEnabled.some((kind) => kind !== "password") || summary.roleMappings >= 1;
+}
+
+/**
+ * A credential for automatic account management exists. Counted in the session
+ * so the collapsed group can say so without a request — the same reason every
+ * other fact in this ladder comes from `access_summary`. Without it the first
+ * credential would flip the disclosure tier and leave the collapsed line still
+ * claiming nothing is set up.
+ */
+export function hasScimTokens(summary: AccessSummary | null): boolean {
+  return summary !== null && summary.scimTokens >= 1;
 }
 
 /**
@@ -143,6 +154,26 @@ export function trustedHeaderProvider(providers: readonly AuthProvider[] | undef
 /** The identity-provider row. Seeded on every install, disabled until connected. */
 export function oidcProvider(providers: readonly AuthProvider[] | undefined): AuthProvider | null {
   return providers?.find((provider) => provider.kind === OIDC_KIND) ?? null;
+}
+
+/**
+ * The company sign-in that automatic account management would follow, or
+ * `null` when none is on yet.
+ *
+ * Read from the provider rows rather than from `access_summary`, because this
+ * group belongs to `security:write` and the summary is absent for a caller
+ * without `users:manage` — deriving it from the summary would tell such a
+ * caller that nothing is connected when something is. A row that is stored but
+ * switched off does not count: provisioning people into an install they cannot
+ * then sign in to is the state this gate exists to prevent.
+ */
+export function companyLoginProvider(providers: readonly AuthProvider[] | undefined): AuthProvider | null {
+  return providers?.find((provider) => provider.kind !== "password" && provider.enabled) ?? null;
+}
+
+/** Whether the automatic account management card may offer its controls at all. */
+export function canManageAccountsAutomatically(providers: readonly AuthProvider[] | undefined): boolean {
+  return companyLoginProvider(providers) !== null;
 }
 
 /**

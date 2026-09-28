@@ -4,11 +4,15 @@ import type { TFunction } from "i18next";
 import {
   createRoleMapping,
   deleteRoleMapping,
+  issueScimToken,
   listAssignableRoles,
   listAuditEntries,
   listAuthProviders,
   listRoleMappings,
+  listScimTokens,
   reorderRoleMappings,
+  revokeScimToken,
+  rotateScimToken,
   startOidcTestLogin,
   updateAuthProvider,
   updateRoleMapping,
@@ -33,6 +37,7 @@ export const PROVIDERS_QUERY_KEY = ["auth-providers", "list"] as const;
 export const MAPPINGS_QUERY_KEY = ["role-mappings", "list"] as const;
 export const REFUSED_SIGN_INS_QUERY_KEY = ["audit-logs", "refused-sign-ins"] as const;
 export const ASSIGNABLE_ROLES_QUERY_KEY = ["role-mappings", "assignable-roles"] as const;
+export const SCIM_TOKENS_QUERY_KEY = ["scim-tokens", "list"] as const;
 /** The shared settings query key; the login-policy card reads and writes the same row. */
 export const SETTINGS_QUERY_KEY = ["settings", "detail"] as const;
 
@@ -57,6 +62,9 @@ const EXPLAINED_ERROR_CODES = new Set([
   "config_not_supported",
   "oidc_provider_unreachable",
   "oidc_rate_limited",
+  // Automatic account management credentials (PLAN §4.6-A1: issuing one is
+  // itself a delegation, so `insufficient_delegation` above is its refusal).
+  "scim_token_not_found",
 ]);
 
 /**
@@ -124,6 +132,16 @@ export function useRoleMappings(enabled = true) {
  */
 export function useAssignableRoles(enabled = true) {
   return useQuery({ queryKey: ASSIGNABLE_ROLES_QUERY_KEY, queryFn: listAssignableRoles, enabled });
+}
+
+/**
+ * The credentials the identity provider pushes with. Gated on the same
+ * `security:write` as the rest of this group, so the card fetches whenever the
+ * group is open — including on an install that cannot use them yet, because
+ * the card has to say whether any already exist before it says why it is off.
+ */
+export function useScimTokens(enabled = true) {
+  return useQuery({ queryKey: SCIM_TOKENS_QUERY_KEY, queryFn: listScimTokens, enabled });
 }
 
 /**
@@ -218,6 +236,40 @@ export function useOrganisationMutations() {
     onSuccess: settle,
   });
 
+  // Issuing and rotating are the two writes whose ANSWER carries a credential,
+  // and they are the only two in this group that do not settle themselves.
+  //
+  // Two reasons, both load-bearing. `settle()` refreshes the session, and the
+  // first credential flips `access_summary.scim_tokens` from zero — which
+  // re-renders the group around the dialog that is showing the plaintext. And
+  // refetching the list while that dialog is open replaces the row it was
+  // opened for. The card calls `settleScimTokens` when the dialog is
+  // dismissed instead, which is the one moment the value is known to be gone
+  // from the screen.
+  //
+  // Neither answer may linger here. The card resets both the moment it copies
+  // one into its own state, because `gcTime: 0` only disposes of a mutation
+  // nothing observes any more and this hook observes them both for as long as
+  // the group is open; `gcTime: 0` is then the backstop for the unmount that
+  // never reaches a dismissal. The plaintext lives in the card's own state for
+  // as long as it is needed and nowhere else.
+  const issueToken = useMutation({
+    mutationFn: (payload: { label: string }) => issueScimToken(payload),
+    gcTime: 0,
+  });
+  const rotateToken = useMutation({ mutationFn: (tokenId: string) => rotateScimToken(tokenId), gcTime: 0 });
+  const revokeToken = useMutation({
+    mutationFn: (tokenId: string) => revokeScimToken(tokenId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: SCIM_TOKENS_QUERY_KEY });
+      await settle();
+    },
+  });
+  const settleScimTokens = async () => {
+    await queryClient.invalidateQueries({ queryKey: SCIM_TOKENS_QUERY_KEY });
+    await settle();
+  };
+
   const busy = [
     updateProvider,
     updateOidcProvider,
@@ -227,6 +279,9 @@ export function useOrganisationMutations() {
     removeMapping,
     reorderMappings,
     updateLoginPolicy,
+    issueToken,
+    rotateToken,
+    revokeToken,
   ].some((mutation) => mutation.isPending);
   return {
     updateProvider,
@@ -238,6 +293,10 @@ export function useOrganisationMutations() {
     removeMapping,
     reorderMappings,
     updateLoginPolicy,
+    issueToken,
+    rotateToken,
+    revokeToken,
+    settleScimTokens,
     busy,
   };
 }

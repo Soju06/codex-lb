@@ -92,6 +92,10 @@ const EXPECTED_ENDPOINTS = [
 	"PUT /api/role-mappings/order",
 	"PATCH /api/role-mappings/:mappingId",
 	"DELETE /api/role-mappings/:mappingId",
+	"GET /api/scim-tokens",
+	"POST /api/scim-tokens",
+	"POST /api/scim-tokens/:tokenId/rotate",
+	"DELETE /api/scim-tokens/:tokenId",
 	"GET /api/audit-logs",
 	// settings
 	"GET /api/settings",

@@ -6,18 +6,26 @@ import { del, get, patch, post, put } from "@/lib/api-client";
 // `app/modules/role_mappings/schemas.py` and the filtered read of
 // `app/modules/audit/api.py`.
 //
-// Nothing the server SENDS here carries a secret: the trusted-header row's
-// `config` holds header NAMES, the OIDC row's comes back with its client
-// secret masked (`****last4`), and the audit rows are refusals. The request
-// side is where a secret does travel: `OidcConfigRequest` carries the client
-// secret in clear, because a connection document is written whole and the
-// server will not inherit the old secret behind a repointed issuer. The mask
-// is never sent back, and the secret is never stored anywhere but the form
-// state of the dialog that collected it.
+// Secrets travel in both directions here, and in different shapes, so it is
+// worth being explicit about which is which.
+//
+// Coming BACK, almost nothing carries one: the trusted-header row's `config`
+// holds header NAMES, the OIDC row's comes back with its client secret masked
+// (`****last4`), and the audit rows are refusals. The one exception is
+// `ScimTokenIssuedResponse`, the answer to issuing or rotating an automatic
+// account management credential: the plaintext appears there and in no later
+// read, so whatever receives it is the only thing that will ever hold it.
+//
+// GOING OUT, `OidcConfigRequest` carries the client secret in clear, because a
+// connection document is written whole and the server will not inherit the old
+// secret behind a repointed issuer. The mask is never sent back, and that
+// secret is never stored anywhere but the form state of the dialog that
+// collected it.
 
 const PROVIDERS_PATH = "/api/auth-providers";
 const MAPPINGS_PATH = "/api/role-mappings";
 const AUDIT_PATH = "/api/audit-logs";
+const SCIM_TOKENS_PATH = "/api/scim-tokens";
 const OIDC_TEST_LOGIN_START_PATH = "/api/dashboard-auth/oidc/test-login/start";
 
 export const AuthProviderSchema = z.object({
@@ -169,6 +177,56 @@ export function deleteRoleMapping(mappingId: string) {
 /** The full order of one provider's rules, winner first. */
 export function reorderRoleMappings(payload: { provider: string; providerKey: string; ids: string[] }) {
   return put(`${MAPPINGS_PATH}/order`, z.array(RoleMappingSchema), { body: payload });
+}
+
+/**
+ * A credential the identity provider uses to push joiners and leavers. Wire
+ * shape of `app/modules/scim/schemas.py::ScimTokenResponse` — the row, never
+ * the secret. `tokenPrefix` is the deliberately non-secret head of the value,
+ * kept so two credentials can be told apart in a list.
+ */
+export const ScimTokenSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  tokenPrefix: z.string(),
+  createdAt: z.string(),
+  createdByUserId: z.string().nullable().default(null),
+  /** When a push last arrived on it; `null` until the connector is switched on. */
+  lastUsedAt: z.string().nullable().default(null),
+  rotatedAt: z.string().nullable().default(null),
+});
+
+export const ScimTokenListSchema = z.object({
+  tokens: z.array(ScimTokenSchema),
+  /** Where the identity provider points its connector, as the server spells it. */
+  basePath: z.string(),
+});
+
+/**
+ * The one response in this feature that carries a plaintext credential. It is
+ * handed to component state and nowhere else: no query cache, no storage, no
+ * URL, no mutation that outlives the dialog showing it.
+ */
+export const ScimTokenIssuedSchema = z.object({ token: ScimTokenSchema, secret: z.string() });
+
+export type ScimToken = z.infer<typeof ScimTokenSchema>;
+export type ScimTokenList = z.infer<typeof ScimTokenListSchema>;
+export type ScimTokenIssued = z.infer<typeof ScimTokenIssuedSchema>;
+
+export function listScimTokens() {
+  return get(SCIM_TOKENS_PATH, ScimTokenListSchema);
+}
+
+export function issueScimToken(payload: { label: string }) {
+  return post(SCIM_TOKENS_PATH, ScimTokenIssuedSchema, { body: payload });
+}
+
+export function rotateScimToken(tokenId: string) {
+  return post(`${SCIM_TOKENS_PATH}/${encodeURIComponent(tokenId)}/rotate`, ScimTokenIssuedSchema);
+}
+
+export function revokeScimToken(tokenId: string) {
+  return del(`${SCIM_TOKENS_PATH}/${encodeURIComponent(tokenId)}`);
 }
 
 export type AuditQuery = { action: string; reason: string; since: string; limit?: number };

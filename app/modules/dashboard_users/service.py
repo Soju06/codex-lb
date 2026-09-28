@@ -633,40 +633,59 @@ class DashboardUsersService:
         account PATCH — the SCIM ``active=false`` endpoint of Phase 3b and the
         identity resolver — so none of them can bypass the break-glass guard.
         A refusal audits ``scim_deprovision_refused`` next to raising, because
-        the caller is a machine whose 409 nobody reads. Returns ``False`` when
-        the account was already inactive (nothing to do, nothing audited).
+        the caller is a machine whose 409 nobody reads.
+
+        An account that never accepted its invitation is deactivated rather
+        than ignored: its invite is deleted in this same transaction and the
+        row moves to ``disabled``. A human revoke deletes such an account
+        outright, which a back channel must not do — the caller has to keep
+        finding that person by the name it pushed — and an ``sso_only`` invite
+        never expires, so ignoring it would leave a way in open forever.
+        Returns ``False`` when the account was already inactive (nothing to do,
+        nothing audited), which is what makes a redelivered push idempotent.
         """
 
         await self._repo.acquire_write_intent()
         user = await self._get(user_id)
-        if not _is_active(user):
+        invited = user.status == DashboardUserStatus.INVITED.value
+        if not _is_active(user) and not invited:
             return False
+        # An invited account is not active, so it counts for neither invariant:
+        # the guards below read the same way the account PATCH reads them.
+        counts_as_admin = _is_active(user) and _is_admin_preset(user)
+        # Read off the row while it is still loaded: a rollback below expires
+        # every attribute, and reading one back then is synchronous IO in an
+        # async context — the refusal would surface as a driver error.
+        username = user.username
+        role_id = user.role_id
         try:
             guarded = await self.assert_break_glass_remains(user, status=DashboardUserStatus.DISABLED.value)
         except LastBreakGlassProtectedError:
-            AuditService.log_async(
-                "scim_deprovision_refused",
-                actor_ip=actor_ip,
-                details={"username": user.username, "source": source, "reason": "last_break_glass_protected"},
-                actor=actor,
-                target=AuditTarget("user", user.id),
-                severity=AuditSeverity.WARNING,
-            )
+            self._audit_deprovision_refused(user_id, username, actor=actor, actor_ip=actor_ip, source=source)
             raise
-        if _is_admin_preset(user):
-            await self._assert_other_active_admin(user.id)
-        key_hashes = await self._repo.deactivate_owned_keys(user.id)
+        if counts_as_admin:
+            await self._assert_other_active_admin(user_id)
+        key_hashes = await self._repo.deactivate_owned_keys(user_id)
+        invite_deleted = await self._repo.delete_invite(user_id) if invited else False
         if not await self._repo.update_role_status_guarded(
-            user.id,
-            role_id=user.role_id,
+            user_id,
+            role_id=role_id,
             status=DashboardUserStatus.DISABLED.value,
-            require_other_admin=_is_admin_preset(user),
+            require_other_admin=counts_as_admin,
             require_other_break_glass=guarded,
         ):
+            # Which invariant actually lost is a re-read, not a guess: both
+            # predicates rode into the one UPDATE, and naming the wrong one
+            # sends the operator to fix an account that was never the problem.
             await self._repo.rollback()
-            raise LastAdminProtectedError("At least one active admin account must remain")
-        username = user.username
-        await self._repo.commit_user(user.id, bump_generation=True)
+            if counts_as_admin and await self._repo.count_active_admins(exclude_user_id=user_id) == 0:
+                raise LastAdminProtectedError("At least one active admin account must remain")
+            self._audit_deprovision_refused(user_id, username, actor=actor, actor_ip=actor_ip, source=source)
+            raise LastBreakGlassProtectedError(
+                "This is the only emergency account that can still sign in while local sign-in is restricted; "
+                "designate another admin with two-factor first"
+            )
+        await self._repo.commit_user(user_id, bump_generation=True)
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
         AuditService.log_async(
@@ -683,6 +702,92 @@ class DashboardUsersService:
             actor=actor,
             target=AuditTarget("user", user_id),
         )
+        if invite_deleted:
+            # The same action the management side writes when an invitation
+            # stops being usable, so one search answers "when did this link
+            # die" whoever killed it.
+            AuditService.log_async(
+                "invite_revoked",
+                actor_ip=actor_ip,
+                details={"username": username, "source": source},
+                actor=actor,
+                target=AuditTarget("user", user_id),
+            )
+        return True
+
+    def _audit_deprovision_refused(
+        self, user_id: str, username: str, *, actor: AuditActor, actor_ip: str | None, source: str
+    ) -> None:
+        """One row per refusal, written where the refusal is raised.
+
+        Both places that raise it are inside :meth:`deactivate_user`, so the
+        machine caller that maps the exception to its own envelope adds
+        nothing: a second row written there would double-count every refused
+        leaver. It takes plain values rather than the row because one caller
+        has already rolled the transaction back.
+        """
+
+        AuditService.log_async(
+            "scim_deprovision_refused",
+            actor_ip=actor_ip,
+            details={"username": username, "source": source, "reason": "last_break_glass_protected"},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+            severity=AuditSeverity.WARNING,
+        )
+
+    async def reactivate_user(
+        self,
+        user_id: str,
+        *,
+        actor: AuditActor,
+        actor_ip: str | None,
+        source: str,
+    ) -> bool:
+        """Re-enable an account through one back-channel: status, commit, then the owner keys.
+
+        The principal-free twin of :meth:`deactivate_user`, for callers that are
+        machines rather than people — the SCIM ``active=true`` push. Fabricating
+        a :class:`DashboardPrincipal` to reuse the administrative
+        :meth:`reactivate_keys` instead would hand a bearer token a blanket
+        ``assert_can_act_on`` bypass over every account on the install, which is
+        exactly the escalation this separation exists to prevent.
+
+        The two halves are ordered, not merged: the restoring ``UPDATE`` reads
+        the owner's status in an ``EXISTS`` predicate, so the status flip has to
+        be committed before it runs or it would restore nothing. Only keys the
+        owner cascade turned off come back; an administrator's explicit revoke
+        (``manual``) and an expiry are never resurrected. Returns ``False`` when
+        the account was already active (nothing written, nothing audited).
+        """
+
+        await self._repo.acquire_write_intent()
+        user = await self._get(user_id)
+        if _is_active(user):
+            return False
+        if user.status == DashboardUserStatus.INVITED.value:
+            raise InvitePendingError("The account has not accepted its invitation yet")
+        username = user.username
+        user.status = DashboardUserStatus.ACTIVE.value
+        await self._repo.commit_user(user.id)
+        await self._invalidate_users()
+        AuditService.log_async(
+            "user_enabled",
+            actor_ip=actor_ip,
+            details={"username": username, "source": source},
+            actor=actor,
+            target=AuditTarget("user", user_id),
+        )
+        key_hashes = await self._repo.reactivate_owner_disabled_keys(user.id)
+        if key_hashes:
+            await self._invalidate_api_keys(key_hashes)
+            AuditService.log_async(
+                "user_keys_reactivated",
+                actor_ip=actor_ip,
+                details={"count": len(key_hashes), "source": source},
+                actor=actor,
+                target=AuditTarget("user", user_id),
+            )
         return True
 
     # --- invites (management side) ---

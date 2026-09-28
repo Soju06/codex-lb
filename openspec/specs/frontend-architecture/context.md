@@ -40,6 +40,13 @@ provider confirmation, pending-account screen, and account rename dialog share
 the same Japanese bundle. Provider names, claim names, redirect URLs, and the
 reference an administrator uses to locate a sign-in retain their original values.
 
+The automatic account management card uses `認証情報` consistently for SCIM
+credentials. Its Japanese copy explains the company sign-in prerequisite,
+email matching that avoids duplicate accounts, and the one-time display of a
+new credential. Administrator-provided labels and last-received values remain
+interpolated; for example, a credential named `Company directory` is described
+as `「Company directory」の認証情報です。`.
+
 ### Example and failure modes
 
 A first-time visitor using `ja-JP` sees the dashboard in Japanese. Choosing

@@ -15,7 +15,7 @@ from starlette._utils import get_route_path
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.core.errors import dashboard_error, openai_error
+from app.core.errors import SCIM_CONTENT_TYPE, dashboard_error, openai_error, scim_error
 from app.core.exceptions import (
     AppError,
     DashboardAuthError,
@@ -33,6 +33,7 @@ from app.core.exceptions import (
     ProxyReasoningEffortNotAllowed,
     ProxyRequiredCapabilityTransportError,
     ProxyUpstreamError,
+    ScimError,
 )
 from app.core.middleware.multipart_content_encoding import (
     UnsupportedMultipartContentEncoding,
@@ -87,7 +88,21 @@ def _error_format(request: Request) -> str | None:
         return "dashboard"
     if path in {"/v1", "/backend-api"} or path.startswith(("/v1/", "/backend-api/")):
         return "openai"
+    # Unmatched ``/scim/...`` paths never reach the router's marker dependency,
+    # so the 404 an identity provider probing for an unimplemented resource
+    # gets has to be decided here. Without it the answer is FastAPI's
+    # ``{"detail": ...}``, which no SCIM client parses.
+    if path == "/scim" or path.startswith("/scim/"):
+        return "scim"
     return None
+
+
+def _scim_response(status_code: int, detail: str, *, scim_type: str | None = None) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=scim_error(status_code, detail, scim_type=scim_type),
+        media_type=SCIM_CONTENT_TYPE,
+    )
 
 
 # Codex-native aliases under /backend-api/codex map to the same route labels
@@ -284,6 +299,23 @@ def add_exception_handlers(app: FastAPI) -> None:
                 headers=headers,
             )
 
+    # --- Domain exceptions: SCIM envelope ---
+
+    @app.exception_handler(ScimError)
+    async def _scim_domain_handler(request: Request, exc: ScimError) -> JSONResponse:
+        log_error_response(
+            logger,
+            request,
+            exc.status_code,
+            exc.scim_type or f"http_{exc.status_code}",
+            exc.message,
+            category="scim_error_response",
+        )
+        response = _scim_response(exc.status_code, exc.message, scim_type=exc.scim_type)
+        for name, value in (exc.headers or {}).items():
+            response.headers[name] = value
+        return response
+
     # --- Framework exceptions: format based on router marker ---
 
     @app.exception_handler(RequestValidationError)
@@ -334,6 +366,16 @@ def add_exception_handlers(app: FastAPI) -> None:
                 outcome="invalid_request",
             )
             return JSONResponse(status_code=400, content=error)
+        if fmt == "scim":
+            log_error_response(
+                logger,
+                request,
+                400,
+                "invalidSyntax",
+                first_message or "Invalid request",
+                category="scim_error_response",
+            )
+            return _scim_response(400, "The request could not be understood.", scim_type="invalidSyntax")
         return await request_validation_exception_handler(request, exc)
 
     @app.exception_handler(StarletteHTTPException)
@@ -396,6 +438,20 @@ def add_exception_handlers(app: FastAPI) -> None:
                 category="openai_error_response",
             )
             return JSONResponse(status_code=exc.status_code, content=openai_error(code, detail, error_type=error_type))
+        if fmt == "scim":
+            log_error_response(
+                logger,
+                request,
+                exc.status_code,
+                f"http_{exc.status_code}",
+                detail,
+                category="scim_error_response",
+            )
+            response = _scim_response(exc.status_code, detail)
+            allow = (exc.headers or {}).get("Allow")
+            if allow is not None:
+                response.headers["Allow"] = allow
+            return response
         return await http_exception_handler(request, exc)
 
     # --- Catch-all for unhandled exceptions ---
@@ -417,4 +473,6 @@ def add_exception_handlers(app: FastAPI) -> None:
                 status_code=500,
                 content=openai_error("server_error", "Internal server error", error_type="server_error"),
             )
+        if fmt == "scim":
+            return _scim_response(500, "The request could not be completed.")
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})

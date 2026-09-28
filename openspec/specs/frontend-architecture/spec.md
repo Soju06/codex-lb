@@ -2630,6 +2630,13 @@ when the English form is the clearest operator-facing label.
 - **AND** provider confirmation and pending-account explanations render in Japanese while preserving provider names and administrator reference values
 - **AND** account rename copy explains that subsequent local sign-ins use the new username
 
+#### Scenario: Japanese automatic account management
+
+- **WHEN** a user selects `ja` and views the Organisation summary, automatic account management card, or issued-credential dialog
+- **THEN** headings, prerequisites, account-matching guidance, credential actions, errors, and one-time credential warnings SHALL render in Japanese
+- **AND** provider and credential labels and last-received values SHALL preserve their interpolation values
+- **AND** the summary SHALL distinguish automatic account management with and without restricted password sign-in
+
 ### Requirement: Japanese locale formats dashboard dates and calendar controls
 
 With Japanese selected and the default date display format active, the dashboard

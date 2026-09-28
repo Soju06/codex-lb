@@ -186,7 +186,6 @@ def test_astra_history_update_preserves_raw_enforcement_distinction():
 @pytest.mark.parametrize(
     "extra",
     [
-        {"truncation": "auto"},
         {"context_management": [{"type": "compaction", "compact_threshold": 200000}]},
         {"reasoning": {"effort": "low", "mode": "pro"}},
     ],
@@ -194,6 +193,17 @@ def test_astra_history_update_preserves_raw_enforcement_distinction():
 def test_astra_rejects_incompatible_update_controls(extra):
     with pytest.raises(ProxyInvalidRequestError):
         _apply_subscription_policy(_request(**extra), None)
+
+
+def test_astra_anchored_enforced_update_accepts_auto_truncation():
+    request = _request("low", previous_response_id="resp_inherited_high", truncation="auto")
+    _apply_subscription_policy(request, _key(enforced="low"))
+    forwarded = request.to_payload()
+    assert forwarded["previous_response_id"] == "resp_inherited_high"
+    forwarded_input = forwarded["input"]
+    assert isinstance(forwarded_input, list)
+    assert forwarded_input[0] == {"type": "configuration_update", "reasoning": {"effort": "low"}}
+    assert "truncation" not in forwarded
 
 
 def test_astra_standalone_compact_rejects_updates():
@@ -287,9 +297,12 @@ def test_astra_rejects_malformed_updates(update):
         {"include": ["message.output_text.logprobs"]},
     ],
 )
-def test_astra_rejects_unsupported_logprob_controls(extra):
-    with pytest.raises(ProxyInvalidRequestError):
-        _apply_subscription_policy(_request(**extra), None)
+def test_astra_does_not_reject_logprob_controls_without_key(extra):
+    request = _request(**extra)
+    _apply_subscription_policy(request, None)
+    forwarded = request.to_payload()
+    for field, value in extra.items():
+        assert forwarded[field] == value
 
 
 def test_other_models_keep_their_existing_control_contract():

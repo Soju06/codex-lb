@@ -11,7 +11,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
 - **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.
-- **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
+- **No upstream truncation support:** Subscription serialization strips client `truncation` before sending upstream.
 - **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`.
 
 ## Constraints
@@ -27,7 +27,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - Upstream limitations determine available modalities, tool output, and overflow handling.
 - `store=true` is rejected; responses are not persisted.
 - `include` values must be on the documented allowlist.
-- `truncation` is rejected.
+- Subscription requests do not forward `truncation`; route-specific validation otherwise remains unchanged.
 - `previous_response_id` is forwarded when `conversation` is absent, but the `conversation + previous_response_id` conflict remains rejected.
 - HTTP `/v1/responses` and HTTP `/backend-api/codex/responses` now use a server-side upstream websocket session bridge by default so repeated compatible requests can keep upstream response/session continuity without forcing clients onto the public websocket route.
 - Codex-affinity HTTP bridge sessions can optionally use a conservative first-request prewarm (`generate=false`), but that behavior stays behind an explicit switch so production defaults do not pay an extra upstream request unless operators opt in. The switch is the dashboard setting `http_responses_session_bridge_codex_prewarm_enabled` (Settings → Advanced → Session bridge), resolved from the settings-cache snapshot before a session's prewarm lock; its `CODEX_LB_*` environment variable is a deprecated alias that applies only while the dashboard value is unset.
@@ -334,9 +334,11 @@ mapping client-plane Ultra to Max only at final subscription serialization.
 
 For example, a request can select Low at the request level, then include a
 High `configuration_update` between two messages. The subscription payload
-retains both values and the update's position. If that history also requests
-automatic compaction or truncation, validation rejects the combination
-before upstream work rather than dropping the update. A source-owned model
+retains both values and the update's position. Automatic compaction still
+rejects the combination before upstream work. A client-supplied
+`truncation: "auto"` does not prevent an enforced continuation reset:
+subscription serialization removes `truncation` but forwards the reset.
+A source-owned model
 with the same name continues to use its source schema and transport fallback.
 See the [Astra history requirement](spec.md#requirement-astra-configuration-updates-preserve-compatible-history).
 

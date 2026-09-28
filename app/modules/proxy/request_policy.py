@@ -511,11 +511,6 @@ def validate_astra_request(
     if payload.reasoning is not None and payload.reasoning.effort is not None:
         _astra_wire_effort(payload.reasoning.effort, param="reasoning.effort")
     extra = payload.model_extra or {}
-    for name in ("top_logprobs", "logprobs"):
-        if extra.get(name) is not None:
-            raise ProxyInvalidRequestError(f"Astra does not support {name}.", param=name)
-    if isinstance(payload, ResponsesRequest) and "message.output_text.logprobs" in payload.include:
-        raise ProxyInvalidRequestError("Astra does not support output logprobs.", param="include")
     if not is_json_list(payload.input):
         return
     has_updates = False
@@ -546,10 +541,6 @@ def validate_astra_request(
                     "Adjacent configuration updates are not supported.", param=f"input.{index}"
                 )
             previous_update = current_update
-    if payload.truncation == "auto":
-        raise ProxyInvalidRequestError(
-            "Configuration updates cannot be combined with automatic truncation.", param="truncation"
-        )
     context_management = extra.get("context_management")
     if is_json_list(context_management) and any(
         is_json_mapping(entry) and entry.get("type") == "compaction" for entry in context_management

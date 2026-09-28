@@ -179,7 +179,17 @@ def _continuation(extra):
 @pytest.mark.parametrize(
     ("extra", "param"),
     [
-        pytest.param({"top_logprobs": 2}, "top_logprobs", id="source-control"),
+        pytest.param(
+            {
+                "input": [
+                    {"type": "configuration_update", "reasoning": {"effort": "low"}},
+                    {"role": "user", "content": "Continue"},
+                ],
+                "context_management": [{"type": "compaction"}],
+            },
+            "context_management",
+            id="source-compaction",
+        ),
         pytest.param(
             {"input": [{"type": "configuration_update", "reasoning": {"effort": "low"}, "vendor_setting": True}]},
             "input.0",
@@ -288,7 +298,17 @@ def test_websocket_source_without_subscription_owner_keeps_http_fallback(
 @pytest.mark.parametrize(
     ("extra", "param"),
     [
-        pytest.param({"top_logprobs": 2}, "top_logprobs", id="source-control"),
+        pytest.param(
+            {
+                "input": [
+                    {"type": "configuration_update", "reasoning": {"effort": "low"}},
+                    {"role": "user", "content": "Continue"},
+                ],
+                "context_management": [{"type": "compaction"}],
+            },
+            "context_management",
+            id="source-compaction",
+        ),
         pytest.param(
             {"input": [{"type": "configuration_update", "reasoning": {"effort": "low"}, "vendor_setting": True}]},
             "input.0",

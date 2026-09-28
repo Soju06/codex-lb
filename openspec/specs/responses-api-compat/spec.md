@@ -10905,8 +10905,8 @@ at subscription wire serialization. It SHALL reject non-string reasoning
 efforts and invalid adjacent updates before upstream work. It SHALL NOT
 enumerate permitted Astra effort strings locally; `disabled`, `none`, and
 other string efforts SHALL be accepted and forwarded. Histories with
-configuration updates SHALL reject automatic compaction, automatic
-truncation, and the standalone compact endpoint. Normal request-level
+configuration updates SHALL reject automatic compaction and the
+standalone compact endpoint. Normal request-level
 reasoning SHALL remain unchanged by a valid input update. Explicit
 terminal compaction_trigger items combined with configuration updates
 SHALL remain on the Responses endpoint instead of being converted to a
@@ -11022,3 +11022,30 @@ validated before upstream connection or send, using client-plane values.
 
 - **WHEN** a compact request contains a configuration_update item
 - **THEN** the proxy returns a compatible invalid-request error before upstream work
+
+### Requirement: Astra policy does not locally reject unrelated Responses controls
+
+Subscription-backed Astra requests with valid configuration updates MUST
+accept a client-supplied `truncation: "auto"` without forwarding that field
+upstream. Automatic `context_management` compaction combined with updates
+MUST remain invalid. Astra-specific configuration-update validation MUST NOT
+reject `top_logprobs`, `logprobs`, or `message.output_text.logprobs` solely
+because the model is Astra; generic Responses validation and upstream
+capability decisions remain applicable.
+
+#### Scenario: Anchored enforced effort with automatic truncation
+
+- **GIVEN** an Astra continuation anchored by `previous_response_id` under an API key enforcing low effort
+- **WHEN** the request includes `truncation: "auto"` and a user turn
+- **THEN** both Responses routes accept the request and prepend the enforced low-effort update
+- **AND** the subscription payload omits `truncation`
+
+#### Scenario: Keyless logprobs controls
+
+- **WHEN** a keyless Astra Responses request includes a valid logprobs control
+- **THEN** the Astra-specific policy does not return a local invalid-request error for that control
+
+#### Scenario: Automatic compaction remains incompatible
+
+- **WHEN** an Astra request combines a configuration update and automatic `context_management` compaction
+- **THEN** the proxy rejects it before upstream work with an invalid-request error

@@ -168,8 +168,6 @@ async def test_astra_compact_rejects_configuration_update_with_openai_error(asyn
 @pytest.mark.parametrize(
     "extra",
     [
-        {"top_logprobs": 3},
-        {"truncation": "auto"},
         {"context_management": [{"type": "compaction", "compact_threshold": 200000}]},
     ],
 )
@@ -183,6 +181,31 @@ async def test_astra_invalid_controls_return_400_before_upstream(async_client, m
     response = await async_client.post(endpoint, json={**_payload(), **extra})
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"top_logprobs": 3},
+        {"logprobs": False},
+        {"include": ["message.output_text.logprobs"]},
+    ],
+)
+async def test_astra_keyless_logprobs_reach_responses_transport(async_client, monkeypatch, endpoint, extra):
+    await _import_account(async_client, "astra-logprobs", "astra-logprobs@example.com")
+    forwarded = []
+
+    async def fake_stream(payload, *args, **kwargs):
+        forwarded.append(payload.to_payload())
+        yield _completed_event("resp_astra_logprobs")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    response = await async_client.post(endpoint, json={**_payload(), **extra})
+    assert response.status_code == 200, response.text
+    assert len(forwarded) == 1
+    for field, value in extra.items():
+        assert forwarded[0][field] == value
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
@@ -255,6 +278,7 @@ async def test_astra_anchored_continuation_resets_inherited_reasoning(async_clie
             "instructions": "",
             "previous_response_id": "resp_inherited_high",
             "reasoning": {"effort": "low"},
+            "truncation": "auto",
             "input": [{"role": "user", "content": "Continue"}],
         },
         headers={"Authorization": f"Bearer {created.json()['key']}"},
@@ -265,6 +289,7 @@ async def test_astra_anchored_continuation_resets_inherited_reasoning(async_clie
     assert forwarded[0]["reasoning"]["effort"] == "low"
     assert forwarded[0]["input"][0] == {"type": "configuration_update", "reasoning": {"effort": "low"}}
     assert len(forwarded[0]["input"]) == 2
+    assert "truncation" not in forwarded[0]
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])

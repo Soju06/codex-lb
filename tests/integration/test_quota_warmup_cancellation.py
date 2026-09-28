@@ -26,7 +26,7 @@ async def test_cancelled_warmup_settles_known_usage(
     del db_setup
     finalization_started = asyncio.Event()
     allow_finalization = asyncio.Event()
-    settlements: list[tuple[str, str, str, int | None, int | None, int | None]] = []
+    settlements: list[tuple[str, str, str, int | None, int | None, int | None, int | None]] = []
 
     class FakeApiKeys:
         async def enforce_limits_for_request(
@@ -47,6 +47,7 @@ async def test_cancelled_warmup_settles_known_usage(
             input_tokens: int,
             output_tokens: int,
             cached_input_tokens: int = 0,
+            cache_write_input_tokens: int = 0,
             service_tier: str | None = None,
             cost_microdollars: int | None = None,
         ) -> None:
@@ -61,6 +62,7 @@ async def test_cancelled_warmup_settles_known_usage(
                     input_tokens,
                     output_tokens,
                     cached_input_tokens,
+                    cache_write_input_tokens,
                 )
             )
 
@@ -72,6 +74,7 @@ async def test_cancelled_warmup_settles_known_usage(
             input_tokens: int | None = None,
             output_tokens: int | None = None,
             cached_input_tokens: int | None = None,
+            cache_write_input_tokens: int | None = None,
             service_tier: str | None = None,
         ) -> None:
             del service_tier
@@ -83,6 +86,7 @@ async def test_cancelled_warmup_settles_known_usage(
                     input_tokens,
                     output_tokens,
                     cached_input_tokens,
+                    cache_write_input_tokens,
                 )
             )
 
@@ -139,6 +143,7 @@ async def test_cancelled_warmup_settles_known_usage(
                 input_tokens=7,
                 output_tokens=3,
                 cached_input_tokens=2,
+                cache_write_input_tokens=5,
                 reasoning_tokens=1,
             )
 
@@ -169,6 +174,7 @@ async def test_cancelled_warmup_settles_known_usage(
                 7,
                 3,
                 2,
+                5,
             )
         ]
         refreshed = await repo.get_decision_fresh(decision.id)

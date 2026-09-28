@@ -862,6 +862,8 @@ The system MUST distinguish request routability from refresh-token eligibility. 
 
 This status baseline is canonical for proxy selection, owner-bound affinity, warmup, automations, API-key account pools and scopes, probes, access-token-authenticated usage and reset-credit operations, and dashboard projections of routable capacity. Capability-specific references to active, eligible, or hard-unavailable accounts MUST apply this baseline unless a stricter credential-expiry, security, ownership, model, quota, cooldown, or operator-policy gate is explicitly required.
 
+Authorized dashboard read-only reset-credit observation of a paused account SHALL be an explicit exception to this routing baseline. It MUST preserve credential refresh and account-bound egress controls and MUST NOT enable request routing or credit redemption. Background reset-credit polling MUST continue to exclude paused accounts.
+
 Selecting a routable `reauth_required` account MUST use its stored access token without proactive refresh-token exchange. Its sticky, bridge, file, response, and realtime ownership MUST remain bound while that token is unexpired. Once a known access-token expiry is reached, new proxy selection and live bridge reuse MUST stop before upstream I/O. Movable soft affinity MAY fail over, while hard account-owned continuity MUST remain fail-closed rather than crossing accounts.
 
 A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block before the stored access token's known expiry.

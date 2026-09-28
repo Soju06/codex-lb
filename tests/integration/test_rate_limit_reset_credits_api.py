@@ -69,6 +69,38 @@ def _snapshot(credits: list[ResetCreditItem], available_count: int | None = None
 
 
 @pytest.mark.asyncio
+async def test_paused_account_cached_credits_remain_visible_without_upstream(async_client, monkeypatch) -> None:
+    account_id = await _import_test_account(
+        async_client,
+        email="paused-observation@example.com",
+        account_id="acc_paused_observation",
+    )
+    store = get_rate_limit_reset_credits_store()
+    await store.set(account_id, _snapshot([_credit("last-observed")], available_count=2))
+    assert (await async_client.post(f"/api/accounts/{account_id}/pause")).status_code == 200
+
+    async def should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
+        raise AssertionError("cached observation must not fetch or redeem upstream")
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", should_not_fetch)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", should_not_fetch)
+    response = await async_client.get(f"/api/accounts/{account_id}/rate-limit-reset-credits")
+    assert response.status_code == 200
+    assert response.json()["availableCount"] == 2
+    assert store.get(account_id) is not None
+
+    response = await async_client.get("/api/accounts")
+    account = next(row for row in response.json()["accounts"] if row["accountId"] == account_id)
+    assert account["status"] == "paused"
+    assert account["availableResetCredits"] == 2
+    assert account["resetCreditNearestExpiresAt"] is not None
+
+    for endpoint in ("usage-reset-credits", "rate-limit-reset-credits"):
+        response = await async_client.post(f"/api/accounts/{account_id}/{endpoint}/consume")
+        assert response.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_consume_paused_account_returns_409(async_client, monkeypatch) -> None:
     async def _should_not_fetch(*args: Any, **kwargs: Any) -> ResetCreditsResponse:
         raise AssertionError("paused account should not invoke upstream fetch")

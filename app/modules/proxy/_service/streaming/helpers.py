@@ -1129,12 +1129,15 @@ def _is_model_scoped_rejection(
 
 
 def _request_usage_refresh(proxy: Any, account_id: str) -> None:
-    """Schedule a tracked, coalesced usage refresh after a streamed ``usage_limit_reached``.
+    """Schedule a tracked, coalesced usage refresh after a streamed usage-limit rejection.
 
-    ``mark_rate_limit`` persists status only, while the pool-exhaustion
-    predicate also needs a >= 100 % usage row that would otherwise wait for
-    the next scheduler tick. The refresh runs on its own background session
-    and never touches this request's ``Account``.
+    The pool-exhaustion predicate reads a >= 100 % usage row that would
+    otherwise wait for the next scheduler tick, so the refresh brings the
+    persisted rows into line with what upstream just said. It is debounced and
+    runs on its own background session, so it can only ever help *later*
+    requests: nothing in the rejecting request may wait on it to learn that the
+    pool is spent. A message-derived usage limit is the same rejection as a
+    coded one and gets the same refresh.
     """
     schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
     if schedule is None:

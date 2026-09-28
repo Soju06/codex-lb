@@ -15,6 +15,12 @@ Fresh databases now create every one of these columns as ``BIGINT`` (see the
 schema-type policy and the migration that first creates each table); this
 migration widens databases installed before that. SQLite is skipped: its
 ``INTEGER`` is already 64-bit and rebuilding the tables would gain nothing.
+
+PostgreSQL is skipped as well: ``ALTER COLUMN ... TYPE BIGINT`` rewrites the
+table under ``ACCESS EXCLUSIVE`` and this migration runs at startup, so the
+PostgreSQL widening ships as its own change with an online plan. This
+migration therefore only widens MySQL/MariaDB, where the old ``INT`` columns
+are the ones that rejected real epoch values.
 """
 
 from __future__ import annotations
@@ -49,7 +55,10 @@ def _columns(connection: Connection, table_name: str) -> set[str]:
 
 def _alter_epoch_columns(*, to_big_integer: bool) -> None:
     bind = op.get_bind()
-    if bind.dialect.name == "sqlite":
+    # MySQL/MariaDB only -- see the module docstring. PostgreSQL's widening
+    # ships as its own change because this ALTER rewrites the table under
+    # ``ACCESS EXCLUSIVE`` and the migration runs at startup.
+    if bind.dialect.name not in ("mysql", "mariadb"):
         return
     for table_name, column_name, nullable in _EPOCH_COLUMNS:
         if column_name not in _columns(bind, table_name):

@@ -132,6 +132,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _estimated_lease_tokens_from_request_usage_budget,
     _fingerprint_input_items,
     _inline_top_level_input_image_urls,
+    _json_value_contains_input_image_part,
     _normalize_service_tier_value,
     _normalize_session_id,
     _prepare_websocket_request_state_for_account_switch,
@@ -3762,6 +3763,15 @@ class _HTTPBridgeRequestSubmitMixin:
         )
 
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
+            if (
+                request_state.failure_detail_override
+                == _http_bridge_helpers._HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+            ):
+                # Silence is not proof of image rejection; do not resend either
+                # the wire payload or images restored by a full-history replay.
+                for text in (request_state.request_text, request_state.fresh_upstream_request_text):
+                    if text and _json_value_contains_input_image_part(json.loads(text).get("input")):
+                        return False
             transport_only_unanchored_replay = bool(
                 request_state.precreated_replay_reason is None
                 and (

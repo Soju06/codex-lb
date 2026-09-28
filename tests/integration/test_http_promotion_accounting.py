@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -117,20 +118,20 @@ async def test_promoted_oversized_payload_bypass_is_counted_and_pins_http(
 
 
 @pytest.mark.asyncio
-async def test_promoted_image_bypass_is_counted_without_pinning_http(async_client, promotion_transport, monkeypatch):
-    # Regression for #2363: the image bypass frees bridge pending slots, and it
-    # must keep doing that, but an inline ``data:`` image below the frame budget
-    # must no longer drag the request onto the upstream HTTP transport.
+async def test_promoted_inline_image_uses_bridge_without_image_bypass(async_client, promotion_transport, monkeypatch):
+    # Inline images no longer bypass the reusable bridge. The transport-only
+    # fix in #2363 left that bypass in place even for retained image history.
     upstreams, raw_calls, _ = promotion_transport
     routing_counter = Mock()
     monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
     history = _image_history("data:image/png;base64,aGVsbG8=")
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
-    assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert len(upstreams) == 1
+    assert not raw_calls
+    assert json.loads(upstreams[0].sent_text[0])["input"][-1]["content"] == history[-1]["content"]
     routing_counter.labels.assert_any_call(stage="admission", reason="smart_history")
-    routing_counter.labels.assert_any_call(stage="bypass", reason="image")
+    assert all(call.kwargs["stage"] != "bypass" for call in routing_counter.labels.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -142,8 +143,9 @@ async def test_historical_image_does_not_pin_later_turns_to_http(async_client, p
     history = _image_history("data:image/png;base64,aGVsbG8=", position=0)
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
-    assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert len(upstreams) == 1
+    assert not raw_calls
+    assert json.loads(upstreams[0].sent_text[0])["input"][0]["content"] == history[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -246,8 +248,32 @@ async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client,
     }
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
+    assert len(upstreams) == 1
+    assert not raw_calls
+    assert json.loads(upstreams[0].sent_text[0])["input"][-1]["output"] == history[-1]["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["disabled", "explicit_http", "always_http", "recent_failure", "image_generation"])
+async def test_inline_image_preserves_existing_bridge_exclusions(async_client, promotion_transport, monkeypatch, gate):
+    upstreams, raw_calls, dashboard = promotion_transport
+    body = {"model": "gpt-5.4", "input": _image_history("data:image/png;base64,aGVsbG8=")}
+    if gate == "disabled":
+        monkeypatch.setattr(proxy_module, "get_settings", lambda: _make_app_settings(enabled=False))
+    elif gate == "explicit_http":
+        dashboard.upstream_stream_transport = "http"
+    elif gate == "always_http":
+        dashboard.http_downstream_transport_policy = "always_http"
+    elif gate == "recent_failure":
+        monkeypatch.setattr(streaming, "upstream_websocket_transport_recently_failed", lambda: True)
+    else:
+        body["tools"] = [{"type": "image_generation"}]
+    response = await async_client.post("/v1/responses", json=body)
+    assert response.status_code == 200, response.text
     assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert len(raw_calls) == 1
+    if gate != "disabled":
+        assert raw_calls[0]["upstream_transport"] == "http"
 
 
 @pytest.mark.asyncio

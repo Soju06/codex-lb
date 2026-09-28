@@ -1021,12 +1021,8 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        # The bridge bypass below is about bridge pending slots; it must not also
-        # decide the upstream transport. An inline ``data:`` image rides the
-        # upstream websocket unchanged, so only the two websocket-specific
-        # hazards keep the pin (#2363). ``image_request`` gates the predicate
-        # because the predicate's own first check is that same walk of the whole
-        # input, and this runs on every request on the hot path.
+        # Inline images can reuse the bridge; external URLs and oversized
+        # payloads retain the existing HTTP fallback.
         force_upstream_stream_transport = (
             "http"
             if image_request
@@ -1035,7 +1031,7 @@ class _HTTPBridgeStreamingMixin:
             )
             else None
         )
-        if runtime_config.enabled and (image_request or image_generation_request):
+        if runtime_config.enabled and (force_upstream_stream_transport == "http" or image_generation_request):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "

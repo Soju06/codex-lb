@@ -215,6 +215,10 @@ def _header_value_case_insensitive(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_header_value_case_insensitive")(*args, **kwargs)
 
 
+def _json_value_contains_input_image_part(value: JsonValue) -> bool:
+    return cast(Callable[[JsonValue], bool], _service_global("_json_value_contains_input_image_part"))(value)
+
+
 def _responses_request_contains_input_image(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_responses_request_contains_input_image")(*args, **kwargs)
 

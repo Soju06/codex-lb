@@ -3104,47 +3104,57 @@ For account-routed file operations, the client and service MUST preserve typed t
 - **WHEN** its first or a later poll fails before dispatch
 - **THEN** the proxy MUST fail closed without invoking a poll through another account
 
-### Requirement: Responses input images bypass the HTTP bridge
+### Requirement: Responses input image bridge eligibility
 
-The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
-`/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
-request contains any `input_image` part in top-level input items, nested
-message content, or tool output content, and send the request over the raw
-(non-bridge) Responses stream path. This bypass MUST happen after rejecting
-unsupported uploaded-image references and MUST be limited to the current
-request; subsequent text-only requests MAY continue using the HTTP responses
-bridge.
+For `/v1/responses` and `/backend-api/codex/responses`, including equivalent trailing-slash routes and collected or streamed responses, an otherwise bridge-eligible request containing inline `data:` input images within the WebSocket payload budget MUST use the ordinary reusable HTTP responses bridge. Images in retained history, top-level input items, nested message content or tool output content MUST NOT alone disable bridge eligibility or change affinity. The service MUST preserve their image content on the upstream wire. Existing route eligibility MUST remain unchanged: backend `/backend-api/codex/responses` requests with `stream: false` retain their non-bridge collection path, even when image-free.
 
-The raw (non-bridge) path is the source of truth for image validation and
-upstream image error semantics. The bridge MUST NOT hold image requests waiting
-for `response.created` when upstream rejects an invalid inline image payload.
+Unsupported uploaded-image references MUST still be rejected before bridge dispatch. External HTTP(S) image URLs at any input nesting depth and over-budget image requests MUST retain their non-bridge HTTP routing. Image-generation tools, explicit HTTP controls, disabled bridge, outage fallback and gateway-safe-mode constraints MUST retain their existing behavior. These request-scoped exclusions MUST NOT disable later eligible bridge requests. Compact requests MUST retain their existing transport and validation behavior.
 
-This bridge bypass MUST NOT by itself pin the upstream stream transport. The
-upstream transport for a bypassed image request MUST be resolved by the ordinary
-upstream-transport precedence.
+An upstream terminal image error received before `response.created` MUST settle the owning request without waiting for an acknowledgement timeout, preserve the client-facing error contract, and release its pending slot, response-create gate and API-key reservation. Cancellation MUST release local request resources and isolate ambiguous upstream work using the ordinary bridge retirement rules. A subsequent eligible request MUST be able to complete without consuming stale image-turn events or inheriting an unsettled reservation.
 
-#### Scenario: Nested input_image bypasses bridge
+An image request that receives no response-lifecycle event MUST fail at the existing response-create acknowledgement deadline without pre-created replay of its image payload. The bridge MUST retire the ambiguous session and settle the slot, gate and API-key reservation. Silence MUST NOT be reported as a validated invalid-image error.
 
-- **GIVEN** the HTTP responses bridge is enabled
-- **WHEN** a Responses request contains a nested content part with `type = "input_image"`
-- **THEN** the request is sent through the raw (non-bridge) stream path
-- **AND** the HTTP responses bridge is not used for that request
+#### Scenario: Inline image retained across later text turns
 
-#### Scenario: Image bypass does not disable future text bridge use
+- **GIVEN** a text request has warmed an eligible bridge session
+- **WHEN** the same affinity sends an inline-image turn and then a text turn retaining that image in history
+- **THEN** all three requests use the same physical upstream WebSocket session
+- **AND** both image-bearing upstream payloads preserve the image bytes
 
-- **GIVEN** the HTTP responses bridge is enabled
-- **WHEN** an image-bearing request bypasses the bridge
-- **THEN** the bypass applies only to that request
-- **AND** a later text-only request can still use the HTTP responses bridge
+#### Scenario: Nested inline image remains eligible
 
-#### Scenario: Image bypass does not pin the upstream transport
+- **GIVEN** an otherwise bridge-eligible below-budget request
+- **WHEN** an inline `data:` image is nested inside tool output content
+- **THEN** the ordinary bridge carries that image unchanged
 
-- **GIVEN** the HTTP responses bridge is enabled
-- **AND** `upstream_stream_transport` is `"auto"`
-- **WHEN** a Responses request carrying an inline `data:` image below the
-  WebSocket frame budget bypasses the bridge
-- **THEN** the request MUST NOT be forced onto upstream HTTP
-- **AND** the configured transport policy MUST decide its upstream transport
+#### Scenario: Unsafe image shapes remain excluded
+
+- **WHEN** an image request contains an external HTTP(S) URL anywhere in input or exceeds the WebSocket payload budget
+- **THEN** the service bypasses the bridge and selects upstream HTTP
+- **AND** an image-generation request still bypasses the bridge
+
+#### Scenario: Invalid image rejected before acknowledgement
+
+- **GIVEN** an image turn is pending on a reusable bridge session
+- **WHEN** upstream sends a terminal invalid-image error before `response.created`
+- **THEN** the request promptly returns the existing client-facing error
+- **AND** its slot, gate and API-key reservation are settled
+- **AND** a later eligible text request can complete
+
+#### Scenario: Silent image upstream is not replayed
+
+- **GIVEN** an inline-image request has been sent on a reusable bridge session
+- **WHEN** no response-lifecycle event arrives before the existing acknowledgement deadline
+- **THEN** the client receives an upstream timeout without resending the image
+- **AND** the session is retired and its slot, gate and reservation are settled
+- **AND** a later eligible text request can complete on a fresh session
+
+#### Scenario: Cancellation isolates ambiguous image work
+
+- **GIVEN** an image request has been sent upstream but has not completed
+- **WHEN** the downstream request is cancelled
+- **THEN** its slot, gate and reservation are released and the ambiguous session is retired
+- **AND** a later eligible request completes on a fresh session without receiving the cancelled turn's events
 
 ### Requirement: Security-work authorization errors can route to authorized accounts
 

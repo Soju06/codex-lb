@@ -63,6 +63,16 @@ nonblank call IDs. It does not restore removed optional bridge recovery modes
 or introduce anchored-turn relocation. Retiring a stale WebSocket anchor also
 retires its pending async identities through the existing shared helper.
 
+The manifest is upstream-derived: a client cannot relabel a recorded
+synchronous `call_s` as `async: true` to skip settlement during owner loss.
+Both durable proofs reject that contradiction before releasing the anchor.
+An actual async call absent from the synchronous manifest is self-contained
+and may remain unresolved past a completed assistant message; its delayed
+typed output can supply fresh follow-up input if that prior output is retained.
+Stateless fresh replay has no previous owner, manifest, or omitted upstream
+state to authenticate, so it accepts a valid async marker under the ordinary
+strict account-neutral item checks rather than a model-name allowlist.
+
 Settling a stored async pair removes it from the outstanding-call map, but
 must not erase the call and output from prefix validation. Both durable proofs
 validate the collected async prefix items under the existing self-contained

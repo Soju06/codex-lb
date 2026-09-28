@@ -168,3 +168,118 @@ async def test_http_owner_loss_validates_async_marker(
         assert connected_accounts == [owner.chatgpt_account_id]
         assert recovered_upstream.sent == []
     assert await recovering_service.drain_persistence_tasks(timeout_seconds=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_input", ["user", "delayed_async_output"])
+async def test_http_owner_loss_rejects_relabelled_sync_call(
+    async_client, app_instance, monkeypatch, fresh_input: str
+) -> None:
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id="instance-a")
+    owner_id = await _import_account(async_client, "acc_sync_marker_owner", "sync-marker-owner@example.com")
+    owner = await _get_account(owner_id)
+    sync = {"type": "function_call", "call_id": "call_s", "name": "work", "arguments": "{}"}
+    async_call = {"type": "function_call", "call_id": "call_a", "name": "later", "arguments": "{}", "async": True}
+    answer = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "finished"}],
+    }
+    stored = [{"role": "user", "content": "first"}]
+    first_output = [async_call, sync, answer] if fresh_input == "delayed_async_output" else [sync, answer]
+    first_upstream = ScriptedUpstream(
+        [
+            [
+                response("response.created", "r1"),
+                *(
+                    [
+                        {"type": "response.output_item.added", "response_id": "r1", "item": async_call},
+                        {"type": "response.output_item.done", "response_id": "r1", "item": async_call},
+                    ]
+                    if fresh_input == "delayed_async_output"
+                    else []
+                ),
+                {"type": "response.output_item.added", "response_id": "r1", "item": sync},
+                {"type": "response.output_item.done", "response_id": "r1", "item": sync},
+                {"type": "response.output_item.added", "response_id": "r1", "item": answer},
+                {"type": "response.output_item.done", "response_id": "r1", "item": answer},
+                response("response.completed", "r1", output=first_output),
+            ]
+        ]
+    )
+    second_upstream = ScriptedUpstream(
+        [[response("response.created", "recovered"), response("response.completed", "recovered")]]
+    )
+    connected: list[str] = []
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    async def connect(headers, access_token, account_id_header, **kwargs):
+        connected.append(account_id_header)
+        return first_upstream if len(connected) == 1 else second_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    service = get_proxy_service_for_app(app_instance)
+    registered = asyncio.Event()
+    register = service._register_http_bridge_previous_response_id
+
+    async def register_and_signal(session, response_id, **kwargs):
+        result = await register(session, response_id, **kwargs)
+        if response_id == "r1":
+            registered.set()
+        return result
+
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_and_signal)
+    base = {"model": "gpt-6-astra", "instructions": ""}
+    headers = {"session_id": "relabelled-sync"}
+    first = await async_client.post("/v1/responses", headers=headers, json={**base, "input": stored})
+    assert first.status_code == 200, first.text
+    await asyncio.wait_for(registered.wait(), timeout=5)
+    lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="relabelled-sync",
+        api_key_id=None,
+        turn_state=None,
+        session_header="relabelled-sync",
+        previous_response_id=None,
+    )
+    assert lookup is not None
+    assert lookup.latest_pending_tool_calls == {"call_s": "function_call"}
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    assert await service.close_all_http_bridge_sessions()
+    alternate_id = await _import_account(async_client, "acc_sync_marker_alternate", "sync-marker-alternate@example.com")
+    alternate = await _get_account(alternate_id)
+    paused = await async_client.post(f"/api/accounts/{owner_id}/pause")
+    assert paused.status_code == 200, paused.text
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id="instance-b")
+    del app_instance.state.proxy_service
+    recovering_service = get_proxy_service_for_app(app_instance)
+    followup = (
+        {"type": "function_call_output", "call_id": "call_a", "output": "ready"}
+        if fresh_input == "delayed_async_output"
+        else {"role": "user", "content": "continue"}
+    )
+    replay = [
+        *stored,
+        *([async_call] if fresh_input == "delayed_async_output" else []),
+        {**sync, "async": True},
+        answer,
+        followup,
+    ]
+    result = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={**base, "previous_response_id": "r1", "input": replay},
+        ),
+        timeout=5,
+    )
+    assert result.status_code == 502, result.text
+    assert result.json()["error"]["code"] == "previous_response_owner_unavailable"
+    assert connected == [owner.chatgpt_account_id]
+    assert second_upstream.sent == []
+    assert alternate.chatgpt_account_id not in connected
+    assert await recovering_service.drain_persistence_tasks(timeout_seconds=5)

@@ -155,6 +155,16 @@ async def run_socket(monkeypatch, socket: ScriptedSocket, upstream: ScriptedUpst
 
 @pytest.mark.asyncio
 async def test_async_call_survives_intervening_turn_and_delayed_output(monkeypatch):
+    from app.modules.proxy._service.websocket import mixin as websocket_mixin
+
+    pending_at_completion: list[dict[str, str]] = []
+    record_completion = websocket_mixin._record_websocket_continuity_completion
+
+    def record_and_snapshot(continuity_state, *, request_state, response_id):
+        record_completion(continuity_state, request_state=request_state, response_id=response_id)
+        pending_at_completion.append(dict(continuity_state.pending_async_tool_calls))
+
+    monkeypatch.setattr(websocket_mixin, "_record_websocket_continuity_completion", record_and_snapshot)
     call = {"type": "function_call", "name": "slow", "call_id": "a", "arguments": "{}", "async": True}
     sync = {"type": "custom_tool_call", "name": "sync", "call_id": "b", "input": "x"}
     output = {"type": "function_call_output", "call_id": "a", "output": "later result"}
@@ -182,6 +192,7 @@ async def test_async_call_survives_intervening_turn_and_delayed_output(monkeypat
     synthetic = [item for item in second if item.get("type") in {"function_call_output", "custom_tool_call_output"}]
     assert [item["call_id"] for item in synthetic] == ["b"]
     assert upstream.sent[2]["input"] == [output]
+    assert pending_at_completion == [{"a": "function_call"}, {"a": "function_call"}, {}]
 
 
 def test_durable_manifest_keeps_synchronous_calls_when_async_is_pending() -> None:

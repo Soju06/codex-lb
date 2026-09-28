@@ -15741,6 +15741,22 @@ def test_verified_durable_full_resend_accepts_response_bound_pending_tool_calls(
         )
         is None
     )
+    relabelled = payload.model_copy(
+        update={
+            "input": [
+                *stored_input_items,
+                {**cast(dict[str, proxy_service.JsonValue], full_input[1]), "async": True},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done"}],
+                },
+                {"role": "user", "content": "continue"},
+            ]
+        }
+    )
+    assert http_bridge_streaming_module._verify_durable_full_resend(relabelled, durable_lookup) is None
 
 
 @pytest.mark.asyncio

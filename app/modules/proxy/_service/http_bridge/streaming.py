@@ -462,7 +462,9 @@ class _VerifiedDurableFullResend:
             preserve_developer_message_ids=True,
         )
         pending_tool_calls = durable_lookup.latest_pending_tool_calls
-        if replay_projection is None:
+        if replay_projection is None or not _async_markers_match_pending_manifest(
+            replay_projection.input_items, pending_tool_calls
+        ):
             return None
         safe_fresh_context = responses_input_suffix_retains_prior_output(
             replay_projection.input_items,
@@ -495,6 +497,22 @@ def _pending_tool_calls_identity(
     pending_tool_calls: Mapping[str, str] | None,
 ) -> tuple[tuple[str, str], ...] | None:
     return None if pending_tool_calls is None else tuple(sorted(pending_tool_calls.items()))
+
+
+def _async_markers_match_pending_manifest(
+    input_items: list[JsonValue],
+    pending_tool_calls: Mapping[str, str] | None,
+) -> bool:
+    if pending_tool_calls is None:
+        return True
+    return not any(
+        isinstance(item, dict)
+        and item.get("type") in ("function_call", "custom_tool_call")
+        and item.get("async") is True
+        and isinstance(call_id := item.get("call_id"), str)
+        and call_id in pending_tool_calls
+        for item in input_items
+    )
 
 
 def _verify_durable_full_resend(
@@ -1607,6 +1625,10 @@ class _HTTPBridgeStreamingMixin:
             replay_projection: AccountNeutralReplayProjection,
             lookup: DurableBridgeLookup,
         ) -> bool:
+            if not _async_markers_match_pending_manifest(
+                replay_projection.input_items, lookup.latest_pending_tool_calls
+            ):
+                return False
             return responses_input_suffix_retains_prior_output(
                 replay_projection.input_items,
                 stored_count=replay_projection.stored_prefix_count,

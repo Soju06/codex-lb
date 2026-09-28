@@ -1514,6 +1514,17 @@
       "profile": "https://github.com/uniskela",
       "contributions": [
         "doc"      ]
+    },
+    {
+      "login": "vitalNohj",
+      "name": "Nohj",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15671154?v=4",
+      "profile": "https://github.com/vitalNohj",
+      "contributions": [
+        "code",
+        "bug",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

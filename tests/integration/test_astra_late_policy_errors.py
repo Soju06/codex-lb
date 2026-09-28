@@ -125,7 +125,8 @@ async def test_late_astra_anchor_policy_error_is_terminal_and_releases_reservati
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
     failures = [event for event in events if event.get("type") == "response.failed"]
-    if enforced:
+    rejects_compaction = enforced and error_param == "context_management"
+    if rejects_compaction:
         assert len(failures) == 1, response.text
         error = failures[0]["response"]["error"]
         assert error["code"] == "invalid_request_error"
@@ -138,9 +139,17 @@ async def test_late_astra_anchor_policy_error_is_terminal_and_releases_reservati
         assert len(upstream.sent_text) == 2
         sent = json.loads(upstream.sent_text[1])
         assert sent["previous_response_id"] == first.json()["id"]
-        assert sent["input"] == [{"role": "user", "content": "second question"}]
+        assert "truncation" not in sent
+        assert sent["input"] == (
+            [
+                {"type": "configuration_update", "reasoning": {"effort": "low"}},
+                {"role": "user", "content": "second question"},
+            ]
+            if enforced
+            else [{"role": "user", "content": "second question"}]
+        )
     connect.assert_awaited_once()
     await service.drain_persistence_tasks(timeout_seconds=5)
     async with SessionLocal() as db:
         statuses = list((await db.execute(select(ApiKeyUsageReservation.status))).scalars())
-    assert sorted(statuses) == (["finalized", "released"] if enforced else ["finalized", "finalized"])
+    assert sorted(statuses) == (["finalized", "released"] if rejects_compaction else ["finalized", "finalized"])

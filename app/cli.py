@@ -123,6 +123,22 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--log-level",
+        default="info",
+        choices=("critical", "error", "warning", "info", "debug"),
+        help="Log level for application and server loggers (default: info).",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help=(
+            "Also write all log output to this file, rotated at 50 MiB with 10 backups and "
+            "redacted like stderr. Put it on durable storage (for example the data volume); "
+            "the directory is created if missing and startup fails if it cannot be written."
+        ),
+    )
+    parser.add_argument(
         "--ws-max-size",
         default=os.getenv("UVICORN_WS_MAX_SIZE", str(MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)),
         help=(
@@ -167,7 +183,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         timeout_keep_alive=timeout_keep_alive,
         ws_max_size=ws_max_size,
         proxy_headers=False,
-        log_config=_build_log_config(),
+        log_level=_uvicorn_log_level(args.log_level),
+        log_config=_build_log_config(args.log_level, args.log_file),
+        log_file=args.log_file,
+        app_log_level=args.log_level,
     )
 
 
@@ -203,7 +222,30 @@ def _load_shutdown_drain_timeout_seconds() -> int:
     return get_settings().shutdown_drain_timeout_seconds
 
 
-def _run_server(app: str, **kwargs: Any) -> None:
+def _uvicorn_log_level(level: str) -> str:
+    from app.core.runtime_logging import uvicorn_log_level
+
+    return uvicorn_log_level(level)
+
+
+def _announce_log_configuration(level: str | None, log_file: Path | None) -> None:
+    from app.core.runtime_logging import LOG_FILE_BACKUP_COUNT, LOG_FILE_MAX_BYTES
+
+    # Named explicitly: under ``python -m app.cli`` this module's __name__ is
+    # "__main__", which would sit outside the app.* logger tree.
+    # At INFO, or at the configured level when that is stricter, so the record
+    # survives --log-level warning/error/critical.
+    record_level = max(logging.INFO, logging.getLevelNamesMapping()[(level or "info").upper()])
+    logging.getLogger("app.cli").log(
+        record_level,
+        "Logging configured level=%s file=%s rotation=%s",
+        level or "info",
+        log_file if log_file is not None else "none",
+        f"{LOG_FILE_MAX_BYTES // (1024 * 1024)}MiBx{LOG_FILE_BACKUP_COUNT}" if log_file is not None else "none",
+    )
+
+
+def _run_server(app: str, *, log_file: Path | None = None, app_log_level: str | None = None, **kwargs: Any) -> None:
     # Route warnings.warn() output (for example aiohttp ResourceWarning reprs
     # that embed connection keys) through the redacting log handlers instead
     # of raw stderr.
@@ -224,6 +266,10 @@ def _run_server(app: str, **kwargs: Any) -> None:
         timeout_graceful_shutdown=drain_timeout_seconds,
         **kwargs,
     )
+    # uvicorn applied the log config in Config(); state it so the log itself
+    # records which level and file are in force.
+    # Announce the configured (app.*) level, not uvicorn's clamped one.
+    _announce_log_configuration(app_log_level or kwargs.get("log_level"), log_file)
     try:
         config.load_app()
         server = _load_graceful_drain_server()(
@@ -239,10 +285,10 @@ def _run_server(app: str, **kwargs: Any) -> None:
         raise SystemExit(STARTUP_FAILURE)
 
 
-def _build_log_config() -> "LogConfig":
+def _build_log_config(level: str, log_file: Path | None) -> "LogConfig":
     from app.core.runtime_logging import build_log_config
 
-    return build_log_config()
+    return build_log_config(level, log_file)
 
 
 def _parse_server_port(raw_port: str) -> int:

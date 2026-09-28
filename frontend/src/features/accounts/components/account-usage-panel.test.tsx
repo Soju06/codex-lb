@@ -214,4 +214,30 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("7-day trend")).toBeInTheDocument();
     expect(screen.getByText("Weekly plan")).toBeInTheDocument();
   });
+  it("omits the 5h legend for a monthly-only trend", () => {
+    const account = createAccountSummary({
+      windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43200,
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 85 },
+    });
+    render(<AccountUsagePanel account={account} trends={createAccountTrends(account.accountId, {
+      primary: [], secondary: [{ t: "2026-01-01T00:00:00Z", v: 85 }], secondaryScheduled: [],
+    })} />);
+    expect(screen.queryByText("5h")).not.toBeInTheDocument();
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+  });
+
+  it("resets smoothed quota values when switching from dual-window to monthly-only accounts", () => {
+    const { rerender } = render(<AccountUsagePanel account={createAccountSummary()} />);
+    expect(screen.getByText("5h remaining")).toBeInTheDocument();
+    rerender(<AccountUsagePanel account={createAccountSummary({
+      accountId: "monthly-account", windowMinutesPrimary: null, windowMinutesSecondary: null,
+      windowMinutesMonthly: 43200,
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 85 },
+    })} />);
+    expect(screen.queryByText("5h remaining")).not.toBeInTheDocument();
+    expect(screen.queryByText("Weekly remaining")).not.toBeInTheDocument();
+    expect(screen.getByText("Monthly remaining")).toBeInTheDocument();
+    expect(screen.getByText("85%")).toBeInTheDocument();
+  });
+
 });

@@ -6815,13 +6815,18 @@ The proxy MUST bind a Responses request body that is not a canonical
 account-neutral fresh replay to the account that first receives that exact
 body. Every later selection for that request MUST treat the dispatch owner as a
 strict required account across HTTP streaming, HTTP bridge, and direct
-WebSocket transports.
+WebSocket transports, except when the first dispatch returns a classified
+pre-visible rate-limit or quota rejection while owner registration is pending
+and encrypted content is the body's only account-scoped retained state.
 
 The proxy MUST NOT exclude the dispatch owner and send the retained body to a
 different account during stale-anchor recovery, retryable account failure,
 Trusted Access migration or degradation, bridge reconnect, or WebSocket account
 switching. If the required owner is unavailable, the proxy MUST fail closed
-without dispatching the retained body to another account.
+without dispatching the retained body to another account. This prohibition
+does not apply when encrypted content is the body's only account-scoped
+retained state and a classified pre-visible rate-limit or quota rejection
+prevents the pending dispatch owner from being established.
 
 The proxy MAY perform one forced authentication refresh and replay a retained
 account-bound body on the same dispatch owner. It MUST NOT use that refresh to
@@ -6839,14 +6844,26 @@ replaces that identity before account selection. Installing a verified fresh
 body and clearing its dispatch-owner binding MUST occur as one state
 transition.
 
-#### Scenario: Encrypted reasoning remains on its first dispatch account
+#### Scenario: Accepted encrypted reasoning remains on its dispatch owner
 
-- **GIVEN** account A first receives a Responses request containing encrypted
-  reasoning or another account-scoped retained item
+- **GIVEN** account A has accepted a Responses request containing encrypted
+  reasoning or another account-scoped retained item and become its dispatch
+  owner
 - **WHEN** a pre-visible retry excludes account A or requests a differently
   authorized account
 - **THEN** the proxy does not dispatch the retained body to account B
 - **AND** the retry fails closed when account A is unavailable
+
+#### Scenario: Rejected encrypted content may fail over before ownership
+
+- **GIVEN** account A first receives a Responses request containing encrypted
+  reasoning or compaction
+- **AND** ciphertext is the body's only account-scoped retained state
+- **WHEN** account A returns a classified rate-limit or quota rejection before
+  any downstream-visible response event while owner registration is pending
+- **THEN** the proxy does not establish account A as the dispatch owner
+- **AND** the proxy MUST attempt the exact unchanged ciphertext on an eligible
+  account B before returning account A's rejection
 
 #### Scenario: Verified account-neutral fresh replay may change accounts
 
@@ -6899,6 +6916,80 @@ transition.
 - **GIVEN** an API-key reservation requires settlement during the failed retry
 - **WHEN** account health is updated
 - **THEN** required settlement still completes before deferred health writes
+
+### Requirement: Pre-visible rate-limit or quota rejection does not establish a transient dispatch owner
+
+Notwithstanding the account-bound retry requirement, a pre-visible rejection
+classified as rate-limit or quota MUST NOT establish a new dispatch-owner
+binding while owner registration is pending only when encrypted content is the
+body's sole account-scoped retained state. This exception MUST NOT apply to a
+body containing a file, container, vector-store, nonneutral URL, unknown
+retained item, or any other non-ciphertext account-scoped reference, even when
+that reference has no live independent owner. It also MUST NOT clear or move an
+independently established previous-response, turn-state, file, or existing
+dispatch owner.
+
+#### Scenario: Classified HTTP 429 does not establish a transient owner
+
+- **GIVEN** a streaming Responses body is not a canonical account-neutral fresh
+  replay
+- **AND** encrypted content is the body's only account-scoped retained state
+- **AND** the body has no independently established required account owner
+- **AND** account B is eligible and the request retry budget remains
+- **WHEN** account A rejects the request with an HTTP 429 classified as
+  rate-limit or quota before any response event
+- **THEN** the proxy does not record account A as the dispatch owner
+- **AND** the proxy MUST attempt dispatch on account B before returning account
+  A's 429
+
+#### Scenario: First-event limit rejection does not establish a transient owner
+
+- **GIVEN** a streaming Responses body is not a canonical account-neutral fresh
+  replay
+- **AND** encrypted content is the body's only account-scoped retained state
+- **AND** the body has no independently established required account owner
+- **AND** account B is eligible and the request retry budget remains
+- **WHEN** account A's first upstream event is `response.failed` with a code
+  classified as rate-limit or quota
+- **THEN** the proxy does not expose that event or record account A as the
+  dispatch owner
+- **AND** the proxy MUST attempt dispatch on account B
+
+#### Scenario: Cross-account encrypted-content rejection has a failover diagnostic
+
+- **GIVEN** account A rejects retained encrypted reasoning or compaction with a
+  classified pre-visible rate-limit or quota failure while owner registration
+  is pending
+- **AND** normal retry selection dispatches the unchanged ciphertext on account
+  B
+- **WHEN** account B returns either `invalid_encrypted_content` or the observed
+  reasoning-decryption rejection shape
+- **THEN** the proxy emits one distinct warning diagnostic containing the
+  request identifier, source account A, target account B, failover trigger, and
+  upstream error code
+- **AND** the diagnostic does not contain encrypted content
+- **AND** the request rejection does not penalize account B's health
+- **AND** the same rejection without that failover
+  provenance does not emit the cross-account diagnostic
+
+#### Scenario: Unresolved file reference remains owner-bound after a limit rejection
+
+- **GIVEN** a streaming Responses body contains an `input_file.file_id`
+- **AND** the reference has no live independent file-owner pin
+- **WHEN** account A returns a pre-visible rejection classified as rate-limit or
+  quota
+- **THEN** the proxy establishes account A as the transient dispatch owner
+- **AND** the proxy surfaces account A's rejection without dispatching the body
+  on account B
+
+#### Scenario: Existing required owner remains fail-closed after a limit rejection
+
+- **GIVEN** a streaming Responses body has a file, previous-response,
+  turn-state, or existing dispatch owner on account A
+- **WHEN** account A returns a pre-visible rejection classified as rate-limit or
+  quota
+- **THEN** the proxy does not clear or move that owner
+- **AND** the retained body is not dispatched on account B
 
 ### Requirement: Compact terminal SSE errors preserve top-level error type
 

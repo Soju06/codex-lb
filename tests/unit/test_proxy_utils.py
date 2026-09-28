@@ -261,6 +261,11 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
     service._handle_stream_error.assert_not_awaited()
 
 
+_REASONING_REPLAY_400_MESSAGE = (
+    "Item with id 'rs_0123456789abcdef' of type 'reasoning' was provided without its required following item."
+)
+
+
 @pytest.mark.parametrize(
     ("code", "http_status", "message", "expected"),
     [
@@ -294,6 +299,13 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
             "This request was blocked by our safety systems.",
             True,
         ),
+        ("invalid_encrypted_content", 400, "Encrypted content is invalid.", True),
+        ("invalid_encrypted_content", None, "Encrypted content is invalid.", True),
+        ("invalid_encrypted_content", 500, "Encrypted content is invalid.", False),
+        ("invalid_request_error", 400, _REASONING_REPLAY_400_MESSAGE, True),
+        ("invalid_request_error", None, _REASONING_REPLAY_400_MESSAGE, True),
+        ("upstream_error", 400, _REASONING_REPLAY_400_MESSAGE, True),
+        ("upstream_error", None, _REASONING_REPLAY_400_MESSAGE, False),
         (
             "misalignment_policy_violation",
             400,
@@ -777,11 +789,6 @@ async def test_non_usage_limit_stream_errors_do_not_request_usage_refresh(
     schedule.assert_not_called()
 
 
-_REASONING_REPLAY_400_MESSAGE = (
-    "Item with id 'rs_0123456789abcdef' of type 'reasoning' was provided without its required following item."
-)
-
-
 @pytest.mark.parametrize(
     ("code", "http_status", "message", "expected"),
     [
@@ -824,9 +831,9 @@ async def test_reasoning_replay_400_increments_counter_without_changing_health(
     )
 
     counter.inc.assert_called_once_with()
-    # Observation only: classification and account health handling are exactly today's.
+    # The rejection describes request-bound replay state, not account health.
     assert classified["failure_class"] == "non_retryable"
-    load_balancer.record_error.assert_awaited_once()
+    load_balancer.record_error.assert_not_awaited()
     load_balancer.mark_rate_limit.assert_not_awaited()
     proxy._schedule_cancel_safe_cleanup.assert_not_called()
 
@@ -55981,6 +55988,47 @@ async def test_stream_responses_owner_bound_coded_429_surfaces_without_same_acco
         )
         yield  # pragma: no cover - makes this an async generator
 
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+
+    with pytest.raises(proxy_module.ProxyResponseError) as excinfo:
+        await _collect_burst_stream(
+            service,
+            _burst_payload([{"type": "input_file", "file_id": "file_expired_owner_pin"}]),
+        )
+
+    assert excinfo.value.status_code == 429
+    # Not a burst: no synthesized Retry-After, no same-account backoff.
+    assert excinfo.value.retry_after_seconds is None
+    assert stream_attempts == 1
+    assert scheduler.sleeps == []
+    assert "failure_class=rate_limit action=surface" in caplog.text
+    cast(AsyncMock, service._load_balancer.mark_rate_limit).assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_file_owner_coded_429_surfaces_without_same_account_backoff(monkeypatch, caplog):
+    service, scheduler = _burst_stream_service(monkeypatch)
+    account = _make_account("acc_coded_429_file_owner")
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    stream_attempts = 0
+
+    async def fake_stream(payload, headers, access_token, account_id, *args, **kwargs):
+        nonlocal stream_attempts
+        stream_attempts += 1
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("rate_limit_exceeded", "Rate limit reached for requests"),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=account.id))
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
     caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
 
@@ -55988,7 +56036,6 @@ async def test_stream_responses_owner_bound_coded_429_surfaces_without_same_acco
         await _collect_burst_stream(service, _burst_payload(_BURST_OWNER_BOUND_INPUT))
 
     assert excinfo.value.status_code == 429
-    # Not a burst: no synthesized Retry-After, no same-account backoff.
     assert excinfo.value.retry_after_seconds is None
     assert stream_attempts == 1
     assert scheduler.sleeps == []

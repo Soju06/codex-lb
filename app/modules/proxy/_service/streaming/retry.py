@@ -2427,19 +2427,28 @@ class _StreamingRetryMixin:
                                 transient_upstream_http_status = (
                                     tex.status_code if isinstance(tex, ProxyResponseError) else None
                                 )
-                                if not (
+                                if (
                                     preserve_native_failure_lifecycle
                                     and error_code in SYNTHETIC_TRANSPORT_FAILURE_CODES
+                                    and not (isinstance(tex, ProxyResponseError) and tex.local_pre_dispatch_refusal)
                                 ):
-                                    try:
-                                        yield format_sse_event(event)
-                                    except (asyncio.CancelledError, GeneratorExit):
-                                        await _finalize_terminal_settlement_after_downstream_close(
-                                            settlement,
-                                            account,
-                                            upstream_http_status=transient_upstream_http_status,
-                                        )
-                                        raise
+                                    # The response is already committed and the
+                                    # client has seen upstream bytes. Preserve
+                                    # the transport provenance for the public
+                                    # normalizer; it turns this marker into the
+                                    # one native retryable terminal event. Do
+                                    # not expose this egress code to account
+                                    # health or request-log classification.
+                                    event = synthetic_transport_failure_event(event)
+                                try:
+                                    yield format_sse_event(event)
+                                except (asyncio.CancelledError, GeneratorExit):
+                                    await _finalize_terminal_settlement_after_downstream_close(
+                                        settlement,
+                                        account,
+                                        upstream_http_status=transient_upstream_http_status,
+                                    )
+                                    raise
                                 settled = await _settle_stream_usage_before_pending_penalty(settlement)
                                 if settled and settlement.account_health_error:
                                     await proxy._handle_stream_error(
@@ -3611,11 +3620,11 @@ class _StreamingRetryMixin:
                 )
                 if last_retryable_stream_error.code in SYNTHETIC_TRANSPORT_FAILURE_CODES:
                     event = synthetic_transport_failure_event(event)
-                if not (
-                    preserve_native_failure_lifecycle
-                    and last_retryable_stream_error.code in SYNTHETIC_TRANSPORT_FAILURE_CODES
-                ):
-                    yield format_sse_event(event)
+                # A committed native Responses body must receive a terminal
+                # event even when every account attempt was exhausted before
+                # the first visible frame. The normalizer translates the
+                # internal transport marker to the native retryable code.
+                yield format_sse_event(event)
                 if not any_attempt_logged:
                     await proxy._write_request_log(
                         affinity_observation=affinity_observation,

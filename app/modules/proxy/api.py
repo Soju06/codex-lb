@@ -87,11 +87,13 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+    NATIVE_GIVEUP_RETRYABLE_CODE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
     is_previous_response_not_found_public_shape,
+    native_giveup_retryable_message,
     normalize_public_error_param,
     openai_error,
     response_failed_event,
@@ -8244,18 +8246,6 @@ async def _stream_response_error_events(
         # left with a committed body that ends without one (issue #2364).
         local_refusal = exc.local_pre_dispatch_refusal
         await release_owned_reservation()
-        if (
-            preserve_native_failure_lifecycle
-            and not local_refusal
-            and error_code
-            in {
-                "stream_incomplete",
-                "stream_idle_timeout",
-                "upstream_request_timeout",
-                "upstream_unavailable",
-            }
-        ):
-            raise
         response_id = None
         if isinstance(exc.payload, dict):
             response_id = _response_id_from_event_payload(cast(dict[str, JsonValue], exc.payload))
@@ -8267,6 +8257,40 @@ async def _stream_response_error_events(
             default_status=exc.status_code,
         )
         error = envelope.error
+        if (
+            preserve_native_failure_lifecycle
+            and not local_refusal
+            and error_code
+            in {
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
+        ):
+            # codex-lb has already given up (internal retries/replays are
+            # exhausted). Starlette already sent the 200, so the only way to
+            # tell a native Codex client anything is a terminal SSE event on
+            # the open stream — a bare re-raise here used to close the
+            # stream with zero bytes, which the client reported as "Stream
+            # disconnected before completion" and retried blind. Emit a
+            # named, retryable error instead: Codex's own reconnect logic
+            # only retries on ``rate_limit_exceeded`` (overload codes are
+            # terminal to it) and only that code's message is scanned for a
+            # "try again in Ns" delay.
+            retryable_message = native_giveup_retryable_message(
+                exc.upstream_error_code or error_code,
+                error.message if error and error.message else None,
+                exc.retry_after_seconds,
+            )
+            giveup_event = response_failed_event(
+                NATIVE_GIVEUP_RETRYABLE_CODE,
+                retryable_message,
+                "server_error",
+                response_id=response_id,
+            )
+            yield format_sse_event(giveup_event)
+            return
         retry_hint = ""
         if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
             # Preserve the HTTP Retry-After signal when a streaming response
@@ -8293,6 +8317,12 @@ async def _stream_response_error_events(
             # a marked terminal straight back into a terminated stream.
             failed_event = synthetic_transport_failure_event(failed_event)
         yield retry_hint + format_sse_event(failed_event)
+    finally:
+        # The native Responses path may stop consuming this wrapper after the
+        # terminal event. Close the inner lease-holding generator explicitly;
+        # async-generator ``aclose()`` does not cascade through a suspended
+        # ``async for`` by itself.
+        await _close_responses_stream_best_effort(stream, action="response error events")
 
 
 def _stream_startup_error_response(
@@ -9139,11 +9169,38 @@ async def _normalize_public_responses_stream(
             payload = dict(payload)
             payload.pop(SYNTHETIC_TRANSPORT_FAILURE_MARKER, None)
             if preserve_native_failure_lifecycle:
-                raise ProxyResponseError(
-                    502,
-                    openai_error("stream_incomplete", "Native upstream transport ended before a terminal event"),
-                    failure_phase="upstream",
+                # Second give-up gate: codex-lb marked this event as a
+                # synthetic transport failure upstream of us (the account
+                # path's own retry/replay is exhausted) instead of raising
+                # ``ProxyResponseError`` directly. Raising here would still
+                # close the stream with no bytes sent to a native Codex
+                # client (the 200 is already on the wire), so emit the same
+                # terminal, retryable ``response.failed`` this module's other
+                # give-up gate emits and end the stream.
+                response_obj = payload.get("response")
+                nested_error = response_obj.get("error") if is_json_mapping(response_obj) else None
+                upstream_code = nested_error.get("code") if is_json_mapping(nested_error) else None
+                upstream_message = nested_error.get("message") if is_json_mapping(nested_error) else None
+                response_id = _response_id_from_event_payload(payload)
+                retryable_message = native_giveup_retryable_message(
+                    upstream_code if isinstance(upstream_code, str) else "stream_incomplete",
+                    upstream_message if isinstance(upstream_message, str) else None,
+                    None,
                 )
+                giveup_event = response_failed_event(
+                    NATIVE_GIVEUP_RETRYABLE_CODE,
+                    retryable_message,
+                    "server_error",
+                    response_id=response_id,
+                )
+                try:
+                    yield format_sse_event(giveup_event)
+                finally:
+                    # A downstream consumer may close this generator immediately
+                    # after receiving the terminal event. Keep cleanup on the
+                    # suspended-generator path as well as the normal return path.
+                    await _close_responses_stream_best_effort(stream, action="native give-up")
+                return
         raw_event_type = payload.get("type")
         if (
             enforce_openai_sdk_contract
@@ -9940,68 +9997,74 @@ async def _normalize_reasoning_summary_stream(stream: AsyncIterator[str]) -> Asy
         normalized["delta"] = cleaned
         return [format_sse_event(normalized)]
 
-    async for event_block in stream:
-        payload = _parse_sse_payload(event_block)
-        if payload is None:
-            yield event_block
-            continue
-        # Error frames can omit the discriminator and carry only ``error``;
-        # classify those as terminal so a pending reasoning candidate flushes
-        # before the frame is forwarded.
-        event_type = classify_event_type(payload)
-        event_key = _reasoning_summary_delta_key(payload)
-        if (
-            pending
-            and not _is_reasoning_summary_interleavable_event(event_type)
-            and not (
-                event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES and event_key in pending
-            )
-        ):
-            for pending_key in tuple(pending):
-                for buffered in flush(pending_key):
-                    yield buffered
-        if event_type in _REASONING_SUMMARY_DELTA_TYPES:
-            delta = payload.get("delta")
-            if not isinstance(delta, str):
+    try:
+        async for event_block in stream:
+            payload = _parse_sse_payload(event_block)
+            if payload is None:
                 yield event_block
                 continue
-            key = event_key
-            if key in pending:
-                pending[key].append((payload, event_block))
-                buffered_text = "".join(cast(str, item.get("delta")) for item, _ in pending[key])
-                if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
+            # Error frames can omit the discriminator and carry only ``error``;
+            # classify those as terminal so a pending reasoning candidate flushes
+            # before the frame is forwarded.
+            event_type = classify_event_type(payload)
+            event_key = _reasoning_summary_delta_key(payload)
+            if (
+                pending
+                and not _is_reasoning_summary_interleavable_event(event_type)
+                and not (
+                    event_type in _REASONING_SUMMARY_DELTA_TYPES | _REASONING_SUMMARY_DONE_TYPES
+                    and event_key in pending
+                )
+            ):
+                for pending_key in tuple(pending):
+                    for buffered in flush(pending_key):
+                        yield buffered
+            if event_type in _REASONING_SUMMARY_DELTA_TYPES:
+                delta = payload.get("delta")
+                if not isinstance(delta, str):
+                    yield event_block
+                    continue
+                key = event_key
+                if key in pending:
+                    pending[key].append((payload, event_block))
+                    buffered_text = "".join(cast(str, item.get("delta")) for item, _ in pending[key])
+                    if _strip_blank_html_comment_lines(buffered_text) != buffered_text:
+                        for buffered in flush(key):
+                            yield buffered
+                        continue
+                    if _could_be_blank_html_comment_line(buffered_text):
+                        continue
                     for buffered in flush(key):
                         yield buffered
                     continue
-                if _could_be_blank_html_comment_line(buffered_text):
+                cleaned_delta = _strip_blank_html_comment_lines(delta)
+                if cleaned_delta != delta:
+                    normalized_payload = dict(payload)
+                    normalized_payload["delta"] = cleaned_delta
+                    yield format_sse_event(normalized_payload)
                     continue
+                if _could_be_blank_html_comment_line(delta):
+                    pending[key] = [(payload, event_block)]
+                    continue
+                yield event_block
+                continue
+            if event_type in _REASONING_SUMMARY_DONE_TYPES:
+                key = event_key
                 for buffered in flush(key):
                     yield buffered
-                continue
-            cleaned_delta = _strip_blank_html_comment_lines(delta)
-            if cleaned_delta != delta:
-                normalized_payload = dict(payload)
-                normalized_payload["delta"] = cleaned_delta
-                yield format_sse_event(normalized_payload)
-                continue
-            if _could_be_blank_html_comment_line(delta):
-                pending[key] = [(payload, event_block)]
-                continue
+            elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
+                for key in tuple(pending):
+                    for buffered in flush(key):
+                        yield buffered
             yield event_block
-            continue
-        if event_type in _REASONING_SUMMARY_DONE_TYPES:
-            key = event_key
+
+        for key in tuple(pending):
             for buffered in flush(key):
                 yield buffered
-        elif event_type in _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES:
-            for key in tuple(pending):
-                for buffered in flush(key):
-                    yield buffered
-        yield event_block
-
-    for key in tuple(pending):
-        for buffered in flush(key):
-            yield buffered
+    finally:
+        # Close the normalizer below this wrapper so a downstream early return
+        # reaches the retry generator and releases its account leases.
+        await _close_responses_stream_best_effort(stream, action="reasoning summary")
 
 
 def _is_public_passthrough_output_item_type(item_type: str) -> bool:

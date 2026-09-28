@@ -136,6 +136,33 @@ _USAGE_LIMIT_MESSAGE_MARKERS = (
 )
 _MESSAGE_WORD_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
 
+# The Codex CLI treats ``server_is_overloaded``/``slow_down`` as terminal
+# (zero retries), so once codex-lb gives up retrying internally for a
+# native Codex client, the give-up path must relabel the cause as the one
+# code Codex both retries on *and* parses a delay out of.
+NATIVE_GIVEUP_RETRYABLE_CODE = "rate_limit_exceeded"
+DEFAULT_NATIVE_GIVEUP_RETRY_AFTER_SECONDS = 5
+
+
+def native_giveup_retryable_message(
+    upstream_error_code: str | None,
+    message: str | None,
+    retry_after_seconds: float | int | None,
+) -> str:
+    """Build the ``rate_limit_exceeded`` message codex-rs's reconnect parses.
+
+    codex-rs matches ``(?i)try again in\\s*(\\d+(?:\\.\\d+)?)\\s*(s|ms|seconds?)``
+    against this message to size its reconnect backoff. Put the canonical
+    delay first so an upstream message containing its own stale retry hint
+    cannot change the client's backoff.
+    """
+    delay = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else None
+    seconds = delay if delay is not None else DEFAULT_NATIVE_GIVEUP_RETRY_AFTER_SECONDS
+    seconds_text = str(int(seconds)) if float(seconds).is_integer() else str(seconds)
+    original = (message or "Upstream error").strip().rstrip(".")
+    code_text = upstream_error_code or "unavailable"
+    return f"Please try again in {seconds_text}s. codex-lb: upstream {code_text}; {original}."
+
 
 def openai_error(
     code: str,

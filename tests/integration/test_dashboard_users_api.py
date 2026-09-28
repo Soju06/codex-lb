@@ -1097,6 +1097,20 @@ async def test_key_patch_that_also_renames_orders_the_owner_before_the_key(
         )
         assert deleted.status_code == 204, deleted.text
         assert patched.status_code in (200, 409), patched.text
+        # End state, not only status codes: the owner row is gone and the key
+        # has been released from it. A 409 means the reactivation read the
+        # owner row first and the key stays parked. A 200 is one of two serial
+        # orders: the DELETE committed first and the reactivation then found
+        # an ownerless key (active), or the reactivation committed first and
+        # the delete cascade parked the key again (inactive, owner reason).
+        assert await _user(second["user"]["id"]) is None
+        row = await _key(doomed.id)
+        assert row.owner_user_id is None
+        if patched.status_code == 409:
+            assert _error(patched) == "owner_disabled"
+            assert not row.is_active and row.deactivated_reason == "owner_disabled"
+        else:
+            assert row.is_active or row.deactivated_reason == "owner_disabled"
 
 
 @pytest.mark.asyncio

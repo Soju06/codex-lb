@@ -127,12 +127,19 @@ class StickySessionsService:
                 continue
             targets.append(target)
 
-        deleted = await self._repository.delete_entries(targets)
-        deleted_set = set(deleted)
+        deleted_rows = await self._repository.delete_entries(targets)
+        deleted_set = set(deleted_rows)
 
         for key, kind in targets:
             if (key, kind) not in deleted_set:
                 failed.append(StickySessionDeleteFailureData(key=key, kind=kind, reason="not_found"))
+
+        # Echo the caller's order: the delete statement's row order is
+        # backend-specific (PostgreSQL and SQLite return the probed rows in
+        # input order; MySQL's emulated ``DELETE ... RETURNING`` reads the
+        # matching rows back off the primary-key index), and the API contract
+        # is the order the caller supplied.
+        deleted = [target for target in targets if target in deleted_set]
 
         return StickySessionsDeleteData(deleted=deleted, failed=failed)
 

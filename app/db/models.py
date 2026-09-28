@@ -15,7 +15,6 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
-    Text,
     UniqueConstraint,
     false,
     func,
@@ -27,10 +26,22 @@ from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
+from app.db import mysql_compat  # noqa: F401  (registers MySQL DDL compatibility)
+from app.db.mysql_compat import mysql_binary_for, mysql_string_for, mysql_text_for
 
 
 class Base(DeclarativeBase):
-    pass
+    # MySQL has no ``INSERT ... RETURNING``, so a freshly inserted row does not
+    # carry the columns the server filled in (``created_at``/``updated_at`` and
+    # friends). Reading any of them afterwards triggers a lazy load, which fails
+    # outright when the read happens outside async context -- for example while
+    # a response model serializes a row that was just created -- and costs an
+    # extra round trip everywhere else. ``eager_defaults`` makes the ORM fetch
+    # server defaults as part of the flush: on SQLite/PostgreSQL that is the
+    # ``RETURNING`` clause that already populates them today (no behaviour
+    # change), and on MySQL/MariaDB it is one follow-up SELECT that restores
+    # the same post-insert state.
+    __mapper_args__ = {"eager_defaults": True}
 
 
 def _enum_values(enum_cls: type[Enum]) -> list[str]:
@@ -70,8 +81,8 @@ class RequestKind(str, Enum):
 class FileAccountPin(Base):
     __tablename__ = "file_account_pins"
 
-    file_id: Mapped[str] = mapped_column(String, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, nullable=False)
+    file_id: Mapped[str] = mapped_column(mysql_string_for("file_id"), primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
@@ -80,27 +91,27 @@ class FileAccountPin(Base):
 class Account(Base):
     __tablename__ = "accounts"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
+    chatgpt_account_id: Mapped[str | None] = mapped_column(mysql_string_for("chatgpt_account_id"), nullable=True)
     # Stable per-seat OpenAI principal identity (chatgpt_user_id / auth sub).
     # Distinct from chatgpt_account_id, which is the shared Team/Business
     # WORKSPACE identity. Two seats in one workspace share chatgpt_account_id
     # but have different chatgpt_user_id. Used to target and verify reauth so
     # repairing one seat cannot overwrite another seat sharing the workspace.
-    chatgpt_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    chatgpt_user_id: Mapped[str | None] = mapped_column(mysql_string_for("chatgpt_user_id"), nullable=True)
     codex_installation_id: Mapped[str] = mapped_column(
         String(36),
         default=new_codex_installation_id,
         nullable=False,
     )
-    email: Mapped[str] = mapped_column(String, nullable=False)
-    alias: Mapped[str | None] = mapped_column(String, nullable=True)
-    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
-    seat_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str] = mapped_column(mysql_string_for("email"), nullable=False)
+    alias: Mapped[str | None] = mapped_column(mysql_string_for("alias"), nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(mysql_string_for("workspace_id"), nullable=True)
+    workspace_label: Mapped[str | None] = mapped_column(mysql_string_for("workspace_label"), nullable=True)
+    seat_type: Mapped[str | None] = mapped_column(mysql_string_for("seat_type"), nullable=True)
+    plan_type: Mapped[str] = mapped_column(mysql_string_for("plan_type"), nullable=False)
     routing_policy: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("routing_policy"),
         default="normal",
         server_default=text("'normal'"),
         nullable=False,
@@ -123,9 +134,9 @@ class Account(Base):
         default=AccountStatus.ACTIVE,
         nullable=False,
     )
-    deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deactivation_reason: Mapped[str | None] = mapped_column(mysql_text_for("deactivation_reason"), nullable=True)
+    reset_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    blocked_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     limit_warmup_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -179,13 +190,15 @@ class UsageHistory(Base):
     __tablename__ = "usage_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    window: Mapped[str | None] = mapped_column(String, nullable=True)
+    window: Mapped[str | None] = mapped_column(mysql_string_for("window"), nullable=True)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reset_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     credits_has: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     credits_unlimited: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -204,7 +217,9 @@ class AccountUsageRollup(Base):
 
     __tablename__ = "account_usage_rollups"
 
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -224,7 +239,9 @@ class ApiKeyUsageRollup(Base):
 
     __tablename__ = "api_key_usage_rollups"
 
-    api_key_id: Mapped[str] = mapped_column(String, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(
+        mysql_string_for("api_key_id"), ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True
+    )
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -296,11 +313,11 @@ class RequestReportHourlyRollup(Base):
     __tablename__ = "request_report_hourly_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
-    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model: Mapped[str] = mapped_column(String, primary_key=True)
-    useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(mysql_string_for("api_key_id"), primary_key=True)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), primary_key=True)
+    useragent_group: Mapped[str] = mapped_column(mysql_string_for("useragent_group"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(mysql_string_for("conversation_id"), primary_key=True)
     first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     error_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
@@ -335,11 +352,11 @@ class RequestUsageHourlyRollup(Base):
     __tablename__ = "request_usage_hourly_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
-    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model: Mapped[str] = mapped_column(String, primary_key=True)
-    service_tier: Mapped[str] = mapped_column(String, primary_key=True)
-    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(mysql_string_for("api_key_id"), primary_key=True)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), primary_key=True)
+    service_tier: Mapped[str] = mapped_column(mysql_string_for("service_tier"), primary_key=True)
+    request_kind: Mapped[str] = mapped_column(mysql_string_for("request_kind"), primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     # sum(status NOT IN ('success', 'cancelled')) — status is folded as a
@@ -387,8 +404,8 @@ class RequestUsageHourlyErrorRollup(Base):
     __tablename__ = "request_usage_hourly_error_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
-    error_code: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
+    error_code: Mapped[str] = mapped_column(mysql_string_for("error_code"), primary_key=True)
     error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
 
 
@@ -412,12 +429,12 @@ class RequestDemandQuarterRollup(Base):
     __tablename__ = "request_demand_quarter_rollups"
 
     slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
-    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
-    model: Mapped[str] = mapped_column(String, primary_key=True)
-    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True)
-    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
-    status: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(mysql_string_for("api_key_id"), primary_key=True)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), primary_key=True)
+    reasoning_effort: Mapped[str] = mapped_column(mysql_string_for("reasoning_effort"), primary_key=True)
+    request_kind: Mapped[str] = mapped_column(mysql_string_for("request_kind"), primary_key=True)
+    status: Mapped[str] = mapped_column(mysql_string_for("status"), primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -450,8 +467,8 @@ class RequestConversationHourlyRollup(Base):
     __tablename__ = "request_conversation_hourly_rollups"
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(mysql_string_for("conversation_id"), primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
 
@@ -460,13 +477,15 @@ class AdditionalUsageHistory(Base):
     __tablename__ = "additional_usage_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    quota_key: Mapped[str] = mapped_column(String, nullable=False)
-    limit_name: Mapped[str] = mapped_column(String, nullable=False)
-    metered_feature: Mapped[str] = mapped_column(String, nullable=False)
-    window: Mapped[str] = mapped_column(String, nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    quota_key: Mapped[str] = mapped_column(mysql_string_for("quota_key"), nullable=False)
+    limit_name: Mapped[str] = mapped_column(mysql_string_for("limit_name"), nullable=False)
+    metered_feature: Mapped[str] = mapped_column(mysql_string_for("metered_feature"), nullable=False)
+    window: Mapped[str] = mapped_column(mysql_string_for("window"), nullable=False)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
-    reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reset_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -479,51 +498,55 @@ class RequestLog(Base):
         Index("idx_logs_client_ip", "client_ip"),
     )
 
-    sticky_key_source: Mapped[str | None] = mapped_column(String, nullable=True)
-    sticky_kind: Mapped[str | None] = mapped_column(String, nullable=True)
-    sticky_key_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    sticky_key_source: Mapped[str | None] = mapped_column(mysql_string_for("sticky_key_source"), nullable=True)
+    sticky_kind: Mapped[str | None] = mapped_column(mysql_string_for("sticky_kind"), nullable=True)
+    sticky_key_hash: Mapped[str | None] = mapped_column(mysql_string_for("sticky_key_hash"), nullable=True)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
     model_source_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("model_source_id"),
         nullable=True,
     )
-    model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
-    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    request_id: Mapped[str] = mapped_column(String, nullable=False)
-    archive_request_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model_source_kind: Mapped[str | None] = mapped_column(mysql_string_for("model_source_kind"), nullable=True)
+    api_key_id: Mapped[str | None] = mapped_column(mysql_string_for("api_key_id"), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(mysql_string_for("session_id"), nullable=True)
+    request_id: Mapped[str] = mapped_column(mysql_string_for("request_id"), nullable=False)
+    archive_request_id: Mapped[str | None] = mapped_column(mysql_string_for("archive_request_id"), nullable=True)
     request_kind: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("request_kind"),
         default=RequestKind.NORMAL.value,
         server_default=text("'normal'"),
         nullable=False,
     )
-    connection_request_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    connection_request_kind: Mapped[str | None] = mapped_column(
+        mysql_string_for("connection_request_kind"), nullable=True
+    )
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    model: Mapped[str] = mapped_column(String, nullable=False)
-    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    source: Mapped[str | None] = mapped_column(String, nullable=True)
-    useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
-    conversation_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
-    transport: Mapped[str | None] = mapped_column(String, nullable=True)
-    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), nullable=False)
+    plan_type: Mapped[str | None] = mapped_column(mysql_string_for("plan_type"), nullable=True)
+    source: Mapped[str | None] = mapped_column(mysql_string_for("source"), nullable=True)
+    useragent: Mapped[str | None] = mapped_column(mysql_text_for("useragent"), nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(mysql_string_for("useragent_group"), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(mysql_string_for("conversation_id"), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(mysql_string_for("client_ip"), nullable=True)
+    transport: Mapped[str | None] = mapped_column(mysql_string_for("transport"), nullable=True)
+    service_tier: Mapped[str | None] = mapped_column(mysql_string_for("service_tier"), nullable=True)
+    requested_service_tier: Mapped[str | None] = mapped_column(
+        mysql_string_for("requested_service_tier"), nullable=True
+    )
+    actual_service_tier: Mapped[str | None] = mapped_column(mysql_string_for("actual_service_tier"), nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(mysql_string_for("reasoning_effort"), nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Pre-attempt wait (account selection, admission waits, failed failover
@@ -534,24 +557,34 @@ class RequestLog(Base):
     latency_first_upstream_event_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_create_gate_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    prewarm_status: Mapped[str | None] = mapped_column(mysql_string_for("prewarm_status"), nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    failure_phase: Mapped[str | None] = mapped_column(String, nullable=True)
-    failure_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
-    failure_exception_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(mysql_string_for("status"), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(mysql_string_for("error_code"), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(mysql_text_for("error_message"), nullable=True)
+    failure_phase: Mapped[str | None] = mapped_column(mysql_string_for("failure_phase"), nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(mysql_text_for("failure_detail"), nullable=True)
+    failure_exception_type: Mapped[str | None] = mapped_column(
+        mysql_string_for("failure_exception_type"), nullable=True
+    )
     upstream_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    upstream_error_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    bridge_stage: Mapped[str | None] = mapped_column(String, nullable=True)
-    upstream_proxy_route_mode: Mapped[str | None] = mapped_column(String, nullable=True)
-    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
-    upstream_proxy_pool_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_error_code: Mapped[str | None] = mapped_column(mysql_string_for("upstream_error_code"), nullable=True)
+    bridge_stage: Mapped[str | None] = mapped_column(mysql_string_for("bridge_stage"), nullable=True)
+    upstream_proxy_route_mode: Mapped[str | None] = mapped_column(
+        mysql_string_for("upstream_proxy_route_mode"), nullable=True
+    )
+    upstream_transport: Mapped[str | None] = mapped_column(mysql_string_for("upstream_transport"), nullable=True)
+    upstream_proxy_pool_id: Mapped[str | None] = mapped_column(
+        mysql_string_for("upstream_proxy_pool_id"), nullable=True
+    )
+    upstream_proxy_endpoint_id: Mapped[str | None] = mapped_column(
+        mysql_string_for("upstream_proxy_endpoint_id"), nullable=True
+    )
     upstream_proxy_fallback_used: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    upstream_proxy_fail_closed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_proxy_fail_closed_reason: Mapped[str | None] = mapped_column(
+        mysql_string_for("upstream_proxy_fail_closed_reason"), nullable=True
+    )
     account: Mapped[Account | None] = relationship(
         "Account",
         back_populates="request_logs",
@@ -566,12 +599,12 @@ class RequestLog(Base):
 class ProxyEndpoint(Base):
     __tablename__ = "proxy_endpoints"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    scheme: Mapped[str] = mapped_column(String, nullable=False)
-    host: Mapped[str] = mapped_column(String, nullable=False)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(mysql_string_for("name"), nullable=False)
+    scheme: Mapped[str] = mapped_column(mysql_string_for("scheme"), nullable=False)
+    host: Mapped[str] = mapped_column(mysql_string_for("host"), nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False)
-    username: Mapped[str | None] = mapped_column(String, nullable=True)
+    username: Mapped[str | None] = mapped_column(mysql_string_for("username"), nullable=True)
     password_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -592,8 +625,8 @@ class ProxyEndpoint(Base):
 class ProxyPool(Base):
     __tablename__ = "proxy_pools"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    name: Mapped[str] = mapped_column(String, nullable=False)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(mysql_string_for("name"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -617,10 +650,12 @@ class ProxyPool(Base):
 class ProxyPoolMember(Base):
     __tablename__ = "proxy_pool_members"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    pool_id: Mapped[str] = mapped_column(String, ForeignKey("proxy_pools.id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pool_id: Mapped[str] = mapped_column(
+        mysql_string_for("pool_id"), ForeignKey("proxy_pools.id", ondelete="CASCADE"), nullable=False
+    )
     endpoint_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("endpoint_id"),
         ForeignKey("proxy_endpoints.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -641,9 +676,13 @@ class ProxyPoolMember(Base):
 class AccountProxyBinding(Base):
     __tablename__ = "account_proxy_bindings"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    pool_id: Mapped[str] = mapped_column(String, ForeignKey("proxy_pools.id", ondelete="RESTRICT"), nullable=False)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    pool_id: Mapped[str] = mapped_column(
+        mysql_string_for("pool_id"), ForeignKey("proxy_pools.id", ondelete="RESTRICT"), nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -663,15 +702,17 @@ class AccountLimitWarmup(Base):
     __tablename__ = "account_limit_warmups"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
-    window: Mapped[str] = mapped_column(String, nullable=False)
-    reset_at: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    model: Mapped[str] = mapped_column(String, nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    window: Mapped[str] = mapped_column(mysql_string_for("window"), nullable=False)
+    reset_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(mysql_string_for("status"), nullable=False)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), nullable=False)
     attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(mysql_string_for("error_code"), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(mysql_text_for("error_message"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -714,7 +755,7 @@ class AuditLog(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     actor_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[str | None] = mapped_column(mysql_text_for("details"), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     actor_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -746,12 +787,12 @@ class ResetCreditRedeemRequest(Base):
     __tablename__ = "reset_credit_redeem_requests"
 
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
-    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    redeem_request_id: Mapped[str] = mapped_column(mysql_string_for("redeem_request_id"), primary_key=True)
+    credit_id: Mapped[str] = mapped_column(mysql_string_for("credit_id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
@@ -767,7 +808,7 @@ class ResetCreditRedeemClaim(Base):
     __tablename__ = "reset_credit_redeem_claims"
 
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -790,15 +831,17 @@ class OAuthFlowState(Base):
 
     __tablename__ = "oauth_flow_states"
 
-    flow_id: Mapped[str] = mapped_column(String, primary_key=True)
-    state_token: Mapped[str | None] = mapped_column(String, nullable=True, unique=True, index=True)
-    method: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    intended_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    flow_id: Mapped[str] = mapped_column(mysql_string_for("flow_id"), primary_key=True)
+    state_token: Mapped[str | None] = mapped_column(
+        mysql_string_for("state_token"), nullable=True, unique=True, index=True
+    )
+    method: Mapped[str] = mapped_column(mysql_string_for("method"), nullable=False)
+    status: Mapped[str] = mapped_column(mysql_string_for("status"), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(mysql_text_for("error_message"), nullable=True)
+    intended_account_id: Mapped[str | None] = mapped_column(mysql_string_for("intended_account_id"), nullable=True)
     code_verifier_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    device_auth_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    user_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    device_auth_id: Mapped[str | None] = mapped_column(mysql_string_for("device_auth_id"), nullable=True)
+    user_code: Mapped[str | None] = mapped_column(mysql_string_for("user_code"), nullable=True)
     interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -822,8 +865,8 @@ class OAuthDeviceFlowSlot(Base):
 
     __tablename__ = "oauth_device_flow_slots"
 
-    slot_key: Mapped[str] = mapped_column(String, primary_key=True)
-    flow_id: Mapped[str] = mapped_column(String, nullable=False)
+    slot_key: Mapped[str] = mapped_column(mysql_string_for("slot_key"), primary_key=True)
+    flow_id: Mapped[str] = mapped_column(mysql_string_for("flow_id"), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -831,7 +874,7 @@ class OAuthDeviceFlowSlot(Base):
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
-    key: Mapped[str] = mapped_column(String, primary_key=True)
+    key: Mapped[str] = mapped_column(mysql_string_for("key"), primary_key=True)
     kind: Mapped[StickySessionKind] = mapped_column(
         SqlEnum(
             StickySessionKind,
@@ -844,7 +887,9 @@ class StickySession(Base):
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -942,12 +987,12 @@ class DashboardUser(Base):
 
     __tablename__ = "dashboard_users"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), unique=True, nullable=True)
     role_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("role_id"),
         ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
         nullable=False,
     )
@@ -963,7 +1008,7 @@ class DashboardUser(Base):
         server_default=text("'active'"),
         nullable=False,
     )
-    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(mysql_text_for("password_hash"), nullable=True)
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     session_generation: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
@@ -971,7 +1016,7 @@ class DashboardUser(Base):
     is_break_glass: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     created_by_user_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("created_by_user_id"),
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
@@ -1002,9 +1047,9 @@ class DashboardIdentity(Base):
         Index("idx_dashboard_identities_user_id", "user_id"),
     )
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("user_id"),
         ForeignKey("dashboard_users.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -1013,7 +1058,7 @@ class DashboardIdentity(Base):
     subject: Mapped[str] = mapped_column(String(512), nullable=False)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    groups_json: Mapped[str | None] = mapped_column(mysql_text_for("groups_json"), nullable=True)
     #: What the provider calls this person, as pushed and unslugified. Only the
     #: SCIM path writes it, because only SCIM has to answer a filter on the
     #: provider's own spelling: our usernames have no ``@``, so an address can
@@ -1053,12 +1098,12 @@ class DashboardUserInvite(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("user_id"),
         ForeignKey("dashboard_users.id", ondelete="CASCADE"),
         unique=True,
         nullable=False,
     )
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
+    token_hash: Mapped[bytes] = mapped_column(mysql_binary_for("token_hash"), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1259,14 +1304,14 @@ class DashboardRoleRecord(Base):
 
     __tablename__ = "dashboard_roles"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True, default=lambda: str(uuid.uuid4()))
     slug: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(mysql_text_for("description"), nullable=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     assignable_to_users: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     cloned_from_role_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("cloned_from_role_id"),
         ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
         nullable=True,
     )
@@ -1290,7 +1335,7 @@ class DashboardRoleGrant(Base):
     __tablename__ = "dashboard_role_grants"
 
     role_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("role_id"),
         ForeignKey("dashboard_roles.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -1306,7 +1351,7 @@ class DashboardSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("upstream_stream_transport"),
         default="auto",
         server_default=text("'auto'"),
         nullable=False,
@@ -1318,7 +1363,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     http_downstream_transport_policy: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("http_downstream_transport_policy"),
         default="smart",
         server_default=text("'smart'"),
         nullable=False,
@@ -1326,7 +1371,9 @@ class DashboardSettings(Base):
     # T3, tri-state: NULL inherits the environment value and then the ``shared``
     # code default. Never seeded from the environment (configuration-tiers,
     # "Environment values are fallbacks, never seeds").
-    thread_cache_identity_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    thread_cache_identity_mode: Mapped[str | None] = mapped_column(
+        mysql_string_for("thread_cache_identity_mode"), nullable=True
+    )
     proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1371,7 +1418,7 @@ class DashboardSettings(Base):
         Boolean, default=True, server_default=true(), nullable=False
     )
     prefer_earlier_reset_window: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("prefer_earlier_reset_window"),
         default="secondary",
         server_default=text("'secondary'"),
         nullable=False,
@@ -1395,7 +1442,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     routing_strategy: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("routing_strategy"),
         default="capacity_weighted",
         server_default=text("'capacity_weighted'"),
         nullable=False,
@@ -1412,7 +1459,7 @@ class DashboardSettings(Base):
         server_default=text("5"),
         nullable=False,
     )
-    single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    single_account_id: Mapped[str | None] = mapped_column(mysql_string_for("single_account_id"), nullable=True)
     # Subscription-exhaustion overflow designation (#2123). No foreign key on
     # purpose: a dangling id means "off", mirroring single_account_id. The drain
     # deadline is armed when the designation is cleared and compared against
@@ -1464,7 +1511,7 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
-    guest_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    guest_password_hash: Mapped[str | None] = mapped_column(mysql_text_for("guest_password_hash"), nullable=True)
     # Bumped whenever guest credentials or guest access change so every
     # outstanding guest session cookie (which carries the generation it was
     # issued under) stops validating. Sessions are stateless Fernet cookies, so
@@ -1476,7 +1523,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     bootstrap_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    bootstrap_token_hash: Mapped[bytes | None] = mapped_column(mysql_binary_for("bootstrap_token_hash"), nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1520,7 +1567,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     upstream_proxy_default_pool_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("upstream_proxy_default_pool_id"),
         ForeignKey("proxy_pools.id", ondelete="SET NULL"),
         nullable=True,
     )
@@ -1543,7 +1590,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     additional_quota_routing_policies_json: Mapped[str] = mapped_column(
-        Text,
+        mysql_text_for("additional_quota_routing_policies_json"),
         default="{}",
         server_default=text("'{}'"),
         nullable=False,
@@ -1555,19 +1602,19 @@ class DashboardSettings(Base):
         nullable=False,
     )
     limit_warmup_windows: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("limit_warmup_windows"),
         default="both",
         server_default=text("'both'"),
         nullable=False,
     )
     limit_warmup_model: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("limit_warmup_model"),
         default="auto",
         server_default=text("'auto'"),
         nullable=False,
     )
     limit_warmup_prompt: Mapped[str] = mapped_column(
-        Text,
+        mysql_text_for("limit_warmup_prompt"),
         default="Say OK.",
         server_default=text("'Say OK.'"),
         nullable=False,
@@ -1596,7 +1643,7 @@ class DashboardSettings(Base):
         server_default=text("100.0"),
     )
     weekly_pace_working_days: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("weekly_pace_working_days"),
         default="0,1,2,3,4,5,6",
         server_default=text("'0,1,2,3,4,5,6'"),
         nullable=False,
@@ -1614,13 +1661,13 @@ class DashboardSettings(Base):
         nullable=False,
     )
     warmup_model: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("warmup_model"),
         default="gpt-5.4-mini",
         server_default=text("'gpt-5.4-mini'"),
         nullable=False,
     )
     additional_quota_routing_policies_json: Mapped[str] = mapped_column(
-        Text,
+        mysql_text_for("additional_quota_routing_policies_json"),
         default="{}",
         server_default=text("'{}'"),
         nullable=False,
@@ -1689,7 +1736,7 @@ class ModelContextWindowOverride(Base):
 
     __tablename__ = "model_context_window_overrides"
 
-    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    slug: Mapped[str] = mapped_column(mysql_string_for("slug"), primary_key=True)
     context_window: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -1723,7 +1770,7 @@ class RuntimeSentinel(Base):
 class ApiFirewallAllowlist(Base):
     __tablename__ = "api_firewall_allowlist"
 
-    ip_address: Mapped[str] = mapped_column(String, primary_key=True)
+    ip_address: Mapped[str] = mapped_column(mysql_string_for("ip_address"), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -1736,30 +1783,38 @@ class ApiKey(Base):
         ),
     )
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    key_prefix: Mapped[str] = mapped_column(String, nullable=False)
-    allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
+    name: Mapped[str] = mapped_column(mysql_string_for("name"), nullable=False)
+    key_hash: Mapped[str] = mapped_column(mysql_string_for("key_hash"), nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(mysql_string_for("key_prefix"), nullable=False)
+    allowed_models: Mapped[str | None] = mapped_column(mysql_text_for("allowed_models"), nullable=True)
     apply_to_codex_model: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         server_default=false(),
         nullable=False,
     )
-    enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
-    enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
-    allowed_reasoning_efforts: Mapped[str | None] = mapped_column(Text, nullable=True)
-    enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    enforced_model: Mapped[str | None] = mapped_column(mysql_string_for("enforced_model"), nullable=True)
+    enforced_reasoning_effort: Mapped[str | None] = mapped_column(
+        mysql_string_for("enforced_reasoning_effort"), nullable=True
+    )
+    allowed_reasoning_efforts: Mapped[str | None] = mapped_column(
+        mysql_text_for("allowed_reasoning_efforts"), nullable=True
+    )
+    enforced_service_tier: Mapped[str | None] = mapped_column(mysql_string_for("enforced_service_tier"), nullable=True)
     traffic_class: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("traffic_class"),
         default="foreground",
         server_default=text("'foreground'"),
         nullable=False,
     )
-    transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    transport_policy_override: Mapped[str | None] = mapped_column(
+        mysql_string_for("transport_policy_override"), nullable=True
+    )
     # NULL = follow the fleet (dashboard, then environment, then ``shared``).
-    thread_cache_identity_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    thread_cache_identity_override: Mapped[str | None] = mapped_column(
+        mysql_string_for("thread_cache_identity_override"), nullable=True
+    )
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1773,7 +1828,7 @@ class ApiKey(Base):
         nullable=False,
     )
     usage_sections: Mapped[str | None] = mapped_column(
-        Text,
+        mysql_text_for("usage_sections"),
         nullable=False,
         default="upstream_limits,account_pool_usage",
         server_default="upstream_limits,account_pool_usage",
@@ -1783,12 +1838,12 @@ class ApiKey(Base):
     # Ownership (per-user accounts). NULL owner = shared/service key. Populated
     # once principals carry a user id; declared here so the schema lands once.
     owner_user_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("owner_user_id"),
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
     created_by_user_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("created_by_user_id"),
         ForeignKey("dashboard_users.id", ondelete="SET NULL"),
         nullable=True,
     )
@@ -1822,12 +1877,12 @@ class ApiKeyAccountAssignment(Base):
     __tablename__ = "api_key_accounts"
 
     api_key_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("api_key_id"),
         ForeignKey("api_keys.id", ondelete="CASCADE"),
         primary_key=True,
     )
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -1840,19 +1895,19 @@ class ApiKeyAccountAssignment(Base):
 class ModelSource(Base):
     __tablename__ = "model_sources"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
+    name: Mapped[str] = mapped_column(mysql_string_for("name"), nullable=False)
     kind: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("kind"),
         default="openai_compatible",
         server_default=text("'openai_compatible'"),
         nullable=False,
     )
-    base_url: Mapped[str] = mapped_column(String, nullable=False)
+    base_url: Mapped[str] = mapped_column(mysql_string_for("base_url"), nullable=False)
     api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     health_status: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("health_status"),
         default="unknown",
         server_default=text("'unknown'"),
         nullable=False,
@@ -1915,9 +1970,11 @@ class ModelSourceModel(Base):
     __table_args__ = (UniqueConstraint("source_id", "model", name="uq_model_source_models_source_model"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False)
-    model: Mapped[str] = mapped_column(String, nullable=False)
-    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_id: Mapped[str] = mapped_column(
+        mysql_string_for("source_id"), ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(mysql_string_for("display_name"), nullable=True)
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     supports_streaming: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
@@ -1927,7 +1984,7 @@ class ModelSourceModel(Base):
     cached_input_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
     output_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
     audio_per_minute: Mapped[float | None] = mapped_column(Float, nullable=True)
-    raw_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_metadata_json: Mapped[str | None] = mapped_column(mysql_text_for("raw_metadata_json"), nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -1944,12 +2001,12 @@ class ApiKeyModelSourceAssignment(Base):
     __tablename__ = "api_key_model_sources"
 
     api_key_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("api_key_id"),
         ForeignKey("api_keys.id", ondelete="CASCADE"),
         primary_key=True,
     )
     source_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("source_id"),
         ForeignKey("model_sources.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -1980,7 +2037,7 @@ class ApiKeyLimit(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     api_key_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("api_key_id"),
         ForeignKey("api_keys.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -2004,7 +2061,7 @@ class ApiKeyLimit(Base):
     )
     max_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
     current_value: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
-    model_filter: Mapped[str | None] = mapped_column(String, nullable=True)
+    model_filter: Mapped[str | None] = mapped_column(mysql_string_for("model_filter"), nullable=True)
     reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="limits")
@@ -2013,14 +2070,14 @@ class ApiKeyLimit(Base):
 class ApiKeyUsageReservation(Base):
     __tablename__ = "api_key_usage_reservations"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
     api_key_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("api_key_id"),
         ForeignKey("api_keys.id", ondelete="CASCADE"),
         nullable=False,
     )
-    model: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False, default="reserved")
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), nullable=False)
+    status: Mapped[str] = mapped_column(mysql_string_for("status"), nullable=False, default="reserved")
     input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -2047,7 +2104,7 @@ class ApiKeyUsageReservationItem(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     reservation_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("reservation_id"),
         ForeignKey("api_key_usage_reservations.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -2056,7 +2113,7 @@ class ApiKeyUsageReservationItem(Base):
         ForeignKey("api_key_limits.id", ondelete="CASCADE"),
         nullable=False,
     )
-    limit_type: Mapped[str] = mapped_column(String, nullable=False)
+    limit_type: Mapped[str] = mapped_column(mysql_string_for("limit_type"), nullable=False)
     reserved_delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
     actual_delta: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     expected_reset_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -2078,7 +2135,7 @@ class ApiKeyUsageReservationItem(Base):
 class AutomationJob(Base):
     __tablename__ = "automation_jobs"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     schedule_type: Mapped[str] = mapped_column(
@@ -2108,9 +2165,11 @@ class AutomationJob(Base):
         server_default=false(),
     )
     account_scope_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
-    model: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(mysql_string_for("model"), nullable=False)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    prompt: Mapped[str] = mapped_column(Text, nullable=False, default="ping", server_default=text("'ping'"))
+    prompt: Mapped[str] = mapped_column(
+        mysql_text_for("prompt"), nullable=False, default="ping", server_default=text("'ping'")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -2141,12 +2200,12 @@ class AutomationJobAccount(Base):
     __table_args__ = (UniqueConstraint("job_id", "position", name="uq_automation_job_accounts_position"),)
 
     job_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("job_id"),
         ForeignKey("automation_jobs.id", ondelete="CASCADE"),
         primary_key=True,
     )
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -2160,9 +2219,9 @@ class AutomationJobAccount(Base):
 class AutomationRun(Base):
     __tablename__ = "automation_runs"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(mysql_string_for("id"), primary_key=True)
     job_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("job_id"),
         ForeignKey("automation_jobs.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -2171,20 +2230,20 @@ class AutomationRun(Base):
     cycle_key: Mapped[str] = mapped_column(String(160), nullable=False)
     cycle_expected_accounts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cycle_window_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(mysql_string_for("model"), nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt: Mapped[str | None] = mapped_column(mysql_text_for("prompt"), nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="running", server_default=text("'running'"))
     account_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(mysql_text_for("error_message"), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     # Compact request budget (seconds) in effect when this row was last
     # claimed; the stale-claim reclaim window covers the larger of this value
@@ -2203,7 +2262,7 @@ class AutomationRunCycle(Base):
 
     cycle_key: Mapped[str] = mapped_column(String(160), primary_key=True)
     job_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("job_id"),
         ForeignKey("automation_jobs.id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -2235,7 +2294,7 @@ class AutomationRunCycleAccount(Base):
         ForeignKey("automation_run_cycles.cycle_key", ondelete="CASCADE"),
         primary_key=True,
     )
-    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(mysql_string_for("account_id"), primary_key=True)
     slot_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -2257,22 +2316,26 @@ class QuotaPlannerSettings(Base):
     __tablename__ = "quota_planner_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    mode: Mapped[str] = mapped_column(String, default="shadow", server_default=text("'shadow'"), nullable=False)
-    timezone: Mapped[str] = mapped_column(String, default="UTC", server_default=text("'UTC'"), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        mysql_string_for("mode"), default="shadow", server_default=text("'shadow'"), nullable=False
+    )
+    timezone: Mapped[str] = mapped_column(
+        mysql_string_for("timezone"), default="UTC", server_default=text("'UTC'"), nullable=False
+    )
     working_days_json: Mapped[str] = mapped_column(
-        Text,
+        mysql_text_for("working_days_json"),
         default="[0,1,2,3,4]",
         server_default=text("'[0,1,2,3,4]'"),
         nullable=False,
     )
     working_hours_start: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("working_hours_start"),
         default="09:00",
         server_default=text("'09:00'"),
         nullable=False,
     )
     working_hours_end: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("working_hours_end"),
         default="18:00",
         server_default=text("'18:00'"),
         nullable=False,
@@ -2287,14 +2350,18 @@ class QuotaPlannerSettings(Base):
         nullable=False,
     )
     min_expected_gain: Mapped[float] = mapped_column(Float, default=1.0, server_default=text("1.0"), nullable=False)
-    forecast_quantile: Mapped[str] = mapped_column(String, default="p75", server_default=text("'p75'"), nullable=False)
+    forecast_quantile: Mapped[str] = mapped_column(
+        mysql_string_for("forecast_quantile"), default="p75", server_default=text("'p75'"), nullable=False
+    )
     allow_synthetic_traffic: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         server_default=false(),
         nullable=False,
     )
-    warmup_model_preference: Mapped[str | None] = mapped_column(String, nullable=True)
+    warmup_model_preference: Mapped[str | None] = mapped_column(
+        mysql_string_for("warmup_model_preference"), nullable=True
+    )
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -2310,38 +2377,44 @@ class QuotaPlannerDecision(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    mode: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(mysql_string_for("mode"), nullable=False)
     account_id: Mapped[str | None] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="SET NULL"),
         nullable=True,
     )
-    action: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(mysql_string_for("action"), nullable=False)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(mysql_text_for("reason"), nullable=True)
     forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    state_before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    state_after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="planned", server_default=text("'planned'"), nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    state_before_json: Mapped[str | None] = mapped_column(mysql_text_for("state_before_json"), nullable=True)
+    state_after_json: Mapped[str | None] = mapped_column(mysql_text_for("state_after_json"), nullable=True)
+    status: Mapped[str] = mapped_column(
+        mysql_string_for("status"), default="planned", server_default=text("'planned'"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(mysql_string_for("idempotency_key"), nullable=False, unique=True)
 
 
 class QuotaWindowObservation(Base):
     __tablename__ = "quota_window_observations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str] = mapped_column(
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(mysql_string_for("model"), nullable=True)
     primary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
-    primary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    primary_reset_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     secondary_remaining_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
-    secondary_reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source: Mapped[str] = mapped_column(String, nullable=False)
-    confidence: Mapped[str] = mapped_column(String, default="unknown", server_default=text("'unknown'"), nullable=False)
+    secondary_reset_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source: Mapped[str] = mapped_column(mysql_string_for("source"), nullable=False)
+    confidence: Mapped[str] = mapped_column(
+        mysql_string_for("confidence"), default="unknown", server_default=text("'unknown'"), nullable=False
+    )
 
 
 class CacheInvalidation(Base):
@@ -2363,7 +2436,7 @@ class ModelRegistrySnapshotRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[str] = mapped_column(mysql_text_for("payload"), nullable=False)
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     leader_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -2383,7 +2456,7 @@ class AccountRefreshClaim(Base):
     __tablename__ = "account_refresh_claims"
 
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -2423,13 +2496,13 @@ class AccountPlanDowngradeObservation(Base):
     __tablename__ = "account_plan_downgrade_observations"
 
     account_id: Mapped[str] = mapped_column(
-        String,
+        mysql_string_for("account_id"),
         ForeignKey("accounts.id", ondelete="CASCADE"),
         primary_key=True,
     )
     observations: Mapped[int] = mapped_column(Integer, nullable=False)
     credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    observed_plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    observed_plan_type: Mapped[str] = mapped_column(mysql_string_for("observed_plan_type"), nullable=False)
     first_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
@@ -2441,7 +2514,7 @@ class BridgeRingMember(Base):
     instance_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
-    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(mysql_text_for("metadata_json"), nullable=True)
 
 
 class HttpBridgeSessionState(str, Enum):
@@ -2490,7 +2563,7 @@ class HttpBridgeSessionRecord(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_key_kind: Mapped[str] = mapped_column(String(64), nullable=False)
-    session_key_value: Mapped[str] = mapped_column(Text, nullable=False)
+    session_key_value: Mapped[str] = mapped_column(mysql_text_for("session_key_value"), nullable=False)
     session_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     owner_instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -2509,15 +2582,17 @@ class HttpBridgeSessionRecord(Base):
         nullable=False,
     )
     account_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+        mysql_string_for("account_id"), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
-    model: Mapped[str | None] = mapped_column(String, nullable=True)
-    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
-    latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(mysql_string_for("model"), nullable=True)
+    service_tier: Mapped[str | None] = mapped_column(mysql_string_for("service_tier"), nullable=True)
+    latest_turn_state: Mapped[str | None] = mapped_column(mysql_text_for("latest_turn_state"), nullable=True)
+    latest_response_id: Mapped[str | None] = mapped_column(mysql_text_for("latest_response_id"), nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(
+        mysql_text_for("latest_pending_tool_calls_json"), nullable=True
+    )
     # Continuity-owner retirement, mirroring sticky_sessions' pair: a non-NULL
     # scope retires ownership only for the matching typed source, while a
     # non-NULL timestamp with NULL scope retires it globally. Deleting the row
@@ -2574,8 +2649,8 @@ class HttpBridgeRecoveryAttemptRecord(Base):
     )
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     request_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(mysql_string_for("account_id"), nullable=True)
+    model: Mapped[str | None] = mapped_column(mysql_string_for("model"), nullable=True)
     replay_safe: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     state: Mapped[HttpBridgeRecoveryAttemptState] = mapped_column(
         SqlEnum(
@@ -2588,7 +2663,7 @@ class HttpBridgeRecoveryAttemptRecord(Base):
         server_default=text("'unknown'"),
         nullable=False,
     )
-    response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_id: Mapped[str | None] = mapped_column(mysql_text_for("response_id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2618,12 +2693,12 @@ class HttpBridgeOperationRecord(Base):
         nullable=False,
     )
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    model: Mapped[str | None] = mapped_column(String, nullable=True)
-    parent_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(mysql_string_for("account_id"), nullable=True)
+    model: Mapped[str | None] = mapped_column(mysql_string_for("model"), nullable=True)
+    parent_response_id: Mapped[str | None] = mapped_column(mysql_text_for("parent_response_id"), nullable=True)
+    request_text: Mapped[str | None] = mapped_column(mysql_text_for("request_text"), nullable=True)
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'submitted'"))
-    response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_id: Mapped[str | None] = mapped_column(mysql_text_for("response_id"), nullable=True)
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
@@ -2676,7 +2751,7 @@ class HttpBridgeOperationEvent(Base):
     )
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    event_text: Mapped[str] = mapped_column(Text, nullable=False)
+    event_text: Mapped[str] = mapped_column(mysql_text_for("event_text"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2728,7 +2803,7 @@ class HttpBridgeSessionAlias(Base):
         nullable=False,
     )
     alias_kind: Mapped[str] = mapped_column(String(64), nullable=False)
-    alias_value: Mapped[str] = mapped_column(Text, nullable=False)
+    alias_value: Mapped[str] = mapped_column(mysql_text_for("alias_value"), nullable=False)
     alias_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -2848,6 +2923,13 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
+# Two indexes the 0.5 s slow log asked for (2026-09-26): the dashboard facet pager
+# enumerated distinct ``account_id`` with a recursive ``min()`` over a full scan
+# (37.6 M rows examined across 129 calls), and the earliest-request aggregate
+# filtered ``request_kind`` out of a `NOT IN` the plan could not narrow, reading
+# every row of the ``deleted_at IS NULL`` range.
+Index("idx_logs_facet_accounts", RequestLog.deleted_at, RequestLog.status, RequestLog.account_id)
+Index("idx_logs_min_requested", RequestLog.deleted_at, RequestLog.request_kind, RequestLog.requested_at)
 Index(
     "idx_logs_account_kind_deleted_latest",
     RequestLog.account_id,

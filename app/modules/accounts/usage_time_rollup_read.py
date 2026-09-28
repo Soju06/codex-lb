@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnExpressionArgument
 from sqlalchemy.sql.selectable import CompoundSelect
 
+from app.db.dialect_sql import epoch_seconds as sql_epoch_seconds
 from app.db.models import (
     AccountUsageRollupState,
     RequestConversationHourlyRollup,
@@ -194,7 +195,7 @@ async def sum_demand_window(
     if session.get_bind().dialect.name == "postgresql":
         watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
     else:
-        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+        watermark_epoch = sa_cast(sql_epoch_seconds(AccountUsageRollupState.hourly_folded_through), Integer)
     join_conditions = [
         *filters,
         RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
@@ -249,7 +250,7 @@ def demand_units_sql_expr(
     spells the scalar maximum ``GREATEST``; SQLite's multi-argument ``MAX``
     is the scalar form.
     """
-    scalar_max = func.greatest if dialect == "postgresql" else func.max
+    scalar_max = func.greatest if dialect in ("postgresql", "mysql", "mariadb") else func.max
     zero = literal(0)
     token_units = (
         scalar_max(input_tokens, zero)
@@ -283,7 +284,7 @@ async def read_demand_slot_units_window(
     if dialect == "postgresql":
         watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
     else:
-        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+        watermark_epoch = sa_cast(sql_epoch_seconds(AccountUsageRollupState.hourly_folded_through), Integer)
     join_conditions = [
         *filters,
         RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
@@ -378,18 +379,20 @@ def _conversation_watermark_epoch_subquery(session: AsyncSession) -> ColumnEleme
     if session.get_bind().dialect.name == "postgresql":
         epoch = cast(func.floor(func.extract("epoch", column)), BigInteger)
     else:
-        epoch = cast(func.strftime("%s", column), Integer)
+        epoch = cast(sql_epoch_seconds(column), Integer)
     return select(epoch).where(AccountUsageRollupState.id == _STATE_ROW_ID).scalar_subquery()
 
 
 def _least_fn(session: AsyncSession):
-    # SQLite's two-argument min() scalar function is its least().
-    return func.least if session.get_bind().dialect.name == "postgresql" else func.min
+    # SQLite's two-argument min() scalar function is its least(); MySQL
+    # spells it LEAST like PostgreSQL.
+    return func.least if session.get_bind().dialect.name in ("postgresql", "mysql", "mariadb") else func.min
 
 
 def _greatest_fn(session: AsyncSession):
-    # SQLite's two-argument max() scalar function is its greatest().
-    return func.greatest if session.get_bind().dialect.name == "postgresql" else func.max
+    # SQLite's two-argument max() scalar function is its greatest(); MySQL
+    # spells it GREATEST like PostgreSQL.
+    return func.greatest if session.get_bind().dialect.name in ("postgresql", "mysql", "mariadb") else func.max
 
 
 def _conversation_folded_select(
@@ -416,7 +419,7 @@ def _conversation_folded_select(
         # Dialect-split integer flooring: SQLAlchemy renders `/` as true
         # division (NUMERIC on PostgreSQL, where a bigint cast then ROUNDS),
         # so mirror the raw readers' bucket arithmetic instead.
-        if session.get_bind().dialect.name == "postgresql":
+        if session.get_bind().dialect.name in ("postgresql", "mysql", "mariadb"):
             display = cast(
                 func.floor(rollup.bucket_epoch / display_bucket_seconds) * display_bucket_seconds, BigInteger
             )

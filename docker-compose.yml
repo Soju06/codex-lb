@@ -126,6 +126,25 @@ services:
       - codex-lb-postgres-data:/var/lib/postgresql
     restart: "no"
 
+  mysql:
+    image: mysql:8.4
+    profiles: ["mysql"]
+    environment:
+      MYSQL_ROOT_PASSWORD: codex_lb_root
+      MYSQL_USER: codex_lb
+      MYSQL_PASSWORD: codex_lb
+      MYSQL_DATABASE: codex_lb
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -ucodex_lb -pcodex_lb --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - codex-lb-mysql-data:/var/lib/mysql
+    restart: unless-stopped
+
 networks:
   default:
     driver: bridge
@@ -135,3 +154,5 @@ volumes:
     name: codex-lb-data
   codex-lb-postgres-data:
     name: codex-lb-postgres-data
+  codex-lb-mysql-data:
+    name: codex-lb-mysql-data

@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Collection
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
+from app.db.dialect_sql import is_mysql
 from app.db.models import CapabilityLineageMarker
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.capability_lineage import (
@@ -73,9 +75,13 @@ class CapabilityLineageRepository:
             insert_fn = pg_insert
         elif dialect == "sqlite":
             insert_fn = sqlite_insert
+        elif is_mysql(dialect):
+            insert_fn = mysql_insert
         else:
             raise RuntimeError(f"Capability lineage persistence unsupported for dialect={dialect!r}")
         statement = insert_fn(CapabilityLineageMarker).values(marker_hash=marker_hash)
+        if is_mysql(dialect):
+            return statement.on_duplicate_key_update(last_seen_at=func.now())
         return statement.on_conflict_do_update(
             index_elements=[CapabilityLineageMarker.marker_hash],
             set_={"last_seen_at": func.now()},

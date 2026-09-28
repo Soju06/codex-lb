@@ -253,8 +253,11 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
     assert saved_first.id == "mavos_workspace"
     assert saved_second.id == "triton_workspace"
     assert saved_third.id == "atlas_workspace"
+    # All three share one email, so ``list_accounts`` orders them by its id
+    # tiebreak -- the listing is defined on every backend, not whatever order the
+    # backend happens to scan rows in.
     assert [(account.id, account.workspace_label) for account in accounts] == [
+        ("atlas_workspace", "Atlas"),
         ("mavos_workspace", "Mavos"),
         ("triton_workspace", "Triton"),
-        ("atlas_workspace", "Atlas"),
     ]

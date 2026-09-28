@@ -8,6 +8,8 @@ from sqlalchemy import delete, func, select
 
 from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import dialect_name as db_dialect_name
+from app.db.dialect_sql import same_table_subquery
 from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
@@ -137,17 +139,17 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                 # deleted holes above the oldest surviving row, which the
                 # rollup-served listing count relies on when clamping its
                 # folded window to listable history.
-                batch_ids = (
+                batch_ids = same_table_subquery(
                     select(RequestLog.id)
                     .where(RequestLog.requested_at < effective_cutoff)
                     .order_by(RequestLog.requested_at.asc(), RequestLog.id.asc())
-                    .limit(BATCH_SIZE)
-                ).scalar_subquery()
-                result = await session.execute(
-                    delete(RequestLog).where(RequestLog.id.in_(batch_ids)).returning(RequestLog.id)
+                    .limit(BATCH_SIZE),
+                    RequestLog.id,
+                    dialect=db_dialect_name(session),
                 )
+                result = await session.execute(delete(RequestLog).where(RequestLog.id.in_(batch_ids)))
                 await session.commit()
-        deleted = len(result.scalars().all())
+        deleted = int(result.rowcount or 0)
         total += deleted
         if deleted < BATCH_SIZE:
             return total
@@ -231,10 +233,14 @@ async def _batched_prune(model, *, cutoff_condition, protected_stmt) -> int:
                 conditions = [cutoff_condition]
                 if protected_ids:
                     conditions.append(model.id.not_in(protected_ids))
-                batch_ids = select(model.id).where(*conditions).limit(BATCH_SIZE).scalar_subquery()
-                result = await session.execute(delete(model).where(model.id.in_(batch_ids)).returning(model.id))
+                batch_ids = same_table_subquery(
+                    select(model.id).where(*conditions).limit(BATCH_SIZE),
+                    model.id,
+                    dialect=db_dialect_name(session),
+                )
+                result = await session.execute(delete(model).where(model.id.in_(batch_ids)))
                 await session.commit()
-        deleted = len(result.scalars().all())
+        deleted = int(result.rowcount or 0)
         total += deleted
         if deleted < BATCH_SIZE:
             return total

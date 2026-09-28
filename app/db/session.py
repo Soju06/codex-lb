@@ -161,7 +161,16 @@ def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:
     """
     connect_args = _postgres_async_connect_args(url)
     kwargs: dict[str, object] = {"connect_args": connect_args or {}}
-    if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and url.startswith("postgresql+asyncpg://"):
+    if os.environ.get("CODEX_LB_TEST_DATABASE_URL") and (
+        url.startswith("postgresql+asyncpg://") or url.startswith("mysql+") or url.startswith("mariadb+")
+    ):
+        # Test runs get no connection pooling on any async backend: the sync
+        # websocket tests drive the app through Starlette's TestClient portal,
+        # which runs on its own event loop, and a pooled connection created on
+        # another loop is a driver-level error (asyncmy reports "Future attached
+        # to a different loop"). SQLite has always been NullPool and PostgreSQL
+        # is NullPool under tests for the same reason; MySQL was the one backend
+        # still pooling, so its websocket paths failed where the others passed.
         kwargs["poolclass"] = NullPool
     else:
         kwargs["pool_size"] = _settings.database_pool_size
@@ -173,6 +182,14 @@ def _postgres_async_engine_kwargs(url: str) -> dict[str, object]:
         # either knob — aiosqlite has no analogous server-side disconnect.
         kwargs["pool_pre_ping"] = True
         kwargs["pool_recycle"] = _POSTGRES_POOL_RECYCLE_SECONDS
+    if url.startswith("mysql+") or url.startswith("mariadb+"):
+        # The repositories were written for PostgreSQL's READ COMMITTED
+        # semantics (and SQLite's serialized writer). MySQL's default
+        # REPEATABLE READ pins a transaction snapshot across statements, so a
+        # row another session committed mid-transaction stays invisible — a
+        # JIT-created dashboard user was not counted in the very request that
+        # created it. READ COMMITTED restores per-statement visibility.
+        kwargs["isolation_level"] = "READ COMMITTED"
     return kwargs
 
 

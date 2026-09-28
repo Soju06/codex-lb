@@ -564,6 +564,7 @@ class SourceDispatch:
                     input_tokens=usage.input_tokens if usage is not None else None,
                     output_tokens=usage.output_tokens if usage is not None else None,
                     cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                    reasoning_tokens=usage.reasoning_tokens if usage is not None else None,
                     cost_usd=source_usage_cost_usd(self.source, self.model, usage),
                     latency_ms=timings.latency_ms if timings is not None else None,
                     latency_first_token_ms=timings.latency_first_token_ms if timings is not None else None,

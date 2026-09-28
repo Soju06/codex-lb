@@ -56,3 +56,17 @@ GROUP BY sticky_key_source, sticky_kind, sticky_key_hash;
 The affinity history converges with dashboard roles, users, the final compatibility-credential projection and audit actor columns through a no-op merge. Published revisions remain unchanged. Databases already on the authentication branch retain their current credentials and session generations; the earlier credential projection is not replayed on merge-only reupgrade. Databases on the older affinity history run the existing authentication backfills once. Ledgerless schema bootstrap retains those migrations' existing legacy-credential projection behavior.
 
 The subsequent invite migration converges through a second no-op join. Pending, consumed and revoked invite rows retain their hashes, expiry/consumption/revocation times, creator snapshots and flags. The older affinity history creates an empty invite table through the unchanged upstream migration.
+
+## Optional model-source telemetry
+
+Source metadata is ancillary to the forwarded response. Preserve reported reasoning
+usage, but leave missing reasoning unknown; reject boolean counts and values beyond
+PostgreSQL's signed 32-bit request-log storage range. Validate timing operands and
+their sum before rounding. For example, two individually finite 1e308 timings are
+not usable measurements and cannot interrupt an otherwise valid response.
+
+The usage parser incrementally decodes UTF-8 and waits for complete SSE events,
+including multi-line data and CRLF split across network chunks. Forwarding still
+yields original upstream bytes. Source routing, metric qualification and report
+cohorts are unchanged. See the optional-source-metrics requirement in spec.md and
+`openspec/changes/archive/2026-09-28-harden-model-source-usage/verification.md`.

@@ -34,6 +34,8 @@ from app.modules.model_sources.forwarding import (
     _timings_from_metrics,
     _timings_from_payload,
     _usage_from_audio_body,
+    _usage_from_chat_payload,
+    _usage_from_responses_payload,
     classify_responses_frame,
     source_stream_idle_seconds,
 )
@@ -2344,3 +2346,188 @@ async def test_stream_responses_keeps_both_open_deadlines_by_default(monkeypatch
         task.result()
     assert excinfo.value.timeout_phase == "header"
     await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.parametrize(
+    ("ttft", "generation"),
+    [
+        (1e308, 1e308),
+        (10**310, 0.5),
+        (2_147_483_648, 0),
+        (0, 2_147_483_648),
+        (2_147_483_647, 1),
+        (1, True),
+    ],
+)
+def test_source_timings_reject_overflow_and_database_integer_range(ttft: int | float, generation: int | float) -> None:
+    assert _timings_from_metrics({"time_to_first_token_ms": ttft, "generation_time_ms": generation}) is None
+
+
+def test_source_timings_accept_database_integer_boundary() -> None:
+    timings = _timings_from_metrics({"time_to_first_token_ms": 2_147_483_600, "generation_time_ms": 47})
+
+    assert timings is not None
+    assert timings.latency_ms == 2_147_483_647
+
+
+@pytest.mark.parametrize("shape", ["chat", "responses"])
+@pytest.mark.parametrize("reasoning", [None, 0, 3, True, -1, 1.5, 2_147_483_648])
+def test_source_usage_preserves_only_reported_integer_reasoning(shape: str, reasoning: JsonValue) -> None:
+    if shape == "chat":
+        usage = _usage_from_chat_payload(
+            {
+                "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 5,
+                    "completion_tokens_details": {"reasoning_tokens": reasoning},
+                }
+            }
+        )
+    else:
+        usage = _usage_from_responses_payload(
+            {"usage": {"input_tokens": 8, "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": reasoning}}}
+        )
+
+    assert usage is not None
+    assert usage.reasoning_tokens == (reasoning if type(reasoning) is int and 0 <= reasoning <= 2_147_483_647 else None)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": True, "completion_tokens": 5},
+        {"prompt_tokens": 8, "completion_tokens": False},
+        {"input_tokens": True, "output_tokens": 5},
+        {"input_tokens": 8, "output_tokens": False},
+        {"total_tokens": True},
+    ],
+)
+def test_source_usage_rejects_boolean_token_totals(usage: dict[str, JsonValue]) -> None:
+    assert _usage_from_audio_body(json.dumps({"usage": usage}).encode(), "application/json") is None
+
+
+@pytest.mark.parametrize("value", [2_147_483_648, 2**63, 10**310])
+@pytest.mark.parametrize("shape", ["chat", "responses", "total"])
+def test_source_usage_rejects_database_integer_overflow(shape: str, value: int) -> None:
+    if shape == "chat":
+        usage = {"prompt_tokens": value, "completion_tokens": value}
+    elif shape == "responses":
+        usage = {"input_tokens": value, "output_tokens": value}
+    else:
+        usage = {"total_tokens": value}
+
+    assert _usage_from_audio_body(json.dumps({"usage": usage}).encode(), "application/json") is None
+
+
+def test_source_usage_accepts_database_integer_boundary() -> None:
+    usage = _usage_from_chat_payload({"usage": {"prompt_tokens": 2_147_483_647, "completion_tokens": 0}})
+
+    assert usage is not None
+    assert usage.input_tokens == 2_147_483_647
+
+
+def test_source_usage_rejects_boolean_cached_tokens_without_inventing_reasoning() -> None:
+    usage = _usage_from_chat_payload(
+        {"usage": {"prompt_tokens": 8, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": True}}}
+    )
+
+    assert usage is not None
+    assert usage.cached_input_tokens == 0
+    assert usage.reasoning_tokens is None
+
+
+@pytest.mark.parametrize("shape", ["chat", "responses"])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_source_multiline_sse_usage_survives_every_chunk_boundary(shape: str, line_ending: str) -> None:
+    if shape == "chat":
+        usage = {"prompt_tokens": 8, "completion_tokens": 5, "completion_tokens_details": {"reasoning_tokens": 3}}
+    else:
+        usage = {"input_tokens": 8, "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 3}}
+    payload = {
+        "marker": "中文\u2028内容",
+        "usage": usage,
+        "metrics": {"time_to_first_token_ms": 20, "generation_time_ms": 180},
+    }
+    if shape == "responses":
+        payload = {"type": "response.completed", "response": payload}
+    # Every JSON line is a separate SSE data field. UTF-8 and CRLF can both
+    # split at any byte; splitlines() must not split the U+2028 string value.
+    frame = (
+        line_ending.join("data: " + line for line in json.dumps(payload, ensure_ascii=False, indent=2).split("\n"))
+        + line_ending * 2
+    ).encode()
+
+    for split in range(len(frame) + 1):
+        holder = SourceUsageHolder()
+        parser = SourceStreamUsageParser(holder, response_shape=shape)
+        parser.feed(frame[:split])
+        parser.feed(b"")
+        parser.feed(frame[split:])
+
+        assert holder.usage is not None, split
+        assert holder.usage.input_tokens == 8
+        assert holder.usage.output_tokens == 5
+        assert holder.usage.reasoning_tokens == 3
+        assert holder.timings is not None, split
+        assert holder.timings.latency_first_token_ms == 20
+        assert holder.timings.latency_ms == 200
+
+
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("terminated", [False, True])
+def test_responses_parser_preserves_utf8_content_observations_across_chunks(line_ending: str, terminated: bool) -> None:
+    delta = "你好\u2028!"
+    data = json.dumps({"type": "response.output_text.delta", "delta": delta}, ensure_ascii=False)
+    frame = _BOM + ("data: " + data + (line_ending * 2 if terminated else "")).encode()
+
+    for split in range(len(frame) + 1):
+        holder = SourceUsageHolder()
+        parser = SourceStreamUsageParser(holder, response_shape="responses")
+        parser.feed(frame[:split])
+        parser.feed(b"")
+        parser.feed(frame[split:])
+        parser.finish()
+        parser.finish()
+
+        assert holder.first_content_seen is True, split
+        assert holder.delta_chars == len(delta), split
+        assert holder.usage is None
+        assert holder.timings is None
+
+
+@pytest.mark.asyncio
+async def test_source_stream_preserves_fragmented_utf8_bytes_and_terminal_observations(monkeypatch):
+    payload = _bom_completed_event("resp_fragmented_utf8")
+    response_payload = cast(dict[str, object], payload["response"])
+    response_payload["output"] = [{"type": "message", "content": [{"type": "output_text", "text": "你好\u2028!"}]}]
+    response_payload["usage"] = {
+        "input_tokens": 8,
+        "output_tokens": 5,
+        "output_tokens_details": {"reasoning_tokens": 3},
+    }
+    response_payload["metrics"] = {"time_to_first_token_ms": 20, "generation_time_ms": 180}
+    frame = (
+        _BOM
+        + (
+            "\r\n".join("data: " + line for line in json.dumps(payload, ensure_ascii=False, indent=2).split("\n"))
+            + "\r\n\r\n"
+        ).encode()
+    )
+    chunks = [frame[index : index + 1] for index in range(len(frame))]
+    remaining: list[bytes | BaseException] = list(chunks[1:])
+    response = _FakeResponse(content=_FakeContent(chunks[0], remaining))
+    _session, _context, lease = _install_session(monkeypatch, response)
+    observations: list[str | None] = []
+
+    async def hook(holder: SourceUsageHolder) -> None:
+        observations.append(holder.terminal_kind)
+
+    stream = await forwarding_module.stream_responses(_responses_source(), {"model": "m"}, on_first_content=hook)
+    delivered = [chunk async for chunk in stream.body]
+
+    assert delivered == chunks
+    assert observations == ["completed"]
+    assert stream.usage_holder.usage == SourceUsage(input_tokens=8, output_tokens=5, reasoning_tokens=3)
+    assert stream.usage_holder.timings is not None
+    assert stream.usage_holder.timings.latency_ms == 200
+    assert lease.released == 1

@@ -47,6 +47,8 @@ def test_capacity_for_plan():
     assert capacity_for_plan("plus", "7d") is not None
     assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
     assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
+    assert capacity_for_plan("self_serve_business_prolite", "5h") == pytest.approx(1125.0)
+    assert capacity_for_plan("self_serve_business_prolite", "7d") == pytest.approx(37800.0)
     assert capacity_for_plan("unknown", "5h") is None
 
 

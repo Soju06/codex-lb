@@ -233,6 +233,22 @@ def parse_sse_data_json_text(text: str) -> dict[str, JsonValue] | None:
     return parse_sse_data_json(f"data: {text}\n\n")
 
 
+def parse_websocket_json_text(text: str) -> dict[str, JsonValue] | None:
+    """Parse one websocket text frame as a JSON object.
+
+    A websocket frame carries one whole JSON document, which may span several
+    lines (upstream pretty-prints some error frames). Framing it as SSE with
+    ``data: {text}`` would keep only the first line, so decode it directly.
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if is_json_dict(payload):
+        return payload
+    return None
+
+
 def parse_sse_data_json(event_block: str) -> dict[str, JsonValue] | None:
     if isinstance(event_block, ParsedSseBlock):
         return event_block.payload

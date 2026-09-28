@@ -350,8 +350,9 @@ def render_settings_reference() -> str:
             "codex-lb's own records rather than protocol-level WebSocket and driver tracing. |"
         ),
         (
-            "| `--log-file PATH` | none | Also write everything printed to stderr/stdout, including access lines,"
-            " to `PATH`, rotated at 50 MiB with 10 backups. The directory is created if missing; startup fails if"
+            "| `--log-file PATH` | none | Also write every log record (application, uvicorn and access), as"
+            " rendered on stderr/stdout, to `PATH` (output that bypasses `logging` is not captured), rotated"
+            " at 50 MiB with 10 backups. The directory is created if missing; startup fails if"
             " the file cannot be opened. |"
         ),
         "",

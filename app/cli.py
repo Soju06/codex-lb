@@ -126,16 +126,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--log-level",
         default="info",
         choices=("critical", "error", "warning", "info", "debug"),
-        help="Log level for application and server loggers (default: info).",
+        help=(
+            "Log level for codex-lb's own (app.*) loggers (default: info). uvicorn and "
+            "third-party loggers stay at info, or at this level when it is stricter."
+        ),
     )
     parser.add_argument(
         "--log-file",
         type=Path,
         default=None,
         help=(
-            "Also write all log output to this file, rotated at 50 MiB with 10 backups and "
-            "redacted like stderr. Put it on durable storage (for example the data volume); "
-            "the directory is created if missing and startup fails if it cannot be written."
+            "Also write every log record (application, server and access) to this file, "
+            "rotated at 50 MiB with 10 backups and redacted like stderr. Put it on durable "
+            "storage (for example the data volume); the directory is created if missing and "
+            "startup fails if it cannot be written."
         ),
     )
     parser.add_argument(

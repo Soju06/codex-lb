@@ -42,9 +42,10 @@ make the command exit with a usage error before the server starts.
 
 ### Requirement: Operators can also write logs to a rotated file
 
-The server command MUST accept `--log-file PATH`. When given, every record the
-server emits to stderr or stdout, including access-log lines, MUST also be
-written to `PATH`, rendered by the same redacting formatter as the stream
+The server command MUST accept `--log-file PATH`. When given, every log record
+the server's logging handlers write to stderr or stdout, including access-log
+records, MUST also be written to `PATH`. Output written to the streams without
+going through `logging` is out of scope. The file records MUST be rendered by the same redacting formatter as the stream
 output, and the file MUST rotate by size (50 MiB, 10 backups) through a single
 rotation sequence shared by application and access records. The parent
 directory MUST be created when missing. If the file cannot be opened, startup

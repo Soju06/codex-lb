@@ -10,11 +10,15 @@ but no such setting exists, so it silently does nothing.
 ## What Changes
 
 - `codex-lb` (`python -m app.cli`) gains `--log-level {critical,error,warning,info,debug}`
-  (default `info`, today's behavior). It sets the level for application loggers
-  and uvicorn's loggers.
-- `codex-lb` gains `--log-file PATH`. When given, every record that reaches
-  stderr/stdout is also written to that file, rendered by the same redacting
-  formatters, with size-based rotation (50 MiB x 10 backups). The parent
+  (default `info`, today's behavior). It sets the level for codex-lb's own
+  `app.*` loggers. uvicorn and third-party loggers stay at `info`, or at the
+  selected level when that is stricter.
+- `codex-lb` gains `--log-file PATH`. When given, every log record the server's
+  stream handlers render (application, uvicorn, and access records) is also
+  written to that file, rendered by the same redacting formatters. Output that
+  bypasses `logging` (raw `print`s, the interpreter's default uncaught-exception
+  traceback) is not captured. The file uses size-based rotation (50 MiB x 10
+  backups). The parent
   directory is created if missing. An unwritable path fails startup instead of
   running without the file.
 - Both are process-level CLI flags, like `--host` and `--ws-max-size`, not

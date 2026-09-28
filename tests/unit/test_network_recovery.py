@@ -13,6 +13,7 @@ from aiohttp.client_exceptions import ClientConnectorError
 from aiohttp.client_reqrep import ConnectionKey
 
 import app.core.resilience.network_recovery as network_recovery
+from tests.unit._proxy_test_helpers import WindowsOSError
 
 pytestmark = pytest.mark.unit
 
@@ -44,9 +45,23 @@ def test_routed_classifier_does_not_treat_missing_proxy_hostname_as_process_outa
     assert not network_recovery.is_process_network_failure(error, include_permanent_dns=False)
 
 
-@pytest.mark.parametrize("error_number", [errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH])
-def test_process_network_failure_classifies_host_route_errors(error_number: int) -> None:
-    assert network_recovery.is_process_network_failure(OSError(error_number, "route failure"))
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.ENETDOWN, "route failure"),
+        OSError(errno.ENETUNREACH, "route failure"),
+        OSError(errno.EHOSTUNREACH, "route failure"),
+        WindowsOSError(1231),
+        WindowsOSError(1232),
+    ],
+)
+def test_process_network_failure_classifies_host_route_errors(error: OSError) -> None:
+    assert network_recovery.is_process_network_failure(error)
+    assert not network_recovery.is_pre_dispatch_connection_failure(error)
+    wrapped = _connector_error(error)
+    assert network_recovery.is_process_network_failure(wrapped)
+    assert network_recovery.is_pre_dispatch_connection_failure(wrapped)
+    assert not network_recovery.is_process_network_failure(OSError(f"[WinError 1231] {error}"))
 
 
 @pytest.mark.parametrize(
@@ -55,10 +70,14 @@ def test_process_network_failure_classifies_host_route_errors(error_number: int)
         ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
         ConnectionResetError(errno.ECONNRESET, "reset"),
         TimeoutError("timed out"),
+        # IOCP peer reset and connect/retransmission timeout, as on POSIX.
+        WindowsOSError(64),
+        WindowsOSError(121),
     ],
 )
 def test_process_network_failure_does_not_classify_endpoint_failures(error: OSError) -> None:
     assert not network_recovery.is_process_network_failure(error)
+    assert not network_recovery.is_process_network_failure(_connector_error(error))
 
 
 def test_process_network_error_requires_stable_code_not_message_text() -> None:

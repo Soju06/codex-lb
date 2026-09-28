@@ -439,6 +439,38 @@ async def test_write_request_log_records_tps_only_for_qualifying_rows() -> None:
     assert runtime.ttft_samples is None
 
 
+@pytest.mark.asyncio
+async def test_display_timing_is_persisted_without_changing_routing_throughput() -> None:
+    scheduler = _RecordingVirtualScheduler(VirtualClock(epoch_value=_NOW))
+    request_logs = _RequestLogsRepo()
+    service = _service(scheduler, request_logs)
+
+    await service._write_request_log(
+        request_id="timing-sample",
+        account_id="acc-log",
+        api_key=None,
+        model=SOL,
+        status="success",
+        latency_ms=14_000,
+        latency_upstream_terminal_ms=12_000,
+        latency_first_token_ms=2_000,
+        latency_first_output_ms=7_000,
+        output_delta_count=3,
+        output_tokens=400,
+        reasoning_tokens=150,
+    )
+    await scheduler.drain()
+
+    row = request_logs.rows[0]
+    assert row["latency_ms"] == 14_000
+    assert row["latency_upstream_terminal_ms"] == 12_000
+    assert row["latency_first_output_ms"] == 7_000
+    assert row["output_delta_count"] == 3
+    # Routing keeps total output tokens over terminal - TTFT (40 TPS),
+    # independently of the display's non-reasoning window (50 TPS).
+    assert service._load_balancer._runtime["acc-log"].tps_samples == {SOL: [(_NOW, pytest.approx(40.0))]}
+
+
 def test_detached_runtime_snapshot_copies_tps_samples_and_cohort_weights() -> None:
     live = _runtime({SOL: [40.0] * 8})
     live.tps_weights = {SOL: 0.6}

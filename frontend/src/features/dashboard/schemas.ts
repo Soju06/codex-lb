@@ -246,6 +246,11 @@ export const RequestLogSchema = z.object({
   costBreakdown: RequestLogCostBreakdownSchema.nullable().optional().default(null),
   latencyMs: z.number().nullable(),
   latencyFirstTokenMs: z.number().nullable().optional().default(null),
+  latencyFirstOutputMs: z.number().nullable().optional(),
+  latencyUpstreamTerminalMs: z.number().nullable().optional(),
+  outputDeltaCount: z.number().int().nullable().optional(),
+  generationTps: z.number().nullable().optional(),
+  generationTpsStatus: z.enum(["estimated", "legacy_estimate", "insufficient_sample", "missing_usage", "missing_timing", "invalid_sample", "incomplete"]).optional(),
   latencyQueueMs: z.number().nullable().optional().default(null),
 });
 

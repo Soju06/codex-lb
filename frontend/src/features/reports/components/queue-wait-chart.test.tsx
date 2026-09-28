@@ -62,7 +62,7 @@ describe("QueueWaitChart", () => {
     ]);
   });
 
-  it("fills missing selected days with zero queue wait", () => {
+  it("keeps missing selected days as gaps", () => {
     render(
       <QueueWaitChart
         startDate="2026-07-14"
@@ -72,9 +72,9 @@ describe("QueueWaitChart", () => {
     );
 
     expect(capturedProps?.data).toEqual([
-      { date: "07-14", queue: 0 },
+      { date: "07-14", queue: null },
       { date: "07-15", queue: 90 },
-      { date: "07-16", queue: 0 },
+      { date: "07-16", queue: null },
     ]);
   });
 });

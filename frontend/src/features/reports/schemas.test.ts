@@ -20,6 +20,12 @@ function validReportsPayload() {
 }
 
 describe("ReportsResponseSchema", () => {
+  it("preserves unavailable timing as null and qualified sample counts", () => {
+    const payload = validReportsPayload();
+    Object.assign(payload.daily[0], { medianTtftMs: null, medianTps: null, medianQueueMs: null, tpsSampleCount: 0 });
+    const parsed = ReportsResponseSchema.parse(payload);
+    expect(parsed.daily[0]).toMatchObject({ medianTtftMs: null, medianTps: null, medianQueueMs: null, tpsSampleCount: 0 });
+  });
   it("preserves conversation, cancellation, and reasoning totals from the reports payload", () => {
     const parsed = ReportsResponseSchema.parse({
       summary: {

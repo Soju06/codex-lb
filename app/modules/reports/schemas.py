@@ -19,9 +19,10 @@ class DailyReportRow(DashboardModel):
     conversations: int = 0
     error_count: int = 0
     cancelled_count: int = 0
-    median_ttft_ms: float = 0.0
-    median_tps: float = 0.0
-    median_queue_ms: float = 0.0
+    median_ttft_ms: float | None = None
+    median_tps: float | None = None
+    median_queue_ms: float | None = None
+    tps_sample_count: int = 0
 
 
 class ModelCostEntry(DashboardModel):

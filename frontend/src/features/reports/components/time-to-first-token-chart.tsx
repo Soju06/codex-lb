@@ -28,11 +28,11 @@ export function TimeToFirstTokenChart({ startDate, endDate, data }: TimeToFirstT
   const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    ttft: d.medianTtftMs ?? 0,
+    ttft: d.medianTtftMs ?? null,
   }));
 
   return (
-    <ReportChartCard title={t("reports.charts.timeToFirstToken")} empty={data.length === 0}>
+    <ReportChartCard title={t("reports.charts.timeToFirstToken")} empty={!chartData.some((d) => d.ttft != null)} description={t("dashboard.requestDetails.ttftExplanation")}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>

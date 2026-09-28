@@ -807,7 +807,9 @@ def _mark_stream_settlement_interrupted(
     )
 
 
-def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock: Clock) -> bool:
+def _stamp_terminal(
+    settlement: _StreamSettlement, event_type: str | None, clock: Clock, *, observed_at: float | None = None
+) -> bool:
     """Return whether ``event_type`` is an upstream terminal frame, stamping its parse instant on the settlement.
 
     Called at the HTTP stream's terminal-detection sites before the frame is
@@ -817,7 +819,8 @@ def _stamp_terminal(settlement: _StreamSettlement, event_type: str | None, clock
     """
     if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
         return False
-    settlement.upstream_terminal_at = clock.monotonic()
+    if settlement.upstream_terminal_at is None:
+        settlement.upstream_terminal_at = clock.monotonic() if observed_at is None else observed_at
     return True
 
 

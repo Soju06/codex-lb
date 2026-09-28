@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import Field
 
+from app.core.usage.speed import GenerationTpsStatus
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -65,6 +66,11 @@ class RequestLogEntry(DashboardModel):
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
+    latency_upstream_terminal_ms: int | None = None
+    output_delta_count: int | None = None
+    latency_first_output_ms: int | None = None
+    generation_tps: float | None = None
+    generation_tps_status: GenerationTpsStatus = "missing_timing"
     latency_queue_ms: int | None = None
 
 

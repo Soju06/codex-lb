@@ -4561,6 +4561,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
             ),
         ],
         deferred_message_batches=[
+            [],
             [
                 _FakeUpstreamMessage(
                     "text",
@@ -4583,7 +4584,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                         separators=(",", ":"),
                     ),
                 ),
-            ]
+            ],
         ],
     )
     connect_calls: list[dict[str, object]] = []

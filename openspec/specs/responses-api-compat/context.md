@@ -321,6 +321,71 @@ Canonical background JSON acknowledgements with status `queued` or `in_progress`
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
 
+## Astra WebSocket steering ownership
+
+The steering requirements in `spec.md` describe protocol-forward support for
+`response.steer` on an owned Astra subscription socket. For example,
+`{"type":"response.steer","previous_response_id":"r1","input":"Use the corrected value."}`
+keeps the active upstream connection/account and reserves one automatic
+successor. Configuration-update/Ultra policy, async-tool continuity and model
+catalog bootstrap remain separate capabilities. The checked rust-v0.153.4 Codex
+baseline does not emit steering; no live provider acceptance is inferred from
+the local transport fixtures.
+
+Explicit tool-input continuations replace a steering placeholder only after
+preparation and admission. Registration, compression, archive writes, and send
+return are not transport handoff: Python transports observe their owned write,
+and native egress observes the worker's successful send acknowledgment before
+making later inbound frames available. An explicit response received during
+post-write flow control remains owned. A dispatched explicit create retains
+priority over an ambiguous same-parent automatic successor; stronger causal
+identity would require upstream metadata not supplied by this protocol.
+
+Expired or finally rejected steering retains only bounded correlation IDs, not
+input bodies. Its parent cannot accept a replacement steer on that upstream
+connection because delayed acknowledgments lack a client generation ID.
+Explicit creates and other parents remain usable. At the history limit,
+admitted tool-input work drains before rotation without an account-health
+penalty. Eligible live requests retain priority for anonymous terminal events;
+an undispatched replacement is not eligible merely because it was registered.
+
+Completed Astra parents retain effective settings, including folded reasoning
+updates, without original input/replay bodies. These snapshots are specific to
+downstream WebSockets and are not duplicated for HTTP bridge requests. Quota
+refresh, exactly-once settlement and cancellation-safe reservation attachment
+are documented in `../api-keys/context.md`. Detailed implementation rationale
+and rejected approaches are retained with the archived
+`support-astra-websocket-steering` change.
+
+The retained configuration is materialized once at completion even if the
+client never steers: accepting a steer after completion requires the original
+request body to be discarded then, rather than retained until a possible later
+steer. Avoiding that parse would require either keeping historical input
+longer or eagerly duplicating the complete request during preparation. The
+request state separately retains pre-wire effort so an omitted effort stays
+omitted and `ultra` is not mistaken for its outbound `max` alias.
+
+
+Ordinary Astra request preparation reuses `request_text`; it does not create a
+second full forwarding dictionary. Configuration is derived from that owned
+serialization when steering or completed-parent retention needs it. aiohttp's
+private writer transport is left untouched until a steering-sensitive explicit
+send needs observation. Missing private transport support produces a local
+`steering_not_supported` failure before dispatch; the normal request cleanup
+releases its reservation and permits a corrected continuation or unrelated
+request. The connection itself is not broken by capability detection.
+
+For example, an ordinary Astra create that completes as `r1` uses its existing
+serialized request without installing a transport observer. Retention keeps
+the effective settings but discards the original input. A later
+`{"type":"response.steer","previous_response_id":"r1","input":"Use the corrected value."}`
+derives its configuration from those retained settings. If an explicit
+tool-input continuation then needs handoff observation and aiohttp's private
+transport interface is unavailable, only that explicit send fails locally
+before dispatch; unrelated ordinary traffic remains usable. This example
+illustrates the [deferred instrumentation requirement](spec.md#requirement-steering-instrumentation-is-deferred-until-needed),
+not a guarantee of live provider steering support.
+
 ## Routed file transport failover
 
 File operations follow the existing pre-visible unary retry policy. The file client carries typed dispatch provenance through its service adapter so a refused account-proxy connection can retry another eligible account even though credential-safe transport messages omit low-level details. Typed replay eligibility takes precedence over message text: a proxy endpoint named `timeout-primary` must not turn a TLS verification failure into a retry.

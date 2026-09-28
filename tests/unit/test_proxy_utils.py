@@ -38489,18 +38489,27 @@ async def test_stream_with_retry_releases_api_key_reservation_when_owner_lookup_
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     owner_lookup.assert_awaited_once()
     select_account.assert_not_called()
+    # Terminal ownership is claimed before the single current-items read.
+    # A failing read still must not settle or commit that claim; real session
+    # rollback and retry are covered by the detached-persistence integration.
     get_usage_reservation_mock.assert_awaited_once_with(reservation.reservation_id)
+    transition_usage_reservation_status_mock.assert_awaited_once_with(
+        reservation.reservation_id,
+        expected_status="reserved",
+        new_status="released",
+    )
     if release_read_fails:
-        transition_usage_reservation_status_mock.assert_not_awaited()
         settle_usage_reservation_mock.assert_not_awaited()
         commit_mock.assert_not_awaited()
     else:
-        transition_usage_reservation_status_mock.assert_awaited_once_with(
+        settle_usage_reservation_mock.assert_awaited_once_with(
             reservation.reservation_id,
-            expected_status="reserved",
-            new_status="released",
+            status="released",
+            input_tokens=None,
+            output_tokens=None,
+            cached_input_tokens=None,
+            cost_microdollars=None,
         )
-        settle_usage_reservation_mock.assert_awaited_once()
         commit_mock.assert_awaited_once()
 
 

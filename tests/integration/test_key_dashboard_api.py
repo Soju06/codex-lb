@@ -297,6 +297,41 @@ async def test_key_installer_requires_own_key_and_is_not_cacheable(async_client,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["macos", "linux", "windows"])
+@pytest.mark.parametrize("scheme", [None, "https"])
+async def test_key_installer_preserves_public_https_behind_http_proxy(async_client, platform, scheme):
+    own = await _create_api_key("installer-https")
+    params = {"platform": platform}
+    if scheme is not None:
+        params["scheme"] = scheme
+    response = await async_client.get(
+        "http://installer.example.test:8443/api/key-dashboard/install-script",
+        params=params,
+        headers={"Authorization": f"Bearer {own.key}"},
+    )
+    assert response.status_code == 200
+    origin = f"{scheme or 'http'}://installer.example.test:8443"
+    assert f'openai_base_url = "{origin}/backend-api/codex"' in response.text
+    assert f'\nbase_url = "{origin}/backend-api/codex"' in response.text
+    assert f'"catalog_url": "{origin}/api/key-dashboard/models"' in response.text
+    assert response.headers["cache-control"] == "private, no-store"
+    assert own.key in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["http", "ftp", "https://elsewhere.invalid", ""])
+async def test_key_installer_rejects_scheme_downgrade_or_destination_override(async_client, scheme):
+    own = await _create_api_key("installer-invalid-scheme")
+    response = await async_client.get(
+        "https://installer.example.test/api/key-dashboard/install-script",
+        params={"platform": "macos", "scheme": scheme},
+        headers={"Authorization": f"Bearer {own.key}"},
+    )
+    assert response.status_code == 422
+    assert own.key not in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enforced", [None, "gpt-5.6-terra"])
 async def test_key_installer_uses_key_model_policy(async_client, db_setup, enforced):
     del db_setup

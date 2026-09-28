@@ -362,7 +362,12 @@ describe("API key dashboard integration", () => {
     expect(document.body.textContent).not.toContain(TEST_KEY);
   });
 
-  it("exports the logged-in key for every platform while masking previews and omitting cookies", async () => {
+  it.each(["http:", "https:"])("exports the logged-in key over %s while masking previews and omitting cookies", async (protocol) => {
+    vi.spyOn(window, "location", "get").mockReturnValue({
+      ...window.location,
+      protocol,
+      origin: `${protocol}//localhost:2455`,
+    });
     mockDashboard();
     const requests: string[] = [];
     server.use(http.get("/api/key-dashboard/install-script", ({ request }) => {
@@ -370,6 +375,7 @@ describe("API key dashboard integration", () => {
       expect(request.credentials).toBe("omit");
       expect(request.cache).toBe("no-store");
       expect(request.url).not.toContain(TEST_KEY);
+      expect(new URL(request.url).searchParams.get("scheme")).toBe(protocol === "https:" ? "https" : null);
       const platform = new URL(request.url).searchParams.get("platform");
       requests.push(platform!);
       return HttpResponse.text(`# ${platform}\n${TEST_KEY}\n`);
@@ -400,6 +406,7 @@ describe("API key dashboard integration", () => {
       const command = clipboard.mock.calls.at(-1)![0];
       expect(command).toContain(`Authorization: Bearer ${TEST_KEY}`);
       expect(command).toContain(`platform=${platform}`);
+      expect(command.includes("scheme=https")).toBe(protocol === "https:");
       expect(command).toContain(platform === "windows" ? "curl.exe" : "curl -fsS");
       await user.click(screen.getByRole("button", { name: "Copy uninstall command" }));
       const uninstall = clipboard.mock.calls.at(-1)![0];

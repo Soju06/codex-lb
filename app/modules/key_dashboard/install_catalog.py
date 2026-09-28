@@ -23,12 +23,19 @@ setup = json.loads((backup_dir / "setup.json").read_text(encoding="utf-8"))
 auth = json.loads((backup_dir / "auth.new").read_text(encoding="utf-8"))
 request = Request(
     setup["catalog_url"],
-    headers={"Authorization": "Bearer " + auth["OPENAI_API_KEY"], "Accept": "application/json"},
+    headers={
+        "Authorization": "Bearer " + auth["OPENAI_API_KEY"],
+        "Accept": "application/json",
+        "User-Agent": "codex-lb-installer/1.0",
+    },
 )
 try:
     with build_opener(NoRedirect).open(request, timeout=30) as response:
         catalog = json.load(response)
 except HTTPError as exc:
+    if exc.code == 403:
+        sys.exit("Catalog download forbidden (HTTP 403); check HTTPS and proxy or firewall rules. "
+                 "Client files were not replaced.")
     sys.exit("Catalog download failed (HTTP %s); check the key and endpoint." % exc.code)
 except (URLError, OSError, ValueError):
     sys.exit("Catalog download failed; check connectivity and the server's JSON catalog.")
@@ -74,10 +81,15 @@ $credential = ($auth | ConvertFrom-Json).OPENAI_API_KEY
 try {
     $catalogResponse = Invoke-WebRequest -UseBasicParsing -Uri $setup.catalog_url `
         -Headers @{ Authorization = ('Bearer ' + $credential); Accept = 'application/json' } `
+        -UserAgent 'codex-lb-installer/1.0' `
         -MaximumRedirection 0 -TimeoutSec 30
     if ([int]$catalogResponse.StatusCode -ne 200) { throw 'Unexpected catalog status' }
     $catalog = $catalogResponse.Content | ConvertFrom-Json
 } catch {
+    if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 403) {
+        throw ('Catalog download forbidden (HTTP 403); check HTTPS and proxy or firewall rules. ' +
+            'Client files were not replaced.')
+    }
     throw 'Catalog download failed; check the key, endpoint, and server JSON catalog. Client files were not replaced.'
 }
 if ($null -eq $catalog -or $catalog.models -isnot [Array]) {

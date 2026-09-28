@@ -9,7 +9,7 @@ function powershellQuote(value: string): string {
 }
 
 export function installCommand(platform: InstallPlatform, apiKey: string, origin: string): string {
-  const url = new URL(installScriptPath(platform), origin).href;
+  const url = new URL(installScriptPath(platform, new URL(origin).protocol), origin).href;
   const authorization = `Authorization: Bearer ${apiKey}`;
   if (platform === "windows") {
     return `$script = curl.exe -fsS --header ${powershellQuote(authorization)} ${powershellQuote(url)}; if ($LASTEXITCODE -ne 0) { throw 'Download failed' }; & ([ScriptBlock]::Create(($script -join "\`n")))`;

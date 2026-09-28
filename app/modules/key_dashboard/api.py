@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query, Request, Response, Security
 from fastapi.responses import PlainTextResponse
 
@@ -35,15 +37,19 @@ async def get_key_dashboard_group(
 async def get_key_dashboard_install_script(
     request: Request,
     platform: InstallPlatform = Query(),
+    scheme: Literal["https"] | None = Query(default=None),
     api_key: ApiKeyData = Security(validate_usage_api_key),
 ) -> PlainTextResponse:
     # Validation above authenticates this exact header; never accept a key selector.
     credential = request.headers["authorization"].partition(" ")[2]
     model = api_key.enforced_model or (api_key.allowed_models[0] if api_key.allowed_models else None)
+    # A browser can preserve public HTTPS across an HTTP ingress without changing
+    # the credential destination or broadening the application's proxy trust.
+    base_url = request.base_url.replace(scheme="https") if scheme == "https" else request.base_url
     script = build_install_script(
         platform=platform,
         api_key=credential,
-        base_url=f"{str(request.base_url).rstrip('/')}/backend-api/codex",
+        base_url=f"{str(base_url).rstrip('/')}/backend-api/codex",
         model=model,
     )
     extension = "ps1" if platform == "windows" else "sh"

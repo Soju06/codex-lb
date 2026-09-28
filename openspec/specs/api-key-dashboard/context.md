@@ -51,6 +51,14 @@ Provider WebSockets remain enabled only if every installed entry advertises `pre
 
 Rerun the downloaded script or the Install command after adding aliases or changing capability metadata, then restart clients. For example, an allowed alias `cd/gpt-6-astra=ch/linxaq` installs as `cd/gpt-6-astra`; clients use that public name and the server applies the upstream mapping. Refresh reads the current catalog even from an older exported script. There is no background synchronization.
 
+### HTTPS export and edge filters
+
+The [installer transport requirements](spec.md#requirement-preserve-https-in-installer-exports-behind-a-proxy) cover proxies that expose HTTPS publicly but report HTTP to the application. The HTTPS Install tab appends `scheme=https` to both its script fetch and copied terminal command. This hint only upgrades the exported URL scheme; the request authority, port and base path remain unchanged. HTTP dashboards omit it. For example, `/api/key-dashboard/install-script?platform=macos&scheme=https` exports HTTPS provider and catalog URLs even when HAProxy reports HTTP. This keeps installer export independent of global forwarded-header trust; the hint does not establish a trusted proxy or authenticated user.
+
+Catalog downloads identify themselves as `codex-lb-installer/1.0`. This addresses edge browser-signature filters that reject generic Python or PowerShell user agents; it is not a guarantee that every firewall permits the request. A remaining HTTP 403 points the user toward HTTPS and proxy or firewall rules without exposing the response body or replacing existing client files. Redirects remain rejected, and certificate verification stays enabled.
+
+After deploying this fix, refresh the dashboard and copy or download a new installer. Previously saved scripts retain their embedded URLs and user agent, and old copied commands lack the HTTPS hint. No ingress configuration change or new setting is required.
+
 This follows the repository's [client setup guide](../../../docs/client-setup.md) and OpenAI's official [authentication](https://developers.openai.com/codex/auth/), [advanced configuration](https://developers.openai.com/codex/config-advanced/), and [configuration reference](https://developers.openai.com/codex/config-reference/) documentation. API-key mode is for local workflows, not ChatGPT-only cloud features.
 
 ### Constraints and recovery

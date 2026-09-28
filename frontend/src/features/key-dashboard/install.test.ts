@@ -18,7 +18,7 @@ describe("installer commands", () => {
       ${command}
     `], { encoding: "utf8" });
     expect(output).toContain(`Authorization: Bearer ${key}\n`);
-    expect(output).toContain("https://example.test/api/key-dashboard/install-script?platform=linux");
+    expect(output).toContain("https://example.test/api/key-dashboard/install-script?platform=linux&scheme=https");
     expect(output).toContain("SETUP_OK");
   });
 
@@ -38,5 +38,13 @@ describe("installer commands", () => {
     expect(command).toContain("'Authorization: Bearer sk-quote'' $variable'");
     expect(command.indexOf("$LASTEXITCODE -ne 0")).toBeLessThan(command.indexOf("[ScriptBlock]::Create"));
     expect(command).toContain('($script -join "`n")');
+  });
+
+  it.each(["macos", "linux", "windows"] as const)("preserves the public protocol for %s exports", (platform) => {
+    const secure = installCommand(platform, "test-key", "https://example.test:8443");
+    expect(secure).toContain(`https://example.test:8443/api/key-dashboard/install-script?platform=${platform}&scheme=https`);
+    const local = installCommand(platform, "test-key", "http://localhost:2455");
+    expect(local).toContain(`http://localhost:2455/api/key-dashboard/install-script?platform=${platform}`);
+    expect(local).not.toContain("scheme=");
   });
 });

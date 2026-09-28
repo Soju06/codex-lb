@@ -17,13 +17,15 @@ export function getKeyDashboardGroup(apiKey: string, signal: AbortSignal) {
 
 export type InstallPlatform = "macos" | "linux" | "windows";
 
-export function installScriptPath(platform: InstallPlatform): string {
-  return `/api/key-dashboard/install-script?platform=${platform}`;
+export function installScriptPath(platform: InstallPlatform, protocol: string): string {
+  const params = new URLSearchParams({ platform });
+  if (protocol === "https:") params.set("scheme", "https");
+  return `/api/key-dashboard/install-script?${params.toString()}`;
 }
 
 export function getInstallScript(apiKey: string, platform: InstallPlatform, signal: AbortSignal): Promise<string> {
   const options = keyRequestOptions(apiKey);
-  return get(installScriptPath(platform), z.string(), {
+  return get(installScriptPath(platform, window.location.protocol), z.string(), {
     ...options,
     headers: { ...options.headers, Accept: "text/plain" },
     signal,

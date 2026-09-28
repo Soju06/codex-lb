@@ -118,6 +118,9 @@ async def test_exported_installer_downloads_scoped_aliases_and_preserves_agent_m
 
     async def bridge(request: web.Request) -> web.Response:
         assert request.headers["Authorization"] == f"Bearer {key}"
+        if request.headers.get("User-Agent") != "codex-lb-installer/1.0":
+            return web.json_response({"error": "browser_signature_banned"}, status=403)
+        assert request.headers["Accept"] == "application/json"
         requests.append(request.path)
         response = await async_client.get(request.path, headers={"Authorization": request.headers["Authorization"]})
         return web.Response(status=response.status_code, body=response.content, content_type="application/json")

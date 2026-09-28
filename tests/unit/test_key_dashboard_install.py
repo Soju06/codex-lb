@@ -51,7 +51,9 @@ def catalog_server() -> Iterator[_CatalogServer]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             state.requests.append((self.path, self.headers.get("Authorization")))
-            self.send_response(state.status)
+            # Reproduce an edge that rejects generic runtime signatures.
+            status = state.status if self.headers.get("User-Agent") == "codex-lb-installer/1.0" else 403
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             if state.status == 302:
                 self.send_header("Location", state.base_url + "/redirected")
@@ -193,15 +195,16 @@ def test_installer_refreshes_catalog_and_transport(tmp_path: Path, catalog_serve
 
 
 @pytest.mark.parametrize(
-    "failure", ["unauthorized", "redirect", "shape", "entry", "empty", "hidden", "unsupported", "removed", "bad_key"]
+    "failure",
+    ["unauthorized", "forbidden", "redirect", "shape", "entry", "empty", "hidden", "unsupported", "removed", "bad_key"],
 )
 def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: _CatalogServer, failure: str) -> None:
     for name in ("config.toml", "auth.json", "codex-lb-models.json"):
         (tmp_path / name).write_text("original " + name)
     key = "own-key"
-    if failure == "unauthorized":
-        catalog_server.status = 401
-        catalog_server.payload = {"error": key}
+    if failure in {"unauthorized", "forbidden"}:
+        catalog_server.status = 401 if failure == "unauthorized" else 403
+        catalog_server.payload = {"error": key, "private": "sensitive-edge-response"}
     elif failure == "redirect":
         catalog_server.status = 302
     elif failure == "shape":
@@ -233,6 +236,10 @@ def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: 
     assert result.returncode != 0
     assert key not in result.stdout + result.stderr
     assert "Traceback" not in result.stderr
+    assert "sensitive-edge-response" not in result.stdout + result.stderr
+    if failure == "forbidden":
+        assert "HTTP 403" in result.stderr
+        assert "HTTPS and proxy or firewall rules" in result.stderr
     assert not (tmp_path / "injected").exists()
     for name in ("config.toml", "auth.json", "codex-lb-models.json"):
         assert (tmp_path / name).read_text() == "original " + name
@@ -241,14 +248,15 @@ def test_catalog_failure_keeps_all_client_files(tmp_path: Path, catalog_server: 
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell runtime is unavailable")
-@pytest.mark.parametrize("failure", [None, "unauthorized", "redirect", "empty", "removed"])
+@pytest.mark.parametrize("failure", [None, "unauthorized", "forbidden", "redirect", "empty", "removed"])
 def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServer, failure: str | None) -> None:
     model = "custom/'quote' $variable 😀"
     native = _entry("native", websockets=True)
     custom = _entry(model)
     catalog_server.payload = {"models": [native, custom, {**_entry("denied"), "visibility": "hide"}]}
-    if failure == "unauthorized":
-        catalog_server.status = 401
+    if failure in {"unauthorized", "forbidden"}:
+        catalog_server.status = 401 if failure == "unauthorized" else 403
+        catalog_server.payload = {"error": "sk-own-key", "private": "sensitive-edge-response"}
     elif failure == "redirect":
         catalog_server.status = 302
     elif failure == "empty":
@@ -291,8 +299,14 @@ def test_powershell_catalog_program(tmp_path: Path, catalog_server: _CatalogServ
         capture_output=True,
     )
     assert "sk-own-key" not in result.stdout + result.stderr
+    assert "sensitive-edge-response" not in result.stdout + result.stderr
     if failure:
         assert result.returncode != 0
+        if failure == "forbidden":
+            assert "HTTP 403" in result.stderr
+            # PowerShell decorates and wraps exception output for the terminal.
+            for term in ("HTTPS", "proxy", "firewall"):
+                assert term in result.stderr
         if failure == "redirect":
             assert len(catalog_server.requests) == 1
         return

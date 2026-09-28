@@ -640,6 +640,59 @@ async def test_backend_codex_models_defaults_source_model_context_window(async_c
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/backend-api/codex/models",
+        "/v1/models?client_version=0.156.1",
+    ],
+)
+@pytest.mark.parametrize(
+    ("instructions_metadata", "expected"),
+    [
+        pytest.param(
+            {"base_instructions": "Follow the source coding policy.\n  Keep 日本語 comments.\n"},
+            "Follow the source coding policy.\n  Keep 日本語 comments.\n",
+            id="string",
+        ),
+        pytest.param({"base_instructions": ""}, "", id="empty"),
+        pytest.param({}, "", id="missing"),
+        pytest.param({"base_instructions": None}, "", id="null"),
+        pytest.param({"base_instructions": {"text": "instructions"}}, "", id="non-string"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_catalog_preserves_source_base_instructions(
+    async_client,
+    path: str,
+    instructions_metadata: dict[str, JsonValue],
+    expected: str,
+):
+    model = "external-source-instructions"
+    metadata: dict[str, JsonValue] = {
+        "tool_mode": "code_mode_only",
+        "multi_agent_version": "v2",
+        "use_responses_lite": False,
+        "experimental_supported_tools": ["custom"],
+        **instructions_metadata,
+    }
+    await _create_model_source(
+        async_client,
+        name="codex-source-instructions",
+        model=model,
+        supports_responses=True,
+        raw_metadata_json=json.dumps(metadata),
+    )
+
+    response = await async_client.get(path)
+
+    assert response.status_code == 200
+    entry = next(item for item in response.json()["models"] if item["slug"] == model)
+    assert entry["base_instructions"] == expected
+    for key in ("tool_mode", "multi_agent_version", "use_responses_lite", "experimental_supported_tools"):
+        assert entry[key] == metadata[key]
+
+
+@pytest.mark.parametrize(
     ("case", "raw_tools", "expected_tools"),
     [
         ("mixed", ["custom", 42, {"type": "bad"}], ["custom"]),

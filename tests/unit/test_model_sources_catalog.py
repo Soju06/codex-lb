@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
+from app.core.types import JsonValue
 from app.db.models import ModelSource, ModelSourceModel
 from app.modules.model_sources.catalog import (
     DEFAULT_SOURCE_CONTEXT_WINDOW,
@@ -139,6 +140,37 @@ def _overrides_source(raw_metadata: dict[str, object]) -> ModelSource:
             )
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("instructions", "expected"),
+    [
+        (
+            "Follow the source coding policy.\n  Keep 日本語 comments.\n",
+            "Follow the source coding policy.\n  Keep 日本語 comments.\n",
+        ),
+        ("", ""),
+        ("  \n", "  \n"),
+        (None, ""),
+        (False, ""),
+        (7, ""),
+        (1.5, ""),
+        (["instructions"], ""),
+        ({"text": "instructions"}, ""),
+    ],
+)
+def test_source_model_catalog_preserves_string_base_instructions(instructions: JsonValue, expected: str) -> None:
+    source = _overrides_source({"base_instructions": instructions})
+
+    [model] = source_models_to_upstream_models([source])
+
+    assert model.base_instructions == expected
+
+
+def test_source_model_catalog_defaults_missing_base_instructions() -> None:
+    [model] = source_models_to_upstream_models([_overrides_source({})])
+
+    assert model.base_instructions == ""
 
 
 def test_source_request_overrides_never_reach_upstream_model_raw() -> None:

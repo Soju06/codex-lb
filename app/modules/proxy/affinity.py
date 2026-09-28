@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Literal, TypedDict
+from typing import TypedDict
 from uuid import uuid4
 
 from app.core.metrics.prometheus import (
@@ -28,6 +28,7 @@ from app.core.openai.requests import (
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.sticky_repository import _ContinuitySource
 from app.modules.proxy.thread_anchors import (
     build_thread_window,
     get_thread_anchor_index,
@@ -36,7 +37,9 @@ from app.modules.proxy.thread_anchors import (
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
-_CodexSessionSource = Literal["session_header", "thread_header", "turn_state"]
+# The literal is owned by the sticky repository so the lookup parameter type
+# and this policy type can never disagree.
+_CodexSessionSource = _ContinuitySource
 # Request headers are stripped and HTTP forbids CR/LF, while PostgreSQL/SQLite
 # text keys can safely retain LF. This sentinel makes the internal namespace
 # structurally unreachable by every legacy raw header, even if its digest is
@@ -105,7 +108,11 @@ class _AffinityPolicy:
 
     @property
     def selection_key(self) -> str | None:
-        if self.key is None or self.codex_session_source != "session_header":
+        if self.key is None:
+            return self.key
+        if self.codex_session_source == "history_session":
+            return _history_session_selection_key(self.key)
+        if self.codex_session_source != "session_header":
             return self.key
         # CODEX_SESSION historically mixed raw session and turn-state values.
         # Namespace only the newly soft source; raw legacy rows stay hard so a
@@ -192,6 +199,19 @@ def _codex_session_selection_key(key: str) -> str:
     # sentinel above—not secrecy—provides source separation from raw rows.
     digest = sha256(key.encode()).hexdigest()
     return f"{_CODEX_SELECTION_KEY_PREFIX}:session_header:{digest}"
+
+
+def _history_session_selection_key(key: str) -> str:
+    """Return the dedicated hard owner key for history/notes sessions.
+
+    A history session is account-local state, rather than the soft process
+    locality represented by a regular Responses ``session_id``. Keep it in a
+    separate opaque namespace so it cannot collide with legacy raw rows or
+    acquire their migration and spillover behavior.
+    """
+
+    digest = sha256(key.encode()).hexdigest()
+    return f"{_CODEX_SELECTION_KEY_PREFIX}:history_session:{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,7 +564,24 @@ def _sticky_key_for_codex_control_request(
     headers: Mapping[str, str],
     *,
     codex_session_affinity: bool,
+    body_session_id: str | None = None,
 ) -> _AffinityPolicy:
+    if codex_session_affinity and isinstance(body_session_id, str) and (session_id := body_session_id.strip()):
+        # Native history/notes requests carry no session header; their body
+        # ``context.session_id`` is the Codex process session whose history
+        # and notes live on exactly one upstream account. Pin them in a
+        # dedicated hard namespace: no legacy raw row, no cap spillover, and
+        # no failover once an owner exists. The first call seeds from the
+        # soft process-session owner so notes land where that session's
+        # Responses traffic currently runs, without changing how Responses
+        # themselves are routed. The forwarded request is left unchanged.
+        return _AffinityPolicy(
+            key=session_id,
+            kind=StickySessionKind.CODEX_SESSION,
+            codex_session_source="history_session",
+            seed_selection_key=_codex_session_selection_key(session_id),
+            seed_selection_kind=StickySessionKind.CODEX_SESSION,
+        )
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         return _AffinityPolicy(

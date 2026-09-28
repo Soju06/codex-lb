@@ -20,6 +20,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service import request_log as request_log_mixin
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
@@ -1388,13 +1389,24 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
         await asyncio.wait_for(gate_entered.wait(), timeout=1.0)
         assert pending_requests == deque()
 
+    terminal_task = upstream_control.terminal_message_task
+    assert terminal_task is not None
+    drain_observed_terminal = asyncio.Event()
+    original_is_persistence_task = request_log_mixin._is_persistence_task
+
+    def observe_persistence_task(task: asyncio.Task[None], prefixes: tuple[str, ...] | None = None) -> bool:
+        matches = original_is_persistence_task(task, prefixes)
+        if task is terminal_task and matches and asyncio.current_task() is persistence_drain:
+            drain_observed_terminal.set()
+        return matches
+
+    monkeypatch.setattr(request_log_mixin, "_is_persistence_task", observe_persistence_task)
     relay.cancel()
-    await asyncio.sleep(0)
     persistence_drain = asyncio.create_task(
         service.drain_persistence_tasks(timeout_seconds=1.0),
         name="test-terminal-persistence-drain",
     )
-    await asyncio.sleep(0.01)
+    await asyncio.wait_for(drain_observed_terminal.wait(), timeout=1.0)
     terminal_work_was_drain_owned = not persistence_drain.done()
 
     if cancel_before_archive_attribution:
@@ -1415,6 +1427,7 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
             "input_tokens": 12,
             "output_tokens": 7,
             "cached_input_tokens": 3,
+            "cache_write_input_tokens": 0,
             "service_tier": request_state.service_tier,
         }
     ]

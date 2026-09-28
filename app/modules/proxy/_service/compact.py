@@ -2179,6 +2179,9 @@ class _CompactMixin:
                 cached_input_tokens=(
                     usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
                 ),
+                cache_write_input_tokens=(
+                    usage.input_tokens_details.cache_write_tokens if usage and usage.input_tokens_details else None
+                ),
                 reasoning_tokens=(
                     usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
                 ),

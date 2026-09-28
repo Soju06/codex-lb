@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -1158,9 +1159,49 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
 
 
 @pytest.mark.asyncio
-async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(monkeypatch, db_setup):
-    """A key with no applicable limits admits without a reservation; the
-    warmup probe must execute and never attempt reservation settlement."""
+async def test_quota_planner_probe_parses_native_cache_writes(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="probe-write-usage",
+        chatgpt_account_id="upstream-probe",
+        access_token_encrypted=encryptor.encrypt("access"),
+        plan_type="plus",
+    )
+
+    async def fake_stream(*args, **kwargs):
+        del args, kwargs
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-probe-writes",
+                        "status": "completed",
+                        "usage": {
+                            "input_tokens": 100_000,
+                            "output_tokens": 0,
+                            "input_tokens_details": {"cached_tokens": 20_000, "cache_write_tokens": 37_000},
+                        },
+                    },
+                }
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr("app.modules.quota_planner.warmup.stream_responses", fake_stream)
+    async with SessionLocal() as session:
+        usage = await QuotaWarmupService(session)._send_warmup_probe(
+            account=account, model="gpt-6-astra", request_id="probe-writes"
+        )
+    assert usage.cache_write_input_tokens == 37_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_reservation", [False, True])
+async def test_quota_planner_warm_now_key_preserves_cache_writes(monkeypatch, db_setup, with_reservation):
+    """A keyed probe logs writes and settles them only when it reserved usage."""
     del db_setup
     encryptor = TokenEncryptor()
     async with SessionLocal() as session:
@@ -1192,15 +1233,16 @@ async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(
             confidence="observed",
         )
         service = QuotaWarmupService(session)
+        finalized: list[dict[str, object]] = []
 
         class FakeApiKeys:
             async def enforce_limits_for_request(self, *args, **kwargs):
                 del args, kwargs
-                return None
+                return SimpleNamespace(reservation_id="warmup-reservation") if with_reservation else None
 
             async def finalize_usage_reservation(self, *args, **kwargs):
-                del args, kwargs
-                raise AssertionError("limit-free warmup must not finalize a reservation")
+                del args
+                finalized.append(kwargs)
 
             async def fail_usage_reservation(self, *args, **kwargs):
                 del args, kwargs
@@ -1208,7 +1250,13 @@ async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(
 
         async def fake_send(self, *, account, model, request_id):
             del self, account, model, request_id
-            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+            return WarmupUsage(
+                input_tokens=100_000,
+                output_tokens=0,
+                cached_input_tokens=20_000,
+                reasoning_tokens=None,
+                cache_write_input_tokens=37_000,
+            )
 
         async def noop_record_effect(self, account, model, *, source, confidence):
             del self, account, model, source, confidence
@@ -1223,9 +1271,26 @@ async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(
             api_key_id="api-key-unlimited",
             force_probe=True,
         )
+        logged = (
+            await session.execute(select(RequestLog).where(RequestLog.request_id == result.request_id))
+        ).scalar_one()
+        assert logged.cache_write_input_tokens == 37_000
 
     assert result.status == "executed"
     assert result.reason == "warmup_executed"
+    assert finalized == (
+        [
+            {
+                "model": "gpt-5.4-mini",
+                "input_tokens": 100_000,
+                "output_tokens": 0,
+                "cached_input_tokens": 20_000,
+                "cache_write_input_tokens": 37_000,
+            }
+        ]
+        if with_reservation
+        else []
+    )
 
 
 @pytest.mark.asyncio

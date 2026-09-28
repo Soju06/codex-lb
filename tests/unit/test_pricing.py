@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.openai.models import ResponseUsage, ResponseUsageDetails
 from app.core.usage.pricing import (
@@ -126,6 +127,70 @@ def test_calculate_cost_from_usage_cached_tokens():
     cost = calculate_cost_from_usage(usage, price)
     expected = (800 / 1_000_000) * 2.0 + (200 / 1_000_000) * 0.5 + (500 / 1_000_000) * 4.0
     assert cost == pytest.approx(expected)
+
+
+def test_cache_writes_replace_uncached_input_in_cost_breakdown():
+    usage = ResponseUsage(
+        input_tokens=100_000,
+        output_tokens=1000,
+        input_tokens_details=ResponseUsageDetails(cached_tokens=20_000, cache_write_tokens=50_000),
+    )
+    price = ModelPrice(10, 50, 1, cache_write_input_per_1m=12.5)
+    breakdown = calculate_cost_breakdown_from_usage(usage, price)
+    assert breakdown is not None
+    assert breakdown.input_usd == pytest.approx(0.925)
+    assert breakdown.cached_input_usd == pytest.approx(0.02)
+    assert breakdown.output_usd == pytest.approx(0.05)
+    assert breakdown.total_usd == pytest.approx(0.995)
+
+
+@pytest.mark.parametrize(("writes", "expected"), [(None, 0.87), (0, 0.87), (-5, 0.87), (200_000, 1.07)])
+def test_cache_write_count_is_limited_to_remaining_input(writes, expected):
+    usage = ResponseUsage(
+        input_tokens=100_000,
+        output_tokens=1000,
+        input_tokens_details=ResponseUsageDetails(cached_tokens=20_000, cache_write_tokens=writes),
+    )
+    price = ModelPrice(10, 50, 1, cache_write_input_per_1m=12.5)
+    assert calculate_cost_from_usage(usage, price) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "tier", "expected"),
+    [
+        (272_000, None, 3.45),
+        (272_001, None, 6.875025),
+        (272_000, "priority", 6.90),
+        (272_001, "priority", 13.75005),
+        (272_000, "fast", 6.90),
+        (272_001, "fast", 13.75005),
+        (272_000, "flex", 1.725),
+        (272_001, "flex", 3.4375125),
+    ],
+)
+def test_astra_cache_writes_follow_service_tier_and_context(tokens, tier, expected):
+    resolved = get_pricing_for_model("gpt-6-astra")
+    assert resolved is not None
+    usage = UsageTokens(tokens, 1000, cache_write_input_tokens=tokens)
+    assert calculate_cost_from_usage(usage, resolved[1], service_tier=tier) == pytest.approx(expected)
+
+
+def test_missing_write_price_preserves_input_charge():
+    usage = UsageTokens(100_000, 1000, 20_000, 50_000)
+    assert calculate_cost_from_usage(usage, ModelPrice(10, 50, 1)) == pytest.approx(0.87)
+
+
+@pytest.mark.parametrize("field", ["cached_tokens", "cache_write_tokens"])
+@pytest.mark.parametrize("value", [True, "100", "invalid"])
+def test_cache_write_count_uses_existing_strict_usage_contract(field, value):
+    with pytest.raises(ValidationError):
+        ResponseUsage.model_validate(
+            {
+                "input_tokens": 100,
+                "output_tokens": 1,
+                "input_tokens_details": {field: value},
+            }
+        )
 
 
 def test_calculate_cost_breakdown_from_usage_cached_tokens():

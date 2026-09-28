@@ -3379,3 +3379,54 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 
 # end bridge continuity abandonment
+
+
+@pytest.mark.asyncio
+async def test_cache_write_usage_migration_preserves_historical_rows(tmp_path):
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'cache-write.sqlite'}"
+    revision = "20260927_190000_add_cache_write_usage"
+    config = _build_alembic_config(db_url)
+    parent = ScriptDirectory.from_config(config).get_revision(revision).down_revision
+    assert isinstance(parent, str)
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO request_logs "
+                    "(request_id, requested_at, model, input_tokens, output_tokens, status, cost_usd) "
+                    "VALUES ('historical', '2026-09-01 00:00:00', 'gpt-6-astra', 100000, 0, 'success', 1.0)"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as connection:
+            for table in ("request_logs", "api_key_usage_reservations"):
+                columns = (await connection.execute(text(f"PRAGMA table_info({table})"))).all()
+                column = next(row for row in columns if row[1] == "cache_write_input_tokens")
+                assert column[3:5] == (0, None)
+            row = (
+                await connection.execute(
+                    text("SELECT cache_write_input_tokens, cost_usd FROM request_logs WHERE request_id = 'historical'")
+                )
+            ).one()
+            assert tuple(row) == (None, 1.0)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent))
+        async with engine.connect() as connection:
+            for table in ("request_logs", "api_key_usage_reservations"):
+                columns = (await connection.execute(text(f"PRAGMA table_info({table})"))).all()
+                assert "cache_write_input_tokens" not in {row[1] for row in columns}
+            assert (
+                await connection.scalar(text("SELECT cost_usd FROM request_logs WHERE request_id = 'historical'"))
+                == 1.0
+            )
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert not await to_thread.run_sync(lambda: check_schema_drift(db_url))
+    finally:
+        await engine.dispose()

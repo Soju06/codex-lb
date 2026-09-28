@@ -461,6 +461,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         output_tokens: int | None,
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
+        cache_write_input_tokens: int | None = None,
     ) -> None:
         reservation = self._reservations.get(reservation_id)
         if reservation is None:

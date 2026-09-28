@@ -65,6 +65,7 @@ class ResponseUsageDetails(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     cached_tokens: StrictInt | None = None
+    cache_write_tokens: StrictInt | None = None
     reasoning_tokens: StrictInt | None = None
 
 

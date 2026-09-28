@@ -882,6 +882,7 @@ class _StreamSettlement:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
+    cache_write_input_tokens: int | None = None
     error_code: str | None = None
     error_message: str | None = None
     error: UpstreamError | None = None

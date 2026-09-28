@@ -863,6 +863,7 @@ class ApiKeysRepository:
         output_tokens: int | None,
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
+        cache_write_input_tokens: int | None = None,
     ) -> None:
         # Reservation accounting keeps full commit durability. Settlement
         # (finalize/fail/release) is what puts completed-request usage on the
@@ -880,6 +881,7 @@ class ApiKeysRepository:
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,
                 cost_microdollars=cost_microdollars,
+                cache_write_input_tokens=cache_write_input_tokens,
             )
         )
 

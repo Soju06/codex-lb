@@ -6474,6 +6474,9 @@ class _WebSocketMixin:
             cached_input_tokens=(
                 usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
             ),
+            cache_write_input_tokens=(
+                usage.input_tokens_details.cache_write_tokens if usage and usage.input_tokens_details else None
+            ),
             error_code=error_code,
             error_message=error_message,
             error=error_payload,
@@ -6555,6 +6558,9 @@ class _WebSocketMixin:
                     await proxy._drain_deferred_keyed_stream_health(request_state)
         latency_ms = int((clock_for(proxy).monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
+        cache_write_input_tokens = (
+            usage.input_tokens_details.cache_write_tokens if usage and usage.input_tokens_details else None
+        )
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
         )
@@ -6581,6 +6587,7 @@ class _WebSocketMixin:
                     input_tokens=usage.input_tokens if usage else None,
                     output_tokens=usage.output_tokens if usage else None,
                     cached_input_tokens=cached_input_tokens,
+                    cache_write_input_tokens=cache_write_input_tokens,
                     reasoning_tokens=reasoning_tokens,
                     reasoning_effort=request_state.reasoning_effort,
                     transport=request_state.transport,

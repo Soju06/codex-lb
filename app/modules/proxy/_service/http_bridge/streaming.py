@@ -2319,6 +2319,76 @@ class _HTTPBridgeStreamingMixin:
             durable_lookup = None
             return True
 
+        async def retire_dead_client_anchor(exc: ProxyResponseError) -> ProxyResponseError | None:
+            """Tell the client its anchor is gone instead of asking it to retry forever.
+
+            ``retire_unavailable_continuity_owner`` handles the anchor the proxy
+            injected: it can drop that anchor itself and rebind. A
+            client-supplied ``previous_response_id`` is different — it names
+            upstream state that lived on the unavailable account, and when the
+            body also carries account-scoped state there is no replacement that
+            can serve this turn. Today that returns 502 "retry later", which is
+            untrue for an owner that is not coming back, and production shows
+            clients answering it with a retry burst (nine in five seconds on one
+            thread) that can never succeed.
+
+            So retire the owner and report the anchor as explicitly rejected,
+            reusing ``bridge_previous_response_not_found`` — the code this
+            module already uses for a proven-dead anchor that will not be
+            retried. The bare ``previous_response_not_found`` is deliberately
+            masked into a retryable ``stream_incomplete`` by the API layer,
+            because an anonymous stale anchor is usually the proxy's own
+            bookkeeping and must not be blamed on the client; this rejection is
+            attributable to the anchor the client itself sent, which is exactly
+            the case that code exists for. Its message tells the client to
+            resend the history or start fresh, and an anchor-free resend is
+            what the retirement above lets bind to a healthy account.
+            """
+            nonlocal owner_retirement_attempted
+
+            if owner_retirement_attempted:
+                return None
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return None
+            client_anchor = payload.previous_response_id
+            if client_anchor is None or rewritten_file_account_id is not None:
+                return None
+            retiring_account_id = request_state.preferred_account_id
+            if durable_lookup is None or retiring_account_id is None:
+                return None
+            if durable_lookup.account_id != retiring_account_id:
+                return None
+            owner_retirement_attempted = True
+            # Same horizon rule as the proxy-injected path: an owner returning
+            # inside this request's budget is worth waiting for, and rejecting
+            # its anchor would throw away recoverable continuity.
+            if not await self._durable_bridge.retire_continuity_owner_if_unavailable(
+                session_id=durable_lookup.session_id,
+                expected_account_id=retiring_account_id,
+                recovery_deadline_epoch=int(
+                    clock.time() + max(0.0, request_deadline - clock.monotonic()),
+                ),
+            ):
+                return None
+            _log_http_bridge_event(
+                "dead_anchor_owner_retired",
+                bridge_session_key,
+                account_id=retiring_account_id,
+                model=payload.model,
+                detail="outcome=report_bridge_previous_response_not_found",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            return ProxyResponseError(
+                404,
+                openai_error(
+                    "bridge_previous_response_not_found",
+                    "The account that owns this conversation is no longer available; "
+                    "resend the full conversation history or start a new conversation.",
+                ),
+            )
+
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             if not _http_bridge_is_previous_response_owner_unavailable(exc):
                 return False
@@ -2547,6 +2617,13 @@ class _HTTPBridgeStreamingMixin:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     if await retire_unavailable_continuity_owner(exc):
                         continue
+                    dead_anchor_error = await retire_dead_client_anchor(exc)
+                    if dead_anchor_error is not None:
+                        # Deliberately not marked as a pre-submit failure: that
+                        # provenance is what admits a failure to the raw-HTTP
+                        # replay, and this is a terminal answer to the client
+                        # rather than a transport problem to route around.
+                        raise dead_anchor_error
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,

@@ -627,6 +627,13 @@ async def test_request_path_retirement_is_idempotent(
     async_session_factory: Callable[[], AsyncSession],
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
+    """Repeating the call answers the same way and writes the marker once.
+
+    The answer is "is this owner retired now?", not "did this call retire it" —
+    a caller that gets False falls back to the retryable owner-unavailable
+    failure, which would be wrong for an owner a racing duplicate already
+    retired. See ``test_a_racing_duplicate_sees_the_owner_as_retired``.
+    """
     await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
     session_id = await _claim(coordinator, account_id="acc-paused")
 
@@ -636,12 +643,21 @@ async def test_request_path_retirement_is_idempotent(
         account_id="acc-paused",
         deadline_epoch=_epoch_in(7200),
     )
-    assert not await _retire_now(
+    async with async_session_factory() as session:
+        first = (await session.execute(select(HttpBridgeSessionRecord))).scalar_one()
+        first_scope = first.continuity_abandonment_scope
+        first_at = first.continuity_abandoned_at
+
+    assert await _retire_now(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
         deadline_epoch=_epoch_in(7200),
     )
+    async with async_session_factory() as session:
+        second = (await session.execute(select(HttpBridgeSessionRecord))).scalar_one()
+    assert second.continuity_abandonment_scope == first_scope
+    assert second.continuity_abandoned_at == first_at
 
 
 async def test_request_path_retirement_is_cleared_by_a_fresh_claim(
@@ -737,6 +753,59 @@ async def test_promotion_does_not_need_the_owner_to_be_unavailable(
     await _age_row(async_session_factory, seconds=_GRACE.total_seconds() + 60)
 
     assert await _retire(async_session_factory) == 1
+
+
+async def test_a_racing_duplicate_sees_the_owner_as_retired(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """The loser of a retirement race must not fall back to the retryable failure.
+
+    Two requests can both hold a pre-retirement lookup. The first CAS wins and
+    answers terminally; the second matches nothing. The caller's question is
+    "is this owner retired now?", so the answer is yes — otherwise a client
+    retrying quickly sees the terminal answer and the retryable one for the
+    same dead owner.
+    """
+    await _add_account(async_session_factory, "acc-paused", AccountStatus.PAUSED)
+    session_id = await _claim(coordinator, account_id="acc-paused")
+
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+    # Same call again, standing in for the racing duplicate.
+    assert await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-paused",
+        deadline_epoch=_epoch_in(7200),
+    )
+
+
+async def test_a_racing_duplicate_on_a_recovered_owner_is_not_retired(
+    async_session_factory: Callable[[], AsyncSession],
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    """The "already retired" answer must come from the marker, not from a miss."""
+    await _add_account(async_session_factory, "acc-active", AccountStatus.ACTIVE)
+    session_id = await _claim(coordinator, account_id="acc-active")
+
+    assert not await _retire_now(
+        async_session_factory,
+        session_id=session_id,
+        account_id="acc-active",
+        deadline_epoch=_epoch_in(7200),
+    )
+    # A session that does not exist is not retired either.
+    assert not await _retire_now(
+        async_session_factory,
+        session_id="missing-session",
+        account_id="acc-active",
+        deadline_epoch=_epoch_in(7200),
+    )
 
 
 def test_unavailable_status_set_covers_every_non_serving_status() -> None:

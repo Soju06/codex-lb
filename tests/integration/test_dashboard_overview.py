@@ -9,7 +9,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, RequestLog
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
@@ -1122,16 +1122,12 @@ async def test_dashboard_projections_ewma_tail_cap_matches_uncapped_history(asyn
     uncapped_payload = uncapped.json()
 
     # One primary-window fetch per request (weekly-only primary-source
-    # account, no secondary rows). On PostgreSQL the capped fetch hydrates
-    # the 18 rows inside the 3h floor plus the 64-row tail; SQLite serves its
-    # shared-floor snapshot cache and ignores the cap.
+    # account, no secondary rows). The capped fetch hydrates the 18 rows
+    # inside the 3h floor plus the 64-row tail across both PostgreSQL and SQLite.
     assert len(fetched_row_counts) == 2
     capped_rows, uncapped_rows = fetched_row_counts
     assert uncapped_rows == 7 * 24 * 6
-    if str(engine.url).startswith("postgresql"):
-        assert capped_rows == 18 + 64
-    else:
-        assert capped_rows == uncapped_rows
+    assert capped_rows == 18 + 64
 
     _assert_json_close(
         capped_payload["depletionSecondary"], uncapped_payload["depletionSecondary"], "$.depletionSecondary"

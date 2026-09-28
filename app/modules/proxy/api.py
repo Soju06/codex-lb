@@ -100,8 +100,10 @@ from app.core.errors import (
 )
 from app.core.exceptions import (
     ProxyAuthError,
+    ProxyInvalidRequestError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
+    ProxyReasoningEffortNotAllowed,
     ProxyUpstreamError,
 )
 from app.core.metrics.prometheus import (
@@ -255,6 +257,7 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.http_bridge.helpers import _trim_http_bridge_previous_response_input_items
 from app.modules.proxy._service.observability import record_http_bridge_routing
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
@@ -295,6 +298,7 @@ from app.modules.proxy.request_policy import (
     apply_prohibit_fast_mode,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
+    has_astra_configuration_updates,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     normalize_source_reasoning_aliases,
@@ -306,6 +310,8 @@ from app.modules.proxy.request_policy import (
     restore_source_reasoning_effort,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
+    validate_astra_request,
+    validate_configuration_update_policy,
     validate_model_access,
     validate_top_level_compaction_trigger_input_shape,
 )
@@ -4494,6 +4500,7 @@ async def v1_chat_completions(
         if disabled_denial is not None:
             return disabled_denial
     if source is None:
+        validate_astra_request(responses_payload, api_key)
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
@@ -5154,10 +5161,11 @@ async def _source_responses_response(
             headers={**rate_limit_headers, "Retry-After": "1"},
         )
     try:
-        # Inside the route-helper latch: the budget serializer can raise
-        # (a lone surrogate in the body) and a claimed slot must never outlive
-        # the request that claimed it.
-        admission_budget = estimate_api_key_request_usage(payload)
+        # Policy validation, body shaping and serialization can raise; keep them
+        # inside the admission latch so an unowned claim is always released.
+        validate_configuration_update_policy(payload, api_key)
+        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
+        admission_budget = estimate_api_key_request_usage(payload, upstream_payload=source_payload)
         reservation = await _enforce_request_limits(
             api_key,
             request_model=payload.model,
@@ -5184,7 +5192,6 @@ async def _source_responses_response(
         claims.release_if_unowned()
         raise
     try:
-        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream
@@ -6341,9 +6348,17 @@ async def _stream_responses(
             service_tier_was_enforced=service_tier_was_enforced,
         )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
+    untrimmed_payload = payload
+    if payload.model.strip().lower() == "gpt-6-astra":
+        # Validation can prepend a reset for either anchor. Preserve the client
+        # input on the original object for bridge completion bookkeeping.
+        payload = payload.model_copy()
+        if payload.previous_response_id is not None and isinstance(payload.input, list):
+            payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     compact_payload: ResponsesCompactRequest | None = None
-    if codex_session_affinity:
+    if codex_session_affinity and not has_astra_configuration_updates(payload):
         try:
             compact_trigger_input = strip_terminal_compaction_trigger_input(payload)
             if compact_trigger_input is not None:
@@ -6426,6 +6441,9 @@ async def _stream_responses(
         preferred=prefer_http_bridge,
         policy_already_applied=forwarded_request,
     )
+    if bridge_active:
+        # The bridge must see the original history to preserve its stored prefix.
+        payload = untrimmed_payload
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
@@ -6799,6 +6817,14 @@ async def _collect_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    untrimmed_payload = payload
+    if payload.model.strip().lower() == "gpt-6-astra":
+        # Validation can prepend a reset for either anchor. Preserve the client
+        # input on the original object for bridge completion bookkeeping.
+        payload = payload.model_copy()
+        if payload.previous_response_id is not None and isinstance(payload.input, list):
+            payload.input = _trim_http_bridge_previous_response_input_items(payload.input)
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
@@ -6831,6 +6857,9 @@ async def _collect_responses(
         api_key,
         preferred=prefer_http_bridge,
     )
+    if bridge_active:
+        # The bridge must see the original history to preserve its stored prefix.
+        payload = untrimmed_payload
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
@@ -7026,6 +7055,7 @@ async def _compact_responses(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
+    validate_astra_request(payload, api_key)
     validate_model_access(api_key, payload.model)
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
@@ -8204,6 +8234,15 @@ async def _stream_proxy_errors_as_response_failed(
         yield line
 
 
+def _stream_policy_response_error(
+    exc: ProxyInvalidRequestError | ProxyReasoningEffortNotAllowed,
+) -> ProxyResponseError:
+    envelope = openai_error(exc.code, exc.message, error_type=exc.error_type)
+    if exc.param is not None:
+        envelope["error"]["param"] = exc.param
+    return ProxyResponseError(exc.status_code, envelope)
+
+
 async def _stream_response_error_events(
     stream: AsyncIterator[str],
     *,
@@ -8236,7 +8275,8 @@ async def _stream_response_error_events(
     try:
         async for line in stream:
             yield line
-    except ProxyResponseError as exc:
+    except (ProxyResponseError, ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed) as stream_exc:
+        exc = stream_exc if isinstance(stream_exc, ProxyResponseError) else _stream_policy_response_error(stream_exc)
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
         # A refusal the proxy raised before any upstream frame was sent shares
         # its public code with the upstream transport failures below, but it is

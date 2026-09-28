@@ -28,6 +28,7 @@ from app.core.exceptions import (
     DashboardUpstreamError,
     DashboardValidationError,
     ProxyAuthError,
+    ProxyInvalidRequestError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
     ProxyReasoningEffortNotAllowed,
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyAuthError,
+    ProxyInvalidRequestError,
     ProxyModelNotAllowed,
     ProxyReasoningEffortNotAllowed,
     ProxyRateLimitError,

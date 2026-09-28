@@ -43,10 +43,11 @@ def estimate_api_key_request_usage(
     ``None`` means the proxy cannot size that side of the request locally, so
     API-key enforcement should use its conservative default for that dimension.
 
-    ``upstream_payload`` lets callers that already hold ``payload.to_payload()``
-    share it instead of paying for another full dump. It must be the pristine
-    ``to_payload()`` result for ``payload`` (``to_payload`` is deterministic, so
-    the budget is identical either way).
+    ``upstream_payload`` lets callers share their prepared outbound body.
+    Subscription callers pass the pristine ``payload.to_payload()`` result;
+    model-source callers pass the body prepared for that source so subscription
+    normalization cannot change its estimate. When omitted, the subscription
+    serialization is used.
     """
 
     if upstream_payload is None:

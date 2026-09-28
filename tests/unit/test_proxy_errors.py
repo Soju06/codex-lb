@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock
 
 import pytest
 from starlette.requests import Request
 
 from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
+from app.core.exceptions import ProxyInvalidRequestError, ProxyReasoningEffortNotAllowed
+from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
 
 pytestmark = pytest.mark.unit
@@ -74,6 +78,54 @@ async def test_stream_proxy_error_preserves_retry_after_as_sse_retry_hint():
 
     assert len(events) == 1
     assert events[0].startswith("retry: 2000\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_lifecycle", [False, True], ids=["openai", "native"])
+@pytest.mark.parametrize(
+    "policy_error",
+    [
+        ProxyInvalidRequestError("Automatic truncation conflicts with updates", param="truncation"),
+        ProxyReasoningEffortNotAllowed("Effort is not allowed", param="input.0.reasoning.effort"),
+        ProxyInvalidRequestError("Invalid continuation"),
+    ],
+    ids=["invalid-request", "reasoning-policy", "without-param"],
+)
+async def test_stream_policy_rejection_preserves_terminal_error(
+    native_lifecycle: bool,
+    policy_error: ProxyInvalidRequestError | ProxyReasoningEffortNotAllowed,
+) -> None:
+    cleanup = AsyncMock(spec=proxy_api._ResponsesReservationCleanup)
+    created_event = 'data: {"type":"response.created","response":{"id":"resp_policy"}}\n\n'
+
+    async def stream() -> AsyncIterator[str]:
+        yield created_event
+        raise policy_error
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=True,
+            reservation=None,
+            reservation_cleanup=cleanup,
+            preserve_native_failure_lifecycle=native_lifecycle,
+        )
+    ]
+
+    assert events[0] == created_event
+    assert len(events) == 2
+    failed = proxy_api._parse_sse_payload(events[1])
+    assert failed is not None
+    assert failed["type"] == "response.failed"
+    assert proxy_api.SYNTHETIC_TRANSPORT_FAILURE_MARKER not in failed
+    response = failed["response"]
+    assert isinstance(response, dict)
+    expected_error = {"code": policy_error.code, "type": policy_error.error_type, "message": policy_error.message}
+    if policy_error.param is not None:
+        expected_error["param"] = policy_error.param
+    assert response["error"] == expected_error
+    cleanup.release.assert_awaited_once_with(action="responses stream cleanup")
 
 
 def _payload_error_code(payload) -> str | None:

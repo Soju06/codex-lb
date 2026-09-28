@@ -37307,10 +37307,37 @@ async def test_stale_operation_maintenance_honours_dashboard_bridge_budget_over_
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_maintenance_runs_all_bridge_passes() -> None:
-    """The ring heartbeat keeps ownership, operation, and socket cleanup live
-    even when a replica receives no request traffic."""
-    from app.main import run_http_bridge_heartbeat_maintenance
+@pytest.mark.parametrize("failure_stage", ["protection_snapshot", "durable_cleanup"])
+async def test_stale_operation_maintenance_surfaces_failures(failure_stage: str) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    pending_operation_ids = AsyncMock(return_value=set())
+    abandon_stale_operations = AsyncMock(return_value=[])
+    if failure_stage == "protection_snapshot":
+        pending_operation_ids.side_effect = RuntimeError("snapshot failed")
+    else:
+        abandon_stale_operations.side_effect = RuntimeError("cleanup failed")
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(pending_operation_ids=pending_operation_ids),
+    )
+    service._durable_bridge = cast(Any, SimpleNamespace(abandon_stale_operations=abandon_stale_operations))
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await service.abandon_stale_http_bridge_operations()
+
+    pending_operation_ids.assert_awaited_once()
+    if failure_stage == "protection_snapshot":
+        abandon_stale_operations.assert_not_awaited()
+    else:
+        abandon_stale_operations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_periodic_maintenance_helpers_run_distinct_bridge_passes() -> None:
+    from app.main import (
+        run_http_bridge_durable_ownership_maintenance,
+        run_http_bridge_idle_sweep_maintenance,
+    )
 
     proxy_service_double = SimpleNamespace(
         reconcile_durable_http_bridge_ownership=AsyncMock(return_value=0),
@@ -37318,37 +37345,43 @@ async def test_heartbeat_maintenance_runs_all_bridge_passes() -> None:
         prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
     )
 
-    await run_http_bridge_heartbeat_maintenance(proxy_service_double)
+    await run_http_bridge_durable_ownership_maintenance(proxy_service_double)
+    proxy_service_double.reconcile_durable_http_bridge_ownership.assert_awaited_once()
+    proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
+    proxy_service_double.prune_idle_http_bridge_sessions.assert_not_awaited()
 
+    await run_http_bridge_idle_sweep_maintenance(proxy_service_double)
     proxy_service_double.reconcile_durable_http_bridge_ownership.assert_awaited_once()
     proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
     proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_maintenance_isolates_a_failing_pass() -> None:
-    """A failing reconcile must not skip the sweep, and neither may stop the
-    heartbeat loop."""
-    from app.main import run_http_bridge_heartbeat_maintenance
+async def test_durable_ownership_maintenance_attempts_stale_cleanup_after_reconcile_failure() -> None:
+    from app.main import run_http_bridge_durable_ownership_maintenance
 
     proxy_service_double = SimpleNamespace(
         reconcile_durable_http_bridge_ownership=AsyncMock(side_effect=RuntimeError("durable read failed")),
         abandon_stale_http_bridge_operations=AsyncMock(return_value=0),
-        prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
     )
 
-    await run_http_bridge_heartbeat_maintenance(proxy_service_double)
+    with pytest.raises(RuntimeError, match="durable ownership maintenance failed"):
+        await run_http_bridge_durable_ownership_maintenance(proxy_service_double)
 
     proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
-    proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_maintenance_tolerates_a_missing_service_or_pass() -> None:
-    from app.main import run_http_bridge_heartbeat_maintenance
+async def test_periodic_maintenance_helpers_tolerate_a_missing_service_or_pass() -> None:
+    from app.main import (
+        run_http_bridge_durable_ownership_maintenance,
+        run_http_bridge_idle_sweep_maintenance,
+    )
 
-    await run_http_bridge_heartbeat_maintenance(None)
-    await run_http_bridge_heartbeat_maintenance(SimpleNamespace())
+    await run_http_bridge_durable_ownership_maintenance(None)
+    await run_http_bridge_idle_sweep_maintenance(None)
+    await run_http_bridge_durable_ownership_maintenance(SimpleNamespace())
+    await run_http_bridge_idle_sweep_maintenance(SimpleNamespace())
 
 
 @pytest.mark.asyncio

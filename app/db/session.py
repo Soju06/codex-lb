@@ -999,13 +999,19 @@ def init_background_db(url: str | None = None) -> None:
     _background_session_factory = async_sessionmaker(_background_engine, expire_on_commit=False, class_=AsyncSession)
 
 
+def get_background_session_factory() -> async_sessionmaker[AsyncSession]:
+    """Return the isolated background factory, falling back before initialization."""
+
+    return _background_session_factory or SessionLocal
+
+
 @asynccontextmanager
 async def get_background_session() -> AsyncIterator[AsyncSession]:
     """Session provider for background tasks, schedulers, and auth dependencies.
 
     Uses the separate background pool if initialized, otherwise falls back to main pool.
     """
-    factory = _background_session_factory or SessionLocal
+    factory = get_background_session_factory()
     session = factory()
     try:
         yield session

@@ -73,6 +73,27 @@ async def test_unregister(ring_service: RingMembershipService) -> None:
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_recreates_removed_row_and_recovers_stale_membership(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-recover")
+    await ring_service.unregister("pod-recover")
+
+    await ring_service.heartbeat("pod-recover")
+    assert await ring_service.list_active() == ["pod-recover"]
+
+    await ring_service.mark_stale(
+        "pod-recover",
+        stale_threshold_seconds=RING_STALE_THRESHOLD_SECONDS,
+        grace_seconds=0,
+    )
+    assert await ring_service.list_active(stale_threshold_seconds=1) == []
+
+    await ring_service.heartbeat("pod-recover")
+    assert await ring_service.list_active(stale_threshold_seconds=1) == ["pod-recover"]
+
+
+@pytest.mark.asyncio
 async def test_stale_heartbeat_excluded(ring_service: RingMembershipService) -> None:
     """Register pod, set last_heartbeat_at to 200s ago, list_active(120) → empty."""
     await ring_service.register("pod-stale")

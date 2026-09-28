@@ -669,6 +669,84 @@ async def test_v1_chat_completions_maps_response_format(async_client, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_json_object_keeps_json_mention_in_input(async_client, monkeypatch):
+    """JSON mode is accepted upstream only when an input message mentions JSON.
+
+    A client that says "JSON" only in its system message used to get a 400,
+    because the system message moves into top-level ``instructions``.
+    """
+    await _import_account(async_client, "acc_chat_json_object", "chat-json-object@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_chat_json_object")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": "Reply with a JSON object."},
+            {"role": "user", "content": "Say hello."},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    resp = await async_client.post("/v1/chat/completions", json=payload)
+
+    assert resp.status_code == 200
+    forwarded = seen["payload"].to_payload()
+    assert forwarded["instructions"] == "Reply with a JSON object."
+    assert forwarded["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Respond in JSON."},
+                {"type": "input_text", "text": "Say hello."},
+            ],
+        },
+    ]
+    assert forwarded["text"] == {"format": {"type": "json_object"}}
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_json_object_keeps_json_mention_in_input(async_client, monkeypatch):
+    await _import_account(async_client, "acc_responses_json_object", "responses-json-object@example.com")
+
+    seen = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen["payload"] = payload
+        yield _completed_event("resp_responses_json_object")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {
+        "model": "gpt-5.2",
+        "input": [
+            {"role": "developer", "content": "Reply with a JSON object."},
+            {"role": "user", "content": "Say hello."},
+        ],
+        "text": {"format": {"type": "json_object"}},
+    }
+    resp = await async_client.post("/v1/responses", json=payload)
+
+    assert resp.status_code == 200
+    forwarded = seen["payload"].to_payload()
+    assert forwarded["instructions"] == "Reply with a JSON object."
+    assert forwarded["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Respond in JSON."},
+                {"type": "input_text", "text": "Say hello."},
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_rejects_strict_schema_violation(async_client):
     """Strict-mode schema violations are rejected locally with 400.
 

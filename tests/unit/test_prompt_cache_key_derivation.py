@@ -167,6 +167,30 @@ class TestAppendStability:
         assert second == first
 
 
+class TestJsonModeNote:
+    def test_key_is_stable_across_turns_that_carry_the_json_mode_note(self):
+        """The JSON-mode note is added to the same first user message every
+        turn, so a growing JSON-mode thread keeps one key."""
+
+        def json_mode_turn(items: Sequence[object]) -> ResponsesRequest:
+            return ResponsesRequest.model_validate(
+                {
+                    "model": "gpt-5.4",
+                    "input": [{"role": "system", "content": "Answer in JSON."}, *items],
+                    "text": {"format": {"type": "json_object"}},
+                }
+            )
+
+        api_key = _make_api_key()
+        items: list[object] = [_env_item(), _user("review file a")]
+        _derive_prompt_cache_key(json_mode_turn(items), api_key)
+        items = [*items, _assistant("{}"), _user("continue 0")]
+        first = _derive_prompt_cache_key(json_mode_turn(items), api_key)
+        for turn in range(1, 5):
+            items = [*items, _assistant("{}"), _user(f"continue {turn}")]
+            assert _derive_prompt_cache_key(json_mode_turn(items), api_key) == first
+
+
 class TestLeadingTrimStability:
     def test_key_survives_the_client_trimming_leading_history(self):
         api_key = _make_api_key()

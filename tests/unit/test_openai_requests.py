@@ -17,6 +17,8 @@ from app.core.openai.requests import (
     _UNSUPPORTED_UPSTREAM_FIELDS,
     ResponsesCompactRequest,
     ResponsesRequest,
+    ResponsesTextControls,
+    ResponsesTextFormat,
     _estimated_json_array_item_tokens,
     _estimated_json_tokens,
     _input_image_file_reference,
@@ -836,6 +838,208 @@ def test_responses_input_system_message_moves_to_instructions():
 
     assert request.instructions == "primary\nsys\ndev"
     assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+
+
+_JSON_OBJECT_TEXT: JsonValue = {"format": {"type": "json_object"}}
+_JSON_MODE_NOTE_PART: JsonValue = {"type": "input_text", "text": "Respond in JSON."}
+
+
+def test_responses_json_object_notes_hoisted_json_mention_in_first_user_message():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "message", "role": "developer", "content": "Answer in JSON."},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "{}"}]},
+            {"type": "message", "role": "user", "content": "second"},
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.instructions == "Answer in JSON."
+    assert request.input == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "first"}],
+        },
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "{}"}]},
+        {"type": "message", "role": "user", "content": "second"},
+    ]
+
+
+def test_responses_json_object_note_is_added_once():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {"role": "user", "content": "hi"},
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+    forwarded = request.to_payload()
+
+    assert forwarded["input"] == [
+        {"role": "user", "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "hi"}]},
+    ]
+    assert ResponsesRequest.model_validate(forwarded).to_payload() == forwarded
+
+
+def test_responses_json_object_note_ignores_assistant_json_mention():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {"role": "user", "content": "hi"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "JSON it is"}]},
+            {"role": "user", "content": "again"},
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [
+        {"role": "user", "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "hi"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "JSON it is"}]},
+        {"role": "user", "content": "again"},
+    ]
+
+
+def test_responses_json_object_note_leaves_later_user_json_mention_alone():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": [{"type": "input_text", "text": "as json please"}]},
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": [{"type": "input_text", "text": "as json please"}]},
+    ]
+
+
+def test_responses_json_object_note_ignores_dropped_reasoning_part_mention():
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "reasoning", "text": "plan the json"},
+                    {"type": "input_text", "text": "hi"},
+                ],
+            },
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [
+        {"role": "user", "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "hi"}]},
+    ]
+
+
+def test_responses_json_object_note_without_user_message_is_appended():
+    function_output: JsonValue = {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+    payload = {
+        "model": "gpt-5.1",
+        "input": [{"role": "system", "content": "Answer in JSON."}, function_output],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [function_output, {"role": "user", "content": [_JSON_MODE_NOTE_PART]}]
+
+
+def test_responses_json_object_note_reads_typed_text_controls():
+    request = ResponsesRequest(
+        model="gpt-5.1",
+        instructions="",
+        input=[{"role": "developer", "content": "Answer in JSON."}, {"role": "user", "content": "hi"}],
+        text=ResponsesTextControls(format=ResponsesTextFormat(type="json_object")),
+    )
+
+    assert request.input == [
+        {"role": "user", "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "hi"}]},
+    ]
+
+
+def test_responses_compact_json_mention_adds_no_note():
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"role": "system", "content": "Answer in JSON."}, {"role": "user", "content": "hi"}],
+            "text": _JSON_OBJECT_TEXT,
+        }
+    )
+
+    assert request.instructions == "Answer in JSON."
+    assert request.input == [{"role": "user", "content": "hi"}]
+    assert "text" not in request.to_payload()
+
+
+def test_responses_json_object_note_keeps_non_text_user_parts():
+    image_part: JsonValue = {"type": "input_image", "image_url": "https://example.com/a.png"}
+    payload = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {"role": "user", "content": [{"type": "input_text", "text": "what is this"}, image_part]},
+        ],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [
+        {
+            "role": "user",
+            "content": [_JSON_MODE_NOTE_PART, {"type": "input_text", "text": "what is this"}, image_part],
+        },
+    ]
+
+
+@pytest.mark.parametrize("text_format", [None, {"format": {"type": "text"}}])
+def test_responses_json_mention_without_json_object_format_adds_no_note(text_format):
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.1",
+        "input": [
+            {"role": "system", "content": "Answer in JSON."},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    if text_format is not None:
+        payload["text"] = text_format
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [{"role": "user", "content": "hi"}]
+
+
+def test_responses_json_object_lite_input_is_unchanged():
+    additional_tools: JsonValue = {"type": "additional_tools", "role": "developer", "tools": []}
+    developer_instructions: JsonValue = {
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "Answer in JSON."}],
+    }
+    user_message: JsonValue = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [additional_tools, developer_instructions, user_message],
+        "text": _JSON_OBJECT_TEXT,
+    }
+    request = ResponsesRequest.model_validate(payload)
+
+    assert request.input == [additional_tools, developer_instructions, user_message]
 
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])

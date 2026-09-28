@@ -69,7 +69,7 @@ def _normalize_secret(secret: str) -> str:
 
 
 def _normalize_code(code: str) -> str:
-    return "".join(ch for ch in code if ch.isdigit())
+    return "".join(ch for ch in code if ch in "0123456789")
 
 
 def _time_step(*, now_epoch: int | None = None, period_seconds: int = 30) -> int:

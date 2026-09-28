@@ -44,3 +44,19 @@ def test_build_otpauth_uri_contains_issuer_and_account() -> None:
     assert uri.startswith("otpauth://totp/")
     assert "issuer=codex-lb" in uri
     assert "secret=JBSWY3DPEHPK3PXP" in uri
+
+
+@pytest.mark.parametrize("code", ["１２３４５６", "١٢٣٤٥٦", "۱۲۳۴۵۶", "123４５６", "²³⁴⁵⁶⁷"])
+def test_verify_totp_rejects_non_ascii_digits(code: str) -> None:
+    result = verify_totp_code("JBSWY3DPEHPK3PXP", code, now_epoch=1_700_000_000)
+    assert result.is_valid is False
+    assert result.matched_step is None
+
+
+def test_verify_totp_accepts_formatted_ascii_code() -> None:
+    secret = "JBSWY3DPEHPK3PXP"
+    epoch = 1_700_000_000
+    code = pyotp.TOTP(secret).at(epoch)
+    result = verify_totp_code(secret, f" {code[:3]}-{code[3:]} ", now_epoch=epoch)
+    assert result.is_valid is True
+    assert result.matched_step == epoch // 30

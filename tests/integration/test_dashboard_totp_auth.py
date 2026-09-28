@@ -39,6 +39,49 @@ async def _force_totp_policy(enabled: bool) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["１２３４５６", "١٢٣٤٥٦", "123４５６"])
+async def test_totp_non_ascii_digits_return_invalid_code(async_client, monkeypatch, code: str):
+    import app.core.auth.totp as totp_module
+    import app.modules.dashboard_auth.service as dashboard_auth_service_module
+
+    epoch = 1_700_000_000
+    monkeypatch.setattr(totp_module, "time", lambda: epoch)
+    monkeypatch.setattr(dashboard_auth_service_module, "time", lambda: epoch)
+    password = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    assert password.status_code == 200
+    start = await async_client.post("/api/dashboard-auth/totp/setup/start", json={})
+    assert start.status_code == 200
+    secret = start.json()["secret"]
+    before = await _compat_user()
+
+    invalid_setup = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm", json={"secret": secret, "code": code}
+    )
+    assert invalid_setup.status_code == 400
+    assert invalid_setup.json()["error"]["code"] == "invalid_totp_code"
+    rejected = await _compat_user()
+    assert rejected.totp_secret_encrypted == before.totp_secret_encrypted
+    assert rejected.totp_last_verified_step == before.totp_last_verified_step
+
+    confirmed = await async_client.post(
+        "/api/dashboard-auth/totp/setup/confirm", json={"secret": secret, "code": pyotp.TOTP(secret).at(epoch)}
+    )
+    assert confirmed.status_code == 200
+    enrolled = await _compat_user()
+    epoch += 30
+
+    invalid_verify = await async_client.post("/api/dashboard-auth/totp/verify", json={"code": code})
+    assert invalid_verify.status_code == 400
+    assert invalid_verify.json()["error"]["code"] == "invalid_totp_code"
+    assert (await _compat_user()).totp_last_verified_step == enrolled.totp_last_verified_step
+
+    valid_verify = await async_client.post(
+        "/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(secret).at(epoch)}
+    )
+    assert valid_verify.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_cannot_enable_totp_requirement_without_configured_secret(async_client):
     response = await async_client.put(
         "/api/settings",

@@ -1514,6 +1514,15 @@
       "profile": "https://github.com/uniskela",
       "contributions": [
         "doc"      ]
+    },
+    {
+      "login": "Aminkbi",
+      "name": "Amin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/130156835?v=4",
+      "profile": "https://github.com/Aminkbi",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

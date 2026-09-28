@@ -1179,9 +1179,25 @@ async def responses(
         # constraints. Previous-response ownership is resolved from continuity
         # evidence below, after a viable source candidate exists.
         source_route_excluded = responses_source_route_excluded(responses_payload)
+        compaction_requested = (
+            source_route_excluded
+            and strip_terminal_compaction_trigger_input(responses_payload, strip_trigger=False) is not None
+        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
+    if compaction_requested:
+        # A source-owned model has no remote compaction path at all, so refuse
+        # here, before the subscription compact flow below spends account
+        # selection, admission, and a reservation on it.
+        compaction_denial = await _model_source_compaction_denial(
+            request,
+            responses_payload.model,
+            api_key,
+            raw_model=raw_source_model,
+        )
+        if compaction_denial is not None:
+            return compaction_denial
     try:
         source_selection, continuity_suppressed = (
             (None, False)
@@ -4758,6 +4774,81 @@ async def _select_responses_model_source_with_continuity(
     return source_selection, False
 
 
+def _source_probe_is_guaranteed_miss(
+    api_key: ApiKeyData | None,
+    model: str,
+    *,
+    raw_model: str | None = None,
+) -> bool:
+    """True when every source-lookup candidate is a subscription-registry slug.
+
+    Mirrors the subscription-registry precedence rule inside the lookups: an
+    unscoped key never source-routes a registry slug, so every candidate would
+    be skipped and the probe is a guaranteed miss. Answering without a query
+    keeps the extra background session off the ordinary subscription hot path,
+    where the denial helpers run on every request whose model no source
+    claims.
+    """
+    if _allowed_source_ids_for_api_key(api_key) is not None:
+        return False
+    registry_models = get_model_registry().get_models_with_fallback()
+    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    return bool(candidates) and all(candidate in registry_models for candidate in candidates)
+
+
+async def _model_source_compaction_denial(
+    request: Request,
+    model: str,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+) -> JSONResponse | None:
+    """Refuse remote compaction for a model an enabled model source serves.
+
+    A model source cannot serve Codex remote compaction: it cannot emit a
+    ``compaction`` output item, so the request can never succeed there, and
+    the compact flow this proxy runs instead is subscription-only. Letting a
+    source-owned model into that flow spends account selection, admission, and
+    a usage reservation on a model that never touches a ChatGPT account, and
+    answers with whatever the account pool says (``usage_limit_reached`` when
+    every account is saturated) -- a retryable verdict for a request that has
+    no path to success. The 400 ``invalid_request_error`` is deliberate: the
+    Codex CLI treats it as non-retryable and compacts locally.
+
+    Ownership is decided by the ordinary enabled-source lookup, so the same
+    candidate order, API key model allowlist, source assignment scope, and
+    subscription-registry precedence apply: a registry slug on an unscoped key
+    keeps reaching the compact flow, and a model only a disabled source serves
+    is answered with the ``model_source_disabled`` refusal at this same
+    boundary, before the subscription compact flow. Streaming support is not
+    required, because the refusal is about the model's owner, not about how
+    this request would have been forwarded.
+
+    Returns ``None`` when no source, enabled or disabled, claims the model.
+    """
+    if _source_probe_is_guaranteed_miss(api_key, model, raw_model=raw_model):
+        return None
+    selection = await _select_responses_model_source(model, api_key, raw_model=raw_model)
+    if selection is None:
+        # The ordinary lookup missed: either nobody owns the model or a
+        # disabled source does. Only the first may reach the compact flow.
+        return await _disabled_model_source_denial(
+            request,
+            model,
+            api_key,
+            route="responses",
+            raw_model=raw_model,
+        )
+    _source, matched_model = selection
+    error = openai_error(
+        "compaction_unsupported",
+        f"The '{matched_model}' model is served by an OpenAI-compatible model source, "
+        "which does not support remote compaction. Compact locally or select a subscription model.",
+        error_type="invalid_request_error",
+    )
+    return _logged_error_json_response(request, 400, error)
+
+
 async def _disabled_model_source_denial(
     request: Request,
     model: str,
@@ -4782,17 +4873,8 @@ async def _disabled_model_source_denial(
     Returns ``None`` when no disabled source claims the model, leaving every
     other request on its existing path.
     """
-    if _allowed_source_ids_for_api_key(api_key) is None:
-        registry_models = get_model_registry().get_models_with_fallback()
-        candidates = [candidate for candidate in (raw_model, model) if candidate]
-        if candidates and all(candidate in registry_models for candidate in candidates):
-            # Mirrors the subscription-registry precedence rule inside the
-            # lookups: an unscoped key never source-routes a registry slug, so
-            # every candidate would be skipped and the probe is a guaranteed
-            # miss. Returning early keeps the extra background session off the
-            # ordinary subscription hot path, where this helper runs on every
-            # request whose model no source claims.
-            return None
+    if _source_probe_is_guaranteed_miss(api_key, model, raw_model=raw_model):
+        return None
     selection = (
         await _select_responses_model_source(
             model,
@@ -7015,6 +7097,7 @@ async def _compact_responses(
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> JSONResponse:
+    raw_source_model = _effective_optional_model_for_api_key(api_key, payload.model)
     # The replaced effort is discarded: this path is subscription-only, so the
     # rewrite that works around the backend hang must stick.
     service_tier_was_enforced = apply_api_key_enforcement(
@@ -7022,11 +7105,21 @@ async def _compact_responses(
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
     ).service_tier_was_enforced
+    if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
+        raw_source_model = payload.model
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
     )
     validate_model_access(api_key, payload.model)
+    compaction_denial = await _model_source_compaction_denial(
+        request,
+        payload.model,
+        api_key,
+        raw_model=raw_source_model,
+    )
+    if compaction_denial is not None:
+        return compaction_denial
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:

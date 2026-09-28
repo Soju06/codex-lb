@@ -1800,7 +1800,10 @@ async def test_usage_refresh_demotes_quota_exceeded_to_rate_limited_when_primary
 
 
 @pytest.mark.asyncio
-async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeypatch) -> None:
+@pytest.mark.parametrize("plan_type, used_percent", [("free", 0.0), ("pro", 3.0)])
+async def test_usage_refresh_recovers_quota_exceeded_weekly_only_account(
+    monkeypatch, plan_type: str, used_percent: float
+) -> None:
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1808,7 +1811,7 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
             {
                 "rate_limit": {
                     "primary_window": {
-                        "used_percent": 0.0,
+                        "used_percent": used_percent,
                         "reset_at": 1735689600,
                         "limit_window_seconds": 604800,
                     },
@@ -1823,12 +1826,14 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
     account = _make_account("acc_free_weekly_recovered", "workspace_shared")
     account.status = AccountStatus.QUOTA_EXCEEDED
-    account.plan_type = "free"
+    account.plan_type = plan_type
+    account.blocked_at = 1735600000
     accounts_repo.accounts_by_id[account.id] = account
 
     await updater.refresh_accounts([account], latest_usage={})
 
-    assert account.status == AccountStatus.QUOTA_EXCEEDED
+    assert account.status == AccountStatus.ACTIVE
+    assert account.blocked_at is None
     assert usage_repo.entries[-1].window == "primary"
 
 

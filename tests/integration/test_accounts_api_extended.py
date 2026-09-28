@@ -976,15 +976,18 @@ async def test_accounts_list_request_usage_counts_repeated_request_id_by_request
 
 
 @pytest.mark.asyncio
-async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client, db_setup):
+@pytest.mark.parametrize("plan_type, used_percent", [("free", 24.0), ("pro", 6.0)])
+async def test_accounts_list_maps_weekly_only_primary_to_secondary(
+    async_client, db_setup, plan_type: str, used_percent: float
+):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
 
-        await accounts_repo.upsert(_make_account("acc_free_like", "free@example.com", plan_type="free"))
+        await accounts_repo.upsert(_make_account("acc_free_like", "free@example.com", plan_type=plan_type))
         await usage_repo.add_entry(
             "acc_free_like",
-            24.0,
+            used_percent,
             window="primary",
             window_minutes=10080,
         )
@@ -996,9 +999,39 @@ async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client,
 
     account = accounts["acc_free_like"]
     assert account["usage"]["primaryRemainingPercent"] is None
-    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(76.0)
+    assert account["usage"]["secondaryRemainingPercent"] == pytest.approx(100.0 - used_percent)
     assert account["windowMinutesPrimary"] is None
     assert account["windowMinutesSecondary"] == 10080
+
+
+@pytest.mark.asyncio
+async def test_manual_reactivate_weekly_only_pro_clears_quota_block(async_client, db_setup):
+    now = utcnow()
+    account = _make_account("acc_pro_weekly_resume", "pro-weekly-resume@example.com", plan_type="pro")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    account.deactivation_reason = "stale quota state"
+    account.reset_at = int((now + timedelta(days=7)).timestamp())
+    account.blocked_at = int((now - timedelta(minutes=3)).timestamp())
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account.id,
+            6.0,
+            window="primary",
+            reset_at=account.reset_at,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    response = await async_client.post(f"/api/accounts/{account.id}/reactivate")
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        stored = await session.get(Account, account.id)
+        assert stored is not None
+        assert stored.status == AccountStatus.ACTIVE
+        assert stored.deactivation_reason is None
+        assert stored.reset_at is None
+        assert stored.blocked_at is None
 
 
 @pytest.mark.asyncio

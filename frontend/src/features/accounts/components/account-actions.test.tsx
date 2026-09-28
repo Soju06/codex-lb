@@ -118,6 +118,30 @@ describe("AccountActions", () => {
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
   });
 
+  it("allows an operator to retry a quota-exceeded account", async () => {
+    const onResume = vi.fn();
+    render(
+      <AccountActions
+        account={createAccountSummary({ accountId: "reserve", status: "quota_exceeded" })}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={onResume}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Resume" }));
+    expect(onResume).toHaveBeenCalledWith("reserve");
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+  });
+
   it("resumes a deactivated account alongside re-authentication", async () => {
     const user = userEvent.setup();
     const onResume = vi.fn();

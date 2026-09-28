@@ -9,10 +9,11 @@ import pytest
 from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -330,6 +331,82 @@ async def test_load_balancer_treats_weekly_only_primary_as_advisory_quota_window
         assert refreshed_free is not None
         await session.refresh(refreshed_free)
         assert refreshed_free.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_weekly_only_pro_routes_after_team_short_quota_exhausts_and_keeps_sticky_owner(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    pro = Account(
+        id="acc_pro_weekly_reserve",
+        email="pro-weekly-reserve@example.com",
+        plan_type="pro",
+        access_token_encrypted=encryptor.encrypt("pro-access"),
+        refresh_token_encrypted=encryptor.encrypt("pro-refresh"),
+        id_token_encrypted=encryptor.encrypt("pro-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+    )
+    team = Account(
+        id="acc_team_short_exhausted",
+        email="team-short-exhausted@example.com",
+        plan_type="team",
+        access_token_encrypted=encryptor.encrypt("team-access"),
+        refresh_token_encrypted=encryptor.encrypt("team-refresh"),
+        id_token_encrypted=encryptor.encrypt("team-id"),
+        last_refresh=now,
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=now_epoch + 3600,
+        blocked_at=now_epoch - 30,
+    )
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(pro)
+        await accounts_repo.upsert(team)
+        await usage_repo.add_entry(
+            account_id=pro.id,
+            used_percent=6.0,
+            window="primary",
+            reset_at=now_epoch + 7 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+        await usage_repo.add_entry(
+            account_id=team.id,
+            used_percent=100.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+            recorded_at=now,
+        )
+        await usage_repo.add_entry(
+            account_id=team.id,
+            used_percent=6.0,
+            window="secondary",
+            reset_at=now_epoch + 7 * 24 * 3600,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    balancer._runtime[pro.id] = RuntimeState(
+        reset_at=now_epoch + 3600,
+        cooldown_until=now_epoch + 120,
+        blocked_at=now_epoch - 30,
+        block_kind="quota",
+        error_count=3,
+        last_error_at=now_epoch - 30,
+    )
+
+    first = await balancer.select_account(sticky_key="weekly-pro-thread", sticky_kind=StickySessionKind.STICKY_THREAD)
+    second = await balancer.select_account(sticky_key="weekly-pro-thread", sticky_kind=StickySessionKind.STICKY_THREAD)
+
+    assert first.account is not None and first.account.id == pro.id
+    assert second.account is not None and second.account.id == pro.id
+    assert balancer._runtime[pro.id].cooldown_until is None
+    assert balancer._runtime[pro.id].error_count == 0
 
 
 @pytest.mark.asyncio

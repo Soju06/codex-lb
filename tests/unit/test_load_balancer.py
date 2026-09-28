@@ -2759,6 +2759,64 @@ def test_state_from_account_clears_primary_window_minutes_for_weekly_only(monkey
     assert state.secondary_used_percent == 20.0
 
 
+def test_weekly_only_pro_clears_stale_local_quota_cooldown_after_recovery(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    runtime = RuntimeState(
+        reset_at=now + 3600,
+        cooldown_until=now + 120,
+        blocked_at=now - 30,
+        block_kind="quota",
+        last_error_at=now - 30,
+        error_count=3,
+    )
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="pro"),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=6.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 10),
+            window_minutes=10080,
+        ),
+        secondary_entry=None,
+        runtime=runtime,
+        now=now,
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent is None
+    assert state.primary_window_minutes is None
+    assert state.secondary_used_percent == 6.0
+    assert state.cooldown_until is None
+    assert state.blocked_at is None
+    assert state.error_count == 0
+    assert select_account([state], now=now).account is not None
+
+
+def test_weekly_only_pro_preserves_unrelated_rate_limit_cooldown(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    runtime = RuntimeState(cooldown_until=now + 120, blocked_at=now - 30)
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE, plan_type="pro"),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=6.0,
+            reset_at=int(now + 3600),
+            recorded_at=_epoch_to_naive_utc(now - 10),
+            window_minutes=10080,
+        ),
+        secondary_entry=None,
+        runtime=runtime,
+        now=now,
+    )
+
+    assert state.cooldown_until == now + 120
+    assert select_account([state], now=now).account is None
+
+
 def test_state_from_account_treats_monthly_usage_as_advisory_long_window_pressure(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 30 * 24 * 3600)

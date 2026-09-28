@@ -882,6 +882,18 @@ class UsageUpdater:
     ) -> None:
         if not self._auth_manager:
             return
+        # Upstream can report a weekly-only quota in the primary slot. Treat
+        # that as the long window for recovery, as routing and the dashboard do.
+        if (
+            primary is not None
+            and secondary is None
+            and monthly is None
+            and primary.limit_window_seconds is not None
+            and primary.limit_window_seconds % 60 == 0
+            and usage_core.is_weekly_window_minutes(primary.limit_window_seconds // 60)
+        ):
+            secondary = primary
+            primary = None
         if account.status == AccountStatus.RATE_LIMITED:
             if account.blocked_at is not None:
                 # An account marked RATE_LIMITED by an actual 429 always
@@ -952,6 +964,7 @@ class UsageUpdater:
         account.deactivation_reason = None
         account.reset_at = target_reset_at
         account.blocked_at = None
+        get_account_selection_cache().invalidate()
 
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:

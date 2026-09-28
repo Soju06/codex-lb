@@ -79,3 +79,29 @@ async def test_reactivate_account_rejects_reauth_required_account() -> None:
         await service.reactivate_account(_ACCOUNT_ID)
 
     repo.update_status_if_current.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reactivate_quota_exceeded_account_clears_persisted_block() -> None:
+    repo = AsyncMock()
+    repo.get_by_id.return_value = _account(
+        AccountStatus.QUOTA_EXCEEDED,
+        deactivation_reason="stale quota state",
+        reset_at=1_700_100_000,
+        blocked_at=1_700_000_000,
+    )
+    repo.update_status_if_current.return_value = True
+    service = AccountsService(repo=repo)
+
+    assert await service.reactivate_account(_ACCOUNT_ID) is True
+    repo.update_status_if_current.assert_awaited_once_with(
+        _ACCOUNT_ID,
+        AccountStatus.ACTIVE,
+        None,
+        None,
+        blocked_at=None,
+        expected_status=AccountStatus.QUOTA_EXCEEDED,
+        expected_deactivation_reason="stale quota state",
+        expected_reset_at=1_700_100_000,
+        expected_blocked_at=1_700_000_000,
+    )

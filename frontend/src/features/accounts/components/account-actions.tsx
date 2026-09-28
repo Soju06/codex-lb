@@ -69,10 +69,12 @@ export function AccountActions({
   const canExport = usePermission("accounts:export");
   const showOperatorRecoveryAction =
     account.status === "reauth_required" || account.status === "deactivated";
-  // A deactivated account can be returned to active directly: the reactivate
-  // endpoint clears the deactivation reason and only refuses
-  // `reauth_required`, where the stored refresh token really is unusable.
-  const canResume = account.status === "paused" || account.status === "deactivated";
+  // The reactivate endpoint accepts operator retries for these states. It
+  // refuses `reauth_required`, where the stored refresh token is unusable.
+  const canResume =
+    account.status === "paused" ||
+    account.status === "deactivated" ||
+    account.status === "quota_exceeded";
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
   const resetCountdown = showResetCreditExpiryBadge && account.resetCreditNearestExpiresAt

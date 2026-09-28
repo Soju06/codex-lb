@@ -18,6 +18,7 @@ class RuntimeState:
     version: int = 0
     health_version: int = 0
     blocked_at: float | None = None
+    block_kind: Literal["quota", "rate_limit"] | None = None
     health_tier: int = 0
     drain_entered_at: float | None = None
     probe_success_streak: int = 0

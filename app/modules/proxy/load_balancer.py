@@ -1715,6 +1715,7 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_rate_limit(state, error)
             self._sync_runtime_state(account, state)
+            self._runtime[account.id].block_kind = "rate_limit"
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -1725,6 +1726,7 @@ class LoadBalancer:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
             self._sync_runtime_state(account, state)
+            self._runtime[account.id].block_kind = "quota"
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
             self._selection_inputs_cache.invalidate()
@@ -1982,6 +1984,9 @@ class LoadBalancer:
             dirty = True
         if runtime.blocked_at != state.blocked_at:
             runtime.blocked_at = state.blocked_at
+            dirty = True
+        if state.blocked_at is None and runtime.block_kind is not None:
+            runtime.block_kind = None
             dirty = True
         if runtime.last_error_at != state.last_error_at:
             runtime.last_error_at = state.last_error_at
@@ -2282,6 +2287,28 @@ def _state_from_account(
     effective_secondary_entry = normalized_usage.effective_secondary_entry
     secondary_used = normalized_usage.secondary_used
     secondary_reset = normalized_usage.secondary_reset
+    if (
+        account.status == AccountStatus.ACTIVE
+        and primary_entry is not None
+        and effective_secondary_entry is primary_entry
+        and primary_used is None
+        and runtime.blocked_at is not None
+        and runtime.block_kind == "quota"
+        and _usage_entry_is_recent_available(primary_entry, now=now)
+        and _usage_entry_recorded_after_block(primary_entry, runtime.blocked_at)
+    ):
+        # A peer or usage refresh has recovered this weekly-only account in
+        # the database. Discard this replica's older quota rejection too;
+        # otherwise its local cooldown still excludes the active account.
+        runtime = replace(
+            runtime,
+            reset_at=None,
+            cooldown_until=None,
+            blocked_at=None,
+            block_kind=None,
+            last_error_at=None,
+            error_count=0,
+        )
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
     credits_has, credits_unlimited, credits_balance = _extract_credit_status(
         primary_entry,

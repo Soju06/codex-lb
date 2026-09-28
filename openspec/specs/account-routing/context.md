@@ -19,6 +19,22 @@ refresh failure excludes the account only from that request's remaining movable
 retries. Paused, deactivated, deleted, and security-ineligible accounts retain
 their hard exclusions.
 
+## Weekly-only Professional quota
+
+Some Professional accounts report only a weekly quota, stored in the upstream
+`primary` slot with `window_minutes = 10080`. This row represents the weekly
+limit; the account has no reported five-hour window. The dashboard and router
+interpret it as weekly without changing the stored slot or manufacturing a
+short-window percentage. For example, `used_percent = 6` means 94% weekly
+remaining and no five-hour quota signal.
+
+If an earlier upstream rejection marked such an account quota-exceeded, a
+successful usage refresh can restore it after the quota cooldown. A replica
+with an older local quota cooldown also clears that hold when it sees the
+persisted account active and a fresh available weekly sample recorded after
+the block. A sample collected before the rejection does not prove recovery;
+a new genuine quota rejection restores the block.
+
 ## Replica-local soft health
 
 Error counts, backoff, health tiers, and probe streaks are advisory signals.

@@ -22,6 +22,7 @@ BOOTSTRAP_MODEL_SLUGS = {
     "gpt-5.3-codex-spark",
     "gpt-5.2",
     "codex-auto-review",
+    "gpt-reserve",
 }
 
 EXPECTED_CORE_MODEL_PLANS = {
@@ -52,6 +53,7 @@ EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
     "gpt-5.3-codex-spark": "0.100.0",
     "gpt-5.2": "0.0.1",
     "codex-auto-review": "0.98.0",
+    "gpt-reserve": "0.0.1",
 }
 
 

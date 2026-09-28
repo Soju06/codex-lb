@@ -73,6 +73,7 @@ _GPT5_ALIAS_BASE_MODELS: tuple[str, ...] = (
     "gpt-5.2",
     "gpt-5.1",
     "gpt-5",
+    "gpt-reserve",
 )
 _MODEL_ALIAS_REASONING_TOKENS: dict[str, str] = {
     "minimal": "minimal",

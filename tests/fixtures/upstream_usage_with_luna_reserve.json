@@ -1,0 +1,45 @@
+{
+  "_fixture_notes": {
+    "captured_at": "2026-09-17",
+    "is_synthetic": false,
+    "source": "Live codex-lb instance, GET /api/accounts on a Plus account whose upstream usage fetch carried ?supportsLunaReserve=true. The dashboard response is camelCase; the field names below are the snake_case wire names that app.core.usage.models parses.",
+    "observed_fields": [
+      "additional_rate_limits[].limit_name = gpt-reserve",
+      "additional_rate_limits[].metered_feature = base_model_inference",
+      "additional_rate_limits[].rate_limit.primary_window.used_percent = 0.0",
+      "additional_rate_limits[].rate_limit.primary_window.reset_at = 1790132381",
+      "additional_rate_limits[].rate_limit.secondary_window = null",
+      "window length 10080 minutes (weekly), rendered here as limit_window_seconds"
+    ],
+    "reconstructed_fields": [
+      "plan_type and the top-level rate_limit block are filled in from an ordinary usage response so the payload parses as a whole document; only the additional_rate_limits entry is load-bearing for these tests."
+    ]
+  },
+  "plan_type": "plus",
+  "rate_limit": {
+    "primary_window": {
+      "used_percent": 27.0,
+      "reset_at": 1790110000,
+      "limit_window_seconds": 18000
+    },
+    "secondary_window": {
+      "used_percent": 41.0,
+      "reset_at": 1790500000,
+      "limit_window_seconds": 604800
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "gpt-reserve",
+      "metered_feature": "base_model_inference",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 0.0,
+          "reset_at": 1790132381,
+          "limit_window_seconds": 604800
+        },
+        "secondary_window": null
+      }
+    }
+  ]
+}

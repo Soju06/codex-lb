@@ -10,7 +10,13 @@ from typing import TypedDict
 from app.core.config.settings import get_settings
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
-ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
+# ``disabled`` is not a ranking policy like the others: it takes the bucket out
+# of routing entirely, so a model gated behind it is never served until an
+# operator changes the policy from the dashboard. Unrecognised values normalize
+# to ``inherit``, so a bucket shipped as ``disabled`` must be listed here or it
+# silently defaults to routable.
+ROUTING_POLICY_DISABLED = "disabled"
+ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve", ROUTING_POLICY_DISABLED})
 
 
 def _normalize_identifier(value: str | None) -> str | None:
@@ -377,3 +383,29 @@ def get_additional_display_label_for_quota_key(quota_key: str | None) -> str | N
         return None
     definition = by_quota_key.get(resolved_key)
     return definition.display_label if definition is not None else None
+
+
+def resolve_additional_quota_routing_policy(
+    limit_name: str | None,
+    overrides: dict[str, str] | None = None,
+) -> str | None:
+    """The effective policy for a quota, or None when the name resolves to none."""
+    if limit_name is None:
+        return None
+    quota_key = canonicalize_additional_quota_key(limit_name=limit_name)
+    if quota_key is None:
+        return None
+    return get_additional_quota_routing_policy(quota_key, overrides=overrides)
+
+
+def additional_quota_routing_disabled(
+    limit_name: str | None,
+    overrides: dict[str, str] | None = None,
+) -> bool:
+    """True when an operator has turned routing off for this quota bucket."""
+    return resolve_additional_quota_routing_policy(limit_name, overrides) == ROUTING_POLICY_DISABLED
+
+
+def additional_quota_display_label(limit_name: str) -> str:
+    definition = get_additional_quota_definition_for_key(limit_name)
+    return definition.display_label if definition is not None else limit_name

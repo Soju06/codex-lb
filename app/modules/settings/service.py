@@ -29,6 +29,7 @@ from app.modules.dashboard_roles.service import resolve_role_grants
 from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.additional_quota_keys import (
+    ADDITIONAL_QUOTA_ROUTING_POLICIES,
     normalize_additional_quota_key,
 )
 
@@ -507,8 +508,6 @@ class SettingsService:
 _RETENTION_DISABLED_DAYS = 0
 
 
-_ROUTING_POLICIES = frozenset({"inherit", "normal", "burn_first", "preserve"})
-
 # Inheritable settings with an environment fallback: the ``dashboard_settings``
 # column, the ``Settings`` field and the provenance key share one name.
 _ENVIRONMENT_INHERITABLE_SETTINGS = (
@@ -752,7 +751,7 @@ def _parse_additional_quota_routing_policies(raw: str | None) -> dict[str, str]:
             continue
         normalized_quota_key = normalize_additional_quota_key(quota_key)
         policy = policy.strip().lower()
-        if normalized_quota_key and policy in _ROUTING_POLICIES:
+        if normalized_quota_key and policy in ADDITIONAL_QUOTA_ROUTING_POLICIES:
             policies[normalized_quota_key] = policy
     return policies
 
@@ -764,6 +763,6 @@ def _dump_additional_quota_routing_policies(policies: dict[str, str]) -> str:
             continue
         normalized_quota_key = normalize_additional_quota_key(quota_key)
         normalized_policy = policy.strip().lower()
-        if normalized_quota_key is not None and normalized_policy in _ROUTING_POLICIES:
+        if normalized_quota_key is not None and normalized_policy in ADDITIONAL_QUOTA_ROUTING_POLICIES:
             normalized[normalized_quota_key] = normalized_policy
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))

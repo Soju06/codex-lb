@@ -657,6 +657,7 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
     "no_accounts",
     "no_plan_support_for_model",
     "additional_quota_data_unavailable",
+    "additional_quota_routing_disabled",
     "quota_exhausted",
     "no_additional_quota_eligible_accounts",
 }

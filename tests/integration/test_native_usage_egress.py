@@ -103,7 +103,7 @@ async def test_native_usage_matches_python_payload_and_error_mapping(
     helper, monkeypatch, status, body, content_type, content_encoding
 ):
     async def origin(reader, writer, head, request_body):
-        assert head.startswith(b"GET /backend-api/wham/usage HTTP/1.1\r\n")
+        assert head.startswith(b"GET /backend-api/wham/usage?supportsLunaReserve=true HTTP/1.1\r\n")
         assert b"authorization: bearer usage-probe-token" in head.lower()
         assert b"chatgpt-account-id: usage-probe-account" in head.lower()
         assert b"accept: application/json" in head.lower()
@@ -310,7 +310,7 @@ async def test_native_usage_uses_environment_http_proxy(helper, monkeypatch):
             lambda url: resolve_http_proxy_from_env(url, {"http_proxy": proxy_url}),
         )
         assert (await _fetch("http://usage.invalid")).plan_type == "plus"
-    assert seen[0].startswith(b"GET http://usage.invalid/backend-api/wham/usage HTTP/1.1\r\n")
+    assert seen[0].startswith(b"GET http://usage.invalid/backend-api/wham/usage?supportsLunaReserve=true HTTP/1.1\r\n")
 
 
 @pytest.mark.asyncio

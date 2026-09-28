@@ -327,6 +327,11 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         cached_input_per_1m=2.0,
         output_per_1m=30.0,
     ),
+    "gpt-reserve": ModelPrice(
+        input_per_1m=0.2,
+        cached_input_per_1m=0.02,
+        output_per_1m=1.2,
+    ),
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {

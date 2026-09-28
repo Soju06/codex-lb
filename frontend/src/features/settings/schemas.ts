@@ -33,6 +33,8 @@ const AdditionalQuotaRoutingPolicySchema = z.enum([
   "normal",
   "burn_first",
   "preserve",
+  // Takes the bucket out of routing entirely rather than ranking it.
+  "disabled",
 ]);
 const SettingScalarSchema = z.union([z.number(), z.string(), z.boolean()]);
 

@@ -4376,3 +4376,112 @@ async def test_api_key_enforced_priority_tier_still_routes_a_model_without_prior
     assert selection.error_code is None
     assert selection.account is not None
     assert selection.account.id == account.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_refuses_gpt_reserve_while_routing_is_disabled(monkeypatch) -> None:
+    """The reserve bucket ships ``disabled``, so the model is not routable
+    until an operator turns it on from the dashboard."""
+    account = _make_account("acc-reserve-disabled", "reserve-disabled@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    reserve_entry = AdditionalUsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        quota_key="base_model_inference",
+        limit_name="gpt-reserve",
+        window="primary",
+        used_percent=0.0,
+        reset_at=now_epoch + 604800,
+        window_minutes=10080,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(primary={account.id: reserve_entry}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus", "pro"})),
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-reserve")
+
+    assert selection.account is None
+    assert selection.error_code == "additional_quota_routing_disabled"
+    assert "Luna Reserve" in (selection.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_select_account_routes_gpt_reserve_once_an_operator_enables_it(monkeypatch) -> None:
+    account = _make_account("acc-reserve-enabled", "reserve-enabled@example.com")
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary_entry = UsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        window="primary",
+        used_percent=5.0,
+        reset_at=now_epoch + 300,
+        window_minutes=5,
+    )
+    reserve_entry = AdditionalUsageHistory(
+        id=1,
+        account_id=account.id,
+        recorded_at=now,
+        quota_key="base_model_inference",
+        limit_name="gpt-reserve",
+        window="primary",
+        used_percent=0.0,
+        reset_at=now_epoch + 604800,
+        window_minutes=10080,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={account.id: primary_entry}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(primary={account.id: reserve_entry}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"plus", "pro"})),
+    )
+
+    async def _load_routing_overrides() -> dict[str, str]:
+        return {"base_model_inference": "normal"}
+
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_load_dashboard_additional_quota_routing_overrides",
+        _load_routing_overrides,
+    )
+
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-reserve")
+
+    assert selection.error_code is None
+    assert selection.account is not None
+    assert selection.account.id == account.id

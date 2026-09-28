@@ -272,7 +272,7 @@ async def test_fetch_usage_prefers_native_direct_egress(
     assert len(native.requests) == 1
     request = native.requests[0]
     assert request.method == "GET"
-    assert request.url == "http://usage.test/backend-api/wham/usage"
+    assert request.url == "http://usage.test/backend-api/wham/usage?supportsLunaReserve=true"
     assert request.headers["Authorization"] == "Bearer access-token"
     assert request.timeout_seconds == (10.0 if timeout_seconds is None else timeout_seconds)
 
@@ -598,7 +598,7 @@ async def test_fetch_usage_uses_resolved_codex_route(monkeypatch: pytest.MonkeyP
     assert data.plan_type == "plus"
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
-    assert client.calls[0]["url"] == "http://usage.test/backend-api/wham/usage"
+    assert client.calls[0]["url"] == "http://usage.test/backend-api/wham/usage?supportsLunaReserve=true"
 
 
 @pytest.mark.asyncio

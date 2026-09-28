@@ -2237,6 +2237,7 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "no_accounts",
         "no_plan_support_for_model",
         "additional_quota_data_unavailable",
+        "additional_quota_routing_disabled",
         "no_additional_quota_eligible_accounts",
         "payload_too_large",
         "proxy_overloaded",

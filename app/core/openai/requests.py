@@ -332,7 +332,7 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     return sanitized_input
 
 
-def _normalize_responses_input_instructions(data: JsonValue, *, forwards_text_format: bool = False) -> JsonValue:
+def _normalize_responses_input_instructions(data: JsonValue, *, keep_json_mode_instructions: bool = False) -> JsonValue:
     if not is_json_mapping(data):
         return data
     input_value = data.get("input")
@@ -343,6 +343,7 @@ def _normalize_responses_input_instructions(data: JsonValue, *, forwards_text_fo
     # developer message into the top-level ``instructions`` field.
     if responses_input_uses_lite_tools(input_value):
         return data
+    keep_json_mentions = keep_json_mode_instructions and _requests_json_object_format(data.get("text"))
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -369,6 +370,15 @@ def _normalize_responses_input_instructions(data: JsonValue, *, forwards_text_fo
             input_items.append(item)
             continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
+        if keep_json_mentions and _mentions_json(instruction_text):
+            # JSON mode only counts a JSON mention inside input messages, not in
+            # top-level instructions. Keep this instruction where it is, as a
+            # developer message: upstream rejects the system role in input.
+            kept_item = dict(item_mapping)
+            kept_item["role"] = "developer"
+            input_items.append(kept_item)
+            changed = True
+            continue
         if instruction_text:
             instruction_parts.append(instruction_text)
         if preserved_content is not None:
@@ -381,14 +391,6 @@ def _normalize_responses_input_instructions(data: JsonValue, *, forwards_text_fo
     if not changed:
         return data
 
-    if (
-        forwards_text_format
-        and _requests_json_object_format(data.get("text"))
-        and any(_mentions_json(part) for part in instruction_parts)
-        and not _user_messages_mention_json(input_items)
-    ):
-        input_items = _add_json_mode_note(input_items)
-
     normalized: MutableJsonObject = dict(data)
     existing_instructions = normalized.get("instructions")
     merged_instructions = _merge_responses_instructions(
@@ -398,12 +400,6 @@ def _normalize_responses_input_instructions(data: JsonValue, *, forwards_text_fo
     normalized["instructions"] = merged_instructions
     normalized["input"] = input_items
     return normalized
-
-
-# Upstream JSON mode (text.format json_object) requires a user input message to
-# mention JSON; top-level ``instructions`` and assistant messages do not count.
-# When hoisting moved the only mention out of input, this note puts one back.
-_JSON_MODE_NOTE = "Respond in JSON."
 
 
 def _mentions_json(text: str) -> bool:
@@ -418,49 +414,6 @@ def _requests_json_object_format(text: JsonValue) -> bool:
         return False
     text_format = _json_mapping_or_none(text_mapping.get("format"))
     return text_format is not None and text_format.get("type") == "json_object"
-
-
-def _is_user_message(item: Mapping[str, JsonValue]) -> bool:
-    return item.get("role") == "user" and item.get("type") in (None, "message")
-
-
-def _user_messages_mention_json(input_items: list[JsonValue]) -> bool:
-    for item in input_items:
-        item_mapping = _json_mapping_or_none(item)
-        if item_mapping is None or not _is_user_message(item_mapping):
-            continue
-        for part in _json_parts(item_mapping.get("content")):
-            # Count only text that is forwarded: input sanitization later drops
-            # reasoning-echo parts, so their text must not satisfy JSON mode.
-            if _sanitize_interleaved_reasoning_content_part(part) is None:
-                continue
-            text = _responses_instruction_content_text(part)
-            if text is not None and _mentions_json(text):
-                return True
-    return False
-
-
-def _add_json_mode_note(input_items: list[JsonValue]) -> list[JsonValue]:
-    # Prefix the first user message so the note sits at the same place on every
-    # turn and the cached prompt prefix stays stable.
-    note: JsonValue = {"type": "input_text", "text": _JSON_MODE_NOTE}
-    for index, item in enumerate(input_items):
-        item_mapping = _json_mapping_or_none(item)
-        if item_mapping is None or not _is_user_message(item_mapping):
-            continue
-        content = item_mapping.get("content")
-        if isinstance(content, str):
-            content_parts: list[JsonValue] = [{"type": "input_text", "text": content}]
-        elif is_json_list(content):
-            content_parts = list(content)
-        else:
-            continue
-        noted_item: MutableJsonObject = dict(item_mapping)
-        noted_item["content"] = [note, *content_parts]
-        return [*input_items[:index], noted_item, *input_items[index + 1 :]]
-    # No user message: append, so the note cannot land between a pending tool
-    # call and its output.
-    return [*input_items, {"role": "user", "content": [note]}]
 
 
 def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
@@ -720,8 +673,8 @@ class ResponsesRequest(BaseModel):
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
         # Compact requests drop ``text`` before upstream, so only this request
-        # type can carry JSON mode and needs its JSON mention kept in input.
-        return _normalize_responses_input_instructions(data, forwards_text_format=True)
+        # type can carry JSON mode.
+        return _normalize_responses_input_instructions(data, keep_json_mode_instructions=True)
 
     model: str = Field(min_length=1)
     instructions: str

@@ -1,15 +1,16 @@
 # Why
 
 Upstream JSON mode (`text.format` of type `json_object`) rejects a request
-unless a user input message mentions JSON:
+unless an input message mentions JSON:
 
 ```
 Response input messages must contain the word 'json' in some form to use
 'text.format' of type 'json_object'.
 ```
 
-Top-level `instructions` and assistant messages do not count, and upstream
-rejects `system` messages inside `input` ("System messages are not allowed").
+Top-level `instructions` do not count. Upstream accepts a `developer` message
+in `input` that mentions JSON, but rejects `system` messages there ("System
+messages are not allowed").
 
 Most clients put the JSON instruction in a `system` or `developer` message.
 Instruction normalization moves those into top-level `instructions`, so the
@@ -19,19 +20,19 @@ out, and #731's test was updated to expect that.
 
 # What Changes
 
-- Keep moving `system`/`developer` messages into `instructions`.
-- When the request uses `json_object`, a moved message mentioned JSON, and no
-  user input message does, add the text part `Respond in JSON.` to the start
-  of the first user message. With no user message, append a user message
-  with only that note.
-- Compact requests are unchanged; they drop `text` before upstream.
+- For a request that uses `json_object`, a `system` or `developer` message that
+  mentions JSON stays in `input` in its original position. A `system` message
+  is sent with the `developer` role, because upstream rejects `system` there.
+- Other `system` and `developer` messages still move into `instructions`.
+- Requests without `json_object`, compact requests (they drop `text` before
+  upstream) and Responses Lite input are unchanged.
 
 # Capabilities
 
 ### Modified Capabilities
 
-- `chat-completions-compat`: JSON mode maps instruction messages to
-  `instructions` and keeps a JSON mention in `input`.
+- `chat-completions-compat`: JSON mode keeps a JSON instruction message in
+  `input` as a `developer` message.
 - `responses-api-compat`: the same rule applies to Responses `input`.
 
 # Impact

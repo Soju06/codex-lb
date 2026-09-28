@@ -475,7 +475,7 @@ def test_chat_response_format_json_object_maps_to_text_format():
     assert text.get("format") == {"type": "json_object"}
 
 
-def test_chat_response_format_json_object_keeps_json_mention_in_input():
+def test_chat_response_format_json_object_keeps_json_instruction_in_input():
     payload = {
         "model": "gpt-5.2",
         "messages": [
@@ -489,37 +489,15 @@ def test_chat_response_format_json_object_keeps_json_mention_in_input():
     responses = req.to_responses_request()
     dumped = responses.to_payload()
 
-    assert dumped["instructions"] == "Return JSON.\nKeep it short."
+    assert dumped["instructions"] == "Keep it short."
     assert dumped["input"] == [
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": "Respond in JSON."},
-                {"type": "input_text", "text": "Say hello."},
-            ],
-        },
+        {"role": "developer", "content": [{"type": "input_text", "text": "Return JSON."}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
     ]
     assert dumped["text"] == {"format": {"type": "json_object"}}
 
 
-def test_chat_response_format_json_object_leaves_user_json_mention_alone():
-    payload = {
-        "model": "gpt-5.2",
-        "messages": [
-            {"role": "system", "content": "Return JSON."},
-            {"role": "user", "content": "Say hello as json."},
-        ],
-        "response_format": {"type": "json_object"},
-    }
-    dumped = ChatCompletionsRequest.model_validate(payload).to_responses_request().to_payload()
-
-    assert dumped["instructions"] == "Return JSON."
-    assert dumped["input"] == [
-        {"role": "user", "content": [{"type": "input_text", "text": "Say hello as json."}]},
-    ]
-
-
-def test_chat_response_format_json_object_without_json_mention_is_unchanged():
+def test_chat_response_format_json_object_without_json_mention_hoists_instructions():
     payload = {
         "model": "gpt-5.2",
         "messages": [
@@ -536,7 +514,7 @@ def test_chat_response_format_json_object_without_json_mention_is_unchanged():
     ]
 
 
-def test_chat_system_json_mention_without_json_object_format_is_unchanged():
+def test_chat_system_json_mention_without_json_object_format_is_hoisted():
     payload = {
         "model": "gpt-5.2",
         "messages": [

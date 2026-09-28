@@ -167,10 +167,10 @@ class TestAppendStability:
         assert second == first
 
 
-class TestJsonModeNote:
-    def test_key_is_stable_across_turns_that_carry_the_json_mode_note(self):
-        """The JSON-mode note is added to the same first user message every
-        turn, so a growing JSON-mode thread keeps one key."""
+class TestJsonModeInstruction:
+    def test_key_is_stable_across_a_growing_json_mode_thread(self):
+        """A JSON-mode instruction kept in input as a developer message is part
+        of the stable prefix, so the thread keeps one key as it grows."""
 
         def json_mode_turn(items: Sequence[object]) -> ResponsesRequest:
             return ResponsesRequest.model_validate(
@@ -187,7 +187,8 @@ class TestJsonModeNote:
         items = [*items, _assistant("{}"), _user("continue 0")]
         first = _derive_prompt_cache_key(json_mode_turn(items), api_key)
         for turn in range(1, 5):
-            items = [*items, _assistant("{}"), _user(f"continue {turn}")]
+            text = "add a date field to that json" if turn == 2 else f"continue {turn}"
+            items = [*items, _assistant("{}"), _user(text)]
             assert _derive_prompt_cache_key(json_mode_turn(items), api_key) == first
 
 

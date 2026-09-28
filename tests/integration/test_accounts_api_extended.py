@@ -1002,12 +1002,21 @@ async def test_accounts_list_maps_weekly_only_primary_to_secondary(async_client,
 
 
 @pytest.mark.asyncio
-async def test_accounts_list_exposes_monthly_only_free_quota(async_client, db_setup):
+@pytest.mark.parametrize("plan_type", ["free", "team"])
+@pytest.mark.parametrize("older_window", [None, "primary", "secondary"])
+async def test_accounts_list_exposes_monthly_only_quota(async_client, db_setup, plan_type, older_window):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
 
-        await accounts_repo.upsert(_make_account("acc_free_monthly", "free-monthly@example.com", plan_type="free"))
+        await accounts_repo.upsert(_make_account("acc_free_monthly", "free-monthly@example.com", plan_type=plan_type))
+        if older_window is not None:
+            await usage_repo.add_entry(
+                "acc_free_monthly",
+                10.0,
+                window=older_window,
+                window_minutes=300 if older_window == "primary" else 10080,
+            )
         await usage_repo.add_entry(
             "acc_free_monthly",
             24.0,

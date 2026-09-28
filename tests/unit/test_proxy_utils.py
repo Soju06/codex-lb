@@ -225,7 +225,7 @@ async def test_budget_compatibility_requires_security_flag_support() -> None:
 
     service = cast(
         proxy_service.ProxyService,
-        SimpleNamespace(_select_account_with_budget=narrow_selector),
+        SimpleNamespace(_select_account_with_budget=narrow_selector, _repo_factory=None),
     )
 
     ordinary_result = await proxy_service.ProxyService._select_account_with_budget_compatible(

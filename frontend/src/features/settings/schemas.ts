@@ -79,6 +79,7 @@ export const DashboardSettingsSchema = z
     autoRedeemResetCreditsBeforeExpiry: z.boolean().optional().default(false),
     showResetCreditExpiryBadge: z.boolean().optional().default(true),
     routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
+    subagentAccountPreference: z.enum(["off", "parent_bound_only", "always"]).optional().default("off"),
     relativeAvailabilityPower: z.number().positive().optional().default(2),
     relativeAvailabilityTopK: z
       .number()
@@ -271,6 +272,7 @@ export const SettingsUpdateRequestSchema = z
     autoRedeemResetCreditsBeforeExpiry: z.boolean().optional(),
     showResetCreditExpiryBadge: z.boolean().optional(),
     routingStrategy: RoutingStrategySchema.optional(),
+    subagentAccountPreference: z.enum(["off", "parent_bound_only", "always"]).optional(),
     relativeAvailabilityPower: z.number().positive().optional(),
     relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
     singleAccountId: z.string().nullable().optional(),

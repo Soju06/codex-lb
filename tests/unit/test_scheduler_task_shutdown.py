@@ -102,15 +102,13 @@ async def test_task_deferring_cancellation_is_tracked_not_awaited_forever(
 
 
 def _shutdown_budget(monkeypatch: pytest.MonkeyPatch, usable_seconds: float) -> None:
-    """Simulate a committed shutdown whose drain-plus-reserve deadline leaves ``usable_seconds``
-    beyond the post-stop reserve, counting down in real time."""
+    """Simulate a committed shutdown whose shared drain deadline leaves ``usable_seconds``,
+    counting down in real time. (The post-drain cleanup reserve lies beyond it.)"""
 
-    # 15s mirrors task_shutdown.POST_STOP_SHUTDOWN_RESERVE_SECONDS; spelled out so the
-    # test measures behavior (elapsed time), not the presence of the constant.
-    deadline = time.monotonic() + 15.0 + usable_seconds
+    deadline = time.monotonic() + usable_seconds
     monkeypatch.setattr(
         shutdown_module,
-        "remaining_post_drain_cleanup_timeout_seconds",
+        "remaining_drain_timeout_seconds",
         lambda: max(deadline - time.monotonic(), 0.0),
     )
 

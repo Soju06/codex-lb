@@ -45,10 +45,14 @@ case operators should see. It names the coroutine.
   sequential stops could reach about 28s. That exceeds the server's 25s
   post-drain cleanup reserve, after which it force-exits before the lease
   release and DB disposal (found in review). Each wait is therefore capped by
-  `shutdown_state.remaining_post_drain_cleanup_timeout_seconds()` minus a 15s
-  reserve (the lease-release deadline of 10s plus the metrics-server wait of
-  5s). With the budget exhausted, a task is cancelled without grace, and one
-  that still defers cancellation is tracked, so the clean record is withheld.
+  the time left in the shared *drain* deadline
+  (`shutdown_state.remaining_drain_timeout_seconds()`), never touching the 25s
+  post-drain cleanup reserve. That reserve is exactly the lease-release
+  deadline (10s) plus the metrics-server wait (5s) plus `close_db()`'s bounded
+  teardown drain (2 x 5s). A first revision subtracted a 15s reserve from the
+  post-drain budget, which left `close_db()` unbudgeted (also found in review).
+  With no drain time left, a task is cancelled without grace, and one that
+  still defers cancellation is tracked, so the clean record is withheld.
 - [PostgreSQL untested] → The code path is backend-independent, but neither the
   symptom nor the fix was measured on Postgres. This is called out in the
   proposal and the PR.

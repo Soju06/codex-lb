@@ -11,11 +11,11 @@ does. It MUST then wait at most the same grace for the cancellation to take
 effect. A task still running after that MUST be logged and tracked rather than
 awaited indefinitely, and while any such task is still running the shutdown
 MUST NOT be recorded as clean. Each of these waits MUST additionally be capped
-by the shared shutdown budget remaining after a reserve for the steps that
-follow the scheduler stops (leader-lease release, metrics-server wait, database
-disposal), so that the sequential stops cannot push the process past its
-forced-exit deadline; when that budget is exhausted the task MUST be cancelled
-without a grace wait. A task that is idle between ticks MUST exit on the stop
+by the time remaining in the shared drain deadline, and MUST NOT use the
+post-drain cleanup reserve, which belongs to the steps that follow the scheduler
+stops (leader-lease release, metrics-server wait, database disposal), so that
+the sequential stops cannot push the process past its forced-exit deadline;
+when no drain time remains the task MUST be cancelled without a grace wait. A task that is idle between ticks MUST exit on the stop
 signal without waiting out the grace.
 
 #### Scenario: Prompt shutdown after startup leaves no pool errors
@@ -54,7 +54,7 @@ signal without waiting out the grace.
 
 #### Scenario: Sequential stops stay within the shutdown budget
 
-- **GIVEN** a committed shutdown with only a fraction of a second of budget left beyond the post-stop reserve
+- **GIVEN** a committed shutdown with only a fraction of a second left in the shared drain deadline
 - **WHEN** seven wedged background tasks are stopped one after another
 - **THEN** all of them are stopped within that remaining budget, not 2 seconds (or more) each
 - **AND** a task that defers cancellation is still tracked so the shutdown is not recorded clean

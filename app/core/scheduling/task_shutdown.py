@@ -17,25 +17,23 @@ logger = logging.getLogger(__name__)
 # grace only applies to a task caught mid-tick.
 DATABASE_TASK_STOP_GRACE_SECONDS = 2.0
 
-# Part of the shared drain-plus-cleanup budget kept for what shutdown still
-# runs after the scheduler stops: the leader-lease release (up to 10s in
-# app/main.py) and the metrics-server wait (up to 5s), then DB disposal. The
-# server force-exits the process once that budget is spent, so the sequential
-# stops must never consume it.
-POST_STOP_SHUTDOWN_RESERVE_SECONDS = 15.0
-
 _undrained: set[asyncio.Task[Any]] = set()
 
 
 def _wait_budget_seconds() -> float:
-    """How long one stop wait may take: the grace, capped by the shutdown budget left.
+    """How long one stop wait may take: the grace, capped by the drain time left.
 
-    Outside a server shutdown (no shared deadline) the full grace applies.
+    The stops draw only on what is left of the shared *drain* deadline, never on
+    the post-drain cleanup reserve that follows it (POST_DRAIN_CLEANUP_TIMEOUT_SECONDS,
+    25s in app/core/server.py). That reserve is sized for the steps after the
+    stops: the leader-lease release (10s), the metrics-server wait (5s) and
+    close_db()'s bounded teardown drain (2 x 5s); the server force-exits once it
+    is spent. Outside a server shutdown (no shared deadline) the full grace applies.
     """
-    remaining = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
+    remaining = shutdown_state.remaining_drain_timeout_seconds()
     if remaining is None:
         return DATABASE_TASK_STOP_GRACE_SECONDS
-    return max(0.0, min(DATABASE_TASK_STOP_GRACE_SECONDS, remaining - POST_STOP_SHUTDOWN_RESERVE_SECONDS))
+    return max(0.0, min(DATABASE_TASK_STOP_GRACE_SECONDS, remaining))
 
 
 def _describe(task: asyncio.Task[Any]) -> str:

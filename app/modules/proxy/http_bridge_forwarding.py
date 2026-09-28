@@ -10,7 +10,12 @@ from typing import cast
 
 import aiohttp
 
-from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
+from app.core.clients.proxy import (
+    _SSE_SEPARATOR_OVERLAP,
+    ProxyResponseError,
+    _find_sse_separator,
+    filter_inbound_headers,
+)
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
@@ -712,7 +717,9 @@ async def _iter_sse_event_blocks(
     scheduler: Scheduler,
     clock: Clock,
 ) -> AsyncIterator[str]:
-    buffer = b""
+    buffer = bytearray()
+    scanned = 0
+    swallow_lf = False
     chunks = response.content.iter_chunked(65536)
     while True:
         receive_timeout = _owner_forward_receive_timeout(
@@ -732,14 +739,27 @@ async def _iter_sse_event_blocks(
             ) from exc
         if not chunk:
             continue
-        buffer += chunk
-        while b"\n\n" in buffer:
-            raw_block, buffer = buffer.split(b"\n\n", 1)
-            text = raw_block.decode("utf-8")
-            if text:
-                yield f"{text}\n\n"
+        buffer.extend(chunk)
+        if swallow_lf:
+            swallow_lf = False
+            if buffer[0] == 0x0A:
+                # The prior chunk's trailing CR already dispatched the event.
+                del buffer[0]
+        while True:
+            separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+            if separator is None:
+                scanned = len(buffer)
+                break
+            index, separator_len = separator
+            event_end = index + separator_len
+            raw_block = bytes(buffer[:event_end])
+            del buffer[:event_end]
+            swallow_lf = raw_block.endswith(b"\r") and not buffer
+            scanned = 0
+            if raw_block.strip():
+                yield raw_block.decode("utf-8", errors="replace")
     if buffer.strip():
-        yield buffer.decode("utf-8")
+        yield buffer.decode("utf-8", errors="replace")
 
 
 def _owner_forward_receive_timeout(

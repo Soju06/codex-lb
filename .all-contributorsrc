@@ -1514,6 +1514,15 @@
       "profile": "https://github.com/uniskela",
       "contributions": [
         "doc"      ]
+    },
+    {
+      "login": "tubededentifrice-dev",
+      "name": "Vincent Dev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/246649517?v=4",
+      "profile": "https://github.com/tubededentifrice-dev",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

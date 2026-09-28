@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import pytest
 
+from app.core import shutdown as shutdown_module
 from app.core.scheduling import task_shutdown
 
 
@@ -97,3 +99,64 @@ async def test_task_deferring_cancellation_is_tracked_not_awaited_forever(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert task not in task_shutdown.undrained_tasks()
+
+
+def _shutdown_budget(monkeypatch: pytest.MonkeyPatch, usable_seconds: float) -> None:
+    """Simulate a committed shutdown whose drain-plus-reserve deadline leaves ``usable_seconds``
+    beyond the post-stop reserve, counting down in real time."""
+
+    # 15s mirrors task_shutdown.POST_STOP_SHUTDOWN_RESERVE_SECONDS; spelled out so the
+    # test measures behavior (elapsed time), not the presence of the constant.
+    deadline = time.monotonic() + 15.0 + usable_seconds
+    monkeypatch.setattr(
+        shutdown_module,
+        "remaining_post_drain_cleanup_timeout_seconds",
+        lambda: max(deadline - time.monotonic(), 0.0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_sequential_stops_of_wedged_tasks_stay_within_the_shutdown_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Seven wedged tasks (six schedulers + the lease keeper) would take 7 x (2s grace + 2s
+    # post-cancel wait) = 28s uncapped; with 0.5s of budget left they must all be done in ~0.5s.
+    _shutdown_budget(monkeypatch, usable_seconds=0.5)
+
+    async def wedged_database_call() -> None:
+        await asyncio.Event().wait()
+
+    tasks = [asyncio.create_task(wedged_database_call()) for _ in range(7)]
+    started = time.monotonic()
+    for task in tasks:
+        await task_shutdown.stop_task_after_grace(task)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5, f"sequential stops took {elapsed:.2f}s against a 0.5s budget"
+    assert all(task.cancelled() for task in tasks)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_budget_cancels_immediately_and_still_tracks_deferring_tasks(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _shutdown_budget(monkeypatch, usable_seconds=0.0)
+    caplog.set_level(logging.WARNING, logger=task_shutdown.__name__)
+    cleanup_may_finish = asyncio.Event()
+
+    async def shielded_database_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await cleanup_may_finish.wait()
+            raise
+
+    task = asyncio.create_task(shielded_database_cleanup())
+    started = time.monotonic()
+    await task_shutdown.stop_task_after_grace(task)
+
+    assert time.monotonic() - started < 0.5
+    assert task in task_shutdown.undrained_tasks()  # clean shutdown record stays withheld
+    cleanup_may_finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task

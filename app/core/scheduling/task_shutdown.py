@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any
 
+from app.core import shutdown as shutdown_state
 from app.core.utils.shared_future import wait_on_shared_future
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,25 @@ logger = logging.getLogger(__name__)
 # grace only applies to a task caught mid-tick.
 DATABASE_TASK_STOP_GRACE_SECONDS = 2.0
 
+# Part of the shared drain-plus-cleanup budget kept for what shutdown still
+# runs after the scheduler stops: the leader-lease release (up to 10s in
+# app/main.py) and the metrics-server wait (up to 5s), then DB disposal. The
+# server force-exits the process once that budget is spent, so the sequential
+# stops must never consume it.
+POST_STOP_SHUTDOWN_RESERVE_SECONDS = 15.0
+
 _undrained: set[asyncio.Task[Any]] = set()
+
+
+def _wait_budget_seconds() -> float:
+    """How long one stop wait may take: the grace, capped by the shutdown budget left.
+
+    Outside a server shutdown (no shared deadline) the full grace applies.
+    """
+    remaining = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
+    if remaining is None:
+        return DATABASE_TASK_STOP_GRACE_SECONDS
+    return max(0.0, min(DATABASE_TASK_STOP_GRACE_SECONDS, remaining - POST_STOP_SHUTDOWN_RESERVE_SECONDS))
 
 
 def _describe(task: asyncio.Task[Any]) -> str:
@@ -34,8 +53,12 @@ async def stop_task_after_grace(task: asyncio.Task[Any]) -> None:
     """
     # wait_on_shared_future never cancels ``task`` itself and absorbs a
     # level-cancelled caller's repeated cancels (see scripts/check_cancellation_safety.py).
+    # Each wait is capped by the shared shutdown budget (see _wait_budget_seconds),
+    # so the scheduler stops, which run sequentially, cannot push the process
+    # past its forced-exit deadline before lease release and DB disposal.
+    grace = _wait_budget_seconds()
     try:
-        await wait_on_shared_future(task, timeout=DATABASE_TASK_STOP_GRACE_SECONDS)
+        await wait_on_shared_future(task, timeout=grace)
         return
     except TimeoutError:
         pass
@@ -45,19 +68,20 @@ async def stop_task_after_grace(task: asyncio.Task[Any]) -> None:
         raise
     logger.warning(
         "Background task still busy %.1fs after stop was requested; cancelling task=%s",
-        DATABASE_TASK_STOP_GRACE_SECONDS,
+        grace,
         _describe(task),
     )
     task.cancel()
+    cancel_wait = _wait_budget_seconds()
     try:
-        await wait_on_shared_future(task, timeout=DATABASE_TASK_STOP_GRACE_SECONDS)
+        await wait_on_shared_future(task, timeout=cancel_wait)
     except TimeoutError:
         # The task is deferring cancellation (e.g. inside shielded DB cleanup).
         # Do not block shutdown on it, but keep it visible: while it runs, the
         # shutdown must not be recorded as clean (see undrained_tasks()).
         logger.warning(
             "Background task still running %.1fs after cancellation; leaving it tracked task=%s",
-            DATABASE_TASK_STOP_GRACE_SECONDS,
+            cancel_wait,
             _describe(task),
         )
         _undrained.add(task)

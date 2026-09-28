@@ -40,9 +40,15 @@ case operators should see. It names the coroutine.
 
 ## Risks / Trade-offs
 
-- [Worst case: several tasks mid-tick in slow DB work] → Up to 2s each, since
-  the stops run sequentially. This is bounded by the existing application
-  drain deadline (`CODEX_LB_SHUTDOWN_DRAIN_TIMEOUT_SECONDS`).
+- [Worst case: several tasks mid-tick in slow DB work] → Uncapped, each stop
+  could take its grace plus the bounded post-cancel wait (2s + 2s), so seven
+  sequential stops could reach about 28s. That exceeds the server's 25s
+  post-drain cleanup reserve, after which it force-exits before the lease
+  release and DB disposal (found in review). Each wait is therefore capped by
+  `shutdown_state.remaining_post_drain_cleanup_timeout_seconds()` minus a 15s
+  reserve (the lease-release deadline of 10s plus the metrics-server wait of
+  5s). With the budget exhausted, a task is cancelled without grace, and one
+  that still defers cancellation is tracked, so the clean record is withheld.
 - [PostgreSQL untested] → The code path is backend-independent, but neither the
   symptom nor the fix was measured on Postgres. This is called out in the
   proposal and the PR.

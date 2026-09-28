@@ -14,6 +14,8 @@
 - [x] 4.1 Bound the post-cancel wait by the same grace; log and track a task still running afterwards, and exclude the clean SQLite shutdown record while any tracked task is still running (`undrained_tasks()` in `app/main.py`'s `database_tasks_drained`). Verify with the deferring-cancellation unit test.
 - [x] 4.2 Add a deterministic barrier test: a `sitecustomize` injected into the server holds the cache-invalidation poller's own read via `await_only` until the poller's stop is requested. Verify it fails on `main` (3/3, read cancelled) and passes with the fix (3/3).
 
+- [x] 4.3 Cap both waits in `stop_task_after_grace` by the shared shutdown budget left after a 15s post-stop reserve (`POST_STOP_SHUTDOWN_RESERVE_SECONDS`), so the sequential stops cannot exhaust the 25s post-drain reserve before lease release and DB disposal. Verify with `test_sequential_stops_of_wedged_tasks_stay_within_the_shutdown_budget` (14.0s on the previous code against a 0.5s budget; passes now) and `test_exhausted_budget_cancels_immediately_and_still_tracks_deferring_tasks`.
+
 ## 3. Validation
 
 - [x] 3.1 `npx --yes @fission-ai/openspec@1.11.0 validate drain-database-schedulers-on-shutdown --strict`, `make lint`, and `uv run ty check` pass.

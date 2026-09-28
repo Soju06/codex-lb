@@ -10,8 +10,13 @@ still running after that grace, and MUST log a WARNING naming the task when it
 does. It MUST then wait at most the same grace for the cancellation to take
 effect. A task still running after that MUST be logged and tracked rather than
 awaited indefinitely, and while any such task is still running the shutdown
-MUST NOT be recorded as clean. A task that is idle between ticks MUST exit on
-the stop signal without waiting out the grace.
+MUST NOT be recorded as clean. Each of these waits MUST additionally be capped
+by the shared shutdown budget remaining after a reserve for the steps that
+follow the scheduler stops (leader-lease release, metrics-server wait, database
+disposal), so that the sequential stops cannot push the process past its
+forced-exit deadline; when that budget is exhausted the task MUST be cancelled
+without a grace wait. A task that is idle between ticks MUST exit on the stop
+signal without waiting out the grace.
 
 #### Scenario: Prompt shutdown after startup leaves no pool errors
 
@@ -46,6 +51,13 @@ the stop signal without waiting out the grace.
 - **GIVEN** the cache-invalidation poller is inside its database read when shutdown stops it
 - **WHEN** the read finishes within the grace
 - **THEN** the read completes instead of being cancelled
+
+#### Scenario: Sequential stops stay within the shutdown budget
+
+- **GIVEN** a committed shutdown with only a fraction of a second of budget left beyond the post-stop reserve
+- **WHEN** seven wedged background tasks are stopped one after another
+- **THEN** all of them are stopped within that remaining budget, not 2 seconds (or more) each
+- **AND** a task that defers cancellation is still tracked so the shutdown is not recorded clean
 
 #### Scenario: Idle tasks stop immediately
 

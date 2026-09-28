@@ -5,7 +5,7 @@ import dataclasses
 import json
 import logging
 import math
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast, get_args
 from uuid import uuid4
 
@@ -410,6 +410,10 @@ class _VerifiedDurableFullResend:
     def stored_input_item_count(self) -> int:
         return self._stored_input_item_count
 
+    @property
+    def owner_account_id(self) -> str:
+        return self._owner_account_id
+
     def matches(
         self,
         payload: ResponsesRequest,
@@ -504,6 +508,25 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
+def _durable_full_resend_projected_payload(
+    payload: ResponsesRequest,
+    *,
+    stored_count: int,
+) -> ResponsesRequest | None:
+    """Return the unanchored projection a durable full resend replays as, before the neutrality check."""
+    if not isinstance(payload.input, list):
+        return None
+    replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+        cast(list[JsonValue], payload.input),
+        stored_count=stored_count,
+    )
+    if replay_projection is None:
+        return None
+    return _http_bridge_payload_without_previous_response_id(payload).model_copy(
+        update={"input": replay_projection.input_items}
+    )
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -1072,6 +1095,45 @@ class _HTTPBridgeStreamingMixin:
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
+            turn_state = _sticky_key_from_turn_state_header(headers)
+            turn_state_full_resend_verifier: Callable[[str], Awaitable[ResponsesRequest | None]] | None = None
+            if (
+                turn_state is not None
+                and not forwarded_request
+                and payload.previous_response_id is None
+                and rewritten_file_account_id is None
+            ):
+                api_key_id = api_key.id if api_key is not None else None
+                bypass_turn_state = turn_state
+
+                async def verify_turn_state_full_resend(owner_account_id: str) -> ResponsesRequest | None:
+                    try:
+                        durable_lookup = await self._durable_bridge.lookup_turn_state_target(
+                            turn_state=bypass_turn_state,
+                            api_key_id=api_key_id,
+                        )
+                        proof = _verify_durable_full_resend(payload, durable_lookup)
+                        if proof is None or proof.owner_account_id != owner_account_id:
+                            return None
+                        replay_payload = _durable_full_resend_projected_payload(
+                            payload,
+                            stored_count=proof.stored_input_item_count,
+                        )
+                        if replay_payload is None or not _http_bridge_payload_is_account_neutral_fresh_replay(
+                            replay_payload
+                        ):
+                            return None
+                        return replay_payload
+                    except Exception:
+                        logger.warning(
+                            "Optional HTTP fallback full-resend verification failed; keeping the owner request_id=%s",
+                            request_id,
+                            exc_info=True,
+                        )
+                        return None
+
+                turn_state_full_resend_verifier = verify_turn_state_full_resend
+
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
                 payload,
@@ -1088,6 +1150,7 @@ class _HTTPBridgeStreamingMixin:
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                turn_state_full_resend_verifier=turn_state_full_resend_verifier,
             ):
                 yield line
             return
@@ -1646,14 +1709,12 @@ class _HTTPBridgeStreamingMixin:
             and isinstance(payload.input, list)
         ):
             durable_full_resend_retains_required_context_cache = durable_full_resend_has_safe_fresh_context
-            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
-                cast(list[JsonValue], payload.input),
+            projected_payload = _durable_full_resend_projected_payload(
+                payload,
                 stored_count=durable_full_resend_anchor_count,
             )
-            if replay_projection is not None:
-                durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
-                    payload
-                ).model_copy(update={"input": replay_projection.input_items})
+            if projected_payload is not None:
+                durable_full_resend_fresh_payload = projected_payload
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload
                 )
@@ -2148,15 +2209,12 @@ class _HTTPBridgeStreamingMixin:
                     # Unreachable while the proof above holds; kept explicit so
                     # a future caller cannot turn it into an AssertionError.
                     return "no_durable_lookup"
-                replay_projection = project_responses_input_for_account_neutral_fresh_replay(
-                    cast(list[JsonValue], payload.input),
+                durable_full_resend_fresh_payload = _durable_full_resend_projected_payload(
+                    payload,
                     stored_count=durable_full_resend_anchor_count,
                 )
-                if replay_projection is None:
+                if durable_full_resend_fresh_payload is None:
                     return "account_scoped_input"
-                durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
-                    payload
-                ).model_copy(update={"input": replay_projection.input_items})
             if durable_full_resend_is_account_neutral is None:
                 durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
                     durable_full_resend_fresh_payload

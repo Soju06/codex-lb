@@ -161,7 +161,7 @@ class _CompactServiceProtocol(Protocol):
         fail_on_missing: bool = True,
     ) -> str | None: ...
 
-    async def _compact_owner_selection_loss_is_quota_caused(self, account_id: str) -> bool: ...
+    async def _owner_selection_loss_is_quota_caused(self, account_id: str) -> bool: ...
 
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
@@ -635,7 +635,7 @@ def _compact_account_neutral_replay_payload(
 
 
 class _CompactMixin:
-    async def _compact_owner_selection_loss_is_quota_caused(self, account_id: str) -> bool:
+    async def _owner_selection_loss_is_quota_caused(self, account_id: str) -> bool:
         """Return whether the pinned owner is unselectable because of quota state.
 
         Account-neutral replay off a pinned previous-response owner is legal
@@ -1415,9 +1415,7 @@ class _CompactMixin:
                             owner_quota_failover_eligible
                             or (
                                 unavailable_owner_account_id not in excluded_account_ids
-                                and await proxy._compact_owner_selection_loss_is_quota_caused(
-                                    unavailable_owner_account_id
-                                )
+                                and await proxy._owner_selection_loss_is_quota_caused(unavailable_owner_account_id)
                             )
                         ):
                             recovery_blocked_reason = "non_quota_owner_loss"

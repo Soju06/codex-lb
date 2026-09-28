@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from dataclasses import replace
-from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, cast
 
 import aiohttp
 
@@ -17,7 +17,7 @@ from app.core.balancer.logic import (
     BURST_SURFACE_RETRY_AFTER_SECONDS,
     burst_same_account_backoff_seconds,
 )
-from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.balancer.types import ClassifiedFailure, FailureClass, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
     _is_native_codex_request,
@@ -88,6 +88,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_input_items_are_self_contained_fresh_replay,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
@@ -97,7 +98,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import resolve_required_account_id, without_http_bridge_session_affinity_headers
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _is_account_model_unsupported_error,
@@ -345,6 +346,7 @@ class _StreamingRetryMixin:
         upstream_stream_transport_override: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        turn_state_full_resend_verifier: Callable[[str], Awaitable[ResponsesRequest | None]] | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         scheduler = scheduler_for(proxy)
@@ -465,15 +467,19 @@ class _StreamingRetryMixin:
         if rewritten_file_account_id is None and not file_account_resolution_complete:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
-        affinity = _sticky_key_for_responses_request(
-            payload,
-            headers,
-            codex_session_affinity=codex_session_affinity,
-            openai_cache_affinity=openai_cache_affinity,
-            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
-            sticky_threads_enabled=settings.sticky_threads_enabled,
-            api_key=api_key,
-        )
+
+        def _request_affinity(request_headers: Mapping[str, str]) -> _AffinityPolicy:
+            return _sticky_key_for_responses_request(
+                payload,
+                request_headers,
+                codex_session_affinity=codex_session_affinity,
+                openai_cache_affinity=openai_cache_affinity,
+                openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+                sticky_threads_enabled=settings.sticky_threads_enabled,
+                api_key=api_key,
+            )
+
+        affinity = _request_affinity(headers)
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)
         if turn_state is not None:
@@ -548,6 +554,9 @@ class _StreamingRetryMixin:
             headers=headers,
             api_key=api_key,
         )
+        # True when ``verified_fresh_replay_payload`` came from the turn-state
+        # durable full-resend proof, so a move must also drop the aliases.
+        verified_fresh_replay_releases_turn_state = False
 
         async def _release_tracked_stream_lease(lease: AccountLease | None) -> None:
             if lease is None:
@@ -759,6 +768,56 @@ class _StreamingRetryMixin:
                 await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
             return classified
 
+        def _verified_owner_replay_available(account_id: str | None) -> bool:
+            """True when required owner ``account_id`` holds a verified account-neutral replacement body."""
+            return (
+                account_id is not None
+                and require_preferred_account
+                and preferred_account_id == account_id
+                and verified_fresh_replay_payload is not None
+            )
+
+        def _turn_state_admission_pending(account_id: str | None, failure_class: FailureClass | None) -> bool:
+            return (
+                turn_state_full_resend_verifier is not None
+                and account_id is not None
+                and failure_class in ("quota", "rate_limit")
+                and routing_strategy != "single_account"
+                and file_preferred_account_id is None
+                and verified_fresh_replay_payload is None
+                and turn_state_owner_account_id == account_id
+                and require_preferred_account
+                and preferred_account_id == account_id
+            )
+
+        async def _admit_turn_state_full_resend(account_id: str | None, failure_class: FailureClass | None) -> None:
+            """Load the turn-state durable full-resend body on definitive quota evidence.
+
+            The proof is checked once, lazily, so a healthy owner never pays for
+            the durable lookup or the fingerprint of a large input. Only a quota
+            or rate-limit loss of the required turn-state owner admits it.
+            """
+            nonlocal turn_state_full_resend_verifier
+            nonlocal verified_fresh_replay_payload, verified_fresh_replay_releases_turn_state
+            verifier = turn_state_full_resend_verifier
+            if verifier is None or account_id is None or not _turn_state_admission_pending(account_id, failure_class):
+                return
+            turn_state_full_resend_verifier = None
+            replay_payload = await verifier(account_id)
+            if replay_payload is not None:
+                verified_fresh_replay_payload = replay_payload
+                verified_fresh_replay_releases_turn_state = True
+
+        async def _admit_selection_quota_owner_loss() -> None:
+            # Selection-time owner loss counts as quota evidence only when the
+            # owner's persisted status says quota caused it.
+            if (
+                turn_state_full_resend_verifier is not None
+                and preferred_account_id is not None
+                and await proxy._owner_selection_loss_is_quota_caused(preferred_account_id)
+            ):
+                await _admit_turn_state_full_resend(preferred_account_id, "quota")
+
         def _stream_owner_bound_to(account: Account) -> bool:
             """True when this request cannot move off ``account``.
 
@@ -771,11 +830,7 @@ class _StreamingRetryMixin:
             """
             if routing_strategy == "single_account":
                 return True
-            if (
-                require_preferred_account
-                and preferred_account_id == account.id
-                and verified_fresh_replay_payload is not None
-            ):
+            if _verified_owner_replay_available(account.id):
                 return False
             return (
                 payload_replay_required_account_id == account.id
@@ -921,35 +976,53 @@ class _StreamingRetryMixin:
                 payload.to_replay_safety_payload()
             )
 
-        def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
+        def _move_verified_fresh_replay_from_owner(
+            *,
+            account_id: str,
+            outcome: str,
+            keep_payload_owner: bool = False,
+        ) -> bool:
             # Only a proxy-injected owner anchor with locally verified full
             # input may move; the failed owner stays excluded so sticky
             # selection cannot immediately loop back to it.
-            nonlocal affinity, payload, payload_replay_required_account_id
+            nonlocal affinity, headers, payload, payload_replay_required_account_id
             nonlocal preferred_account_id, require_preferred_account, verified_fresh_replay_payload
-            if not (
-                require_preferred_account
-                and preferred_account_id == account_id
-                and verified_fresh_replay_payload is not None
-            ):
+            nonlocal turn_state_owner_account_id, verified_fresh_replay_releases_turn_state
+            if not _verified_owner_replay_available(account_id) or verified_fresh_replay_payload is None:
                 return False
             if not responses_payload_is_account_neutral_fresh_replay(
                 verified_fresh_replay_payload.to_replay_safety_payload()
             ):
                 return False
+            releases_turn_state = verified_fresh_replay_releases_turn_state
             payload = verified_fresh_replay_payload
-            payload_replay_required_account_id = None
+            if not keep_payload_owner:
+                payload_replay_required_account_id = None
             verified_fresh_replay_payload = None
+            verified_fresh_replay_releases_turn_state = False
             excluded_account_ids.add(account_id)
             preferred_account_id = None
             require_preferred_account = False
+            if releases_turn_state:
+                # Only the replacement dispatch loses the owner's session and
+                # turn-state aliases; affinity is re-derived without them.
+                headers = without_http_bridge_session_affinity_headers(headers)
+                turn_state_owner_account_id = None
+                affinity = _request_affinity(headers)
+                logger.info(
+                    "http_fallback_verified_full_resend request_id=%s outcome=%s account_id=%s",
+                    request_id,
+                    outcome,
+                    account_id,
+                )
+            else:
+                logger.info(
+                    "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
+                    request_id,
+                    outcome,
+                    account_id,
+                )
             affinity = replace(affinity, reallocate_sticky=True)
-            logger.info(
-                "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
-                request_id,
-                outcome,
-                account_id,
-            )
             return True
 
         async def _stream_post_refresh_with_capacity_recovery(
@@ -1271,11 +1344,7 @@ class _StreamingRetryMixin:
                 model=payload.model,
             ):
                 return None
-            can_move_verified_owner = bool(
-                require_preferred_account
-                and preferred_account_id == account.id
-                and verified_fresh_replay_payload is not None
-            )
+            can_move_verified_owner = _verified_owner_replay_available(account.id)
             can_try_other_account = bool(
                 not account_model_replay_attempted
                 and attempt < max_attempts - 1
@@ -1717,21 +1786,12 @@ class _StreamingRetryMixin:
                             )
                         yield format_sse_event(event)
                         return
-                    if (
-                        require_preferred_account
-                        and preferred_account_id is not None
-                        and verified_fresh_replay_payload is not None
+                    await _admit_selection_quota_owner_loss()
+                    if preferred_account_id is not None and _move_verified_fresh_replay_from_owner(
+                        account_id=preferred_account_id,
+                        outcome="owner_unavailable",
+                        keep_payload_owner=True,
                     ):
-                        excluded_account_ids.add(preferred_account_id)
-                        payload = verified_fresh_replay_payload
-                        verified_fresh_replay_payload = None
-                        preferred_account_id = None
-                        require_preferred_account = False
-                        affinity = replace(affinity, reallocate_sticky=True)
-                        logger.info(
-                            "cross_transport_verified_fresh_replay request_id=%s outcome=owner_unavailable",
-                            request_id,
-                        )
                         continue
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                     if propagate_http_errors and last_transient_exc is not None:
@@ -1908,18 +1968,12 @@ class _StreamingRetryMixin:
                     and preferred_account_id is not None
                     and account.id != preferred_account_id
                 ):
-                    if verified_fresh_replay_payload is not None:
-                        payload = verified_fresh_replay_payload
-                        verified_fresh_replay_payload = None
-                        excluded_account_ids.add(preferred_account_id)
-                        preferred_account_id = None
-                        require_preferred_account = False
-                        affinity = replace(affinity, reallocate_sticky=True)
-                        logger.info(
-                            "cross_transport_verified_fresh_replay request_id=%s outcome=alternate_selected",
-                            request_id,
-                        )
-                    else:
+                    await _admit_selection_quota_owner_loss()
+                    if not _move_verified_fresh_replay_from_owner(
+                        account_id=preferred_account_id,
+                        outcome="alternate_selected",
+                        keep_payload_owner=True,
+                    ):
                         error_code = "previous_response_owner_unavailable"
                         message = "Previous response owner account is unavailable; retry later."
                         reason = "owner_account_unavailable"
@@ -2301,13 +2355,7 @@ class _StreamingRetryMixin:
                                 # other continuations retain the normal
                                 # fail-closed owner-error rewrite.
                                 preferred_account_id=(
-                                    None
-                                    if (
-                                        require_preferred_account
-                                        and preferred_account_id == account.id
-                                        and verified_fresh_replay_payload is not None
-                                    )
-                                    else preferred_account_id
+                                    None if _verified_owner_replay_available(account.id) else preferred_account_id
                                 ),
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -2628,7 +2676,23 @@ class _StreamingRetryMixin:
                                     failure_class=classified["failure_class"],
                                     http_status=tex.status_code,
                                 )
+                                owner_health_recorded = False
                                 if resilience.deterministic_failover_enabled:
+                                    if not settlement.downstream_visible and _turn_state_admission_pending(
+                                        account.id, classified["failure_class"]
+                                    ):
+                                        # Recorded before the durable lookup so a
+                                        # disconnect during it cannot drop the
+                                        # owner's quota health write.
+                                        await _handle_or_defer_keyed_stream_health(
+                                            account,
+                                            _upstream_error_from_openai(error),
+                                            code,
+                                            http_status=tex.status_code,
+                                            retry_after_seconds=tex.retry_after_seconds,
+                                        )
+                                        owner_health_recorded = True
+                                        await _admit_turn_state_full_resend(account.id, classified["failure_class"])
                                     action = failover_decision(
                                         failure_class=classified["failure_class"],
                                         downstream_visible=settlement.downstream_visible,
@@ -2707,13 +2771,14 @@ class _StreamingRetryMixin:
                                     # Budget spent during the wait: surface the
                                     # original rejection below (one health write).
                                 if action == "failover_next":
-                                    await _handle_or_defer_keyed_stream_health(
-                                        account,
-                                        _upstream_error_from_openai(error),
-                                        code,
-                                        http_status=tex.status_code,
-                                        retry_after_seconds=tex.retry_after_seconds,
-                                    )
+                                    if not owner_health_recorded:
+                                        await _handle_or_defer_keyed_stream_health(
+                                            account,
+                                            _upstream_error_from_openai(error),
+                                            code,
+                                            http_status=tex.status_code,
+                                            retry_after_seconds=tex.retry_after_seconds,
+                                        )
                                     last_transient_exc = tex
                                     transient_failed_account_id = account.id
                                     await _release_tracked_stream_lease(current_account_lease)
@@ -2724,13 +2789,14 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=tex.status_code,
-                                    **_retry_after_kwargs(tex.retry_after_seconds),
-                                )
+                                if not owner_health_recorded:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        **_retry_after_kwargs(tex.retry_after_seconds),
+                                    )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
                                     _stamp_surfaced_burst_retry_after(tex)
@@ -2872,6 +2938,17 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    # A pre-visible ``response.failed`` frame is the same quota
+                    # evidence as the HTTP 429 that would have carried it.
+                    await _admit_turn_state_full_resend(
+                        account.id,
+                        classify_upstream_failure(
+                            error_code=exc.code,
+                            error=exc.error,
+                            http_status=None,
+                            phase="first_event",
+                        )["failure_class"],
+                    )
                     _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
@@ -3350,9 +3427,23 @@ class _StreamingRetryMixin:
                                 failure_class=classified["failure_class"],
                                 http_status=retry_exc.status_code,
                             )
+                            owner_health_recorded = False
                             if retry_exc.status_code == 401 and candidates_remaining > 0:
                                 action = "failover_next"
                             elif resilience.deterministic_failover_enabled:
+                                if _turn_state_admission_pending(account.id, classified["failure_class"]):
+                                    # Recorded before the durable lookup so a
+                                    # disconnect during it cannot drop the
+                                    # owner's quota health write.
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        current_error_payload,
+                                        current_error_code,
+                                        http_status=retry_exc.status_code,
+                                        retry_after_seconds=retry_exc.retry_after_seconds,
+                                    )
+                                    owner_health_recorded = True
+                                    await _admit_turn_state_full_resend(account.id, classified["failure_class"])
                                 action = failover_decision(
                                     failure_class=classified["failure_class"],
                                     downstream_visible=False,
@@ -3430,13 +3521,14 @@ class _StreamingRetryMixin:
                                 # Budget spent during the wait: surface the
                                 # original rejection below (one health write).
                             if action == "failover_next":
-                                await _handle_or_defer_keyed_stream_health(
-                                    account,
-                                    current_error_payload,
-                                    current_error_code,
-                                    http_status=retry_exc.status_code,
-                                    retry_after_seconds=retry_exc.retry_after_seconds,
-                                )
+                                if not owner_health_recorded:
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        current_error_payload,
+                                        current_error_code,
+                                        http_status=retry_exc.status_code,
+                                        retry_after_seconds=retry_exc.retry_after_seconds,
+                                    )
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
@@ -3447,14 +3539,15 @@ class _StreamingRetryMixin:
                                 excluded_account_ids.add(account.id)
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
-                            if health_write_allowed:
-                                await proxy._handle_stream_error(
-                                    account,
-                                    current_error_payload,
-                                    current_error_code,
-                                    http_status=retry_exc.status_code,
-                                    **_retry_after_kwargs(retry_exc.retry_after_seconds),
-                                )
+                            if health_write_allowed or owner_health_recorded:
+                                if not owner_health_recorded:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        current_error_payload,
+                                        current_error_code,
+                                        http_status=retry_exc.status_code,
+                                        **_retry_after_kwargs(retry_exc.retry_after_seconds),
+                                    )
                                 setattr(retry_exc, _STREAM_HEALTH_RECORDED_ATTR, True)
                             if burst:
                                 _stamp_surfaced_burst_retry_after(retry_exc)

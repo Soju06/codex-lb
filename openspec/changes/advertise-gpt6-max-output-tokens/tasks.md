@@ -8,5 +8,5 @@
 
 ## 2. Verification
 
-- [ ] 2.1 Run the targeted `/v1/models` integration tests.
-- [ ] 2.2 Run spec validation and diff checks.
+- [x] 2.1 Run the targeted `/v1/models` integration tests.
+- [x] 2.2 Run spec validation and diff checks.

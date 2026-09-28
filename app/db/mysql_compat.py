@@ -113,6 +113,17 @@ def mysql_string_length_for(column_name: str) -> int:
     name = column_name.lower()
     if name == "key":
         return 128
+    # Client-supplied conversation header, only whitespace-stripped before it
+    # is stored, so the DDL needs real headroom rather than the generic ``_id``
+    # guess. 255 keeps composite index keys inside MySQL's 3072-byte utf8mb4
+    # budget (255 x 4 = 1020 bytes).
+    if name == "conversation_id":
+        return 255
+    # Canonicalized upstream limit name (``_canonical_quota_key`` falls back to
+    # it when no registry alias matches), so it is not an enum-like value
+    # despite the name.
+    if name == "quota_key":
+        return 128
     if name == "id" or name.endswith("_id"):
         return 96
     if name.endswith(("_key", "_hash", "_token", "_secret", "_fingerprint", "_etag", "_nonce", "_salt")):

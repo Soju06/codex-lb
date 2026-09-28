@@ -296,16 +296,19 @@ def _clear_test_data(sync_conn) -> None:
 def _reset_test_database(sync_conn, module: str | None = None) -> None:
     from sqlalchemy.exc import ProgrammingError
 
-    from app.db.migration_indexes import is_mariadb
+    from app.db.migration_indexes import is_mariadb, is_mysql
 
     # SQLite keeps the recreate-per-test behaviour (it is cheap there and the
-    # suite relies on it). MySQL/MariaDB rebuild per test *file* and reset only
+    # suite relies on it). MySQL and MariaDB rebuild per test *file* and reset only
     # the rows within a file: at seconds per rebuild, doing it per test turned
-    # the MySQL leg into a multi-hour run. ``CODEX_LB_TEST_RECREATE_SCHEMA=1``
-    # asks for the old behaviour, which is also the fallback when a test leaves
-    # the schema altered.
+    # the leg into a multi-hour run -- which is why the CI service being
+    # ``mysql:8.4`` (not MariaDB) must not send the job back to per-test
+    # rebuilds. ``CODEX_LB_TEST_RECREATE_SCHEMA=1`` asks for the old behaviour,
+    # which is also the fallback when a test leaves the schema altered.
     global _schema_built_for
-    if not is_mariadb(sync_conn) or os.environ.get("CODEX_LB_TEST_RECREATE_SCHEMA") == "1":
+    if not (is_mariadb(sync_conn) or is_mysql(sync_conn)) or os.environ.get(
+        "CODEX_LB_TEST_RECREATE_SCHEMA"
+    ) == "1":
         _recreate_test_schema(sync_conn)
         return
     if _schema_built_for != module:

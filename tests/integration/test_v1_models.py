@@ -1569,6 +1569,9 @@ def _raw_with_max_context_window(max_context_window: int) -> dict[str, JsonValue
 async def test_v1_models_reports_backend_context_window(async_client):
     registry = get_model_registry()
     models = [
+        _make_upstream_model("gpt-6-astra", raw=_raw_with_max_context_window(872_000)),
+        _make_upstream_model("gpt-6-sol", raw=_raw_with_max_context_window(872_000)),
+        _make_upstream_model("gpt-6-luna", raw=_raw_with_max_context_window(872_000)),
         _make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(1_000_000)),
         _make_upstream_model("gpt-5.5", raw=_raw_with_max_context_window(272_000)),
         _make_upstream_model("gpt-5.4-mini", raw=_raw_with_max_context_window(272_000)),
@@ -1580,7 +1583,15 @@ async def test_v1_models_reports_backend_context_window(async_client):
     assert resp_v1.status_code == 200
     metadata_by_id = {item["id"]: item["metadata"] for item in resp_v1.json()["data"]}
 
-    for slug in ("gpt-5.4", "gpt-5.5", "gpt-5.4-mini", "gpt-5.3-codex"):
+    for slug in (
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.4",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+    ):
         metadata = metadata_by_id[slug]
         assert metadata["context_window"] == 272_000
         assert metadata["input_context_window"] == 272_000
@@ -1608,6 +1619,23 @@ async def test_v1_models_reports_backend_context_window(async_client):
     assert codex_by_slug["gpt-5.4"]["max_context_window"] == 1_000_000
     assert codex_by_slug["gpt-5.5"]["context_window"] == 272_000
     assert codex_by_slug["gpt-5.5"]["max_context_window"] == 272_000
+
+
+@pytest.mark.asyncio
+async def test_v1_models_prefers_raw_max_output_tokens_over_slug_fallback(async_client):
+    registry = get_model_registry()
+    raw = _raw_with_max_context_window(872_000)
+    raw["max_output_tokens"] = 96_000
+    models = [_make_upstream_model("gpt-6-sol", raw=raw)]
+    await registry.update({"pro": models})
+
+    resp = await async_client.get("/v1/models")
+    assert resp.status_code == 200
+    entry = next(item for item in resp.json()["data"] if item["id"] == "gpt-6-sol")
+    assert entry["metadata"]["max_output_tokens"] == 96_000
+    assert entry["capabilities"]["max_output_tokens"] == 96_000
+    assert entry["maxOutputTokens"] == 96_000
+    assert entry["max_output_tokens"] == 96_000
 
 
 @pytest.mark.asyncio

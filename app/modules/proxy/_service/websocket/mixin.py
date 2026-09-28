@@ -3583,6 +3583,13 @@ class _WebSocketMixin:
             await proxy._release_websocket_reservation(reservation)
             raise
         request_state.useragent = useragent
+        if request_state.model == "gpt-6-astra":
+            request_state.reasoning_effort = (
+                refreshed_api_key.enforced_reasoning_effort
+                if refreshed_api_key is not None and refreshed_api_key.enforced_reasoning_effort is not None
+                else responses_payload._codex_lb_client_reasoning_effort
+                or (responses_payload.reasoning.effort if responses_payload.reasoning else None)
+            )
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip

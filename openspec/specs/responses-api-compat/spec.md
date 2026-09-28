@@ -10902,6 +10902,19 @@ The proxy SHALL accept valid response.steer events on an active subscription Res
 
 Completed Astra parents retained for later steering SHALL discard historical input and serialized request/replay bodies while preserving the effective configuration needed for later steering and explicit tool continuations.
 
+An Astra continuation SHALL validate the parent's effective pre-wire
+reasoning effort against refreshed API-key policy. An absent, unenforced
+effort SHALL remain absent; client or enforced `ultra` SHALL remain `ultra`
+for authorization even when its upstream create used the `max` wire alias.
+Queued steering input SHALL be subject to the existing frame and aggregate
+byte bounds without a separate submission-count limit.
+
+#### Scenario: Absent and ultra effort retain admitted policy
+- **GIVEN** an admitted Astra create with absent effort under an allowed-`high` key, or `ultra` under an allowed-`ultra` key
+- **WHEN** that response is steered with unchanged key policy
+- **THEN** steering SHALL not invent `medium` or authorize the `max` wire alias in place of client `ultra`
+- **AND** refreshed policy that forbids the original effort SHALL reject steering before upstream dispatch
+
 Steering configuration snapshots SHALL be retained only for downstream Astra WebSocket requests. HTTP requests, including requests bridged to an upstream WebSocket, SHALL preserve their existing forwarded payload and accounting without retaining an additional steering snapshot.
 
 #### Scenario: HTTP Astra requests do not retain steering snapshots
@@ -11184,7 +11197,7 @@ The proxy SHALL distinguish send attempt timing from explicit steering transport
 - **THEN** only the wrapped transport's handoff SHALL make the request eligible for matching
 
 ### Requirement: Steering instrumentation is deferred until needed
-The proxy SHALL reuse its existing serialized Astra request rather than retain a second complete payload before steering. It SHALL derive retained configuration when steering or completed-parent retention needs it. The aiohttp adapter SHALL leave its private writer transport unchanged until a steering-sensitive explicit send requires handoff observation. If that observation cannot be installed, the proxy SHALL reject that send before dispatch without disrupting ordinary traffic or transferring its reservation to another request.
+The proxy SHALL reuse its existing serialized Astra request rather than retain a second complete payload before steering. It SHALL derive retained configuration when steering or completed-parent retention needs it. The aiohttp adapter SHALL leave its private writer transport unchanged until a steering-sensitive explicit send requires handoff observation. If that observation cannot be installed, the proxy SHALL reject that send before dispatch with status `503` and code `steering_not_supported`, without disrupting ordinary traffic or transferring its reservation to another request.
 
 #### Scenario: Ordinary Astra traffic avoids steering instrumentation
 - **WHEN** an Astra request is prepared and sent without a steering-sensitive continuation

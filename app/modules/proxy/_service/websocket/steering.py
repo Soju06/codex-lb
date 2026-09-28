@@ -50,7 +50,6 @@ from app.modules.proxy.request_policy import (
     validate_model_access,
 )
 
-_MAX_QUEUED_STEERS = 32
 _MAX_STEERING_HISTORY_IDS = 256
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -143,10 +142,6 @@ def steering_parent(
     if continuation is not None:
         if continuation.request_state not in pending_requests:
             raise steering_error("response_not_found", "The steering continuation is no longer active.")
-        if len(continuation.submissions) >= _MAX_QUEUED_STEERS:
-            raise steering_error(
-                "too_many_pending_steers", "Wait for queued steering to be applied before submitting more."
-            )
         return continuation.parent
     parent = next((state for state in pending_requests if state.response_id == parent_id), None)
     if parent is None and control.last_completed_request is not None:
@@ -170,21 +165,25 @@ def _steering_response_configuration(parent: _WebSocketRequestState) -> dict[str
         raise steering_error("response_not_found", "The original response settings are unavailable on this connection.")
     reasoning = data.get("reasoning")
     original_input = data.pop("input", None)
+    effective_effort = parent.reasoning_effort
     if isinstance(original_input, list):
         for item in original_input:
             if isinstance(item, dict) and item.get("type") == "configuration_update":
                 update = item.get("reasoning")
-                if isinstance(update, dict) and isinstance(update.get("effort"), str):
+                updated_effort = update.get("effort") if isinstance(update, dict) else None
+                if isinstance(updated_effort, str):
+                    effective_effort = updated_effort
                     data["reasoning"] = {
                         **(reasoning if isinstance(reasoning, dict) else {}),
-                        "effort": update["effort"],
+                        "effort": updated_effort,
                     }
     effective_reasoning = data.get("reasoning")
-    if not isinstance(effective_reasoning, dict) or effective_reasoning.get("effort") is None:
+    if effective_effort is not None:
         data["reasoning"] = {
             **(effective_reasoning if isinstance(effective_reasoning, dict) else {}),
-            "effort": "medium",
+            "effort": effective_effort,
         }
+    parent.reasoning_effort = effective_effort
     data.pop("type", None)
     return data
 

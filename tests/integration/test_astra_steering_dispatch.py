@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +19,75 @@ from tests.unit.test_astra_steering_protocol import ScriptedSocket, create, resp
 from tests.unit.test_proxy_websocket_model_source_guard import _api_key
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["missing", "ultra", "enforced-ultra", "forbidden"])
+async def test_astra_steering_policy_through_route_and_upstream_transport(
+    app_instance: FastAPI, monkeypatch: pytest.MonkeyPatch, policy: str
+) -> None:
+    initial = create()
+    if policy in {"ultra", "enforced-ultra"}:
+        initial["reasoning"] = {"effort": "ultra"} if policy == "ultra" else None
+        if policy == "enforced-ultra":
+            initial.pop("reasoning")
+    elif policy == "forbidden":
+        initial["reasoning"] = {"effort": "high"}
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(initial, lambda _: True), (steer, saw("response.created", "r1"))])
+    wire_frames: list[dict] = []
+
+    async def upstream_server(connection):
+        async for raw in connection:
+            frame = json.loads(raw)
+            wire_frames.append(frame)
+            if frame["type"] == "response.create":
+                await connection.send(json.dumps(response("response.created", "r1")))
+            else:
+                for event in [
+                    {"type": "response.steer.accepted", "steer": {"id": "s1", "previous_response_id": "r1"}},
+                    response("response.incomplete", "r1"),
+                    response("response.created", "r2", parent="r1"),
+                    response("response.completed", "r2", parent="r1"),
+                ]:
+                    await connection.send(json.dumps(event))
+
+    async with serve(upstream_server, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        async with connect(f"ws://127.0.0.1:{port}", proxy=None, ping_interval=None) as connection:
+            upstream = WebsocketsUpstreamWebSocket(connection)
+
+            def configure(service, _account):
+                key = _api_key()
+                if policy == "missing":
+                    key = replace(key, allowed_reasoning_efforts=["high"])
+                elif policy == "ultra":
+                    key = replace(key, allowed_reasoning_efforts=["ultra"])
+                elif policy == "enforced-ultra":
+                    key = replace(key, enforced_reasoning_effort="ultra", allowed_reasoning_efforts=["ultra"])
+                else:
+                    key = replace(key, allowed_reasoning_efforts=["high"])
+                refreshed = replace(key, allowed_reasoning_efforts=["low"]) if policy == "forbidden" else key
+                monkeypatch.setattr(
+                    service, "_refresh_websocket_api_key_policy", AsyncMock(side_effect=[key, refreshed])
+                )
+                _use_websocket_route(app_instance, monkeypatch, service, socket)
+
+            _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
+
+    if policy == "forbidden":
+        assert [frame["type"] for frame in wire_frames] == ["response.create"]
+        assert socket.sent[-1]["error"]["code"] == "reasoning_effort_not_allowed"
+        assert len(reservations) == 1
+    else:
+        assert [frame["type"] for frame in wire_frames] == ["response.create", "response.steer"]
+        assert wire_frames[1] == steer
+        assert saw("response.completed", "r2")(socket.sent)
+        assert len(reservations) == len(settled) == 2
+    if policy in {"ultra", "enforced-ultra"}:
+        assert wire_frames[0]["reasoning"]["effort"] == "max"
+    elif policy == "missing":
+        assert "reasoning" not in wire_frames[0] or wire_frames[0]["reasoning"].get("effort") is None
 
 
 def _use_websocket_route(app_instance, monkeypatch, service, socket):

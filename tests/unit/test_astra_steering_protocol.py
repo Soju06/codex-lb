@@ -394,7 +394,7 @@ async def test_steering_policy_refresh_auth_failure_uses_canonical_public_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("restricted_key", "expected_error"),
+    ("restricted_key", "expected_error", "effort"),
     [
         (
             replace(_api_key(), allowed_models=["gpt-5.5"]),
@@ -403,6 +403,7 @@ async def test_steering_policy_refresh_auth_failure_uses_canonical_public_error(
                 "message": "This API key does not have access to the requested model.",
                 "type": "permission_error",
             },
+            None,
         ),
         (
             replace(_api_key(), allowed_reasoning_efforts=["low"]),
@@ -411,12 +412,16 @@ async def test_steering_policy_refresh_auth_failure_uses_canonical_public_error(
                 "message": "This API key does not have access to the requested reasoning effort.",
                 "type": "permission_error",
             },
+            "high",
         ),
     ],
 )
-async def test_steering_policy_rejection_uses_canonical_public_error(monkeypatch, restricted_key, expected_error):
+async def test_steering_policy_rejection_uses_canonical_public_error(
+    monkeypatch, restricted_key, expected_error, effort
+):
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
-    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    initial = {**create(), "reasoning": {"effort": effort}} if effort is not None else create()
+    socket = ScriptedSocket([(initial, lambda _: True), (steer, saw("response.created", "r1"))])
     upstream = ScriptedUpstream([[response("response.created", "r1")]])
 
     def configure(service, account):
@@ -1045,7 +1050,7 @@ async def test_steering_revalidates_file_account_and_key_policy(monkeypatch, den
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effort", ["high"])
+@pytest.mark.parametrize("effort", ["high", "ultra"])
 async def test_steering_keeps_permitted_inherited_raw_reasoning_effort(monkeypatch, effort):
     initial = {**create(), "reasoning": {"effort": effort}}
     steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
@@ -1068,6 +1073,32 @@ async def test_steering_keeps_permitted_inherited_raw_reasoning_effort(monkeypat
 
     _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
     assert upstream.sent[0]["reasoning"]["effort"] == ("max" if effort == "ultra" else effort)
+    assert len(upstream.sent) == 2, socket.sent
+    assert upstream.sent[1] == steer
+    assert len(reservations) == len(settled) == 2
+
+
+@pytest.mark.asyncio
+async def test_steering_preserves_absent_reasoning_effort_under_restricted_key(monkeypatch):
+    steer = {"type": "response.steer", "previous_response_id": "r1", "input": "Correction"}
+    socket = ScriptedSocket([(create(), lambda _: True), (steer, saw("response.created", "r1"))])
+    upstream = ScriptedUpstream(
+        [
+            [response("response.created", "r1")],
+            [
+                {"type": "response.steer.accepted", "steer": {"id": "s", "previous_response_id": "r1"}},
+                response("response.incomplete", "r1"),
+                response("response.created", "r2", parent="r1"),
+                response("response.completed", "r2", parent="r1"),
+            ],
+        ]
+    )
+
+    def configure(service, account):
+        key = replace(_api_key(), allowed_reasoning_efforts=["high"])
+        monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=key))
+
+    _, reservations, settled, _, _ = await run_socket(monkeypatch, socket, upstream, configure=configure)
     assert len(upstream.sent) == 2, socket.sent
     assert upstream.sent[1] == steer
     assert len(reservations) == len(settled) == 2

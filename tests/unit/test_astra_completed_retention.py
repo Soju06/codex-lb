@@ -7,12 +7,54 @@ from collections import deque
 import anyio
 import pytest
 
+from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy._service.support import _WebSocketRequestState, _WebSocketUpstreamControl
+from app.modules.proxy._service.support import (
+    _WebSocketRequestState,
+    _WebSocketSteeringContinuation,
+    _WebSocketSteerSubmission,
+    _WebSocketUpstreamControl,
+)
 from app.modules.proxy._service.websocket.steering import steering_parent, steering_response_payload
 from tests.unit.test_proxy_utils import _make_account, _repo_factory, _RequestLogsRecorder
 
 pytestmark = pytest.mark.unit
+
+
+def test_bounded_steering_queue_does_not_impose_an_extra_count_limit() -> None:
+    parent = _WebSocketRequestState(
+        request_id="parent",
+        model="gpt-6-astra",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="r1",
+    )
+    child = _WebSocketRequestState(
+        request_id="child",
+        model="gpt-6-astra",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    continuation = _WebSocketSteeringContinuation(
+        parent=parent,
+        request_state=child,
+        submissions=[
+            _WebSocketSteerSubmission(
+                input="x",
+                wire_bytes=1,
+                request_usage_budget=ApiKeyRequestUsageBudget(),
+                request_service_tier=None,
+            )
+            for _ in range(33)
+        ],
+        queued_input_bytes=33,
+    )
+    control = _WebSocketUpstreamControl(steering_continuations={"r1": continuation})
+    assert steering_parent("r1", pending_requests=deque([child]), control=control) is parent
 
 
 @pytest.mark.asyncio

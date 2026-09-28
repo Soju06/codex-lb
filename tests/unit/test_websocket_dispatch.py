@@ -12,6 +12,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.frames import Frame, Opcode
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import (
     ArchivingUpstreamWebSocket,
     CodexUpstreamWebSocket,
@@ -154,6 +155,24 @@ async def test_real_transport_dispatches_before_drain_and_only_once(
             await asyncio.gather(sending, return_exceptions=True)
             if kind == "aiohttp":
                 raw._writer.protocol._paused = False
+
+
+@pytest.mark.asyncio
+async def test_missing_aiohttp_dispatch_seam_rejects_only_sensitive_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _connected_adapter("aiohttp") as (upstream, raw):
+        transport = raw._writer.transport
+        monkeypatch.setattr(raw._writer, "transport", None)
+        dispatched: list[str] = []
+        with pytest.raises(ProxyResponseError) as failure:
+            await _tracked_send(upstream, "explicit", lambda: dispatched.append("explicit"))
+        assert failure.value.status_code == 503
+        assert failure.value.payload["error"]["code"] == "steering_not_supported"
+        assert dispatched == []
+        monkeypatch.setattr(raw._writer, "transport", transport)
+        await upstream.send_text("ordinary")
+        assert (await asyncio.wait_for(upstream.receive(), 2)).text == "ordinary"
 
 
 class _HeldCompressor(ZLibCompressor):

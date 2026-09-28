@@ -357,6 +357,14 @@ are documented in `../api-keys/context.md`. Detailed implementation rationale
 and rejected approaches are retained with the archived
 `support-astra-websocket-steering` change.
 
+The retained configuration is materialized once at completion even if the
+client never steers: accepting a steer after completion requires the original
+request body to be discarded then, rather than retained until a possible later
+steer. Avoiding that parse would require either keeping historical input
+longer or eagerly duplicating the complete request during preparation. The
+request state separately retains pre-wire effort so an omitted effort stays
+omitted and `ultra` is not mistaken for its outbound `max` alias.
+
 
 Ordinary Astra request preparation reuses `request_text`; it does not create a
 second full forwarding dictionary. Configuration is derived from that owned

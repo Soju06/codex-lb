@@ -32,6 +32,13 @@ request costing, without changing reservation ownership or idempotency.
 The additive migration leaves historical non-NULL costs and settled limits
 untouched.
 
+Automation compact pings, limit warm-ups and quota planner warm-ups are native
+writers too; each persists the upstream write count. A keyed quota planner
+warm-up also supplies that count when its reservation is finalized. Missing
+counts remain unknown in request logs, while settlement treats them as zero.
+Admission estimates continue to use their existing input/output budget:
+changing that policy is separate from preserving observed usage.
+
 ## Backfill
 
 On startup, after new pricing arrives, and on hourly rescans, the scheduler fills NULL costs in retained subscription request logs. It scans at most 200 eligible rows per five-second tick using a partial index. A cursor prevents unknown models from monopolizing a batch; it is safe to reset on restart because NULL is the durable idempotency marker. All replicas refresh their in-process pricing/version metadata; only the scheduler leader repairs database rows.

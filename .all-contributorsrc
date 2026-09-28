@@ -1513,7 +1513,19 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
+    },
+    {
+      "login": "ngallodev",
+      "name": "ngallodev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
+      "profile": "https://github.com/ngallodev",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,

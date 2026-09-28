@@ -72,6 +72,7 @@ name = "openai"  # required — enables remote /responses/compact. Lowercase sin
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
+supports_standalone_web_search = true # requires codex-lb >= 1.22.0
 requires_openai_auth = true # required for codex app
 ```
 

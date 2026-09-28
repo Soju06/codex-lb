@@ -4,7 +4,9 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](api-keys.md) i
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
-The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all with a 272k default input budget and an 872k upstream maximum ([opt-in, Codex CLI only](#opting-into-the-872k-context-window)). `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
+The examples use `gpt-6-astra` for complex reasoning and coding, following [OpenAI's model guidance](https://developers.openai.com/api/docs/guides/latest-model). `gpt-5.6-terra` and `gpt-5.6-luna` remain alternative examples. Confirm that your live model catalog includes each selected model before using these configs.
+
+The client budgets below are conservative example settings, not Astra's maximum context or output limits. Use your live catalog's limits when adjusting them. The [872k opt-in instructions](#opting-into-the-872k-context-window) describe the GPT-5.6 family specifically. Existing pinned model IDs remain valid only while your upstream account serves them.
 
 | Client | Endpoint | Config |
 |--------|----------|--------|
@@ -19,7 +21,7 @@ The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest
 `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
@@ -52,9 +54,9 @@ model_context_window = 872000
 - Cost: input beyond the 272,000-token threshold is metered at the upstream
   long-context rate. That threshold is why 272,000 stays the default.
 
-These keys are Codex-CLI-only. The OpenCode / OpenClaw / SDK examples below
-stay at 272000 because `/v1/models` reports the default input budget, not the
-ceiling.
+These keys are Codex-CLI-only. For GPT-5.6, `/v1/models` reports the default
+input budget, not the ceiling. The OpenCode and OpenClaw examples below use
+conservative client budgets; adjust them against your selected model's live catalog entry.
 
 ### Daybreak Blue profile (Trusted Access)
 
@@ -79,7 +81,7 @@ http_headers = { "X-Codex-LB-Required-Capability" = "trusted_cyber" }
 Then create `~/.codex/daybreak-blue.config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_provider = "codex-lb-daybreak-blue"
 ```
 
@@ -120,8 +122,8 @@ account. Restore direct Responses WebSocket availability
 instead of removing the carrier or retrying through ordinary HTTP. Codex LB
 narrows a direct WebSocket turn's first and later account selections to eligible accounts already marked
 `security_work_authorized`; if none are available, it fails closed without
-ordinary fallback. Selecting `gpt-5.6-sol` by itself does not activate this
-path, and a Daybreak alias may resolve to that same underlying model. See
+ordinary fallback. Selecting `gpt-6-astra` by itself does not activate this
+path. A model name or alias does not grant Trusted Access authorization. See
 OpenAI's
 [Trusted Access guidance](https://developers.openai.com/api/docs/guides/safety-checks/cybersecurity#authorized-access-and-agentic-workflows).
 
@@ -241,8 +243,8 @@ jq 'del(.openai)' ~/.local/share/opencode/auth.json > auth.json.tmp && mv auth.j
         "apiKey": "{env:CODEX_LB_API_KEY}"
       },
       "models": {
-        "gpt-5.6-sol": {
-          "name": "GPT-5.6-Sol",
+        "gpt-6-astra": {
+          "name": "GPT-6 Astra",
           "reasoning": true,
           "options": { "reasoningEffort": "xhigh", "reasoningSummary": "detailed" },
           "limit": { "context": 272000, "output": 65536 }
@@ -268,7 +270,7 @@ jq 'del(.openai)' ~/.local/share/opencode/auth.json > auth.json.tmp && mv auth.j
       }
     }
   },
-  "model": "openai/gpt-5.6-sol"
+  "model": "openai/gpt-6-astra"
 }
 ```
 
@@ -287,9 +289,9 @@ opencode
 {
   "agents": {
     "defaults": {
-      "model": { "primary": "codex-lb/gpt-5.6-sol" },
+      "model": { "primary": "codex-lb/gpt-6-astra" },
       "models": {
-        "codex-lb/gpt-5.6-sol": { "params": { "cacheRetention": "short" } },
+        "codex-lb/gpt-6-astra": { "params": { "cacheRetention": "short" } },
         "codex-lb/gpt-5.6-terra": { "params": { "cacheRetention": "short" } },
         "codex-lb/gpt-5.6-luna": { "params": { "cacheRetention": "short" } }
       }
@@ -304,8 +306,8 @@ opencode
         "api": "openai-responses",
         "models": [
           {
-            "id": "gpt-5.6-sol",
-            "name": "gpt-5.6-sol (codex-lb)",
+            "id": "gpt-6-astra",
+            "name": "gpt-6-astra (codex-lb)",
             "contextWindow": 272000,
             "contextTokens": 272000,
             "maxTokens": 4096,
@@ -359,7 +361,7 @@ custom_providers:
 Then select the model interactively with `hermes model`, or in a session:
 
 ```text
-/model custom:codex-lb:gpt-5.6-sol
+/model custom:codex-lb:gpt-6-astra
 ```
 
 ```bash

@@ -56,3 +56,13 @@ GROUP BY sticky_key_source, sticky_kind, sticky_key_hash;
 The affinity history converges with dashboard roles, users, the final compatibility-credential projection and audit actor columns through a no-op merge. Published revisions remain unchanged. Databases already on the authentication branch retain their current credentials and session generations; the earlier credential projection is not replayed on merge-only reupgrade. Databases on the older affinity history run the existing authentication backfills once. Ledgerless schema bootstrap retains those migrations' existing legacy-credential projection behavior.
 
 The subsequent invite migration converges through a second no-op join. Pending, consumed and revoked invite rows retain their hashes, expiry/consumption/revocation times, creator snapshots and flags. The older affinity history creates an empty invite table through the unchanged upstream migration.
+
+## Account pool metrics
+
+The pool metrics describe the shared account inventory, not process-local activity. Summing worker snapshots multiplies the inventory; taking a maximum prevents a newer deletion or pause from lowering the observed count. Prometheus `livemostrecent` selects the latest live-worker observation and removes the automatic PID label.
+
+The existing routing cache is seeded at startup and refreshed on account-routing invalidations. Those events alone cannot reflect a token crossing its expiry time while the pool is idle. The metrics ASGI application therefore awaits the same refresh before exposition. It performs one account projection query per scrape, never probes upstream, and fails the scrape if the refresh fails. Operators can use Prometheus `up` alongside availability rather than interpreting stale values as fresh.
+
+The routing cache continues to load its existing complete status map. Metrics omit rows pending deletion, matching the account repository's operator-facing inventory. Only reauthentication-required tokens need decryption for the expiry predicate. Active tokens are counted even when their JWT expiry is past because ordinary routing can refresh them; unknown expiry on a reauthentication-required account remains eligible under the existing predicate.
+
+For example, two active accounts and one reauthentication-required account with a future token expiry produce `accounts_available = 3`. If all three are occupied by streams, the metric remains 3. When the reauthentication token expires, the next scrape reports 2 without changing the status inventory.

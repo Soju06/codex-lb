@@ -60,6 +60,7 @@ nav:
   - Live Voice: live-voice.md
   - Conversations: conversations.md
   - Usage Reporting: usage-reporting.md
+  - Metrics: metrics.md
   - Configuration: configuration.md
   - Anonymous Telemetry: telemetry.md
   - Authentication: authentication.md

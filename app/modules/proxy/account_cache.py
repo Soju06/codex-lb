@@ -13,8 +13,17 @@ from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_SELECTION,
     get_cache_invalidation_poller,
 )
+from app.core.clock import REAL_CLOCK, Clock
+from app.core.config.settings import get_settings
+from app.core.crypto import TokenEncryptor
+from app.core.metrics import prometheus as metrics
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal, close_session
+from app.modules.proxy.account_eligibility import (
+    ROUTABLE_STATUSES,
+    reauth_access_token_is_expired,
+    stored_access_token_expires_at,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -111,10 +120,13 @@ class RoutingAvailabilityCache:
     to the historical process-local set semantics.
     """
 
-    def __init__(self, session_factory: Callable[[], AsyncSession] | None = None) -> None:
+    def __init__(self, session_factory: Callable[[], AsyncSession] | None = None, *, clock: Clock = REAL_CLOCK) -> None:
+        """Keep a routing snapshot with serialized refreshes and an expiry clock."""
         self._session_factory = session_factory
+        self._clock = clock
         self._snapshot: dict[str, AccountStatus] | None = None
         self._local_marks: set[str] = set()
+        self._refresh_lock = anyio.Lock()
 
     @property
     def seeded(self) -> bool:
@@ -140,6 +152,13 @@ class RoutingAvailabilityCache:
         return status is None or status in _ROUTING_UNAVAILABLE_STATUSES
 
     async def refresh_from_db(self) -> None:
+        """Publish cache and metric observations in database-read order."""
+        # Scrapes and invalidations can overlap. Serialize their reads and
+        # publication so a slower old read cannot overwrite a newer snapshot.
+        async with self._refresh_lock:
+            await self._refresh_from_db()
+
+    async def _refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
 
         Local overlay marks whose committed status became routable again are dropped —
@@ -160,9 +179,33 @@ class RoutingAvailabilityCache:
         marks_before_refresh = frozenset(self._local_marks)
         factory = self._session_factory or SessionLocal
         session = factory()
+        publish_metrics = metrics.PROMETHEUS_AVAILABLE and get_settings().metrics_enabled
+        counts = dict.fromkeys(AccountStatus, 0)
+        available = 0
         try:
-            result = await session.execute(select(Account.id, Account.status))
-            snapshot: dict[str, AccountStatus] = {account_id: status for account_id, status in result.all()}
+            if publish_metrics:
+                result = await session.execute(
+                    select(Account.id, Account.status, Account.access_token_encrypted, Account.delete_requested_at)
+                )
+                rows = result.all()
+                snapshot = {row.id: row.status for row in rows}
+                encryptor: TokenEncryptor | None = None
+                now = self._clock.time()
+                for row in rows:
+                    if row.delete_requested_at is not None:
+                        continue
+                    counts[row.status] += 1
+                    if row.status not in ROUTABLE_STATUSES:
+                        continue
+                    expires_at = None
+                    if row.status == AccountStatus.REAUTH_REQUIRED:
+                        if encryptor is None:
+                            encryptor = TokenEncryptor()
+                        expires_at = stored_access_token_expires_at(row.access_token_encrypted, encryptor)
+                    available += not reauth_access_token_is_expired(row.status, expires_at, now=now)
+            else:
+                statuses = await session.execute(select(Account.id, Account.status))
+                snapshot = {account_id: status for account_id, status in statuses.all()}
         finally:
             await close_session(session)
         self._snapshot = snapshot
@@ -173,6 +216,12 @@ class RoutingAvailabilityCache:
             or (status := snapshot.get(account_id)) is None
             or status in _ROUTING_UNAVAILABLE_STATUSES
         }
+        if publish_metrics:
+            assert metrics.accounts_total is not None
+            assert metrics.accounts_available is not None
+            for status, count in counts.items():
+                metrics.accounts_total.labels(status=status.value).set(count)
+            metrics.accounts_available.set(available)
 
     def reset(self) -> None:
         """Drop all state (snapshot back to unseeded). Test isolation helper."""

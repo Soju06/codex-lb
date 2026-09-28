@@ -715,11 +715,15 @@ _CREDENTIAL_DROP_DRAIN_WARNING = (
 #: Frozen as a literal on both sides for the same reason the revision freezes
 #: its identifiers: neither may import the other.
 LEGACY_CREDENTIALS_RETIRED_SENTINEL = "dashboard_legacy_credentials_retired"
+# Only this merge writes the marker, and its downgrade removes it. Context
+# tables alone are deliberately insufficient evidence to adopt an unknown schema.
+CONTEXT_OIDC_MERGE_REVISION = "20260916_000000_merge_context_oidc_heads"
+_CONTEXT_OIDC_MERGE_SENTINEL = "codex_context_oidc_merge_applied"
 
 _LEDGER_BEHIND_SCHEMA_WARNING = (
     "Database has already retired the legacy dashboard credential columns (%s recorded it in "
     "%s), but its Alembic ledger says %s, which does not include that revision. Stamping the "
-    "ledger at it rather than replaying the chain over this schema: the replay re-creates those "
+    "ledger at its proven revision %s rather than replaying the chain over this schema: the replay re-creates those "
     "columns empty and the re-projection between them reads that emptiness as a removed "
     "password, which would clear the account row that now holds the only dashboard credential "
     "this install has."
@@ -862,7 +866,9 @@ def _reconcile_retired_credential_ledger(config: Config) -> str | None:
     reached, rather than replayed. The evidence is the marker
     ``CREDENTIAL_DROP_REVISION`` writes into ``runtime_sentinels``, and only
     that revision writes it (its downgrade removes it again), so the marker
-    means the three columns are gone -- whatever the ledger says. A ledger that
+    means the three columns are gone -- whatever the ledger says. The context
+    merge has its own marker, which proves both branches were applied and is
+    removed on downgrade; when present, recover that merge instead. A ledger that
     disagrees has been lost, rewound or restored from a partial backup, and it
     is the ledger that is wrong.
 
@@ -893,13 +899,17 @@ def _reconcile_retired_credential_ledger(config: Config) -> str | None:
     with _sync_connection(sync_database_url) as connection:
         has_ledger = _ALEMBIC_VERSION_TABLE in _read_table_names(connection)
         marker = _read_runtime_sentinel(connection, LEGACY_CREDENTIALS_RETIRED_SENTINEL)
+        context_marker = _read_runtime_sentinel(connection, _CONTEXT_OIDC_MERGE_SENTINEL)
         current_revisions = _read_current_revisions_from_connection(connection) if has_ledger else ()
 
     if marker is None:
         return None
     if any(revision not in _known_revisions(config) for revision in current_revisions):
         return None
-    if current_revisions and _ledger_has_applied(config, current_revisions, CREDENTIAL_DROP_REVISION):
+    recovery_revision = (
+        CONTEXT_OIDC_MERGE_REVISION if context_marker == CONTEXT_OIDC_MERGE_REVISION else CREDENTIAL_DROP_REVISION
+    )
+    if current_revisions and _ledger_has_applied(config, current_revisions, recovery_revision):
         return None
 
     logger.warning(
@@ -907,10 +917,11 @@ def _reconcile_retired_credential_ledger(config: Config) -> str | None:
         marker,
         _RUNTIME_SENTINELS_TABLE,
         ",".join(current_revisions) if current_revisions else f"no {_ALEMBIC_VERSION_TABLE} table",
+        recovery_revision,
     )
     _ensure_alembic_version_table_capacity(config)
-    command.stamp(config, CREDENTIAL_DROP_REVISION)
-    return CREDENTIAL_DROP_REVISION
+    command.stamp(config, recovery_revision)
+    return recovery_revision
 
 
 def _schema_ahead_error(state: MigrationState) -> MigrationBootstrapError:

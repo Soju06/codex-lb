@@ -13,6 +13,25 @@ import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
 
 describe("ApiKeyEditDialog", () => {
+  it("loads the stored Astra notes preference and lets the user turn it off", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ autoEnableAstraNotes: true })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    const checkbox = screen.getByRole("checkbox", { name: "Experimental Astra notes" });
+    expect(checkbox).toBeChecked();
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].autoEnableAstraNotes).toBe(false);
+  });
   function ControlledApiKeyEditDialog({
     apiKey = createApiKey({ allowedModels: [] }),
   }: {

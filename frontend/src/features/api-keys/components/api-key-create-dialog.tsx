@@ -77,6 +77,7 @@ type ApiKeyCreateDraft = {
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
+  autoEnableAstraNotes: boolean;
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -93,6 +94,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
+  autoEnableAstraNotes: false,
 };
 
 function apiKeyCreateDraftReducer(
@@ -120,6 +122,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
+      autoEnableAstraNotes: draft.autoEnableAstraNotes,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
@@ -186,6 +189,24 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
               <label htmlFor="create-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
               </label>
+            </div>
+
+            <div className="flex items-start gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="create-api-key-astra-notes"
+                className="mt-0.5"
+                checked={draft.autoEnableAstraNotes}
+                onCheckedChange={(checked) => updateDraft({ autoEnableAstraNotes: checked === true })}
+                aria-describedby="create-api-key-astra-notes-description"
+              />
+              <div className="space-y-1">
+                <label htmlFor="create-api-key-astra-notes" className="cursor-pointer">
+                  {t("apiKeys.form.astraNotes")}
+                </label>
+                <p id="create-api-key-astra-notes-description" className="text-xs text-muted-foreground">
+                  {t("apiKeys.form.astraNotesDescription")}
+                </p>
+              </div>
             </div>
 
             <div className="space-y-1">

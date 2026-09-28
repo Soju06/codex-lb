@@ -344,6 +344,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         created_at=now,
         last_used_at=None,
         limits=[],
+        auto_enable_astra_notes=False,
     )
     new_plain = "sk-clb-new-key-regen"
     new_row = SimpleNamespace(
@@ -360,6 +361,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         created_at=now,
         last_used_at=None,
         limits=[],
+        auto_enable_astra_notes=False,
     )
 
     class _RegenRepo:
@@ -415,6 +417,7 @@ async def test_deactivated_key_rejected_immediately() -> None:
         created_at=now,
         last_used_at=None,
         limits=[],
+        auto_enable_astra_notes=False,
     )
 
     class _UpdateOnlyRepo:

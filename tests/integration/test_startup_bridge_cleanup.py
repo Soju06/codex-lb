@@ -10,8 +10,8 @@ from sqlalchemy import select
 import app.main as main_module
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
-from app.db.models import HttpBridgeSessionRecord, HttpBridgeSessionState
-from app.db.session import SessionLocal
+from app.db.models import Base, HttpBridgeSessionRecord, HttpBridgeSessionState
+from app.db.session import SessionLocal, engine
 
 pytestmark = pytest.mark.integration
 
@@ -23,6 +23,11 @@ async def test_lifespan_startup_purges_abandoned_ownerless_bridge_rows(db_setup,
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED", "true")
     monkeypatch.setenv("CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INSTANCE_ID", "startup-instance")
     get_settings.cache_clear()
+
+    # Exercise startup against a versioned schema created by real migrations.
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await main_module.init_db()
 
     now = utcnow()
     stale_time = now - timedelta(hours=3)

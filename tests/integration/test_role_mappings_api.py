@@ -613,6 +613,8 @@ async def test_role_mappings_migration_upgrades_and_downgrades(tmp_path) -> None
         # asserted equal to ``_TARGET_REVISION``: this revision is no longer the
         # newest one, and pinning that would break on every later migration.
         assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT COUNT(*) FROM dashboard_role_mappings")) == 0
     finally:
         await engine.dispose()
 

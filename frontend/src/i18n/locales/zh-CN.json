@@ -215,6 +215,8 @@
   "apiKeys.form.allowedModels": "允许的 Model",
   "apiKeys.form.allowedReasoningEfforts": "允许的推理强度",
   "apiKeys.form.applyToCodexModel": "应用到 codex /model",
+  "apiKeys.form.astraNotes": "Astra 实验性笔记",
+  "apiKeys.form.astraNotesDescription": "为新的 GPT-6 Astra 对话自动启用实验性笔记。",
   "apiKeys.form.assignedAccounts": "分配账户",
   "apiKeys.form.assignedModelSources": "分配 Model source",
   "apiKeys.form.currentUsage": "当前用量",

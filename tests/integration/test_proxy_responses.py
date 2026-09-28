@@ -26,6 +26,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy.downstream_delivery import (
     OUTCOME_TERMINAL_AFTER_DISCONNECT,
@@ -2226,13 +2227,129 @@ async def test_v1_responses_default_smart_policy_routes_http_downstream_by_stick
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_http_smart"))
         log = result.scalar_one()
     assert log.transport == "http"
-    assert log.upstream_transport == expected_transport
+    assert log.upstream_transport == ("websocket" if expected_transport == "auto" else expected_transport)
     assert metric_calls == [
         {
             "downstream_transport": "http",
-            "upstream_transport": expected_transport,
+            "upstream_transport": "websocket" if expected_transport == "auto" else expected_transport,
             "policy": "smart",
             "sticky": expected_transport == "auto",
+            "status": "success",
+        }
+    ]
+
+
+@pytest.mark.parametrize("bridge_image_bypass", [True, False], ids=["bridge-image-bypass", "sticky-raw"])
+@pytest.mark.asyncio
+async def test_bypassed_request_logs_resolved_upstream_transport(
+    async_client, monkeypatch: pytest.MonkeyPatch, bridge_image_bypass: bool
+) -> None:
+    account_id = f"acc_resolved_transport_{bridge_image_bypass}"
+    response_id = f"resp_resolved_transport_{bridge_image_bypass}"
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json(account_id, f"{account_id}@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=bridge_image_bypass,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        stream_idle_timeout_seconds=300.0,
+        proxy_response_create_limit=64,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="auto",
+        http_downstream_transport_policy="always_websocket" if bridge_image_bypass else "smart",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    captured: dict[str, object] = {}
+    metric_calls: list[dict[str, object]] = []
+    bypass_calls: list[dict[str, object]] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        yield (
+            'data: {"type":"response.completed","response":{"id":"' + response_id + '","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(streaming_retry_module, "_resolve_stream_transport", lambda **_: "websocket")
+    monkeypatch.setattr(
+        streaming_retry_module, "_record_upstream_transport_decision", lambda **labels: metric_calls.append(labels)
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module, "record_http_bridge_routing", lambda **labels: bypass_calls.append(labels)
+    )
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_json: dict[str, object] = {"model": "gpt-5.1", "instructions": "Return exactly OK."}
+    if bridge_image_bypass:
+        request_json["input"] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+                ],
+            }
+        ]
+    else:
+        request_json["input"] = "continue"
+        request_json["previous_response_id"] = "resp_prior_turn"
+
+    response = await async_client.post("/v1/responses", json=request_json)
+    assert response.status_code == 200
+    assert response.json()["id"] == response_id
+    assert captured["transport"] == "auto"  # Preserve upstream client's 426 fallback.
+    if bridge_image_bypass:
+        assert {"stage": "bypass", "reason": "image"} in bypass_calls
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == response_id))
+        log = result.scalar_one()
+    assert log.transport == "http"
+    assert log.upstream_transport == "websocket"
+    assert metric_calls == [
+        {
+            "downstream_transport": "http",
+            "upstream_transport": "websocket",
+            "policy": "always_websocket" if bridge_image_bypass else "smart",
+            "sticky": not bridge_image_bypass,
             "status": "success",
         }
     ]

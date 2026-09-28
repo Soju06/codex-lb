@@ -38,6 +38,22 @@ contract this fix doesn't need to touch.
 **WARNING on fallback cancel.** A task that needed cancelling is exactly the
 case operators should see. It names the coroutine.
 
+**Maintainer review: two stop policies, and one loop turn first.** The
+drain-deadline cap is right for the periodic schedulers, but wrong for the
+lease keeper. The keeper is stopped inside `release()`, which already runs under
+the 10s `_release_leader_lease_within` deadline, and `release()` relies on the
+cancelled keeper having *finished* (one renewal owner at a time). On a busy
+instance the drain deadline is exhausted at shutdown (streaming responses open
+at SIGTERM), so a zero-budget keeper stop returned while the renew session was
+still unwinding. So:
+- the keeper uses the plain grace and awaits the cancelled task
+  (`await_cancellation=True`);
+- the schedulers keep the drain-capped grace but wait up to the plain grace
+  after cancelling, so a promptly cancelled task is finished before the next
+  stop (preserving "poller after model scheduler");
+- every stop first yields one loop turn, so a loop idling on its stop event
+  exits without a spurious WARNING.
+
 ## Risks / Trade-offs
 
 - [Worst case: several tasks mid-tick in slow DB work] → Uncapped, each stop

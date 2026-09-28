@@ -41,20 +41,32 @@ def _describe(task: asyncio.Task[Any]) -> str:
     return getattr(coro, "__qualname__", None) or task.get_name()
 
 
-async def stop_task_after_grace(task: asyncio.Task[Any]) -> None:
+async def stop_task_after_grace(task: asyncio.Task[Any], *, await_cancellation: bool = False) -> None:
     """Let a task finish its current unit of work, cancelling it only as a fallback.
 
     Callers set the task's stop event first. Cancelling a task while it is
     inside database work interrupts SQLAlchemy's connection cleanup (on SQLite
     the pool logs ``Exception closing connection``) and can leave rows such as
     the leader lease unreleased.
+
+    ``await_cancellation=True`` is for a stop that runs inside its own bounded
+    deadline and whose caller relies on the task having fully finished (the
+    leader-lease keeper inside ``release()``, bounded by the 10s release
+    deadline): the grace is the plain grace rather than the drain-capped one,
+    and after cancelling, the task is awaited until it is done. Otherwise the
+    grace is capped by the drain time left and the post-cancel wait by the
+    plain grace, after which a still-running task is tracked.
     """
+    # One loop turn first: a loop idling on its stop event exits here, so it is
+    # neither warned about nor cancelled even when no drain time is left.
+    await asyncio.sleep(0)
+    if task.done():
+        if not task.cancelled():
+            task.result()
+        return
     # wait_on_shared_future never cancels ``task`` itself and absorbs a
     # level-cancelled caller's repeated cancels (see scripts/check_cancellation_safety.py).
-    # Each wait is capped by the shared shutdown budget (see _wait_budget_seconds),
-    # so the scheduler stops, which run sequentially, cannot push the process
-    # past its forced-exit deadline before lease release and DB disposal.
-    grace = _wait_budget_seconds()
+    grace = DATABASE_TASK_STOP_GRACE_SECONDS if await_cancellation else _wait_budget_seconds()
     try:
         await wait_on_shared_future(task, timeout=grace)
         return
@@ -70,16 +82,21 @@ async def stop_task_after_grace(task: asyncio.Task[Any]) -> None:
         _describe(task),
     )
     task.cancel()
-    cancel_wait = _wait_budget_seconds()
     try:
-        await wait_on_shared_future(task, timeout=cancel_wait)
+        if await_cancellation:
+            await wait_on_shared_future(task)
+            return
+        # The plain grace, not the drain budget: a promptly cancelled task is
+        # awaited to completion, so stop order in app/main.py still holds (the
+        # cache poller stops only after the model scheduler has finished).
+        await wait_on_shared_future(task, timeout=DATABASE_TASK_STOP_GRACE_SECONDS)
     except TimeoutError:
         # The task is deferring cancellation (e.g. inside shielded DB cleanup).
         # Do not block shutdown on it, but keep it visible: while it runs, the
         # shutdown must not be recorded as clean (see undrained_tasks()).
         logger.warning(
             "Background task still running %.1fs after cancellation; leaving it tracked task=%s",
-            cancel_wait,
+            DATABASE_TASK_STOP_GRACE_SECONDS,
             _describe(task),
         )
         _undrained.add(task)

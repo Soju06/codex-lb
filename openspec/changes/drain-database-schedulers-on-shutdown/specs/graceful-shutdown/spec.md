@@ -7,16 +7,23 @@ leader-lease keeper and the periodic scheduler loops), it MUST first signal the
 task to stop and then wait up to a fixed grace of 2 seconds for the task to
 finish the unit of work in progress. It MUST cancel the task only if it is
 still running after that grace, and MUST log a WARNING naming the task when it
-does. It MUST then wait at most the same grace for the cancellation to take
-effect. A task still running after that MUST be logged and tracked rather than
-awaited indefinitely, and while any such task is still running the shutdown
-MUST NOT be recorded as clean. Each of these waits MUST additionally be capped
-by the time remaining in the shared drain deadline, and MUST NOT use the
-post-drain cleanup reserve, which belongs to the steps that follow the scheduler
-stops (leader-lease release, metrics-server wait, database disposal), so that
-the sequential stops cannot push the process past its forced-exit deadline;
-when no drain time remains the task MUST be cancelled without a grace wait. A task that is idle between ticks MUST exit on the stop
-signal without waiting out the grace.
+does. Before any grace wait the stop MUST yield one event-loop turn, and a task
+that has finished by then (a loop idling on its stop event) MUST NOT be warned
+about or cancelled.
+
+For the periodic scheduler loops, the grace MUST be capped by the time remaining
+in the shared drain deadline and MUST NOT use the post-drain cleanup reserve,
+which belongs to the steps that follow the stops (leader-lease release,
+metrics-server wait, database disposal). After cancelling, the stop MUST wait
+up to the plain grace for the cancellation to take effect, so that a promptly
+cancelled task has finished before the next stop in the shutdown order begins.
+A task still running after that MUST be logged and tracked, and while any such
+task is still running the shutdown MUST NOT be recorded as clean.
+
+For the leader-lease keeper, which is stopped inside `release()` under the
+release's own bounded deadline, the stop MUST use the plain grace (not the
+drain-capped one) and, after cancelling, MUST wait until the keeper has
+finished, so exactly one owner renews the lease at a time.
 
 #### Scenario: Prompt shutdown after startup leaves no pool errors
 
@@ -58,6 +65,18 @@ signal without waiting out the grace.
 - **WHEN** seven wedged background tasks are stopped one after another
 - **THEN** all of them are stopped within that remaining budget, not 2 seconds (or more) each
 - **AND** a task that defers cancellation is still tracked so the shutdown is not recorded clean
+
+#### Scenario: Idle loop does not warn when no drain time is left
+
+- **GIVEN** the shared drain deadline is exhausted
+- **WHEN** a scheduler loop idling on its stop event is stopped
+- **THEN** it exits without a WARNING and without being cancelled
+
+#### Scenario: Keeper finishes before release continues when no drain time is left
+
+- **GIVEN** the shared drain deadline is exhausted and the keeper is inside a lease renewal whose session close defers cancellation
+- **WHEN** `release()` stops the keeper
+- **THEN** the keeper's session has closed before `release()` drains detached bodies and deletes the lease
 
 #### Scenario: Idle tasks stop immediately
 

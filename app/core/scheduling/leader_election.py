@@ -536,7 +536,10 @@ class LeaderElection:
         if stop is not None:
             stop.set()
         try:
-            await stop_task_after_grace(keeper)
+            # Plain grace and a full await of the cancelled keeper: release()
+            # relies on exactly one renewal owner, and its own 10s deadline
+            # (app/main.py) already bounds this wait.
+            await stop_task_after_grace(keeper, await_cancellation=True)
         except Exception:
             logger.warning("Scheduler leader lease keeper failed during shutdown", exc_info=True)
 

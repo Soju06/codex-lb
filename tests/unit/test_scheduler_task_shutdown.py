@@ -139,6 +139,9 @@ async def test_exhausted_budget_cancels_immediately_and_still_tracks_deferring_t
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _shutdown_budget(monkeypatch, usable_seconds=0.0)
+    # The post-cancel wait uses the plain grace (so a promptly cancelled task is
+    # awaited); shrink it so the deferring task is tracked quickly.
+    monkeypatch.setattr(task_shutdown, "DATABASE_TASK_STOP_GRACE_SECONDS", 0.05)
     caplog.set_level(logging.WARNING, logger=task_shutdown.__name__)
     cleanup_may_finish = asyncio.Event()
 
@@ -158,3 +161,54 @@ async def test_exhausted_budget_cancels_immediately_and_still_tracks_deferring_t
     cleanup_may_finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_idle_loop_exits_without_warning_when_no_drain_time_left(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _shutdown_budget(monkeypatch, usable_seconds=0.0)
+    caplog.set_level(logging.WARNING, logger=task_shutdown.__name__)
+    stop = asyncio.Event()
+    ticks: list[int] = []
+
+    async def scheduler_loop() -> None:  # the loop shape every changed scheduler uses
+        while not stop.is_set():
+            ticks.append(1)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=60)
+            except TimeoutError:
+                continue
+
+    task = asyncio.create_task(scheduler_loop())
+    await asyncio.sleep(0.01)  # idle between ticks
+    stop.set()
+    await task_shutdown.stop_task_after_grace(task)
+
+    assert task.done() and not task.cancelled()
+    assert caplog.records == []
+
+
+@pytest.mark.asyncio
+async def test_promptly_cancelled_task_is_finished_when_stop_returns_with_no_drain_time_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # app/main.py stops the cache poller only after the model scheduler has finished;
+    # that ordering needs stop() to return only once the cancelled task is done.
+    _shutdown_budget(monkeypatch, usable_seconds=0.0)
+    cleaned_up = asyncio.Event()
+
+    async def tick_in_database_work() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.02)  # prompt rollback/close on cancellation
+            cleaned_up.set()
+            raise
+
+    task = asyncio.create_task(tick_in_database_work())
+    await asyncio.sleep(0)
+    await task_shutdown.stop_task_after_grace(task)
+
+    assert task.done()
+    assert cleaned_up.is_set()

@@ -16,6 +16,8 @@
 
 - [x] 4.3 Cap both waits in `stop_task_after_grace` by the time left in the shared drain deadline (`remaining_drain_timeout_seconds()`), so the sequential stops never use the 25s post-drain reserve that the lease release (10s), metrics wait (5s) and `close_db()` teardown drain (2 x 5s) need. (A first revision reserved only 15s of the post-drain budget and left `close_db()` unbudgeted.) Verify with `test_sequential_stops_of_wedged_tasks_stay_within_the_shutdown_budget` (14.0s on the previous code against a 0.5s budget; passes now) and `test_exhausted_budget_cancels_immediately_and_still_tracks_deferring_tasks`.
 
+- [x] 4.4 Maintainer review: every stop yields one loop turn before warning or cancelling; the leader-lease keeper uses the plain grace and awaits its cancelled task (`await_cancellation=True`), bounded by `release()`'s 10s deadline; the schedulers wait up to the plain grace after cancelling. Verify with `test_idle_loop_exits_without_warning_when_no_drain_time_left`, `test_promptly_cancelled_task_is_finished_when_stop_returns_with_no_drain_time_left` and `test_release_waits_for_the_keeper_to_finish_when_no_drain_time_left`, which all fail on `7b2e373a` and pass now.
+
 ## 3. Validation
 
 - [x] 3.1 `npx --yes @fission-ai/openspec@1.11.0 validate drain-database-schedulers-on-shutdown --strict`, `make lint`, and `uv run ty check` pass.

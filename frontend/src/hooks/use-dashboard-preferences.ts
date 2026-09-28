@@ -9,7 +9,7 @@ const DASHBOARD_REFRESH_STORAGE_KEY = "codex-lb-dashboard-refresh-seconds";
 
 export type DashboardRefreshSeconds = 5 | 15 | 30 | 60;
 
-export type DashboardAccountViewMode = "cards" | "list";
+export type DashboardAccountViewMode = "cards" | "list" | "compact";
 
 type DashboardPreferencesState = {
   accountBurnrateEnabled: boolean;
@@ -57,7 +57,7 @@ function readStoredAccountViewMode(): DashboardAccountViewMode | null {
     return null;
   }
   const stored = window.localStorage.getItem(ACCOUNT_VIEW_MODE_STORAGE_KEY);
-  return stored === "cards" || stored === "list" ? stored : null;
+  return stored === "cards" || stored === "list" || stored === "compact" ? stored : null;
 }
 
 function readStoredAccountListSort(): AccountListSort {

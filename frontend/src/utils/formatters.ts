@@ -9,6 +9,9 @@ function t(key: string, options?: Record<string, unknown>): string {
 
 function getIntlLocale(): string {
   const language = (i18n.resolvedLanguage ?? i18n.language ?? "en").toLowerCase();
+  if (language.startsWith("ja")) {
+    return "ja-JP";
+  }
   if (language.startsWith("ko")) {
     return "ko-KR";
   }

@@ -12,7 +12,9 @@ import {
   useThreadIdentity,
 } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { getErrorMessageOrNull } from "@/utils/errors";
+import { formatDateTimeInline } from "@/utils/formatters";
 import { ReportsFilters, type ReportsFiltersState } from "./reports-filters";
 import { ReportsSummaryCards } from "./reports-summary-cards";
 import type { CostPerDayChartProps } from "./cost-per-day-chart";
@@ -87,6 +89,7 @@ export type ReportsPageProps = {
 
 export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const [filters, setFilters] = useState<ReportsFiltersState>(() => ({
     ...createDefaultFilters(),
     ...initialFilters,
@@ -315,7 +318,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
       <div className="flex items-center justify-end gap-3">
         {reportsQuery.data?.generatedAt ? (
-          <span className="text-xs text-muted-foreground">{t("reports.asOf", { time: new Date(reportsQuery.data.generatedAt).toLocaleString() })}</span>
+          <span className="text-xs text-muted-foreground">
+            {t("reports.asOf", {
+              time: formatDateTimeInline(reportsQuery.data.generatedAt, dateDisplayFormat),
+            })}
+          </span>
         ) : null}
         <Button variant="outline" size="sm"
           disabled={reportsQuery.isFetching || filterCatalogQuery.isFetching || !isReportDateRangeValid(filters.startDate, filters.endDate)}

@@ -55,9 +55,11 @@ async def _read[ModelT: BaseModel](request: Request, model: type[ModelT]) -> Mod
     declared = request.headers.get("content-length")
     if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         raise errors.too_large(MAX_BODY_BYTES)
-    raw = await request.body()
-    if len(raw) > MAX_BODY_BYTES:
-        raise errors.too_large(MAX_BODY_BYTES)
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > MAX_BODY_BYTES:
+            raise errors.too_large(MAX_BODY_BYTES)
+        raw.extend(chunk)
     try:
         payload = json.loads(raw or b"{}")
     except ValueError as exc:

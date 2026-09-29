@@ -96,9 +96,9 @@ keeps `requires_openai_auth = true` does not activate the actor-authorized path.
 
 ## Internal host compatibility
 
-Images and default account probes prefer `gpt-5.6-luna`, then `gpt-5.5`,
-using registry plan visibility and suppression. With neither candidate available,
-they default to Luna. For example, a stale catalog still advertising both now
-selects Luna rather than the withdrawn host reported in #2134. Visibility does
-not establish account entitlement. Existing errors are preserved; no host retry
-is performed. Public image models and explicit account-probe models are unchanged.
+Images use their own ordered host selection and prefer `gpt-5.6-sol`, then
+`gpt-6-astra`, `gpt-5.6-luna`, and `gpt-5.5`, using registry plan visibility
+and suppression. With no candidate visible, they default to Sol. Default account
+probes retain their separate Luna-then-5.5 selection. Visibility does not
+establish account entitlement. Existing errors are preserved; no host retry is
+performed. Public image models and explicit account-probe models are unchanged.

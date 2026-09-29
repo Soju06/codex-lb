@@ -109,6 +109,7 @@ from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import codex_backend_passthrough as codex_backend_passthrough_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
@@ -1039,6 +1040,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.files_router)
     app.include_router(proxy_api.usage_router)
+    # Last /backend-api router: every served /backend-api route must win over its catch-all.
+    app.include_router(codex_backend_passthrough_api.router)
     app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(rate_limit_reset_credits_api.router)

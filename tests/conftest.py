@@ -466,6 +466,12 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        from app.core.auth.dependencies import get_verified_codex_caller_cache
+
+        get_verified_codex_caller_cache().clear()
+    except Exception:
+        pass
+    try:
         from app.core.middleware.firewall_cache import get_firewall_ip_cache as get_firewall_cache
 
         get_firewall_cache().invalidate_all()

@@ -31,6 +31,47 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Showing pooled quota in Codex
+
+By default Codex reads its rate-limit display from `chatgpt.com` for the
+account it is logged in as, so it shows that one account's quota even while
+codex-lb routes its requests to a different account. To show the pool's
+combined quota instead, point Codex's ChatGPT backend at codex-lb. Add this at
+the top level of `~/.codex/config.toml`, not under `[model_providers.codex-lb]`:
+
+```toml
+chatgpt_base_url = "http://127.0.0.1:2455/backend-api"
+```
+
+Or try it for one run without editing the file:
+
+```bash
+codex -c 'chatgpt_base_url="http://127.0.0.1:2455/backend-api"'
+```
+
+Recent Codex versions run sessions through a background app-server daemon that
+reads `config.toml` only when it starts. After adding the line, restart it once
+(`codex app-server daemon restart`; this interrupts running sessions), or new
+sessions will keep showing the logged-in account's quota. A `-c` flag applies
+immediately.
+
+Keep the `/backend-api` suffix. Codex then reads usage from
+`/backend-api/wham/usage`, which codex-lb answers with usage pooled across all
+accounts. Codex's other ChatGPT-backend calls (account checks, user settings,
+plugins, cloud tasks) are forwarded to ChatGPT unchanged, under your own login.
+This works only if the account Codex is logged into is also in the codex-lb
+pool; otherwise those calls return `401`.
+
+Two limits:
+
+- ChatGPT connectors are unavailable with this setting. Codex does not send
+  your ChatGPT credentials to its connectors endpoint unless the host is
+  chatgpt.com, and codex-lb will not substitute a pool account's.
+- During a session, the display still updates from the rate-limit events of
+  whichever account served the last turn.
+
+See [codex-backend-passthrough](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/codex-backend-passthrough).
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token
@@ -386,4 +427,4 @@ print(response.choices[0].message.content)
 
 ---
 
-*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [images-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/images-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [proxy-admission-control](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-admission-control) · [proxy-warmup](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-warmup) · [files-upload-protocol](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/files-upload-protocol) · [audio-transcriptions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/audio-transcriptions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability)*
+*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [images-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/images-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [proxy-admission-control](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-admission-control) · [proxy-warmup](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-warmup) · [files-upload-protocol](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/files-upload-protocol) · [audio-transcriptions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/audio-transcriptions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability) · [codex-backend-passthrough](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/codex-backend-passthrough)*

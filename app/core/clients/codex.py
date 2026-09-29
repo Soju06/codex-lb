@@ -231,13 +231,13 @@ class CodexClient:
             native_egress_client if native_egress_client is not None else discover_native_egress_client()
         )
 
-    async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> Any:
+    async def request(self, method: str, url: str | URL, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> Any:
         return (await self.request_with_route_metadata(method, url, route=route, **kwargs)).response
 
     async def request_with_route_metadata(
         self,
         method: str,
-        url: str,
+        url: str | URL,
         *,
         route: ResolvedUpstreamRoute,
         native_sse: NativeSseOptions | None = None,
@@ -249,7 +249,7 @@ class CodexClient:
         if native_sse is not None and buffer_response:
             raise ValueError("Native SSE framing requires buffer_response=False")
         _reject_reserved(kwargs)
-        native_request = _prepare_native_request(url, kwargs)
+        native_request = _prepare_native_request(str(url), kwargs)
         aiohttp_kwargs = dict(kwargs)
         _normalize_aiohttp_request_kwargs(aiohttp_kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
@@ -486,7 +486,7 @@ def create_codex_session(*, max_clients: int = 10) -> Any:
 
 async def _request_via_socks_proxy(
     method: str,
-    url: str,
+    url: str | URL,
     endpoint: ResolvedProxyEndpoint,
     *,
     buffer_response: bool,
@@ -860,7 +860,7 @@ def _response_status(response: Any) -> int:
     return int(value or 0)
 
 
-def _reject_credentialed_plaintext_target(url: str, endpoints: tuple[ResolvedProxyEndpoint, ...]) -> None:
+def _reject_credentialed_plaintext_target(url: str | URL, endpoints: tuple[ResolvedProxyEndpoint, ...]) -> None:
     # Proxy credentials ride in a Proxy-Authorization header (never URL
     # userinfo, which aiohttp reprs into ConnectionKey/ClientHttpProxyError).
     # aiohttp only forwards proxy_headers on the CONNECT tunnel, so a

@@ -134,7 +134,7 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.host_models import resolve_default_host_model
+from app.core.openai.host_models import resolve_image_host_model
 from app.core.openai.images import (
     DEFAULT_PUBLIC_IMAGE_MODEL,
     V1ImageResponse,
@@ -3302,7 +3302,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = resolve_default_host_model()
+    host_model = resolve_image_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -3607,7 +3607,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = resolve_default_host_model()
+    host_model = resolve_image_host_model()
 
     try:
         validate_model_access(api_key, effective_model)

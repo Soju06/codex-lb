@@ -3,6 +3,7 @@
 from app.core.openai.model_registry import get_model_registry
 
 _HOST_MODEL_CANDIDATES = ("gpt-5.6-luna", "gpt-5.5")
+_IMAGE_HOST_MODEL_CANDIDATES = ("gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.5")
 
 
 def resolve_default_host_model() -> str:
@@ -12,3 +13,12 @@ def resolve_default_host_model() -> str:
         if registry.plan_types_for_model(slug) and not registry.is_suppressed_model(slug):
             return slug
     return _HOST_MODEL_CANDIDATES[0]
+
+
+def resolve_image_host_model() -> str:
+    """Select a Responses host that supports the image_generation tool."""
+    registry = get_model_registry()
+    for slug in _IMAGE_HOST_MODEL_CANDIDATES:
+        if registry.plan_types_for_model(slug) and not registry.is_suppressed_model(slug):
+            return slug
+    return _IMAGE_HOST_MODEL_CANDIDATES[0]

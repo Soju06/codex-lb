@@ -317,7 +317,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
         captured["instructions"] = payload.instructions
         captured["input"] = payload.input
         captured["account_id"] = account_id
-        if payload.model == "gpt-5.5":
+        if payload.model in {"gpt-5.6-luna", "gpt-5.5"}:
             yield _sse(
                 {
                     "type": "response.failed",
@@ -387,7 +387,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     assert body["usage"] == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
 
     # The host model is hidden from clients but appears in the upstream call.
-    assert captured["model"] == "gpt-5.6-luna"
+    assert captured["model"] == "gpt-5.6-sol"
     tools = cast(list[Any], captured["tools"])
     image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
@@ -1089,7 +1089,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
         },
     )
 
-    assert captured["model"] == "gpt-5.6-luna"
+    assert captured["model"] == "gpt-5.6-sol"
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]

@@ -2156,6 +2156,10 @@ def _pop_terminal_websocket_request_state(
     return None
 
 
+def _upstream_websocket_payload_too_large_message() -> str:
+    return "Upstream websocket closed with code 1009 (message too big): a message exceeded a size limit."
+
+
 def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) -> str:
     if message.kind == "error" and message.error:
         return f"Upstream websocket closed before response.completed: {message.error}"

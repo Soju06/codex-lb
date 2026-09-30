@@ -74,6 +74,10 @@ invented number of credits. Recorded observations remain unquantified when
 optional reset metadata is missing. An absent short window is not an
 unquantified short window.
 
+The weekly-pace builder uses fresh secondary history, not its optional duration,
+to detect incomplete coverage. Missing or zero duration therefore does not
+expose a forecast covering only the known-capacity accounts.
+
 ## Status Derivation
 
 The fetched usage is fed through

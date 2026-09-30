@@ -110,10 +110,17 @@ def test_weekly_pace_verdict_branches_and_legacy_status_mapping(
 
 
 @pytest.mark.parametrize("missing_reset", [False, True])
-def test_weekly_pace_omits_fleet_forecast_with_fresh_max_weekly_usage(missing_reset: bool) -> None:
+@pytest.mark.parametrize("window_minutes", [10080, None, 0])
+def test_weekly_pace_omits_fleet_forecast_with_fresh_max_weekly_usage(
+    missing_reset: bool,
+    window_minutes: int | None,
+) -> None:
     known = _summary("pro", used_percent=40.0, reset_in_hours=24.0)
     unknown = _summary("max", used_percent=20.0, reset_in_hours=24.0, capacity=0.0)
     unknown.plan_type = "promax"
+    unknown.window_minutes_secondary = window_minutes
+    unknown_row = _row("max", 20.0, NOW - timedelta(minutes=1))
+    unknown_row.window_minutes = window_minutes
     if missing_reset:
         unknown.reset_at_secondary = None
 
@@ -122,7 +129,7 @@ def test_weekly_pace_omits_fleet_forecast_with_fresh_max_weekly_usage(missing_re
         account_summaries=[known, unknown],
         secondary_history={
             "pro": [_row("pro", 40.0, NOW - timedelta(minutes=1))],
-            "max": [_row("max", 20.0, NOW - timedelta(minutes=1))],
+            "max": [unknown_row],
         },
         now=NOW,
         usage_refresh_interval_seconds=60,

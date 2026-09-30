@@ -110,9 +110,7 @@ def build_weekly_credit_pace(
         account = accounts_by_id.get(summary.account_id)
         if account is not None and account.status in PACE_ELIGIBLE_ACCOUNT_STATUSES and summary.plan_type == "promax":
             rows = secondary_history.get(summary.account_id, [])
-            if summary.window_minutes_secondary == 10_080 and any(
-                row.recorded_at >= freshness_cutoff and row.window_minutes == 10_080 for row in rows
-            ):
+            if any(row.recorded_at >= freshness_cutoff for row in rows):
                 return None
         timing = _weekly_timing(summary, now_ms)
         if timing is None:

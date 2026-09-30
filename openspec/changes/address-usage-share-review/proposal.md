@@ -10,6 +10,7 @@ PR #2463 carries obsolete branch-local migration convergence and an independent 
 - Publish allocation invalidation through the existing API-key namespace instead of adding API-key callbacks to account-routing observations.
 - Reuse incomplete authentication snapshots for at most five seconds using the existing cache and version fence.
 - Preserve the submitted fail-open policy pending maintainer approval; do not silently adopt the separate account-cap policy.
+- Finalize prepared direct-WebSocket states when fixed-limit reservation rejects a turn, without changing the existing client error or retiring a reusable upstream.
 
 ## Capabilities
 
@@ -20,6 +21,7 @@ None.
 ### Modified Capabilities
 
 - `usage-refresh-policy`: bound reuse of incomplete usage-share authentication snapshots. Allocation invalidation retains its observable contract; the namespace wiring change is implementation-only.
+- `proxy-admission-control`: account-neutral finalization of direct-WebSocket reservation refusals during preparation.
 
 ## Impact
 

@@ -29,3 +29,18 @@ The prior broad test result remains **638 passed / 9 skipped / 1 commit-dependen
 - The independent retained-invalidation reliability change is deferred, not opened as a new PR in this session.
 
 All implementation tasks and the commit-dependent local check are verified. Keep this follow-up active while maintainer policy approval and new-head cloud review/CI remain outstanding; local verification is not permission to merge.
+
+## Reservation-failure review follow-up — 2026-09-30
+
+Review thread: https://github.com/Soju06/codex-lb/pull/2463#discussion_r4143379876. Baseline: `fea4e88a2`. The receive loop already handles `AppError`; preparation creates neither a pending log nor an upstream lease, and API-key enforcement already rolls back refused limit writes. The concrete defect reproduced here is missing terminal logging/cleanup of the prepared, unreturned state, not a proven leaked database reservation.
+
+- Before the source fix, all **8 public-route regressions failed** because the accepted WebSocket emitted its correct refusal but persisted **zero** terminal error logs. A test-harness timeout argument was corrected before recording this baseline. Log: `/tmp/codex-lb-2463-reservation-baseline.log`.
+- After the fix, all **8 cases pass**: both public Responses WebSocket routes, initial/reused upstreams, real exhausted fixed-limit and revoked-key reservation failures, persisted account-neutral logs, cleanup-before-logging, unchanged client status/code/message, no upstream refusal frame, no orphaned reservation, healthy account, successful next turn, and exactly-once reservation settlement. Mocking policy refresh reproduces a mutation racing that refresh; reservation enforcement and request-log persistence are real.
+- Full WebSocket integration, model-source guard, API-key usage/share/virtual-time, terminal cancellation, WebSocket auth, and proxy utility selection: **1699 passed**. Log: `/tmp/codex-lb-2463-reservation-suite.log`.
+- A final typing-only non-null assertion in the test fixture was followed by another **8 passing** public regressions. The unchanged migration-topology suite separately passed **24 tests**. An initial combined `-k` command deselected those topology tests; the recorded 24-test result comes from the subsequent unfiltered run.
+- `make lint` (including architecture, cancellation, timing, settings, and unchanged topology guards), `uv run ty check`, `.github/scripts/check_simplicity_budgets.py`, strict change validation, all **67 stable specs**, exact delta/stable admission-spec equality, and `git diff --check`: passed. One attempted simplicity invocation used the wrong path; the actual repository checker above was subsequently run successfully.
+- Independent read-only review session `ea4ee201-2d54-4494-af7a-e116addf6878` (`openai-codex/gpt-5.5`): **no actionable findings**. Log: `/tmp/codex-lb-2463-reservation-independent-review.jsonl`.
+
+Only reservation domain-refusal finalization changes in production. Successful preparation, reservation placement, usage-share policy, migrations, and account health are unchanged. Stable admission requirements/context are synchronized. The previously extracted invalidation work is now independently published as #2545; it is not reintroduced here.
+
+Publication and exact-new-head cloud review/CI remain separate from these local results (task 4.4). The feature and incomplete-telemetry policy holds remain in force. No merge, archive, or production operation is authorized.

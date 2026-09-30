@@ -3534,12 +3534,24 @@ class _WebSocketMixin:
             request_state=request_state,
             affinity_policy=affinity_policy,
         )
-        request_state.api_key_reservation = await proxy._reserve_websocket_api_key_usage(
-            refreshed_api_key,
-            request_model=responses_payload.model,
-            request_service_tier=request_state.requested_service_tier,
-            request_usage_budget=estimate_api_key_request_usage(responses_payload),
-        )
+        try:
+            request_state.api_key_reservation = await proxy._reserve_websocket_api_key_usage(
+                refreshed_api_key,
+                request_model=responses_payload.model,
+                request_service_tier=request_state.requested_service_tier,
+                request_usage_budget=estimate_api_key_request_usage(responses_payload),
+            )
+        except AppError as exc:
+            # The receive loop cannot own this state until preparation returns.
+            await proxy._release_websocket_request_state_reservation(request_state)
+            await proxy._write_websocket_connect_failure(
+                account_id=None,
+                api_key=refreshed_api_key,
+                request_state=request_state,
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+            raise
         request_state.api_key_reservation_last_touch_at = clock_for(proxy).monotonic()
         return prepared
 

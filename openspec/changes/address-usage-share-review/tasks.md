@@ -13,3 +13,10 @@
 
 - [x] 3.1 Run focused feature, migration, refresh, and invalidation tests plus lint/type/OpenSpec validation; record evidence and remaining policy holds.
 - [x] 3.2 After an authorized commit, rerun the unchanged HEAD-to-disk migration graph assertion; verify it passes before archiving.
+
+## 4. Reservation-failure review follow-up
+
+- [x] 4.1 Reproduce missing prepared-state finalization through both public WebSocket routes, with initial/reused sockets and real fixed-limit/auth reservation refusals.
+- [x] 4.2 Release and log the prepared state before rethrowing reservation domain errors; preserve success, error envelopes, transactional rollback, and healthy reused sockets.
+- [x] 4.3 Synchronize admission spec/context, run regressions and static/spec checks, and obtain independent review before publication.
+- [ ] 4.4 Verify exact-head GitHub review and CI after publishing the reservation fix and replying to the review thread; retain the maintainer policy hold.

@@ -19,7 +19,7 @@ import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from httpx import Headers
-from sqlalchemy import select
+from sqlalchemy import select, update
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
@@ -34,8 +34,9 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
+from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
@@ -609,6 +610,177 @@ def _capability_test_api_key(key_id: str) -> ApiKeyData:
         created_at=datetime(2026, 7, 29, tzinfo=timezone.utc),
         last_used_at=None,
     )
+
+
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("reuse_upstream", [False, True], ids=["first-turn", "reused-socket"])
+@pytest.mark.parametrize("failure_kind", ["fixed-limit", "revoked-key"])
+def test_responses_websocket_reservation_refusal_finalizes_prepared_turn(
+    app_instance, monkeypatch, path, reuse_upstream, failure_kind
+):
+    account_id = "acct_ws_reservation_refusal"
+    successful_batches = (
+        [
+            _websocket_response_batch("resp_ws_before_refusal"),
+            _websocket_response_batch("resp_ws_after_refusal"),
+        ]
+        if reuse_upstream
+        else [_websocket_response_batch("resp_ws_after_refusal")]
+    )
+    for batch in successful_batches:
+        assert batch[-1].text is not None
+        terminal = json.loads(batch[-1].text)
+        terminal["response"]["usage"] = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        batch[-1].text = json.dumps(terminal)
+    upstream = _SequencedUpstreamWebSocket([], deferred_message_batches=successful_batches)
+    released_request_ids: list[str] = []
+    failure_request_ids: list[str] = []
+    connect_count = 0
+    original_release = proxy_module.ProxyService._release_websocket_request_state_reservation
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def prepare_rows():
+        async with SessionLocal() as session:
+            session.add(
+                Account(
+                    id=account_id,
+                    chatgpt_account_id=account_id,
+                    email="ws-reservation-refusal@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"access",
+                    refresh_token_encrypted=b"refresh",
+                    id_token_encrypted=b"id",
+                    last_refresh=proxy_module.utcnow(),
+                    status=AccountStatus.ACTIVE,
+                )
+            )
+            await session.commit()
+            service = ApiKeysService(ApiKeysRepository(session))
+            created = await service.create_key(
+                ApiKeyCreateData(
+                    name="websocket reservation refusal",
+                    allowed_models=None,
+                    limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000)],
+                )
+            )
+            return await service.get_key_by_id(created.id)
+
+    async def set_reservation_allowed(allowed: bool):
+        async with SessionLocal() as session:
+            if failure_kind == "fixed-limit":
+                await session.execute(
+                    update(ApiKeyLimit)
+                    .where(ApiKeyLimit.api_key_id == api_key.id)
+                    .values(current_value=0 if allowed else ApiKeyLimit.max_value)
+                )
+            else:
+                await session.execute(update(ApiKey).where(ApiKey.id == api_key.id).values(is_active=allowed))
+            await session.commit()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization, *, request=None):
+        return api_key
+
+    async def keep_refreshed_policy(self, current_api_key):
+        # Reproduce exhaustion/revocation racing the policy refresh, using real
+        # database enforcement in _reserve_websocket_api_key_usage.
+        assert current_api_key.id == api_key.id
+        return current_api_key
+
+    async def fake_connect(self, headers, *, request_state, **kwargs):
+        nonlocal connect_count
+        connect_count += 1
+        assert request_state.api_key_reservation is not None
+        async with SessionLocal() as session:
+            return await session.get(Account, account_id), upstream
+
+    async def track_release(self, request_state):
+        await original_release(self, request_state)
+        released_request_ids.append(request_state.request_id)
+
+    async def write_request_log(self, **kwargs):
+        if kwargs.get("error_code") in {"rate_limit_exceeded", "invalid_api_key"}:
+            assert kwargs["request_id"] in released_request_ids
+            assert kwargs["account_id"] is None
+            failure_request_ids.append(kwargs["request_id"])
+        await _REAL_WRITE_REQUEST_LOG(self, **kwargs)
+
+    async def read_results():
+        await get_proxy_service_for_app(app_instance).drain_persistence_tasks(timeout_seconds=5.0)
+        async with SessionLocal() as session:
+            logs = list((await session.scalars(select(RequestLog).where(RequestLog.api_key_id == api_key.id))).all())
+            reservations = list(
+                (
+                    await session.scalars(
+                        select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == api_key.id)
+                    )
+                ).all()
+            )
+            account = await session.get(Account, account_id)
+            assert account is not None
+            return logs, reservations, account.status
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_refresh_websocket_api_key_policy", keep_refreshed_policy)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_release_websocket_request_state_reservation", track_release)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", write_request_log)
+
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        api_key = client.portal.call(prepare_rows)
+        assert api_key is not None
+        with client.websocket_connect(path) as websocket:
+            if reuse_upstream:
+                websocket.send_text(json.dumps(_websocket_response_create("before refusal")))
+                assert json.loads(websocket.receive_text())["type"] == "response.created"
+                assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+            client.portal.call(set_reservation_allowed, False)
+            releases_before_refusal = len(released_request_ids)
+            websocket.send_text(json.dumps(_websocket_response_create("refused turn")))
+            refused = json.loads(websocket.receive_text())
+            assert refused["type"] == "error"
+            assert refused["status"] == (429 if failure_kind == "fixed-limit" else 401)
+            expected_code = "rate_limit_exceeded" if failure_kind == "fixed-limit" else "invalid_api_key"
+            assert refused["error"]["code"] == expected_code
+            logs, reservations, account_status = client.portal.call(read_results)
+            error_logs = [row for row in logs if row.status == "error"]
+            assert len(error_logs) == 1
+            assert error_logs[0].request_id == failure_request_ids[0]
+            assert error_logs[0].account_id is None
+            assert error_logs[0].error_code == expected_code
+            assert error_logs[0].error_message == refused["error"]["message"]
+            assert error_logs[0].transport == "websocket"
+            assert len(released_request_ids) == releases_before_refusal + 1
+            assert failure_request_ids == [released_request_ids[-1]]
+            assert len(reservations) == int(reuse_upstream)
+            assert all(row.status == "finalized" for row in reservations)
+            assert account_status == AccountStatus.ACTIVE
+            assert connect_count == int(reuse_upstream)
+            assert len(upstream.sent_text) == int(reuse_upstream)
+            assert upstream.closed is False
+
+            client.portal.call(set_reservation_allowed, True)
+            websocket.send_text(json.dumps(_websocket_response_create("after refusal")))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            recovered = json.loads(websocket.receive_text())
+            assert recovered["type"] == "response.completed"
+            assert recovered["response"]["id"] == "resp_ws_after_refusal"
+            logs, reservations, account_status = client.portal.call(read_results)
+            assert len([row for row in logs if row.status == "error"]) == 1
+            assert len(reservations) == int(reuse_upstream) + 1
+            assert all(row.status == "finalized" for row in reservations)
+            assert len(upstream.sent_text) == int(reuse_upstream) + 1
+            assert connect_count == 1
+            assert account_status == AccountStatus.ACTIVE
 
 
 def test_responses_websocket_route_rejects_disallowed_reasoning_before_upstream(app_instance, monkeypatch):

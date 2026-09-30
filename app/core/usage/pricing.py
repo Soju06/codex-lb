@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from fnmatch import fnmatchcase
 from typing import Iterable, Mapping
 
@@ -522,6 +523,25 @@ def calculate_cost_from_usage(
     if breakdown is None:
         return None
     return breakdown.total_usd
+
+
+def calculate_cost_microdollars_from_usage(
+    usage: UsageTokens | ResponseUsage | None,
+    price: ModelPrice,
+    *,
+    service_tier: str | None = None,
+) -> int | None:
+    normalized = _normalize_usage(usage)
+    if normalized is None:
+        return None
+    input_rate, cached_rate, output_rate = _effective_rates(normalized, price, service_tier=service_tier)
+    billable_input = max(0.0, normalized.input_tokens - normalized.cached_input_tokens)
+    # USD per million tokens is also microdollars per token. Avoid a float USD roundtrip.
+    return int(
+        Decimal(str(billable_input)) * Decimal(str(input_rate))
+        + Decimal(str(normalized.cached_input_tokens)) * Decimal(str(cached_rate))
+        + Decimal(str(max(0.0, normalized.output_tokens))) * Decimal(str(output_rate))
+    )
 
 
 def calculate_cost_breakdown_from_usage(

@@ -14,3 +14,9 @@ mechanism. Ultrafast mode context tiers must share the standard threshold.
 
 No database changes are needed. Cache-write support is deliberately excluded
 until its independent accounting contract lands.
+
+Cost-limit settlement uses decimal token-rate products directly in microdollars,
+sharing the existing normalized usage and effective-tier rates. Converting to
+floating-point USD and back can lose an integral microdollar even after a
+single-ULP adjustment. Truncate only the final decimal sum; preserve the existing
+token clamping and genuine fractional-microdollar behavior.

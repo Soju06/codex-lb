@@ -11,6 +11,7 @@ from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_breakdown_from_usage,
     calculate_cost_from_usage,
+    calculate_cost_microdollars_from_usage,
     calculate_costs,
     get_pricing_for_model,
     resolve_model_alias,
@@ -41,6 +42,21 @@ def test_resolve_model_alias_longest_match():
         "gpt-5.1-codex-max*": "gpt-5.1-codex-max",
     }
     assert resolve_model_alias("gpt-5.1-codex-max-2025", aliases) == "gpt-5.1-codex-max"
+
+
+@pytest.mark.parametrize(
+    "price,usage,expected",
+    [
+        (ModelPrice(0.6, 1.2, 0.06), UsageTokens(5, 2, 3), 3),
+        (ModelPrice(0.9999999999999999, 0), UsageTokens(1, 0), 0),
+        (ModelPrice(1.0, 0), UsageTokens(1, 0), 1),
+        (ModelPrice(1.0, 0), None, None),
+        (ModelPrice(1.0, 1.0), UsageTokens(-1, -5, -4), 0),
+        (ModelPrice(1.0, 1.0, 0.5), UsageTokens(3, -1, 5), 1),
+    ],
+)
+def test_microdollar_cost_preserves_fractional_truncation(price, usage, expected):
+    assert calculate_cost_microdollars_from_usage(usage, price) == expected
 
 
 def test_get_pricing_for_model_alias():

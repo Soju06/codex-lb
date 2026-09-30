@@ -3308,6 +3308,10 @@ async def test_compact_cost_limit_prefers_response_service_tier_over_request(
         pytest.param(0, 0, 10_000, (0.0, 0.0, 3.0), (0.0, 0.0, 0.5), id="output"),
         pytest.param(272_000, 20_000, 10_000, (15.12, 0.12, 3.0), (2.52, 0.02, 0.5), id="short-boundary"),
         pytest.param(272_001, 20_000, 10_000, (30.24012, 0.24, 4.5), (5.04002, 0.04, 0.75), id="long-boundary"),
+        pytest.param(32, 0, 7, (0.00192, 0.0, 0.0021), (0.00032, 0.0, 0.00035), id="microdollar-precision"),
+        pytest.param(
+            40, 3, 3, (0.00222, 0.000018, 0.0009), (0.00037, 0.000003, 0.00015), id="cached-microdollar-precision"
+        ),
     ],
 )
 async def test_v1_responses_ultrafast_cost_logs_and_settlement(

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from math import ceil, inf, nextafter
+from math import ceil
 from typing import Protocol
 
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -20,7 +20,7 @@ from app.core.clients.thread_cache_identity import (
 )
 from app.core.usage.pricing import (
     UsageTokens,
-    calculate_cost_from_usage,
+    calculate_cost_microdollars_from_usage,
     get_pricing_for_model,
 )
 from app.core.usage.types import UsageWindowRow
@@ -2083,11 +2083,10 @@ def _calculate_cost_microdollars(
         output_tokens=float(output_tokens),
         cached_input_tokens=float(cached_input_tokens),
     )
-    cost_usd = calculate_cost_from_usage(usage, price, service_tier=service_tier)
-    if cost_usd is None:
+    cost_microdollars = calculate_cost_microdollars_from_usage(usage, price, service_tier=service_tier)
+    if cost_microdollars is None:
         return 0
-    # Preserve fractional truncation without losing an integral microdollar to float error.
-    return int(nextafter(cost_usd * 1_000_000, inf))
+    return cost_microdollars
 
 
 def _build_api_key_trends(

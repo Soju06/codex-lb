@@ -22,3 +22,9 @@ integral microdollar to binary floating-point representation error.
 #### Scenario: Previously recorded cost
 - **WHEN** the pricing fix is installed
 - **THEN** existing non-NULL costs are not rewritten merely because a request asked for Ultrafast
+
+#### Scenario: Small Ultrafast requests settle exact whole microdollars
+- **WHEN** an Ultrafast response has 32 input tokens and 7 output tokens
+- **THEN** settlement records 4020 microdollars
+- **AND** 40 input tokens including 3 cached tokens and 3 output tokens settle 3138 microdollars
+- **AND** genuinely fractional microdollar costs are truncated, not rounded up

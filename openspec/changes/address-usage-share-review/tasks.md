@@ -12,4 +12,4 @@
 ## 3. Verification
 
 - [x] 3.1 Run focused feature, migration, refresh, and invalidation tests plus lint/type/OpenSpec validation; record evidence and remaining policy holds.
-- [ ] 3.2 After an authorized commit, rerun the unchanged HEAD-to-disk migration graph assertion; verify it passes before archiving.
+- [x] 3.2 After an authorized commit, rerun the unchanged HEAD-to-disk migration graph assertion; verify it passes before archiving.

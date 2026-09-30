@@ -821,6 +821,52 @@ describe("buildDashboardView", () => {
     expect(view.weeklyCreditPace).toBe(overviewPace);
   });
 
+  it.each(["overview", "projections", "local"] as const)(
+    "suppresses the %s pace before fallback when weekly coverage is incomplete",
+    (source) => {
+      const overview = createDashboardOverview({
+        accounts: [account({
+          accountId: "known",
+          email: "known@example.com",
+          capacityCreditsSecondary: 50_400,
+          remainingCreditsSecondary: 25_200,
+          resetAtSecondary: "2026-10-04T00:00:00Z",
+          windowMinutesSecondary: 10_080,
+        })],
+        weeklyCreditPace: source === "overview" ? serverWeeklyPace() : null,
+      });
+      if (!overview.summary.secondaryWindow) throw new Error("Missing weekly fixture");
+      overview.summary.secondaryWindow.unquantifiedAccountCount = 1;
+      expect(buildWeeklyCreditPace(overview.accounts, new Date("2026-09-30T00:00:00Z"))).not.toBeNull();
+
+      const view = buildDashboardView(overview, [], false, {
+        weeklyCreditPace: source === "projections" ? serverWeeklyPace() : null,
+        depletionSecondary: overview.depletionSecondary,
+      });
+
+      expect(view.weeklyCreditPace).toBeNull();
+      expect(view.safeLineSecondary).toBeNull();
+      expect(view.safeLinePrimary).not.toBeNull();
+    },
+  );
+
+  it("excludes unquantified credit contributions without dropping observed account percentages", () => {
+    const overview = createDashboardOverview();
+    if (!overview.windows.secondary) throw new Error("Missing weekly fixture");
+    const excluded = overview.windows.secondary.accounts[0];
+    excluded.capacityKnown = false;
+    excluded.remainingCredits = 999_999;
+    const percentages = overview.accounts.map((entry) => entry.usage?.secondaryRemainingPercent);
+
+    const view = buildDashboardView(overview, []);
+
+    expect(view.secondaryUsageItems.some((entry) => entry.accountId === excluded.accountId)).toBe(false);
+    expect(view.secondaryTotal).toBe(
+      overview.windows.secondary.accounts.slice(1).reduce((sum, entry) => sum + entry.remainingCredits, 0),
+    );
+    expect(overview.accounts.map((entry) => entry.usage?.secondaryRemainingPercent)).toEqual(percentages);
+  });
+
   it("prefers the fresh overview weekly pace over a retained projections copy", () => {
     // TanStack Query keeps the last successful projections payload across
     // later failures; a stale "safe" copy must not mask a fresh "runs_dry".

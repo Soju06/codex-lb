@@ -267,7 +267,7 @@ function createOverviewTimeframe(
 }
 
 export function createDashboardOverview(
-	overrides: Partial<DashboardOverview> = {},
+	overrides: Partial<z.input<typeof DashboardOverviewSchema>> = {},
 ): DashboardOverview {
 	const timeframe = overrides.timeframe ?? createOverviewTimeframe();
 	const accounts = overrides.accounts ?? createDefaultAccounts();

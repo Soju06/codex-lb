@@ -25,7 +25,7 @@ The exact unchanged test also fails from the clean original main checkout at `f8
 
 ## Independent review and coherence
 
-Independent read-only Pi review using `openai-codex/gpt-5.5` reported **no actionable findings** (`/tmp/codex-lb-invalidation-independent-review.jsonl`). It reviewed the implementation, changed tests, and OpenSpec coherence; it did not rerun tests or inspect cloud evidence. Final self-review maps all 13 resilience scenarios to the new or existing passing cache-invalidation suites. The delta and stable resilience requirement match; only this requirement's behavior changes.
+Independent read-only Pi review using `openai-codex/gpt-5.5` reported **no actionable findings** (`/tmp/codex-lb-invalidation-independent-review.jsonl`). A final committed-state review of implementation commit `faad3c5fd`, session `7b0042c5-7175-4a00-ad1f-967c493ead83`, also reported no actionable findings (`/tmp/codex-lb-invalidation-final-review.jsonl`; session saved under `~/.pi/agent/review-sessions/`). Both reviewed the implementation, changed tests, and OpenSpec coherence; neither reran broad tests nor inspected cloud evidence. Final self-review maps all 13 resilience scenarios to the new or existing passing cache-invalidation suites. The delta and stable resilience requirement match; only this requirement's behavior changes.
 
 Production diff is confined to `app/core/cache/invalidation.py`. Namespace registrations, settings/upstream-route publication and caller fallbacks, API fields, migrations, UI, and #2463's usage-share implementation remain unchanged. Retention is in-process, not a durable outbox or shutdown guarantee; duplicate invalidations after ambiguous commit outcomes remain safe.
 

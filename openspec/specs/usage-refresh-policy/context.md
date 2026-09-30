@@ -49,14 +49,18 @@ On 2026-09-30, authenticated usage returned a weekly window in the primary
 slot, no secondary slot, and percentages rather than an absolute included
 allowance. Purchased credits were a separate field. OpenAI's
 [Pro tiers](https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers)
-and [pricing](https://learn.chatgpt.com/docs/pricing) documentation do not
-establish a numeric Pro Max allowance multiplier. Even Pro 200 can have
-grandfathered or reduced allowances under the same identifier. The
+and [pricing](https://learn.chatgpt.com/docs/pricing) documentation distinguish
+plan allowances from API token prices. Relative plan multipliers can support
+estimates against a chosen reference, but do not establish an absolute
+included-credit grant. Even Pro 200 can have grandfathered or reduced
+allowances under the same identifier. The
 [Ultrafast consumption multipliers](https://learn.chatgpt.com/codex/agent-configuration/speed)
 describe speed-mode consumption, not plan size.
 
-Pro Max therefore has no fabricated absolute subscription capacity.
-Routing uses the Pro reference only as a scheduling heuristic. Credit
+This initial Pro Max support does not calibrate new capacity estimates or
+model transitional Pro allowance cohorts. Pro Max has no fabricated absolute
+subscription capacity. Routing uses the Pro reference only as a scheduling
+heuristic. Credit
 summaries retain their legacy estimated-credit subtotal and disclose the
 number of unquantified accounts; their percentage is not a whole-pool
 percentage. Scoped client pools return null whole-pool percentages for

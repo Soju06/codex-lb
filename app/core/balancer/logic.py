@@ -79,6 +79,7 @@ UsageWeightedOrder = Literal["secondary_first", "primary_first"]
 ResetPreferenceWindow = Literal["primary", "secondary"]
 UNKNOWN_PLAN_FALLBACK = "free"
 CAPACITY_PLAN_ALIASES = {
+    "promax": "pro",
     "education": "edu",
     "k12": "edu",
     "guest": "free",

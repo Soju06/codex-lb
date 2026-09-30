@@ -2279,6 +2279,37 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
+@pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
+def test_state_from_account_promax_uses_pro_routing_weight_and_lease_pressure(monkeypatch, routing_strategy):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    states = [
+        _state_from_account(
+            account=_make_test_account(account_id=plan, plan_type=plan),
+            primary_entry=None,
+            secondary_entry=_make_test_usage(
+                account_id=plan,
+                used_percent=20.0,
+                reset_at=int(now + 604800),
+                recorded_at=_epoch_to_naive_utc(now),
+            ),
+            runtime=RuntimeState(leased_tokens=1000),
+        )
+        for plan in ("pro", "promax")
+    ]
+
+    pro_state, max_state = states
+    assert pro_state.capacity_credits is not None and pro_state.capacity_credits > 0
+    assert max_state.capacity_credits == pro_state.capacity_credits
+    assert max_state.secondary_used_percent == pro_state.secondary_used_percent
+    assert max_state.secondary_used_percent is not None and max_state.secondary_used_percent > 20.0
+    assert states[1].used_percent is None
+    assert states[1].plan_type == "promax"
+    result = select_account([states[1]], routing_strategy=routing_strategy, now=now)
+    assert result.account is states[1]
+
+
 def test_state_from_account_keeps_active_account_selectable_when_primary_usage_snapshot_is_exhausted(
     monkeypatch,
 ):

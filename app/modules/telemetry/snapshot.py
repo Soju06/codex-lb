@@ -456,7 +456,7 @@ class _FeatureCounts:
 
 def _canonical_plan(raw_plan: str | None) -> str:
     normalized = (raw_plan or "").strip().lower()
-    if normalized in {"pro", "prolite"}:
+    if normalized in {"pro", "prolite", "promax"}:
         return "pro"
     if normalized in {"team", "business", "enterprise", "edu", "education"}:
         return "team"

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-28T07:03:49.648438+00:00",
+  "updated_at": "2026-09-30T06:51:01.999410+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -670,6 +670,27 @@
       "flex_long_context_input_per_1m": 2.0,
       "flex_long_context_output_per_1m": 7.5,
       "flex_long_context_cached_input_per_1m": 0.19999999999999998
+    },
+    "gpt-6.1-sol": {
+      "input_per_1m": 2.0,
+      "output_per_1m": 10.0,
+      "cached_input_per_1m": 0.1,
+      "priority_input_per_1m": 4.0,
+      "priority_output_per_1m": 20.0,
+      "priority_cached_input_per_1m": 0.2,
+      "flex_input_per_1m": 1.0,
+      "flex_output_per_1m": 5.0,
+      "flex_cached_input_per_1m": 0.049999999999999996,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 4.0,
+      "long_context_output_per_1m": 15.0,
+      "long_context_cached_input_per_1m": 0.2,
+      "priority_long_context_input_per_1m": 8.0,
+      "priority_long_context_output_per_1m": 30.0,
+      "priority_long_context_cached_input_per_1m": 0.39999999999999997,
+      "flex_long_context_input_per_1m": 2.0,
+      "flex_long_context_output_per_1m": 7.5,
+      "flex_long_context_cached_input_per_1m": 0.09999999999999999
     },
     "gpt-daybreak-blue-latest": {
       "input_per_1m": 4.0,

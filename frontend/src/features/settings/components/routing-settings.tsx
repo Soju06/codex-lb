@@ -15,9 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { AccountSummary } from "@/features/accounts/schemas";
-import type { ModelSource } from "@/features/model-sources/schemas";
 import { InheritBadge } from "@/features/settings/components/inherit-badge";
-import { SubscriptionOverflowSettings } from "@/features/settings/components/subscription-overflow-settings";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type {
   AdditionalQuotaRoutingPolicy,
@@ -77,9 +75,6 @@ export type RoutingSettingsProps = {
   settings: DashboardSettings;
   accounts?: AccountSummary[];
   accountsLoading?: boolean;
-  modelSources?: ModelSource[];
-  modelSourcesLoading?: boolean;
-  modelSourcesError?: boolean;
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 };
@@ -235,9 +230,6 @@ export function RoutingSettings({
   settings,
   accounts = EMPTY_ACCOUNTS,
   accountsLoading = false,
-  modelSources,
-  modelSourcesLoading = false,
-  modelSourcesError = false,
   busy,
   onSave,
 }: RoutingSettingsProps) {
@@ -1011,15 +1003,6 @@ export function RoutingSettings({
               />
             </div>
           </div>
-
-          <SubscriptionOverflowSettings
-            settings={settings}
-            modelSources={modelSources}
-            modelSourcesLoading={modelSourcesLoading}
-            modelSourcesError={modelSourcesError}
-            busy={busy}
-            onSave={onSave}
-          />
 
           <div className="space-y-3 p-3">
             <div>

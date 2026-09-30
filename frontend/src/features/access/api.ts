@@ -105,6 +105,8 @@ export type DashboardRole = z.infer<typeof DashboardRoleSchema>;
 export type PermissionDescriptor = z.infer<typeof PermissionDescriptorSchema>;
 export type DashboardUserCreateRequest = z.infer<typeof DashboardUserCreateRequestSchema>;
 export type DashboardUserUpdateRequest = {
+  /** A new username. Validated like one chosen at creation; `409 username_taken` on collision. */
+  username?: string;
   roleId?: string;
   status?: "active" | "disabled";
   /** Take a role the company login manages back under manual control (`409 role_managed_externally` otherwise). */

@@ -44,6 +44,24 @@ def test_step_up_methods_follow_what_the_account_holds(password: bool, totp: boo
     assert step_up_methods(_user(password=password, totp=totp)) == expected
 
 
+@pytest.mark.parametrize(
+    ("password", "totp", "expected"),
+    [
+        # The identity provider is the last resort, never a shortcut past a
+        # factor the account holds: an attacker with a stolen cookie and a live
+        # provider session must not be able to choose the cheaper one.
+        (True, False, ["password"]),
+        (True, True, ["password", "totp"]),
+        (False, True, ["totp"]),
+        (False, False, ["oidc"]),
+    ],
+)
+def test_an_identity_provider_is_only_offered_to_an_account_with_nothing_else(
+    password: bool, totp: bool, expected: list[str]
+) -> None:
+    assert step_up_methods(_user(password=password, totp=totp), oidc_identity=True) == expected
+
+
 def test_freshness_window_is_five_minutes_inclusive() -> None:
     assert STEP_UP_MAX_AGE_SECONDS == 300
     assert is_step_up_fresh(None, now=_NOW) is False

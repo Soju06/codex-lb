@@ -13,8 +13,23 @@ export const LOCAL_LOGIN_URL = `${LOCAL_LOGIN_ROUTE}?local=1`;
 
 /** Whether this URL asks for the local password form (`?local=1`). */
 export function isLocalLoginRequested(search: string): boolean {
+  return queryValue(search, "local") === "1";
+}
+
+/**
+ * The marker the server redirects a failed company sign-in to
+ * (`OIDC_FAILURE_PATH`). It is one constant for every cause on purpose — a bad
+ * state, a mismatched nonce and a refused exchange are indistinguishable to an
+ * unauthenticated caller — so this answers only "did a sign-in come back
+ * unfinished", and the screen adds nothing to it.
+ */
+export function isSignInFailureRequested(search: string): boolean {
+  return queryValue(search, "sso") === "failed";
+}
+
+function queryValue(search: string, name: string): string | null {
   const query = search.startsWith("?") ? search.slice(1) : search;
-  return new URLSearchParams(query).get("local") === "1";
+  return new URLSearchParams(query).get(name);
 }
 
 /**

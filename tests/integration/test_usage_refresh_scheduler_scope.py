@@ -535,3 +535,86 @@ async def test_scheduler_restart_uses_anchored_persisted_evidence(
         expected_attempt_reset_at,
         "succeeded",
     )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_rate_limited_pro_after_early_weekly_reset(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paid account benched on its 7d window recovers when upstream rolls that window early.
+
+    Production signature: upstream re-anchors the 7d quota window days before
+    the deadline the 429 persisted, usage history records the 100% -> 0%
+    transition in the primary slot, and the account stays benched until the
+    stale deadline unless the anchored evidence releases it.
+    """
+
+    del db_setup
+    now = int(time.time())
+    weekly_reset_at = now + 3 * 24 * 60 * 60
+    blocked_at = now - 2 * 24 * 60 * 60
+    baseline_recorded_at = datetime.fromtimestamp(now - 120, timezone.utc).replace(tzinfo=None)
+    after_recorded_epoch = now - 60
+    after_recorded_at = datetime.fromtimestamp(after_recorded_epoch, timezone.utc).replace(tzinfo=None)
+    after_reset_at = after_recorded_epoch + 10_080 * 60
+
+    account = _account(
+        "acc_pro_weekly",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    account.plan_type = "pro"
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        # The exhausted 7d window that produced the 429, still carrying the
+        # deadline persisted on the account.
+        await UsageRepository(session).add_entry(
+            account.id,
+            100.0,
+            window="primary",
+            recorded_at=baseline_recorded_at,
+            reset_at=weekly_reset_at,
+            window_minutes=10_080,
+        )
+        await SettingsRepository(session).update(limit_warmup_enabled=False)
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            del latest_usage
+            assert [candidate.id for candidate in accounts] == [account.id]
+            async with SessionLocal() as session:
+                await UsageRepository(session).add_entry(
+                    account.id,
+                    0.0,
+                    window="primary",
+                    recorded_at=after_recorded_at,
+                    reset_at=after_reset_at,
+                    window_minutes=10_080,
+                )
+            return True
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    assert await scheduler._refresh_once() == 60.0
+
+    async with SessionLocal() as session:
+        persisted_account = await AccountsRepository(session).get_by_id(account.id)
+    assert persisted_account is not None
+    assert (persisted_account.status, persisted_account.reset_at, persisted_account.blocked_at) == (
+        AccountStatus.ACTIVE,
+        None,
+        None,
+    )

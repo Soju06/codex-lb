@@ -22,6 +22,8 @@ export class ApiError extends Error {
   readonly code: string;
   readonly details: unknown;
   readonly payload: unknown;
+  /** Seconds from `Retry-After`, when the server sent one. Never echoed as a retry. */
+  readonly retryAfter: number | null;
 
   constructor(params: {
     message: string;
@@ -29,6 +31,7 @@ export class ApiError extends Error {
     code: string;
     details?: unknown;
     payload?: unknown;
+    retryAfter?: number | null;
   }) {
     super(params.message);
     this.name = "ApiError";
@@ -36,7 +39,23 @@ export class ApiError extends Error {
     this.code = params.code;
     this.details = params.details;
     this.payload = params.payload;
+    this.retryAfter = params.retryAfter ?? null;
   }
+}
+
+/**
+ * The wait a rate limit names, in seconds. It lives in a header rather than the
+ * envelope, so an interface that wants to say how long to wait cannot read it
+ * off `details` — and the alternative, showing the raw server message, is the
+ * one thing an explained refusal must not do.
+ */
+function retryAfterSeconds(response: Response): number | null {
+  const header = response.headers.get("Retry-After");
+  if (header === null) {
+    return null;
+  }
+  const seconds = Number.parseInt(header, 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 let unauthorizedHandler: (() => void) | null = null;
@@ -47,7 +66,7 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 
 export const STEP_UP_REQUIRED_CODE = "step_up_required";
 export const STEP_UP_UNAVAILABLE_CODE = "step_up_unavailable";
-export type StepUpMethod = "password" | "totp";
+export type StepUpMethod = "password" | "totp" | "oidc";
 
 export type StepUpHandlers = {
   /** Ask the person to re-verify with `methods`; resolve `true` once `/step-up` succeeded, `false` if they gave up. */
@@ -65,7 +84,7 @@ export function setStepUpHandlers(handlers: StepUpHandlers | null): void {
 
 function stepUpMethodsFrom(details: unknown): StepUpMethod[] {
   const parsed = z
-    .object({ details: z.object({ methods: z.array(z.enum(["password", "totp"])) }) })
+    .object({ details: z.object({ methods: z.array(z.enum(["password", "totp", "oidc"])) }) })
     .safeParse(details);
   return parsed.success ? parsed.data.details.methods : [];
 }
@@ -214,6 +233,7 @@ async function request<T>(
       message: parsedError.message,
       details: parsedError.details,
       payload,
+      retryAfter: retryAfterSeconds(response),
     });
   }
 

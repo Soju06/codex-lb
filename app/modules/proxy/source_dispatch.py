@@ -42,13 +42,6 @@ releases: the client received a failure, so nothing is charged. Estimates are
 never written to the request-log row
 as usage -- they are visible through the WARN line and the
 ``codex_lb_model_source_usage_estimated_total`` counter.
-
-The overflow decision (WP-C2) supplies ``request_log_source``,
-``dispatch_kind``, the pin intent and the ``on_finished`` hook; this module
-never spells the designation itself. The pin intent is resolved against the
-source response id at the content trigger (``PinIntent.resolve``) so an anchor
-row for an SDK ``previous_response_id`` chain lands in the same transaction as
-the thread pin.
 """
 
 from __future__ import annotations
@@ -57,7 +50,6 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
 
 from fastapi import Request
@@ -80,7 +72,7 @@ from app.core.utils.shared_future import (
     _await_result_deferring_cancellation,
     _await_task_deferring_cancellation,
 )
-from app.core.utils.sse import _SSE_LINE_BOUNDARY, format_sse_event, parse_sse_data_json
+from app.core.utils.sse import _SSE_LINE_BOUNDARY, parse_sse_data_json
 from app.db.models import ModelSource
 from app.db.session import get_background_session
 from app.modules.api_keys.service import (
@@ -103,8 +95,7 @@ from app.modules.model_sources.forwarding import (
 )
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.affinity import _owner_lookup_session_id_from_headers
-from app.modules.proxy.model_source_pins import PinIntent, PinWriteExecutor, PinWriteOutcome
-from app.modules.proxy.source_admission import SourceAdmission, TrialResult
+from app.modules.proxy.source_admission import SourceAdmission
 from app.modules.request_logs.repository import RequestLogsRepository
 
 logger = logging.getLogger(__name__)
@@ -115,10 +106,9 @@ DispatchStatus = Literal["success", "error", "cancelled"]
 EstimateCause = Literal["missing_usage", "client_cancel"]
 AbandonStage = Literal["during_open", "before_body", "stall"]
 
-# Attribution defaults for direct source routing; the overflow decision (WP-C2)
-# passes its own values so this module never spells them.
-DEFAULT_REQUEST_LOG_SOURCE = "model_source"
-DEFAULT_DISPATCH_KIND = "direct"
+# Attribution for direct source routing.
+REQUEST_LOG_SOURCE = "model_source"
+DISPATCH_KIND = "direct"
 
 # A client that leaves while the open is still pending is a stall abandonment
 # once the source has been silent this long without a first frame.
@@ -161,11 +151,6 @@ _NON_EVENT_FRAME_PREFIXES = ("data: [DONE]", "event: codex.keepalive")
 # terminals do not.
 _DELIVERING_FRAME_KINDS = frozenset({"content", "success_terminal"})
 CANCELLED_CLIENT_DISCONNECTED = "client_disconnected"
-# The overflow decision (WP-C2) overrides these with its own codes; a pin
-# intent is never armed by direct routing, so they are unreachable in
-# production until then.
-DEFAULT_PIN_FAILURE_ERROR_CODE = "model_source_pin_unavailable"
-DEFAULT_PIN_UNVERIFIED_ERROR_CODE = "model_source_pin_unverified"
 
 _ABANDON_STAGES: Mapping[str, AbandonStage] = {
     ABANDON_CLIENT_DISCONNECTED_DURING_OPEN: "during_open",
@@ -205,14 +190,6 @@ class ReservationReleaser(Protocol):
     """``api.py``'s ``_release_reservation`` shape."""
 
     def __call__(self, reservation: ApiKeyUsageReservationData) -> Coroutine[Any, Any, None]: ...
-
-
-class SourcePinCommitError(Exception):
-    """The pre-content pin write did not verify as durable; the stream must not deliver content."""
-
-    def __init__(self, outcome: Literal["not_written", "unknown"]) -> None:
-        super().__init__(outcome)
-        self.outcome: Literal["not_written", "unknown"] = outcome
 
 
 class ClientDisconnectedDuringOpen(Exception):
@@ -314,57 +291,6 @@ def _reservation_requires_usage(reservation: ApiKeyUsageReservationData | None) 
     return bool(reservation is not None and reservation.has_applicable_limits)
 
 
-def forwarding_error_trial_result(exc: ModelSourceForwardingError) -> TrialResult:
-    """Breaker classification of a pre-body source failure (design §8.3): 4xx other than 429 is not counted."""
-
-    if exc.timeout_phase is not None or exc.upstream_status_code is None:
-        return "failure"
-    if exc.upstream_status_code == 429 or exc.upstream_status_code >= 500:
-        return "failure"
-    return "inconclusive"
-
-
-# Row codes of a started stream that broke off: an exception out of the body
-# (a transport drop) or a clean EOF without a terminal (the wrapper synthesized
-# ``response.failed``; the source never finished its answer). Counted by the
-# breaker before and after the first output item alike, like the idle deadline
-# (design §8.3: "after the first frame: idle timeout, transport drop").
-_TRANSPORT_DROP_ERROR_CODES: frozenset[str] = frozenset(
-    {ERROR_MODEL_SOURCE_STREAM, ERROR_MODEL_SOURCE_STREAM_TRUNCATED}
-)
-
-
-def stream_trial_result(
-    status: DispatchStatus,
-    *,
-    error_code: str | None,
-    first_output_item_seen: bool,
-    forwarding_error: ModelSourceForwardingError | None,
-) -> TrialResult:
-    """Breaker classification of a started stream's terminal outcome (design §8.3).
-
-    ``success`` counts only once an output item was produced (an empty
-    completion is inconclusive). A mid-stream ``ModelSourceForwardingError``
-    (the idle deadline, a transport failure, the withheld-bytes cap) and a
-    transport drop are counted before and after the first output item alike.
-    A failure terminal -- the source's ``response.failed``/``error``, or a
-    success terminal the public contract rewrote into one -- is counted only
-    before the first output item: after it the source itself ended the
-    answer. A client cancel is never counted here (``abandon`` classifies the
-    stall evidence of a body that never started).
-    """
-
-    if status == "success":
-        return "success" if first_output_item_seen else "inconclusive"
-    if status != "error":
-        return "inconclusive"
-    if forwarding_error is not None:
-        return forwarding_error_trial_result(forwarding_error)
-    if error_code in _TRANSPORT_DROP_ERROR_CODES:
-        return "failure"
-    return "inconclusive" if first_output_item_seen else "failure"
-
-
 def estimate_settlement_usage(*, admission_budget: ApiKeyRequestUsageBudget | None, delta_chars: int) -> SourceUsage:
     """Settle-at-estimate figures: input = admission estimate or default; output = max(default, delta_chars // 4)."""
 
@@ -373,39 +299,6 @@ def estimate_settlement_usage(*, admission_budget: ApiKeyRequestUsageBudget | No
         input_tokens = admission_budget.input_tokens
     output_tokens = max(API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS, max(0, delta_chars) // 4)
     return SourceUsage(input_tokens=input_tokens, output_tokens=output_tokens, cached_input_tokens=0)
-
-
-def synthesized_pin_failure_frames(created_envelope: Mapping[str, JsonValue] | None, *, error_code: str) -> list[str]:
-    """The ``response.created`` + ``response.failed`` pair (sequence 0/1) emitted on a verified pin non-write.
-
-    Nothing from the source was yielded before the pin hook fired, so this is
-    the only lifecycle the client sees (I2). The captured source envelope keeps
-    the source's ids; without one a minimal envelope is synthesized.
-    """
-
-    envelope: dict[str, JsonValue] = dict(created_envelope) if created_envelope is not None else {}
-    envelope.setdefault("object", "response")
-    created_envelope_out: dict[str, JsonValue] = {**envelope, "status": "in_progress"}
-    failed_envelope: dict[str, JsonValue] = {
-        **envelope,
-        "status": "failed",
-        "error": {
-            "code": error_code,
-            "type": "server_error",
-            "message": "The model source could not record continuity for this conversation; retry the request",
-        },
-    }
-    created_event: dict[str, JsonValue] = {
-        "type": "response.created",
-        "sequence_number": 0,
-        "response": created_envelope_out,
-    }
-    failed_event: dict[str, JsonValue] = {
-        "type": "response.failed",
-        "sequence_number": 1,
-        "response": failed_envelope,
-    }
-    return [format_sse_event(created_event), format_sse_event(failed_event)]
 
 
 def _inc(counter: Any, **labels: str) -> None:
@@ -429,18 +322,12 @@ class SourceDispatch:
     claims: SourceAdmission
     admission_budget: ApiKeyRequestUsageBudget | None
     requested_service_tier: str | None
-    request_log_source: str = DEFAULT_REQUEST_LOG_SOURCE
-    dispatch_kind: str = DEFAULT_DISPATCH_KIND
-    pin_intent: PinIntent | None = None
-    pin_executor: PinWriteExecutor | None = None
-    drain_until: datetime | None = None
     cleanup_scheduler: CleanupScheduler | None = None
     scheduler: Scheduler = REAL_SCHEDULER
     clock: Clock = REAL_CLOCK
     stream: SourceResponsesStream | None = None
     sent_at: float = 0.0
     first_frame_at: float | None = None
-    first_output_item_seen: bool = False
     # Set by ``settlement_stream`` when it hands the transport an event frame
     # that carries content (``relayed_frame_delivers_content``); the cancel
     # settlement policy keys on this alone. It is never mirrored from
@@ -460,14 +347,6 @@ class SourceDispatch:
     request_id: str | None = None
     # Outermost body iterator handed to ``SourceStreamingResponse`` (closed by ``finalize_transport``).
     body: AsyncIterator[str] | None = None
-    pin_failure_error_code: str = DEFAULT_PIN_FAILURE_ERROR_CODE
-    pin_unverified_error_code: str = DEFAULT_PIN_UNVERIFIED_ERROR_CODE
-    # Called exactly once per lifecycle from ``finish()`` with the terminal
-    # status, after the result was recorded and before the row is written
-    # (the overflow decision records its transport-decision counter here);
-    # failure-isolated like every other step.
-    on_finished: Callable[[SourceDispatch, DispatchStatus], None] | None = None
-    pin_outcome: PinWriteOutcome | None = None
     # Non-stream completions carry the source response id in the JSON body
     # (streams expose it through the usage holder).
     source_response_id: str | None = None
@@ -501,66 +380,8 @@ class SourceDispatch:
             return None
         if self.first_frame_at is None and holder.first_frame_at is not None:
             self.first_frame_at = holder.first_frame_at
-        self.first_output_item_seen = self.first_output_item_seen or holder.first_output_item_seen
         self.delta_chars = max(self.delta_chars, holder.delta_chars)
         return holder
-
-    @property
-    def pin_failure_row_code(self) -> str:
-        return self.pin_unverified_error_code if self.pin_outcome == "unknown" else self.pin_failure_error_code
-
-    def observe_first_output_item(self) -> None:
-        """The body released the source's first output item past the pin hook: a half-open breaker trial closes now.
-
-        Called once by ``settlement_stream`` (design §8.3, CL-2); the
-        concurrency slot stays held until ``finish()``. Failure-isolated: the
-        breaker never breaks a stream that is delivering.
-        """
-
-        self.first_output_item_seen = True
-        try:
-            self.claims.observe_first_output_item()
-        except Exception:
-            logger.warning(
-                "source_dispatch_first_output_item_failed request_id=%s source_id=%s",
-                self.request_id,
-                self.source.id,
-                exc_info=True,
-            )
-
-    # -- hooks ----------------------------------------------------------------------
-
-    async def on_first_content(self, holder: SourceUsageHolder) -> None:
-        """Pin hook awaited before the first content frame; raises ``SourcePinCommitError``.
-
-        The executor bounds acquisition only and verifies the outcome; anything
-        but ``written`` fails the lifecycle closed (design §8.5) -- never
-        "proceed unpinned".
-        """
-
-        if self.pin_intent is None or self.pin_executor is None:
-            return
-        # The source response id is known only now: an anchored intent appends
-        # the anchor row here so both rows land in one transaction (design §3,
-        # §6.3). An intent that still owes its anchor at this point (the source
-        # minted no ``response.id`` yet) is refused by the executor
-        # (``anchor_pending`` -> ``not_written``, nothing issued), so no content
-        # frame is ever delivered unanchored (decision 78).
-        outcome = await self.pin_executor.commit(
-            self.pin_intent.resolve(holder.response_id),
-            drain_until=self.drain_until,
-            scheduler=self.scheduler,
-            clock=self.clock,
-        )
-        self.pin_outcome = outcome
-        if outcome != "written":
-            logger.warning(
-                "model_source_pin_write outcome=%s request_id=%s source_id=%s",
-                outcome,
-                self.request_id,
-                self.source.id,
-            )
-            raise SourcePinCommitError(outcome)
 
     # -- latched steps ----------------------------------------------------------------
 
@@ -693,12 +514,12 @@ class SourceDispatch:
                     request_id=self.request_id or ensure_request_id(),
                 )
 
-    def release_claims(self, trial_result: TrialResult) -> None:
+    def release_claims(self) -> None:
         if self._claims_released:
             return
         self._claims_released = True
         try:
-            self.claims.release(trial_result)
+            self.claims.release()
         except Exception:
             logger.warning("source_dispatch_claims_release_failed request_id=%s", self.request_id, exc_info=True)
 
@@ -706,21 +527,7 @@ class SourceDispatch:
         if self._result_recorded:
             return
         self._result_recorded = True
-        _inc(model_source_dispatch_total, kind=self.dispatch_kind, status=status)
-
-    def _notify_finished(self, status: DispatchStatus) -> None:
-        hook = self.on_finished
-        if hook is None:
-            return
-        try:
-            hook(self, status)
-        except Exception:  # the hook never breaks the latch
-            logger.warning(
-                "source_dispatch_on_finished_failed request_id=%s source_id=%s",
-                self.request_id,
-                self.source.id,
-                exc_info=True,
-            )
+        _inc(model_source_dispatch_total, kind=DISPATCH_KIND, status=status)
 
     async def write_row(
         self,
@@ -766,7 +573,7 @@ class SourceDispatch:
                     upstream_status_code=upstream_status_code,
                     transport="http",
                     upstream_transport="openai_compatible_http",
-                    source=self.request_log_source,
+                    source=REQUEST_LOG_SOURCE,
                     requested_service_tier=self.requested_service_tier,
                     service_tier=None,
                     useragent=headers.get("user-agent"),
@@ -793,10 +600,9 @@ class SourceDispatch:
         error_message: str | None = None,
         usage: SourceUsage | None = None,
         upstream_status_code: int | None = None,
-        trial_result: TrialResult = "inconclusive",
         timings: SourceTimings | None = None,
     ) -> None:
-        """``close_source -> settle_or_release -> release_claims + record_result + on_finished -> write_row``.
+        """``close_source -> settle_or_release -> release_claims + record_result -> write_row``.
 
         Idempotent (``finished`` is the latch).
 
@@ -829,9 +635,8 @@ class SourceDispatch:
                     error_code = ERROR_USAGE_SETTLEMENT_FAILED
                     error_message = "source usage settlement failed"
                 try:
-                    self.release_claims(trial_result)
+                    self.release_claims()
                     self.record_result(status)
-                    self._notify_finished(status)
                 finally:
                     await _await_cleanup_deferring_cancellation(
                         self.write_row(
@@ -855,7 +660,6 @@ class SourceDispatch:
             error_code=error_code_from_payload(exc.payload),
             error_message=error_message_from_payload(exc.payload),
             upstream_status_code=exc.upstream_status_code,
-            trial_result=forwarding_error_trial_result(exc),
         )
 
     async def abandon(self, reason: str) -> None:
@@ -880,7 +684,6 @@ class SourceDispatch:
             status="cancelled",
             error_code=reason,
             error_message="client left before the model-source response was delivered",
-            trial_result="failure" if reason == ABANDON_SOURCE_STALL else "inconclusive",
         )
 
     async def finalize_transport(self) -> None:
@@ -1060,9 +863,7 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     ``except Exception`` and are recorded as ``cancelled`` (the settle policy
     decides between release and estimate) unless the client already received a
     terminal: a relayed failure terminal is an ``error``, a relayed success
-    terminal a ``success``. A verified pin non-write yields the
-    synthesized ``response.created`` + ``response.failed`` pair after the
-    reservation was released and the source closed.
+    terminal a ``success``.
 
     Delivery is decided here as well: ``owner.content_delivered`` is set when
     an event frame ``relayed_frame_delivers_content`` classifies as content is
@@ -1091,21 +892,11 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     error_message: str | None = None
     completed_normally = False
     timeout_phase: TimeoutPhase | None = None
-    forwarding_error: ModelSourceForwardingError | None = None
     relayed_kind: str | None = None
     holder = owner.usage_holder
-    # One attribute read per chunk until the parser reports the first output
-    # item: a half-open breaker trial closes at the item, not at the terminal
-    # (design §8.3). The parser runs ahead of this layer, so the flag is set by
-    # the time the frame carrying the item -- or the bookkeeping the body
-    # flushed ahead of it behind the pin hook -- reaches the transport.
-    awaiting_first_item = holder is not None and not owner.first_output_item_seen
     owner.body_started = True
     try:
         async for chunk in wrapped:
-            if awaiting_first_item and holder is not None and holder.first_output_item_seen:
-                awaiting_first_item = False
-                owner.observe_first_output_item()
             if _is_event_frame(chunk):
                 if relayed_kind not in _FAILURE_TERMINAL_KINDS:
                     frame_kind = relayed_terminal_kind(chunk)
@@ -1151,8 +942,7 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         # received a failure, not a partial answer, so this is an ``error`` that
         # releases the reservation, never a cancel-after-first-item estimate
         # (design §6.4; api-keys "Failure terminal is never charged"). The
-        # completed-normally branch already classifies this; the cancel path
-        # keyed only on ``first_output_item_seen`` and charged the estimate.
+        # completed-normally branch already classifies this.
         owner.observe_stream()
         holder = owner.usage_holder
         if (
@@ -1176,24 +966,11 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         # wrapper's own ``finally`` blocks release everything below it.
         await _aclose_best_effort(wrapped, scheduler=owner.scheduler)
         raise
-    except SourcePinCommitError:
-        status = "error"
-        error_code = owner.pin_failure_row_code
-        error_message = "model-source pin write did not verify as durable"
-        await owner.finish(status=status, error_code=error_code, error_message=error_message)
-        holder = owner.usage_holder
-        for frame in synthesized_pin_failure_frames(
-            holder.created_envelope if holder is not None else None,
-            error_code=owner.pin_failure_error_code,
-        ):
-            yield frame
-        return
     except ModelSourceForwardingError as exc:
         status = "error"
         error_code = error_code_from_payload(exc.payload)
         error_message = error_message_from_payload(exc.payload)
         timeout_phase = exc.timeout_phase
-        forwarding_error = exc
         raise
     except Exception as exc:
         status = "error"
@@ -1212,12 +989,6 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
                     status=status,
                     error_code=error_code,
                     error_message=error_message,
-                    trial_result=stream_trial_result(
-                        status,
-                        error_code=error_code,
-                        first_output_item_seen=owner.first_output_item_seen,
-                        forwarding_error=forwarding_error,
-                    ),
                 ),
                 scheduler=owner.scheduler,
             )

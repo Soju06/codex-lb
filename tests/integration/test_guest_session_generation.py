@@ -283,7 +283,6 @@ async def test_guest_login_stamps_generation_from_the_database_not_the_cache(
                 guest_password_hash=row.guest_password_hash,
                 guest_session_generation=row.guest_session_generation,
                 dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
-                password_hash=row.password_hash,
                 totp_required_on_login=row.totp_required_on_login,
             )
             stale_generation = row.guest_session_generation

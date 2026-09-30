@@ -35,7 +35,7 @@ from app.core.cache.invalidation import (
     get_cache_invalidation_poller,
     set_cache_invalidation_poller,
 )
-from app.core.config.settings_cache import SettingsCache
+from app.core.config.settings_cache import SettingsCache, get_settings_cache
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     cache_invalidation_bump_failures_total,
@@ -51,6 +51,7 @@ from app.modules.proxy.account_cache import (
     is_account_routing_unavailable,
     mark_account_routing_unavailable,
 )
+from app.modules.settings.repository import SettingsRepository
 
 if TYPE_CHECKING:
     from app.modules.proxy._service.http_bridge.helpers import _HTTPBridgeSession
@@ -312,23 +313,33 @@ async def test_selection_cache_invalidation_propagates_to_peer(db_setup, poller_
 
 @pytest.mark.asyncio
 async def test_password_setup_propagates_settings_to_peer(async_client, db_setup) -> None:
-    """Setting the dashboard password on replica A is visible to replica B's settings
-    cache after one poll cycle, without waiting for the 5s TTL."""
+    """First-run setup clears the bootstrap token, and replica B sees that after one poll.
+
+    The credential itself no longer lives in ``dashboard_settings``; the token
+    that setup invalidates does, and it is the settings fact that setup changes.
+    """
+
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.bootstrap_token_encrypted, row.bootstrap_token_hash = b"token", b"token-hash"
+        await session.commit()
+    await get_settings_cache().invalidate()
+
     b_settings = SettingsCache()
     poller_b = CacheInvalidationPoller(SessionLocal)
     poller_b.on_invalidation(NAMESPACE_SETTINGS, lambda: b_settings.invalidate(propagate=False))
     await poller_b._poll_once()
 
-    assert (await b_settings.get()).password_hash is None
+    assert (await b_settings.get()).bootstrap_token_hash is not None
 
     response = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
     assert response.status_code == 200
 
     # Replica B still serves the stale row until its next poll (the defect window).
-    assert (await b_settings.get()).password_hash is None
+    assert (await b_settings.get()).bootstrap_token_hash is not None
 
     await poller_b._poll_once()
-    assert (await b_settings.get()).password_hash is not None
+    assert (await b_settings.get()).bootstrap_token_hash is None
 
 
 class _FlakySessionFactory:
@@ -906,7 +917,6 @@ async def test_lifespan_registers_a_settings_refresh_on_the_bus(app_instance) ->
     per archived frame — otherwise keep the pre-change value on a replica that
     is only carrying already-open streams.
     """
-    from app.core.config.settings_cache import get_settings_cache
 
     async with app_instance.router.lifespan_context(app_instance):
         poller = get_cache_invalidation_poller()

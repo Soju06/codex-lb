@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import unquote_plus
 
 from fastapi import Request
 from uvicorn.config import LOGGING_CONFIG
@@ -70,8 +71,30 @@ _SENSITIVE_LOG_KEY_PATTERN = re.compile(r"(?i)(password|passwd|pwd|token|secret|
 # is a route name, not a token, and stays readable.
 _INVITE_PATH_TOKEN_PATTERN = re.compile(r"(/api/dashboard-auth/invite/)(?!accept(?:[/?#\s]|$))[A-Za-z0-9_-]{20,}")
 _INVITE_PATH_PRECHECK = "/api/dashboard-auth/invite/"
+# The OIDC callback carries its credentials in the query string
+# (``?code=...&state=...``), which is the one part of a request the access
+# logger prints verbatim: ``AccessFormatter`` renders the whole request line, so
+# a handler that carefully logs nothing still leaves the authorization code and
+# the flow's ``state`` in the access log of every replica. A refused callback is
+# the worse case, because its code is still unconsumed at the identity provider.
+# Anchored to the one path, so no other route's ``code``/``state`` parameter is
+# touched, and applied at every level because access logs are INFO.
+#
+# The key is matched *decoded*, because that is the only spelling that decides
+# anything: Starlette builds ``request.query_params`` with ``parse_qsl``, which
+# percent-decodes names, so ``?c%6Fde=`` binds to the handler's ``code`` exactly
+# as ``?code=`` does -- while Uvicorn renders the request line from the raw
+# ``query_string`` bytes, encoding intact. A literal-key pattern therefore masks
+# one spelling of a parameter the route accepts in several. Values are never
+# decoded: they are replaced whole, so nothing decoded is ever written back out.
+_OIDC_CALLBACK_PRECHECK = "/api/dashboard-auth/oidc/callback"
+_OIDC_CALLBACK_QUERY_PATTERN = re.compile(re.escape(_OIDC_CALLBACK_PRECHECK) + r"\?([^\s\"'<>]*)")
+#: Kept as groups so the separators survive the rebuild verbatim.
+_OIDC_CALLBACK_PARAMETER_SPLIT = re.compile(r"([&;])")
+_OIDC_CALLBACK_CREDENTIAL_KEYS = frozenset({"code", "state"})
 _SECRET_HINTS = (
     _INVITE_PATH_PRECHECK,
+    _OIDC_CALLBACK_PRECHECK,
     "password",
     "passwd",
     "pwd",
@@ -98,8 +121,39 @@ def _redact_invite_path_tokens_on_line(text: str) -> str:
     return _INVITE_PATH_TOKEN_PATTERN.sub(_redact_path_secret, text)
 
 
+def _is_oidc_credential_key(raw_key: str) -> bool:
+    """Whether ``raw_key`` is *any* spelling of a key the callback reads as a credential.
+
+    ``unquote_plus`` is the decoding ``parse_qsl`` applies to names, so this asks
+    the same question the router does. It never raises: a stray ``%`` or an
+    invalid escape comes back unchanged and simply does not match.
+    """
+
+    return unquote_plus(raw_key).casefold() in _OIDC_CALLBACK_CREDENTIAL_KEYS
+
+
+def _redact_oidc_callback_parameter(parameter: str) -> str:
+    key, separator, _ = parameter.partition("=")
+    if not separator or not _is_oidc_credential_key(key):
+        return parameter
+    # The key is written back as it arrived; only the value goes.
+    return f"{key}={_LOG_REDACTION}"
+
+
+def _redact_oidc_callback_query(match: re.Match[str]) -> str:
+    """Mask ``code`` and ``state`` inside one callback query, keeping the rest readable."""
+
+    parts = _OIDC_CALLBACK_PARAMETER_SPLIT.split(match.group(1))
+    query = "".join(part if index % 2 else _redact_oidc_callback_parameter(part) for index, part in enumerate(parts))
+    return f"{_OIDC_CALLBACK_PRECHECK}?{query}"
+
+
+def _redact_oidc_callback_on_line(text: str) -> str:
+    return _OIDC_CALLBACK_QUERY_PATTERN.sub(_redact_oidc_callback_query, text)
+
+
 def _redact_secret_patterns_on_line(text: str) -> str:
-    redacted = _redact_invite_path_tokens_on_line(text)
+    redacted = _redact_oidc_callback_on_line(_redact_invite_path_tokens_on_line(text))
     redacted = _JSON_SENSITIVE_LOG_VALUE_PATTERN.sub(_redact_json_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
@@ -145,6 +199,10 @@ def redact_rendered_log_text(text: str, *, keyed_secrets: bool = True) -> str:
             # Access logs are INFO: the path secret must be masked even when the
             # keyed pass below is skipped for cost.
             redacted = _map_log_lines(redacted, _redact_invite_path_tokens_on_line)
+        if _OIDC_CALLBACK_PRECHECK in text:
+            # Same reason, for the query string: the access log renders the
+            # whole request line, and this route's is an authorization code.
+            redacted = _map_log_lines(redacted, _redact_oidc_callback_on_line)
         if not keyed_secrets:
             return redacted
         folded = text.casefold()

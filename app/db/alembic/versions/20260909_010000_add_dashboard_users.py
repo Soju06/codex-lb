@@ -15,10 +15,11 @@ down_revision = "20260909_000000_add_dashboard_roles"
 branch_labels = None
 depends_on = None
 
-# Frozen copies of the runtime identifiers (see
-# app.modules.dashboard_users.compat and app.core.auth.dashboard_access). A
-# migration must not import transient runtime modules; the unit test
-# tests/unit/test_dashboard_users_compat.py asserts these stay in sync.
+# Frozen copies of the runtime identifiers (see app.db.models and
+# app.core.auth.dashboard_access). A migration must not import runtime modules,
+# which may move or go; the unit test
+# tests/unit/test_migration_identifier_literals.py asserts these stay in sync
+# with the constants they were copied from.
 COMPAT_ADMIN_USER_ID = "7a4fc02d-216e-5be7-b974-bc437f23df60"
 COMPAT_ADMIN_USERNAME = "admin"
 ADMIN_ROLE_ID = "3fe7dc57-aabd-5b16-9850-b6d464087f07"

@@ -163,20 +163,6 @@ const WeeklyCreditPaceSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
 });
 
-/**
- * Subscription-overflow spend inside the overview's selected timeframe, plus the
- * live thread-pin count (#2123 WP-G). `null`/absent means the backend has
- * nothing to show — no overflow was ever dispatched and no pin is live — so the
- * dashboard renders neither the tile nor the request-log source filter. Absent
- * on backends older than WP-G, which is the same "render nothing" state.
- */
-const SubscriptionOverflowSummarySchema = z.object({
-  requests: z.number().int().nonnegative(),
-  costUsd: z.number(),
-  usageLessRequests: z.number().int().nonnegative().default(0),
-  livePins: z.number().int().nonnegative().default(0),
-});
-
 export const DashboardOverviewSchema = z.object({
   lastSyncAt: z.iso.datetime({ offset: true }).nullable(),
   timeframe: DashboardOverviewTimeframeSchema,
@@ -187,7 +173,6 @@ export const DashboardOverviewSchema = z.object({
     cost: UsageCostSchema,
     metrics: DashboardMetricsSchema.nullable(),
     comparison: DashboardMetricsComparisonSchema.optional(),
-    subscriptionOverflow: SubscriptionOverflowSummarySchema.nullable().optional(),
   }),
   windows: z.object({
     primary: UsageWindowSchema,
@@ -302,9 +287,6 @@ export const FilterStateSchema = z.object({
   apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),
-  // Repeated `?source=` values; defaulted so a URL written by an older build
-  // still parses into a complete filter state.
-  sources: z.array(z.string()).default([]),
   conversationId: z.string().nullable().optional().default(null),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
@@ -321,7 +303,6 @@ export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
-export type SubscriptionOverflowSummary = z.infer<typeof SubscriptionOverflowSummarySchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
 export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;

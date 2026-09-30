@@ -15,6 +15,7 @@ import anyio
 
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.auth.providers import AuthProvider, PasswordProvider, TrustedHeaderProvider
+from app.core.auth.providers.oidc import get_oidc_provider
 from app.core.cache.invalidation import NAMESPACE_DASHBOARD_USERS, get_cache_invalidation_poller
 from app.db.models import AuthProviderKind, DashboardAuthProvider
 from app.db.session import SessionLocal
@@ -23,6 +24,7 @@ from app.modules.auth_providers.repository import AuthProvidersRepository
 _IMPLEMENTATIONS: dict[AuthProviderKind, AuthProvider] = {
     AuthProviderKind.PASSWORD: PasswordProvider(),
     AuthProviderKind.TRUSTED_HEADER: TrustedHeaderProvider(),
+    AuthProviderKind.OIDC: get_oidc_provider(),
 }
 
 
@@ -31,8 +33,10 @@ def provider_active(row: DashboardAuthProvider, mode: DashboardAuthMode) -> bool
 
     ``password`` follows the mode's existing rules (management is refused in
     ``disabled`` mode elsewhere), ``trusted_header`` needs the matching mode,
-    and a kind without an implementation (``oidc`` before Phase 3) is never
-    active.
+    ``oidc`` serves ``standard`` and ``trusted_header`` but never ``disabled``
+    (an install that has turned dashboard authentication off must not grow a
+    sign-in flow that mints sessions and provisions accounts), and a kind with
+    no implementation is never active.
     """
 
     if not row.enabled:
@@ -45,6 +49,8 @@ def provider_active(row: DashboardAuthProvider, mode: DashboardAuthMode) -> bool
         return False
     if kind is AuthProviderKind.TRUSTED_HEADER:
         return mode == DashboardAuthMode.TRUSTED_HEADER
+    if kind is AuthProviderKind.OIDC:
+        return mode != DashboardAuthMode.DISABLED
     return True
 
 

@@ -1,4 +1,4 @@
-"""The provider-portability fixture corpus gate (#2123, design v3 section 16 item i).
+"""The Codex request-body fixture corpus gate.
 
 Provenance-agnostic: every assertion is driven by ``provenance.json`` rather
 than by a hard-coded expectation per file, so adding a captured body is a data
@@ -6,14 +6,14 @@ change. Three jobs:
 
 * **Shape.** Every fixture validates through production's own dispatch and
   looks like a Codex Responses body.
-* **Recorded verdict.** The view and the portability verdict match what
-  provenance records. A real captured body that cannot overflow is therefore
-  green *and states that fact* -- neither a red CI nor a fake pass.
+* **Sanitiser round-trip.** Rebuilding a committed fixture through
+  ``codex_body_sanitize`` reproduces the same structure, host-independently,
+  and nothing the capture authored survives the rebuild.
 * **Sync.** Files on disk, ``provenance.json`` rows and ``README.md`` rows
   agree in both directions, and the privacy gate passes.
 
-Assertion messages always carry the provenance, because "fixture X is not
-portable" is meaningless without knowing which client version produced it.
+Assertion messages always carry the provenance, because "fixture X is the
+wrong shape" is meaningless without knowing which client version produced it.
 """
 
 from __future__ import annotations
@@ -31,12 +31,8 @@ import pytest
 
 from app.core.types import JsonValue
 from app.modules.model_sources.projection import (
-    OVERFLOW_VIEW_FIELDS,
     STRIPPED_STREAM_OPTIONS_KEYS,
     STRIPPED_TELEMETRY_FIELDS,
-    Declined,
-    PortabilityView,
-    overflow_portability_view,
     strip_source_telemetry,
 )
 from app.modules.proxy.api import _has_openai_responses_shape
@@ -44,9 +40,6 @@ from app.modules.proxy.replay_safety import (
     _ACCOUNT_NEUTRAL_CONTENT_FIELDS,
     _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS,
     _ACCOUNT_NEUTRAL_MESSAGE_FIELDS,
-    PortabilityVerdict,
-    responses_payload_is_provider_portable,
-    transcript_is_source_free,
 )
 from app.modules.proxy.request_policy import normalize_responses_request_payload
 from scripts.traffic_analysis import codex_body_sanitize, fixture_privacy_scan
@@ -64,28 +57,56 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codex_bodies"
 PROVENANCE_NAME = "provenance.json"
 README_NAME = "README.md"
 
-# Fields a fixture may carry beyond the portability view: the Codex telemetry a
+# Top-level Responses fields a Codex request body may carry. Spelled here rather
+# than imported: this is the corpus contract (nothing fabricated beyond what a
+# real client sends), not a production allowlist.
+_CODEX_BODY_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "input",
+        "instructions",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "text",
+        "include",
+        "store",
+        "stream",
+        "truncation",
+        "max_output_tokens",
+        "temperature",
+        "top_p",
+        "metadata",
+        "user",
+        "safety_identifier",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "previous_response_id",
+        "conversation",
+        "prompt",
+    }
+)
+
+# Fields a fixture may carry beyond a stripped body: the Codex telemetry a
 # pre-strip fixture exists to feed to ``strip_source_telemetry``.
 _PRE_STRIP_FIELDS = STRIPPED_TELEMETRY_FIELDS | {"stream_options", "service_tier"}
 
-# The brief's byte-preserve list, intersected with the view allowlist: the
-# sanitiser must never drop or fabricate any of these (drift guard).
-_MUST_SURVIVE_SANITISATION = (
-    frozenset(
-        {
-            "instructions",
-            "tools",
-            "input",
-            "reasoning",
-            "include",
-            "text",
-            "store",
-            "stream",
-            "parallel_tool_calls",
-            "tool_choice",
-        }
-    )
-    & OVERFLOW_VIEW_FIELDS
+# The brief's byte-preserve list: the sanitiser must never drop or fabricate any
+# of these (drift guard).
+_MUST_SURVIVE_SANITISATION = frozenset(
+    {
+        "instructions",
+        "tools",
+        "input",
+        "reasoning",
+        "include",
+        "text",
+        "store",
+        "stream",
+        "parallel_tool_calls",
+        "tool_choice",
+    }
 )
 
 _README_ROW = re.compile(
@@ -130,8 +151,8 @@ def _label(name: str) -> str:
     )
 
 
-def _stripped(name: str) -> dict[str, JsonValue]:
-    """The body as the overflow decision sees it, through production's own dispatch.
+def _stripped_body(body: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """The body as a model source sees it, through production's own dispatch.
 
     ``normalize_responses_request_payload`` with ``openai_compat`` from
     ``_has_openai_responses_shape`` is the *only* correct entry point: a real
@@ -141,9 +162,55 @@ def _stripped(name: str) -> dict[str, JsonValue]:
     capture lands.
     """
 
-    body = _load(name)
     payload = normalize_responses_request_payload(dict(body), openai_compat=_has_openai_responses_shape(body))
-    return strip_source_telemetry(payload.model_dump_for_forwarding(), strip_service_tier=True)
+    return strip_source_telemetry(payload.model_dump_for_forwarding())
+
+
+def _stripped(name: str) -> dict[str, JsonValue]:
+    return _stripped_body(_load(name))
+
+
+def _structure(value: JsonValue) -> JsonValue:
+    """``value`` with every leaf replaced by its type name; keys and arity kept."""
+
+    if isinstance(value, dict):
+        return {key: _structure(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        return [_structure(item) for item in value]
+    return type(value).__name__
+
+
+def _node_skeleton(node: JsonValue) -> object:
+    """Discriminators, id presence and nested arity of one item, tool or content part."""
+
+    if not isinstance(node, dict):
+        return type(node).__name__
+    shape: dict[str, object] = {
+        "type": node.get("type") if isinstance(node.get("type"), str) else None,
+        "role": node.get("role") if isinstance(node.get("role"), str) else None,
+        "has_id": bool(node.get("id")),
+    }
+    for key in ("content", "tools"):
+        nested = node.get(key)
+        if isinstance(nested, list):
+            shape[key] = [_node_skeleton(part) for part in nested]
+    return shape
+
+
+def _skeleton(body: dict[str, JsonValue]) -> object:
+    """The request skeleton the rebuild must preserve exactly.
+
+    Free-form *keys* are prose too -- a tool's JSON-Schema property names are
+    renamed by the rebuild, like its descriptions -- so the skeleton is the part
+    that is never operator text: the top-level field set, and the discriminator,
+    id presence and nested arity of every input item and tool declaration.
+    """
+
+    def branch(key: str) -> object:
+        value = body.get(key)
+        return [_node_skeleton(node) for node in value] if isinstance(value, list) else _structure(value)
+
+    return {"top_level": sorted(body), "input": branch("input"), "tools": branch("tools")}
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
@@ -177,7 +244,7 @@ def test_every_fixture_is_shaped_like_a_codex_responses_body(name: str) -> None:
     has_bundle = any(isinstance(item, dict) and item.get("type") == "additional_tools" for item in input_items)
     assert has_tools != has_bundle, f"{label}: tools={has_tools} additional_tools={has_bundle}"
     # No field production has never seen; nothing fabricated beyond the corpus contract.
-    assert set(body) <= OVERFLOW_VIEW_FIELDS | _PRE_STRIP_FIELDS, label
+    assert set(body) <= _CODEX_BODY_FIELDS | _PRE_STRIP_FIELDS, label
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
@@ -207,36 +274,23 @@ def test_telemetry_presence_matches_the_declared_fixture_role(name: str) -> None
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_every_fixture_matches_its_recorded_view_and_verdict(name: str) -> None:
-    entry = PROVENANCE[name]
+def test_every_fixture_strips_to_a_telemetry_free_body(name: str) -> None:
+    """The stripped body a source would see carries no Codex telemetry and keeps the request shape.
+
+    The fixture's declared role decides what it starts with; what it must end
+    with is the same either way, so a pre-strip fixture and a rebuilt capture
+    are held to one contract.
+    """
+
     label = _label(name)
     stripped = _stripped(name)
 
-    view = overflow_portability_view(stripped)
-
-    if entry["expected_view"] == "view":
-        assert isinstance(view, PortabilityView), f"{label}: {view}"
-        assert entry["expected_view_decline"] is None, label
-        classified = view
-    else:
-        assert isinstance(view, Declined), f"{label}: expected a decline"
-        decline = entry["expected_view_decline"]
-        assert (view.reason, view.detail) == (decline["reason"], decline["detail"]), label
-        # A view the builder declined is still classified, from the stripped
-        # body, so the recorded verdict covers the Lite lane too.
-        classified = PortabilityView(body=stripped)
-
-    expected = entry["expected_portability_verdict"]
-    verdict = responses_payload_is_provider_portable(
-        classified,
-        {},
-        supported_tool_types=frozenset(expected["declared_tool_types"]),
-        supports_vision=bool(expected["supports_vision"]),
-    )
-
-    assert verdict == PortabilityVerdict(bool(expected["portable"]), expected["reason"], expected["detail"]), (
-        f"{label}: declared {sorted(expected['declared_tool_types'])} -> {verdict}"
-    )
+    assert not STRIPPED_TELEMETRY_FIELDS & set(stripped), label
+    stream_options = stripped.get(STREAM_OPTIONS_FIELD)
+    if isinstance(stream_options, dict):
+        assert not STRIPPED_STREAM_OPTIONS_KEYS & set(stream_options), label
+    assert stripped["model"] == _load(name)["model"], label
+    assert isinstance(stripped["input"], list) and stripped["input"], label
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
@@ -277,13 +331,12 @@ def test_the_committed_catalog_is_the_one_every_captured_fixture_records() -> No
         assert PROVENANCE[name]["model_slug"] in {model["slug"] for model in catalog["models"]}, _label(name)
 
 
-def test_a_captured_body_records_that_native_codex_traffic_cannot_overflow() -> None:
-    """Design section 16 item (i) existed to discover this; the corpus must state it.
+def test_a_captured_body_carries_its_client_version_and_source_minted_item_ids() -> None:
+    """A capture is only evidence if it says which client produced it and keeps the wire's own ids.
 
-    Not a synthetic construction: the real gpt-5.5 body declines even with
-    every tool type it declares marked supported, because ``tool_search``
-    carries ``execution``, ``web_search`` carries ``external_web_access`` /
-    ``search_content_types``, and every input item carries a prefixed id.
+    The item ids are the structural fact the sweep turned on: real Codex
+    traffic carries a prefixed, account-scoped ``id`` on every input item, and
+    the rebuild preserves it (the prose around it is synthetic).
     """
 
     captured = {name for name, entry in PROVENANCE.items() if entry["origin"] == "captured"}
@@ -293,14 +346,6 @@ def test_a_captured_body_records_that_native_codex_traffic_cannot_overflow() -> 
         entry = PROVENANCE[name]
         assert entry["codex_version"], _label(name)
         assert entry["catalog_sha256"], _label(name)
-        assert entry["expected_portability_verdict"]["portable"] is False, _label(name)
-        # Computed from the committed body, not read back out of provenance.
-        # The literal alone passed with every input-item id deleted -- which is
-        # the third of the three reasons this test exists to record.
-        stripped = _stripped(name)
-        declared = frozenset(entry["expected_portability_verdict"]["declared_tool_types"])
-        source_free = transcript_is_source_free(PortabilityView(body=stripped), supported_tool_types=declared)
-        assert source_free is bool(entry["expected_transcript_is_source_free"]), _label(name)
         items = _load(name)["input"]
         assert isinstance(items, list), _label(name)
         assert any(isinstance(item, dict) and item.get("id") for item in items), _label(name)
@@ -314,7 +359,7 @@ def test_the_sanitiser_field_sets_are_pinned_against_production() -> None:
 
     assert DROPPED_TOP_LEVEL_FIELDS >= STRIPPED_TELEMETRY_FIELDS
     assert SANITISED_STREAM_OPTIONS_KEYS == STRIPPED_STREAM_OPTIONS_KEYS
-    # Fields the overflow view reads must never be dropped or fabricated.
+    # Fields production forwards to a source must never be dropped or fabricated.
     assert SHAPE_PRESERVED_TOP_LEVEL_FIELDS >= _MUST_SURVIVE_SANITISATION
     assert not DROPPED_TOP_LEVEL_FIELDS & SHAPE_PRESERVED_TOP_LEVEL_FIELDS
 
@@ -517,38 +562,24 @@ def test_the_item_and_content_key_allowlists_cover_what_production_validates() -
 
 
 @pytest.mark.parametrize("name", FIXTURE_NAMES)
-def test_rebuilding_a_fixture_preserves_the_recorded_verdict(name: str) -> None:
-    """The inversion's price, measured: shape survives, prose does not, verdict is unchanged.
+def test_rebuilding_a_fixture_preserves_its_request_skeleton(name: str) -> None:
+    """The inversion's price, measured: the skeleton survives, prose does not.
 
-    Replacing every free-text field would be worthless if it moved the answer
-    the corpus exists to record, so the verdict is computed twice -- on the
+    Replacing every free-text field would be worthless if it moved the shape the
+    corpus exists to record, so the skeleton is computed twice -- on the
     committed body and on the body the rebuild produces from it -- and the two
-    must agree with each other and with ``provenance.json``.
+    must agree discriminator for discriminator. The rebuild is idempotent on top
+    of that: a second pass over its own output changes nothing at all, keys
+    included, which is what makes the committed captures reproducible.
     """
 
     body = _load(name)
 
     rebuilt, _ = codex_body_sanitize.sanitize_body(body)
+    twice, _ = codex_body_sanitize.sanitize_body(rebuilt)
 
-    stripped = strip_source_telemetry(
-        normalize_responses_request_payload(
-            dict(rebuilt), openai_compat=_has_openai_responses_shape(rebuilt)
-        ).model_dump_for_forwarding(),
-        strip_service_tier=True,
-    )
-    view = overflow_portability_view(stripped)
-    classified = view if isinstance(view, PortabilityView) else PortabilityView(body=stripped)
-    expected = PROVENANCE[name]["expected_portability_verdict"]
-    verdict = responses_payload_is_provider_portable(
-        classified,
-        {},
-        supported_tool_types=frozenset(expected["declared_tool_types"]),
-        supports_vision=bool(expected["supports_vision"]),
-    )
-
-    assert verdict == PortabilityVerdict(bool(expected["portable"]), expected["reason"], expected["detail"]), _label(
-        name
-    )
+    assert _skeleton(_stripped_body(rebuilt)) == _skeleton(_stripped_body(body)), _label(name)
+    assert _structure(_stripped_body(twice)) == _structure(_stripped_body(rebuilt)), _label(name)
 
 
 _OPERATOR_MARKER = "acme-holdings-/home/jane/ledger@build-box"

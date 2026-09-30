@@ -40,18 +40,22 @@ export function signInAsTeamAdmin(overrides: Partial<ReturnType<typeof useAuthSt
   });
 }
 
+/** The render result, plus the client behind it for a test that asserts on what is cached. */
 export function renderAt(ui: ReactElement, initialEntry = "/settings") {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <MemoryRouter initialEntries={[initialEntry]}>
-          <Routes>
-            <Route path="*" element={ui} />
-          </Routes>
-          <LocationProbe />
-        </MemoryRouter>
-      </TooltipProvider>
-    </QueryClientProvider>,
-  );
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[initialEntry]}>
+            <Routes>
+              <Route path="*" element={ui} />
+            </Routes>
+            <LocationProbe />
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    ),
+    queryClient,
+  };
 }

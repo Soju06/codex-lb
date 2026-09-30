@@ -21,8 +21,9 @@ from app.core.exceptions import (
 )
 from app.db.models import AuthProviderKind, DashboardAuthProvider
 from app.dependencies import AuthProvidersContext, get_auth_providers_context
+from app.modules.auth_providers.config import load_oidc_config, mask_oidc_config
 from app.modules.auth_providers.schemas import AuthProviderResponse, AuthProviderUpdateRequest
-from app.modules.auth_providers.service import ProviderNotFoundError
+from app.modules.auth_providers.service import OidcTestLoginRequiredError, ProviderNotFoundError
 from app.modules.dashboard_roles.service import RoleNotAssignableError
 from app.modules.dashboard_users.break_glass import BreakGlassRequiresTotpError
 
@@ -47,21 +48,30 @@ async def _require_account(
 
 
 def _config(provider: DashboardAuthProvider) -> dict[str, str]:
-    """Read-only, non-secret provider configuration the settings UI shows.
+    """Provider configuration the settings UI shows, with every secret masked.
 
     The trusted-header provider is configured by the deployment topology, not
     by the database: both header names come from ``CODEX_LB_DASHBOARD_AUTH_PROXY_*``
     and have to match the reverse proxy. Returning them lets the settings card
     name the values it cannot edit instead of only naming the variables.
+
+    The OIDC provider's settings come from the sealed document on the row. The
+    client secret is the one field that comes back masked (``****`` plus its
+    last four characters) — enough for an operator to recognise which secret is
+    stored, never enough to use it. There is no code path that returns it in
+    clear, here or anywhere else.
     """
 
-    if provider.kind != AuthProviderKind.TRUSTED_HEADER.value:
-        return {}
-    settings = get_settings()
-    return {
-        "identityHeader": settings.dashboard_auth_proxy_header,
-        "groupsHeader": settings.dashboard_auth_proxy_groups_header,
-    }
+    if provider.kind == AuthProviderKind.TRUSTED_HEADER.value:
+        settings = get_settings()
+        return {
+            "identityHeader": settings.dashboard_auth_proxy_header,
+            "groupsHeader": settings.dashboard_auth_proxy_groups_header,
+        }
+    if provider.kind == AuthProviderKind.OIDC.value:
+        config = load_oidc_config(provider)
+        return mask_oidc_config(config) if config is not None else {}
+    return {}
 
 
 def _response(provider: DashboardAuthProvider) -> AuthProviderResponse:
@@ -78,6 +88,7 @@ def _response(provider: DashboardAuthProvider) -> AuthProviderResponse:
         skip_role_sync=provider.skip_role_sync,
         idp_mfa_enforced=provider.idp_mfa_enforced,
         config=_config(provider),
+        test_login_verified_at=provider.test_login_verified_at,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
     )
@@ -111,4 +122,6 @@ async def update_provider(
         raise DashboardConflictError(
             str(exc), code="break_glass_requires_totp", param=exc.username, details={"username": exc.username}
         ) from exc
+    except OidcTestLoginRequiredError as exc:
+        raise DashboardConflictError(str(exc), code="oidc_test_login_required") from exc
     return _response(provider)

@@ -14,13 +14,6 @@ export type RequestFiltersProps = {
   apiKeyOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   statusOptions: MultiSelectOption[];
-  /**
-   * Empty or omitted (the default) hides the control entirely: no overflow has
-   * ever been dispatched on this installation, so there is nothing to filter by.
-   * A deep-linked `?source=` still renders the control (as a `Stale` chip) so the
-   * selection stays visible and clearable.
-   */
-  sourceOptions?: MultiSelectOption[];
   /** Hide the API key filter (read-only guests receive no key options). */
   showApiKeyFilter?: boolean;
   onSearchChange: (value: string) => void;
@@ -29,7 +22,6 @@ export type RequestFiltersProps = {
   onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
-  onSourceChange?: (values: string[]) => void;
   onConversationDismiss: () => void;
   onReset: () => void;
 };
@@ -40,7 +32,6 @@ export function RequestFilters({
   apiKeyOptions,
   modelOptions,
   statusOptions,
-  sourceOptions,
   showApiKeyFilter = true,
   onSearchChange,
   onTimeframeChange,
@@ -48,7 +39,6 @@ export function RequestFilters({
   onApiKeyChange,
   onModelChange,
   onStatusChange,
-  onSourceChange,
   onConversationDismiss,
   onReset,
 }: RequestFiltersProps) {
@@ -97,15 +87,6 @@ export function RequestFilters({
           options={statusOptions}
           onChange={onStatusChange}
         />
-        {onSourceChange && ((sourceOptions?.length ?? 0) > 0 || filters.sources.length > 0) ? (
-          <MultiSelectFilter
-            label={t("dashboard.filters.sources")}
-            values={filters.sources}
-            options={sourceOptions ?? []}
-            onChange={onSourceChange}
-          />
-        ) : null}
-
         {filters.conversationId ? (
           <Badge variant="outline" className="h-8 gap-1.5 px-3 text-xs font-normal">
             <span className="max-w-[200px] truncate" title={filters.conversationId}>

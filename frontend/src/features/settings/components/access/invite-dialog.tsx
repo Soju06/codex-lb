@@ -106,7 +106,9 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
   const { t } = useTranslation();
   const assignableRoleIds = useAuthStore((state) => state.assignableRoleIds);
   const accessSummary = useAuthStore((state) => state.accessSummary);
-  const username = useAuthStore((state) => state.user?.username ?? "admin");
+  // Whatever this account is actually called: the bootstrapped one may have
+  // been renamed, so the note names the session's own username or says nothing.
+  const username = useAuthStore((state) => state.user?.username ?? null);
   const ssoProvider = useAuthStore((state) => state.loginHint.providers.find((p) => p.kind !== "password") ?? null);
   const rolesQuery = useDashboardRoles(open);
   const [error, setError] = useState<string | null>(null);
@@ -269,7 +271,7 @@ export function InviteDialog({ open, onOpenChange, onIssued }: InviteDialogProps
                 ) : null}
               </div>
             ) : null}
-            {isFirstInvite ? (
+            {isFirstInvite && username ? (
               <p className="text-xs text-muted-foreground" data-testid="first-invite-note">
                 {t("access.invite.firstInviteNote", { username })}
               </p>

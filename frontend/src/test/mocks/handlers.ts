@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
-import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
+import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
 
 import {
   LIMIT_TYPES,
@@ -34,7 +34,6 @@ import {
   createDashboardOverview,
   createDashboardProjections,
   createDashboardSettings,
-  createSubscriptionOverflowPreflight,
   createDefaultAccounts,
   createDefaultApiKeys,
   createDefaultConversations,
@@ -54,6 +53,8 @@ import {
   createModelContextWindowOverrides,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
+  createScimToken,
+  SCIM_BASE_PATH,
   type DashboardAuthSession,
   type DashboardSettings,
   type ModelContextWindowOverrides,
@@ -84,16 +85,51 @@ const DashboardUserCreatePayloadSchema = z.looseObject({
 });
 
 const DashboardUserUpdatePayloadSchema = z.looseObject({
+  username: z.string().optional(),
   roleId: z.string().optional(),
   status: z.enum(["active", "disabled"]).optional(),
   force: z.boolean().optional(),
 });
 
+const OidcConfigPayloadSchema = z.looseObject({
+  issuer: z.string(),
+  discoveryUrl: z.string().nullable().optional(),
+  clientId: z.string(),
+  clientSecret: z.string(),
+  redirectUri: z.string(),
+  subjectClaim: z.string().nullable().optional(),
+  emailClaim: z.string().nullable().optional(),
+  nameClaim: z.string().nullable().optional(),
+  groupsClaim: z.string().nullable().optional(),
+});
+
+/** Where the mock identity provider sends the browser; never navigated to in tests. */
+const OIDC_AUTHORIZE_URL = "https://login.example.com/authorize";
+
+/** `mask_oidc_config`: everything in clear except the secret, defaults filled in. */
+function maskOidcConfig(config: z.infer<typeof OidcConfigPayloadSchema>): Record<string, string> {
+  const secret = config.clientSecret;
+  return {
+    issuer: config.issuer,
+    discoveryUrl: config.discoveryUrl ?? `${config.issuer.replace(/\/$/, "")}/.well-known/openid-configuration`,
+    clientId: config.clientId,
+    clientSecret: `****${secret.slice(-4)}`,
+    redirectUri: config.redirectUri,
+    subjectClaim: config.subjectClaim ?? "sub",
+    emailClaim: config.emailClaim ?? "email",
+    nameClaim: config.nameClaim ?? "name",
+    groupsClaim: config.groupsClaim ?? "groups",
+  };
+}
+
 const AuthProviderUpdatePayloadSchema = z.looseObject({
+  label: z.string().optional(),
+  enabled: z.boolean().optional(),
   unknownIdentityRoleId: z.string().nullable().optional(),
   noMatchRoleId: z.string().nullable().optional(),
   linkByEmail: z.boolean().optional(),
   skipRoleSync: z.boolean().optional(),
+  config: OidcConfigPayloadSchema.optional(),
 });
 
 const RoleMappingCreatePayloadSchema = z.looseObject({
@@ -173,7 +209,6 @@ const AccountRoutingPolicyPayloadSchema = z.object({
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
-  subscriptionOverflowSourceId: z.string().nullable().optional(),
   upstreamStreamTransport: z
     .enum(["auto", "http", "websocket"])
     .optional(),
@@ -321,6 +356,36 @@ function renumberMappings(ordered: readonly RoleMapping[]): RoleMapping[] {
   return ordered.map((mapping, index) => ({ ...mapping, priority: ordered.length - index }));
 }
 
+/**
+ * The plaintext an issue or a rotate answers with — the only place one ever
+ * appears. Assembled from parts, and derived from the row id rather than
+ * written out, so no line here reads as a credential to a secret scanner and
+ * no two rows hand back the same value.
+ */
+function scimSecretFor(seed: string): string {
+  return [["clb", "scim"].join("-"), seed, "0".repeat(8)].join("_");
+}
+
+/**
+ * `admin` is reserved for the local break-glass account, whether or not a row
+ * currently holds the name.
+ *
+ * `DashboardUsersService._new_username` refuses it before it looks anything up,
+ * so the reservation outlives the row: once the bootstrap account is renamed
+ * away, no account — including that one — may take the name back. A mock that
+ * only checked for a duplicate would accept that rename and let a test prove a
+ * workflow production refuses.
+ */
+const RESERVED_USERNAME = "admin";
+
+function reservedUsernameRefusal(username: string | null | undefined): Response | null {
+  if (username !== RESERVED_USERNAME) return null;
+  return HttpResponse.json(
+    { error: { code: "validation_error", message: "'admin' is reserved for the local break-glass account" } },
+    { status: 422 },
+  );
+}
+
 type MockState = {
   accounts: AccountSummary[];
   requestLogs: RequestLogEntry[];
@@ -400,6 +465,7 @@ type MockState = {
   modelSources: ModelSource[];
   authProviders: AuthProvider[];
   roleMappings: RoleMapping[];
+  scimTokens: ScimToken[];
   refusedSignIns: AuditEntry[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
@@ -450,6 +516,8 @@ function createInitialState(): MockState {
     authProviders: createDefaultAuthProviders(),
     // Zero rules is the shipped default: the empty state is the common case.
     roleMappings: [],
+    // Same for credentials: nothing is provisioning accounts until somebody connects it.
+    scimTokens: [],
     refusedSignIns: createDefaultRefusedSignIns(),
     firewallEntries: [],
     stickySessions: [],
@@ -1267,28 +1335,6 @@ export const handlers = [
 
   http.get("/api/settings", () => {
     return HttpResponse.json(state.settings);
-  }),
-
-  http.get("/api/settings/subscription-overflow/preflight", ({ request }) => {
-    const sourceId = new URL(request.url).searchParams.get("source_id") ?? "";
-    const source = state.modelSources.find((candidate) => candidate.id === sourceId);
-    if (!source) {
-      return HttpResponse.json(
-        { error: { code: "not_found", message: "Model source not found" } },
-        { status: 404 },
-      );
-    }
-    const eligible = source.kind === "openai_compatible" && source.supportsResponses;
-    return HttpResponse.json(
-      createSubscriptionOverflowPreflight({
-        sourceId: source.id,
-        sourceName: source.name,
-        sourceEnabled: source.isEnabled,
-        eligible,
-        blockers: eligible ? [] : ["source_responses_unsupported"],
-        drainUntil: state.settings.subscriptionOverflowDrainUntil,
-      }),
-    );
   }),
 
   http.get("/api/settings/telemetry", ({ request }) => {
@@ -2296,6 +2342,7 @@ export const handlers = [
         providers: [{ kind: "password", providerKey: "default", label: "Password", loginUrl: null }],
         localLogin: "enabled",
         pendingIdentity: false,
+        pendingArrival: null,
       },
     });
     return HttpResponse.json(state.authSession);
@@ -2313,6 +2360,8 @@ export const handlers = [
     if (!payload) {
       return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
     }
+    const reservedOnCreate = reservedUsernameRefusal(payload.username);
+    if (reservedOnCreate) return reservedOnCreate;
     if (state.dashboardUsers.some((user) => user.username === payload.username)) {
       return HttpResponse.json(
         { error: { code: "username_taken", message: "Username is already taken" } },
@@ -2370,9 +2419,16 @@ export const handlers = [
       return HttpResponse.json({ error: { code: "user_not_found", message: "User not found" } }, { status: 404 });
     }
     const changesAccess = Boolean(payload.roleId && payload.roleId !== user.role.id) || Boolean(payload.status);
-    if (user.username === "admin" && changesAccess) {
+    // A rename is neither: it is allowed on any account, including the caller's own.
+    // The reservation is checked on the name that was sent, before the "did it
+    // actually change" filter, because the service validates it the same way --
+    // so even the bootstrap account re-sending its own `admin` is refused.
+    const reservedOnRename = reservedUsernameRefusal(payload.username);
+    if (reservedOnRename) return reservedOnRename;
+    const renamesTo = payload.username && payload.username !== user.username ? payload.username : null;
+    if (renamesTo && state.dashboardUsers.some((candidate) => candidate.username === renamesTo)) {
       return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account keeps its role and status" } },
+        { error: { code: "username_taken", message: "Username is already taken" } },
         { status: 409 },
       );
     }
@@ -2408,6 +2464,7 @@ export const handlers = [
     const role = payload.roleId ? state.dashboardRoles.find((candidate) => candidate.id === payload.roleId) : null;
     const updated: DashboardUser = {
       ...user,
+      username: renamesTo ?? user.username,
       role: role ? { id: role.id, slug: role.slug, name: role.name, kind: role.kind } : user.role,
       status: payload.status ?? user.status,
       roleSource: payload.force ? "manual" : user.roleSource,
@@ -2424,12 +2481,6 @@ export const handlers = [
     if (user.id === state.authSession.user?.id) {
       return HttpResponse.json(
         { error: { code: "self_modification_forbidden", message: "You cannot delete your own account" } },
-        { status: 409 },
-      );
-    }
-    if (user.username === "admin") {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "The migrated 'admin' account cannot be deleted" } },
         { status: 409 },
       );
     }
@@ -2484,12 +2535,6 @@ export const handlers = [
         { status: 409 },
       );
     }
-    if (user.username === "admin" && state.settings.totpRequiredOnLogin) {
-      return HttpResponse.json(
-        { error: { code: "compat_user_locked", message: "Resetting the migrated admin's TOTP would lock it out" } },
-        { status: 409 },
-      );
-    }
     state.dashboardUsers = state.dashboardUsers.map((candidate) =>
       candidate.id === params.userId ? { ...candidate, totpConfigured: false } : candidate,
     );
@@ -2515,8 +2560,15 @@ export const handlers = [
         { status: 404 },
       );
     }
+    // Writing the connection replaces it whole, masks the secret on the way
+    // out and clears the test-login proof, exactly as the service does: a proof
+    // earned against one identity provider may not enable a different one.
+    const connection = payload.config;
     const updated: AuthProvider = {
       ...provider,
+      label: payload.label ?? provider.label,
+      enabled: payload.enabled ?? provider.enabled,
+      active: payload.enabled ?? provider.active,
       unknownIdentityRoleId:
         payload.unknownIdentityRoleId === undefined
           ? provider.unknownIdentityRoleId
@@ -2524,11 +2576,19 @@ export const handlers = [
       noMatchRoleId: payload.noMatchRoleId === undefined ? provider.noMatchRoleId : payload.noMatchRoleId,
       linkByEmail: payload.linkByEmail ?? provider.linkByEmail,
       skipRoleSync: payload.skipRoleSync ?? provider.skipRoleSync,
+      config: connection ? maskOidcConfig(connection) : provider.config,
+      testLoginVerifiedAt: connection ? null : provider.testLoginVerifiedAt,
     };
     state.authProviders = state.authProviders.map((candidate) =>
       candidate.id === provider.id ? updated : candidate,
     );
     return HttpResponse.json(updated);
+  }),
+
+  // The pre-flight only says where to send the window; its verdict arrives as
+  // `testLoginVerifiedAt` on the row, which a test advances for itself.
+  http.post("/api/dashboard-auth/oidc/test-login/start", () => {
+    return HttpResponse.json({ authorizationUrl: `${OIDC_AUTHORIZE_URL}?state=mock` });
   }),
 
   http.get("/api/role-mappings", () => {
@@ -2624,6 +2684,49 @@ export const handlers = [
     state.roleMappings = renumberMappings(
       state.roleMappings.filter((mapping) => mapping.id !== params.mappingId),
     );
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ── Organisation: automatic account management credentials ──
+
+  http.get("/api/scim-tokens", () => {
+    return HttpResponse.json({ tokens: state.scimTokens, basePath: SCIM_BASE_PATH });
+  }),
+
+  http.post("/api/scim-tokens", async ({ request }) => {
+    const payload = (await request.json().catch(() => null)) as { label?: string } | null;
+    const label = (payload?.label ?? "").trim();
+    if (label === "") {
+      return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
+    }
+    const issued = createScimToken({ id: `scim_token_${state.scimTokens.length + 1}`, label });
+    state.scimTokens = [...state.scimTokens, issued];
+    return HttpResponse.json({ token: issued, secret: scimSecretFor(issued.id) }, { status: 201 });
+  }),
+
+  http.post("/api/scim-tokens/:tokenId/rotate", ({ params }) => {
+    const row = state.scimTokens.find((token) => token.id === params.tokenId);
+    if (!row) {
+      return HttpResponse.json(
+        { error: { code: "scim_token_not_found", message: "No such token" } },
+        { status: 404 },
+      );
+    }
+    // In place, exactly as the server rotates it: same id, same label, same
+    // history — only the verifier behind it changes.
+    const rotated = { ...row, rotatedAt: "2026-02-01T00:00:00Z" };
+    state.scimTokens = state.scimTokens.map((token) => (token.id === row.id ? rotated : token));
+    return HttpResponse.json({ token: rotated, secret: scimSecretFor(`${row.id}-again`) });
+  }),
+
+  http.delete("/api/scim-tokens/:tokenId", ({ params }) => {
+    if (!state.scimTokens.some((token) => token.id === params.tokenId)) {
+      return HttpResponse.json(
+        { error: { code: "scim_token_not_found", message: "No such token" } },
+        { status: 404 },
+      );
+    }
+    state.scimTokens = state.scimTokens.filter((token) => token.id !== params.tokenId);
     return new HttpResponse(null, { status: 204 });
   }),
 

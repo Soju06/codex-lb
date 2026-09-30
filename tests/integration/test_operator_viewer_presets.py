@@ -377,29 +377,43 @@ async def test_enabling_a_totp_requirement_needs_the_actors_own_secret(async_cli
 
 
 @pytest.mark.asyncio
-async def test_global_requirement_waits_for_the_compat_admin_to_enrol(async_client: AsyncClient, app_instance):
-    """The migrated ``admin`` row is what a previous-release replica reads: requiring TOTP at
-    sign-in while it has a password and no secret would lock it out there (N+1 removes this)."""
+async def test_an_unenrolled_migrated_admin_no_longer_blocks_the_global_requirement(
+    async_client: AsyncClient, app_instance
+):
+    """Release N refused this to protect a previous-release replica that read the legacy row.
 
-    await _setup_admin(async_client)
+    Nothing reads that row now, so the only condition left is the one that was
+    always about the acting account: whoever turns the requirement on must hold
+    a secret. The unenrolled migrated account is held at the enrolment gate like
+    any other, and no settings response reports a compatibility state for it.
+    """
+
+    admin_id = await _setup_admin(async_client)
     async with _client(app_instance) as admin2:
         await _invite_and_accept(async_client, admin2, "admin2", ADMIN_ROLE)
         admin2_secret = await _enrol_totp(admin2)
-
-        refused = await admin2.put("/api/settings", json={"totpRequiredOnLogin": True})
-        assert refused.status_code == 409, refused.text
-        assert _error(refused)[0] == "compat_user_locked"
-        assert (await admin2.get("/api/settings")).json()["totpRequiredOnLogin"] is False
-        # The admin-role requirement is not mirrored to the legacy row and stays available;
-        # it now binds admin2, who presents the code and carries on.
-        assert (await admin2.put("/api/settings", json={"totpRequiredForAdminRole": True})).status_code == 200
         verified = await admin2.post("/api/dashboard-auth/totp/verify", json={"code": pyotp.TOTP(admin2_secret).now()})
         assert verified.status_code == 200, verified.text
 
-        await _present_totp(async_client, await _enrol_totp(async_client))
+        # The migrated admin has a password and no secret; the requirement goes on anyway.
         enabled = await admin2.put("/api/settings", json={"totpRequiredOnLogin": True})
         assert enabled.status_code == 200, enabled.text
-        assert enabled.json()["totpRequiredOnLogin"] is True
+        body = enabled.json()
+        assert body["totpRequiredOnLogin"] is True
+        assert "compatAdminUnenrolled" not in body
+        assert (await admin2.put("/api/settings", json={"totpRequiredForAdminRole": True})).status_code == 200
+
+        # ...and that account meets the gate it was just given, like anyone else.
+        assert (await async_client.get("/api/dashboard-auth/me")).status_code == 200
+        await async_client.post("/api/dashboard-auth/logout", json={})
+        login = await async_client.post(
+            "/api/dashboard-auth/password/login", json={"username": "admin", "password": "password123"}
+        )
+        assert login.status_code == 200 and login.json()["totpEnrollmentRequired"] is True
+        held = await async_client.get("/api/settings")
+        assert held.status_code == 403 and _error(held)[0] == "totp_enrollment_required"
+        await _present_totp(async_client, await _enrol_totp(async_client))
+        assert (await async_client.get("/api/dashboard-auth/me")).json()["id"] == admin_id
     await _set_admin_role_policy(False)
     async with SessionLocal() as session:
         row = (await session.execute(select(DashboardSettings))).scalar_one()

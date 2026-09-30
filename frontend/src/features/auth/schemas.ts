@@ -75,6 +75,16 @@ export const StrictLocalLoginPolicySchema = z.enum(["enabled", "admins_only", "b
 // update — see `buildSettingsUpdateRequest`.
 export const LocalLoginPolicySchema = StrictLocalLoginPolicySchema.catch("enabled");
 
+// What a browser the identity resolver refused may be told about its own
+// arrival: the provider's public label (the same string its sign-in button
+// carries) and the reference the server computed from the address the identity
+// provider asserted. Both are the server's words; the client renders them and
+// derives nothing. Absent for a reverse-proxy refusal and for an expired marker.
+export const PendingArrivalSchema = z.object({
+  provider: z.string(),
+  reference: z.string(),
+});
+
 export const LoginHintSchema = z.object({
   usernameField: z.enum(["hidden", "shown"]).default("hidden"),
   providers: z
@@ -83,6 +93,7 @@ export const LoginHintSchema = z.object({
   localLogin: LocalLoginPolicySchema.default("enabled"),
   // The request carried a provider identity that has no account here yet.
   pendingIdentity: z.boolean().default(false),
+  pendingArrival: PendingArrivalSchema.nullable().default(null),
 });
 
 // Team-size facts served only to `users:manage` holders; `null` for everyone
@@ -105,11 +116,18 @@ export const AccessSummarySchema = z.object({
 // Step-up (re-verification for sensitive changes): when the account last
 // re-verified, and which factors `/step-up` will ask for. Empty `methods`
 // means the account must enrol two-factor or set a password first.
-export const StepUpMethodSchema = z.enum(["password", "totp"]);
+export const StepUpMethodSchema = z.enum(["password", "totp", "oidc"]);
 export const StepUpStateSchema = z.object({
   verifiedAt: z.number().int().nullable().default(null),
   expiresAt: z.number().int().nullable().default(null),
   methods: z.array(StepUpMethodSchema).default([]),
+});
+
+// Where to send the browser to begin a signed-in round trip at the identity
+// provider. The server builds the URL from the stored configuration; the app
+// only follows it.
+export const OidcStartResponseSchema = z.object({
+  authorizationUrl: z.string(),
 });
 
 export const AuthSessionSchema = z.object({
@@ -232,6 +250,7 @@ export type AuthSession = z.infer<typeof AuthSessionSchema>;
 export type AuthSessionUser = z.infer<typeof AuthSessionUserSchema>;
 export type LoginHint = z.infer<typeof LoginHintSchema>;
 export type LoginProvider = z.infer<typeof LoginProviderSchema>;
+export type PendingArrival = z.infer<typeof PendingArrivalSchema>;
 export type LocalLoginPolicy = z.infer<typeof LocalLoginPolicySchema>;
 export type AccessSummary = z.infer<typeof AccessSummarySchema>;
 export type Permission = z.infer<typeof PermissionSchema>;
@@ -253,6 +272,7 @@ export type TotpSetupStartResponse = z.infer<typeof TotpSetupStartResponseSchema
 export type StatusResponse = z.infer<typeof StatusResponseSchema>;
 export type StepUpState = z.infer<typeof StepUpStateSchema>;
 export type StepUpRequest = z.infer<typeof StepUpRequestSchema>;
+export type OidcStartResponse = z.infer<typeof OidcStartResponseSchema>;
 
 export function getFirstZodIssueMessage(error: unknown): string | null {
   if (!(error instanceof z.ZodError)) {

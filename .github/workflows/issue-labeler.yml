@@ -1,0 +1,27 @@
+name: Issue labeler
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Add issue classification
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const target = {...context.repo, issue_number: context.issue.number};
+            const {data: issue} = await github.rest.issues.get(target);
+            if (issue.state !== 'open') return;
+            const labels = ['triage'];
+            const match = /^(bug|fix|feat|docs)(\([^()\r\n]+\))?!?:\s+\S/.exec(issue.title);
+            if (match) {
+              const category = {bug: 'bug', fix: 'bug', feat: 'enhancement', docs: 'documentation'};
+              labels.push(category[match[1]]);
+            }
+            await github.rest.issues.addLabels({...target, labels});

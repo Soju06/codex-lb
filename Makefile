@@ -59,7 +59,11 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_index_migration_repairs_invalid_leftover_postgresql \
 	tests/integration/test_migrations.py::test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql \
-	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql
+	tests/integration/test_migrations.py::test_request_logs_live_facet_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_scim_v2_users.py::test_a_patch_meets_the_length_caps_a_replace_meets \
+	tests/integration/test_dashboard_users_api.py::test_concurrent_admin_mutations_keep_exactly_one_admin \
+	tests/integration/test_dashboard_users_api.py::test_key_reactivation_never_leaves_active_keys_on_a_disabled_owner \
+	tests/integration/test_dashboard_users_api.py::test_key_patch_that_also_renames_orders_the_owner_before_the_key
 SHELL := bash
 
 .PHONY: help
@@ -75,7 +79,6 @@ help:
 	  '  make test-dashboard-browser-smoke  built dashboard against the real local API' \
 	  '  make test-unit               unit pytest slice, same as CI' \
 	  '  make test-integration-core   integration-core pytest slice' \
-	  '  make test-overflow-drills    subscription-overflow canary drill rehearsals' \
 	  '  make package                 build and verify sdist/wheel' \
 	  '  make ci-fast                 lint/type/frontend/unit/package/rust-check' \
 	  '  make ci                      full local CI gate'
@@ -142,7 +145,7 @@ rust-audit:
 
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
-	test-integration-bridge test-overflow-drills test-e2e test-postgres
+	test-integration-bridge test-e2e test-postgres
 test-unit: frontend-build
 	uv sync --dev --frozen
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) tests/unit tests/simulation tests/test_request_logs_options_api.py
@@ -176,15 +179,6 @@ test-integration-bridge: frontend-build
 	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -vv \
 	  tests/integration/test_http_responses_bridge.py \
 	  tests/integration/test_proxy_websocket_responses.py
-
-# The pre-flip canary drill rehearsals (docs/routing.md "Canary and drills").
-# Marker-selected rather than path-selected so a drill can move modules without
-# staling the runbook; ``tests/integration`` only bounds collection. Already
-# covered by test-integration-core -- this target exists so an operator can run
-# exactly the drill list before standing a canary up.
-test-overflow-drills:
-	uv sync --dev --frozen
-	PYTHONFAULTHANDLER=1 uv run pytest $(PYTEST_ARGS) -m overflow_drill tests/integration
 
 test-e2e: frontend-build
 	uv sync --dev --frozen

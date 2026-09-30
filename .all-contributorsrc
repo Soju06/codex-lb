@@ -1497,6 +1497,41 @@
         "test",
         "bug"
       ]
+    },
+    {
+      "login": "felixcake618",
+      "name": "Felix Cake",
+      "avatar_url": "https://avatars.githubusercontent.com/u/91266981?v=4",
+      "profile": "https://github.com/felixcake618",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "uniskela",
+      "name": "Uniskela",
+      "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
+      "profile": "https://github.com/uniskela",
+      "contributions": [
+        "doc"      ]
+    },
+    {
+      "login": "nhdong1993",
+      "name": "nhdong1993",
+      "avatar_url": "https://avatars.githubusercontent.com/u/86702790?v=4",
+      "profile": "https://github.com/nhdong1993",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "tubededentifrice-dev",
+      "name": "Vincent Dev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/246649517?v=4",
+      "profile": "https://github.com/tubededentifrice-dev",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

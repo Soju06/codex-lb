@@ -18,6 +18,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { StepUpDialog } from "@/features/auth/components/step-up-dialog";
 import { hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
+import { signedInLoginDestination } from "@/features/auth/oidc-window";
 import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
@@ -110,8 +111,10 @@ export default function App() {
             {/* Public pending screen: once the account exists, "Try again" lands in the app. */}
             <Route path="/auth/pending" element={<Navigate to="/dashboard" replace />} />
             {/* Public login route (`?local=1` is the break-glass form): a session
-                that already exists belongs in the app, not on a not-found page. */}
-            <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+                that already exists belongs in the app, not on a not-found page —
+                and, when a same-tab sign-in flow it started failed here, back on
+                the card that started it rather than on the dashboard. */}
+            <Route path="/login" element={<Navigate to={signedInLoginDestination()} replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />

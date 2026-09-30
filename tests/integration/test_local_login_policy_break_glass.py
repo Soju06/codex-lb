@@ -148,10 +148,11 @@ async def _enrol_totp(client: AsyncClient) -> str:
 
 
 async def _emergency_admin(admin: AsyncClient, person: AsyncClient, username: str = "rescue") -> tuple[str, str]:
-    """A second, non-compat admin with a second factor, designated as the emergency account.
+    """A second admin with a second factor, designated as the emergency account.
 
-    Deliberately not the compat ``admin`` row: that one is locked by
-    ``compat_user_locked``, which would mask the guard under test.
+    Deliberately not the bootstrapped account, which is the *caller* here: a
+    designation change on one's own row is the caller's to make, but the guards
+    under test are about acting on somebody else.
     """
 
     user_id = await _invite_and_accept(admin, person, username, ADMIN_ROLE)
@@ -782,9 +783,9 @@ async def test_the_policy_narrows_the_reverse_proxy_password_fallback(
     async_client: AsyncClient, app_instance, monkeypatch
 ) -> None:
     await _setup_admin(async_client)
-    # ``break_glass_only`` admits a *qualifying* account, so the compat admin
-    # enrols before the policy is tightened (exactly what the tightening gate
-    # would have forced anyway).
+    # ``break_glass_only`` admits a *qualifying* account, so the bootstrapped
+    # admin enrols before the policy is tightened (exactly what the tightening
+    # gate would have forced anyway).
     admin_secret = await _enrol_totp(async_client)
     assert (
         await async_client.post("/api/dashboard-auth/totp/verify", json={"code": _code(admin_secret)})

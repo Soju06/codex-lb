@@ -44,7 +44,7 @@ user item* `[:512]`. Append-only histories do stay stable, which is why one
 
 - New `app/modules/proxy/thread_anchors.py`: a process-local, TTL- and
   LRU-bounded index from a turn's item-digest window to the thread key already
-  minted for that thread, modelled on `model_source_pins.PinCache`.
+  minted for that thread.
 - `_derive_prompt_cache_key` now anchors instead of hashing text. A turn reuses
   a thread's key **only** when the recorded item sequence, from some offset to
   its end, is exactly the head of the new turn's items, with at least **four**

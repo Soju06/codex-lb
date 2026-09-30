@@ -286,25 +286,6 @@ describe("buildSettingsUpdateRequest", () => {
   });
 });
 
-describe("buildSettingsUpdateRequest subscription overflow", () => {
-  it("always carries the designation so Off reaches the backend as an explicit null", () => {
-    const off = buildSettingsUpdateRequest(createDashboardSettings(), {});
-    expect(off.subscriptionOverflowSourceId).toBeNull();
-
-    const designated = buildSettingsUpdateRequest(
-      createDashboardSettings({ subscriptionOverflowSourceId: "src_1" }),
-      {},
-    );
-    expect(designated.subscriptionOverflowSourceId).toBe("src_1");
-
-    const cleared = buildSettingsUpdateRequest(
-      createDashboardSettings({ subscriptionOverflowSourceId: "src_1" }),
-      { subscriptionOverflowSourceId: null },
-    );
-    expect(cleared.subscriptionOverflowSourceId).toBeNull();
-  });
-});
-
 describe("buildSettingsUpdateRequest local login policy", () => {
   it("never echoes the policy back, so an unrelated save cannot re-open local sign-in", () => {
     // The response schema falls an unknown policy back to the most open value.

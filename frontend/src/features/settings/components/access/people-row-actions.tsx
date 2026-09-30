@@ -1,5 +1,5 @@
 import { MoreHorizontal } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -30,26 +30,26 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
-import type { DashboardRole, DashboardUser } from "@/features/access/api";
+import { DashboardUserCreateRequestSchema, type DashboardRole, type DashboardUser } from "@/features/access/api";
 import type { useAccessMutations } from "@/features/access/hooks";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import type { IssuedLink } from "@/features/settings/components/access/invite-dialog";
 import { RoleSelectItems } from "@/features/settings/components/access/role-picker";
 
-// The migrated `admin` account keeps its role and status and cannot be deleted
-// in this release (`409 compat_user_locked`); its TOTP can only be reset while
-// "require TOTP on login" is off.
-const COMPAT_ADMIN_USERNAME = "admin";
+// The same rule the invite dialog validates a new name against, so a malformed
+// one is refused before the round-trip. Names the server reserves (and names
+// already taken) come back as refusals: the client keeps no list of its own.
+const UsernameSchema = DashboardUserCreateRequestSchema.shape.username;
 
-type RowDialog = "role" | "delete" | null;
+type RowDialog = "role" | "rename" | "delete" | null;
 type MenuItem = { key: string; label: string; onSelect: () => void; destructive?: boolean };
 
 export type PeopleRowActionsProps = {
   user: DashboardUser;
   isSelf: boolean;
-  /** The configured "require TOTP on login" policy (dashboard settings); `undefined` while unknown. */
-  totpPolicyOn: boolean | undefined;
   roles: readonly DashboardRole[];
   assignableRoleIds: readonly string[];
   mutations: ReturnType<typeof useAccessMutations>;
@@ -58,33 +58,40 @@ export type PeopleRowActionsProps = {
 
 /**
  * Per-row menu offering only what the server honours: the self row can only
- * sign itself out everywhere (through the store, a clean client logout), the
- * migrated `admin` row keeps role and status, invited rows get invite actions.
- * Every remaining refusal comes back from the server and is shown by the tab.
+ * sign itself out everywhere (through the store, a clean client logout) and
+ * invited rows get invite actions. No row is treated differently for the
+ * account it is -- the account the install bootstrapped included: every
+ * remaining refusal comes back from the server and is shown by the tab.
  */
-export function PeopleRowActions({
-  user,
-  isSelf,
-  totpPolicyOn,
-  roles,
-  assignableRoleIds,
-  mutations,
-  onIssued,
-}: PeopleRowActionsProps) {
+export function PeopleRowActions({ user, isSelf, roles, assignableRoleIds, mutations, onIssued }: PeopleRowActionsProps) {
   const { t } = useTranslation();
+  const usernameInputId = useId();
   const [dialog, setDialog] = useState<RowDialog>(null);
   const [roleId, setRoleId] = useState(user.role.id);
+  const [username, setUsername] = useState(user.username);
+  const [usernameError, setUsernameError] = useState<string | null>(null);
   const name = user.displayName ?? user.username;
   const assignable = roles.filter((role) => assignableRoleIds.includes(role.id));
-  const isCompat = user.username === COMPAT_ADMIN_USERNAME;
   // The company login owns this role; changing it pins the account to manual.
   const managedExternally = user.roleSource !== "manual";
-  const locked = isSelf || isCompat;
 
   const run = (promise: Promise<unknown>, successKey: string) =>
     void promise.then(() => toast.success(t(successKey))).catch(() => undefined);
   const setStatus = (status: "active" | "disabled", successKey: string) =>
     run(mutations.updateUser.mutateAsync({ userId: user.id, payload: { status } }), successKey);
+  const submitRename = () => {
+    const parsed = UsernameSchema.safeParse(username);
+    if (!parsed.success) {
+      setUsernameError(parsed.error.issues[0]?.message ?? "access.invite.validation.usernameRequired");
+      return;
+    }
+    setDialog(null);
+    if (parsed.data === user.username) return;
+    run(
+      mutations.updateUser.mutateAsync({ userId: user.id, payload: { username: parsed.data } }),
+      "access.people.toasts.renamed",
+    );
+  };
 
   const items: MenuItem[] = [];
   if (user.status === "invited") {
@@ -109,7 +116,7 @@ export function PeopleRowActions({
       },
     );
   } else {
-    if (!locked) {
+    if (!isSelf) {
       items.push({
         key: "role",
         label: managedExternally
@@ -120,14 +127,22 @@ export function PeopleRowActions({
           setDialog("role");
         },
       });
+      items.push({
+        key: "rename",
+        label: t("access.people.actions.rename"),
+        onSelect: () => {
+          setUsername(user.username);
+          setUsernameError(null);
+          setDialog("rename");
+        },
+      });
       items.push(
         user.status === "active"
           ? { key: "disable", label: t("access.people.actions.disable"), onSelect: () => setStatus("disabled", "access.people.toasts.disabled") }
           : { key: "enable", label: t("access.people.actions.enable"), onSelect: () => setStatus("active", "access.people.toasts.enabled") },
       );
     }
-    // Unknown policy counts as "on" for the compat row: the server would refuse.
-    if (user.totpConfigured && !isSelf && !(isCompat && totpPolicyOn !== false)) {
+    if (user.totpConfigured && !isSelf) {
       items.push({
         key: "reset-totp",
         label: t("access.people.actions.resetTotp"),
@@ -142,7 +157,7 @@ export function PeopleRowActions({
           ? void useAuthStore.getState().logoutEverywhere()
           : run(mutations.revokeSessions.mutateAsync(user.id), "access.people.toasts.sessionsRevoked"),
     });
-    if (!locked) {
+    if (!isSelf) {
       items.push({ key: "delete", label: t("access.people.actions.delete"), destructive: true, onSelect: () => setDialog("delete") });
     }
   }
@@ -215,6 +230,42 @@ export function PeopleRowActions({
               {managedExternally
                 ? t("access.people.changeRole.takeOverSubmit")
                 : t("access.people.changeRole.submit")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={dialog === "rename"} onOpenChange={(open) => !open && setDialog(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("access.people.rename.title")}</DialogTitle>
+            <DialogDescription>{t("access.people.rename.description", { name })}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor={usernameInputId}>{t("access.people.rename.label")}</Label>
+            <Input
+              id={usernameInputId}
+              value={username}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              onChange={(event) => {
+                setUsername(event.target.value);
+                setUsernameError(null);
+              }}
+            />
+            {usernameError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {t(usernameError)}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setDialog(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button type="button" disabled={mutations.busy} onClick={submitRename}>
+              {t("access.people.rename.submit")}
             </Button>
           </DialogFooter>
         </DialogContent>

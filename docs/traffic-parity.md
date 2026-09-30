@@ -200,13 +200,12 @@ organization name. ASN parity is comparable only when A and C use the same
 observer and exact database digest; it does not guarantee that a different
 destination uses the same policy route.
 
-### Capture a Codex request body for the portability fixtures
+### Capture a Codex request body for the parity fixtures
 
-The provider-portability gate for the subscription-overflow Model Source
-classifies real Codex request bodies. Capturing one needs no ChatGPT
-credentials, no upstream contact and no quota — it is a different lane from the
-parity capture above, because the body is recorded *in the origin* rather than
-at a TLS boundary:
+The fixture corpus in `tests/fixtures/codex_bodies` records real Codex request
+bodies as shape. Capturing one needs no ChatGPT credentials, no upstream contact
+and no quota — it is a different lane from the parity capture above, because the
+body is recorded *in the origin* rather than at a TLS boundary:
 
 ```bash
 uv run python -m scripts.traffic_analysis.codex_body_capture \

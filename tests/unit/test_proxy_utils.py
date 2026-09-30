@@ -40,7 +40,6 @@ import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
@@ -76,7 +75,6 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import helpers as proxy_helpers_module
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
-from app.modules.proxy._load_balancer.exhaustion_probe import probe_pool_usage_exhaustion
 from app.modules.proxy._service import compact as proxy_compact_service
 from app.modules.proxy._service import file_ops as proxy_file_ops
 from app.modules.proxy._service import observability as proxy_observability_module
@@ -290,6 +288,36 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
             "No tool output found for function call call_abc.",
             True,
         ),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+            True,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            "Unrelated upstream failure",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
+            400,
+            " This request was blocked by our safety systems.",
+            False,
+        ),
+        (
+            "misalignment_policy_violation",
+            500,
+            "This request was blocked by our safety systems.",
+            False,
+        ),
         # A model-entitlement rejection is not a payload-shape rejection, so it
         # is not a member of this narrow set. Its own health-neutrality is
         # decided by ``_is_model_scoped_rejection`` instead.
@@ -342,6 +370,31 @@ async def test_missing_tool_output_rejection_does_not_penalize_account() -> None
         {"message": "No tool output found for custom tool call call_poisoned."},
         "invalid_request_error",
         400,
+    )
+
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_safety_policy_rejection_does_not_penalize_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-healthy")),
+        {"message": "This request was blocked by our safety systems."},
+        "misalignment_policy_violation",
+        None,
     )
 
     assert classified["failure_class"] == "non_retryable"
@@ -568,6 +621,44 @@ async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_code_less_usage_limit_frame_requests_the_same_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh is owed to the account whose window is spent, and the serialized terminal frame
+    proves that with its message alone: it reaches here as ``upstream_error`` with no status. Left
+    on the literal code, the pool's usage picture stays stale for exactly the accounts it most
+    needs to be current about -- the ones that have just said they are out."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    monkeypatch.setattr(
+        UsageUpdater,
+        "request_refresh",
+        staticmethod(lambda account_id: (requested.append(account_id), refresh)[1]),
+        raising=False,
+    )
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-frame-usage-limit")),
+            {"message": "The usage limit has been reached"},
+            "upstream_error",
+            None,
+        )
+    finally:
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.record_error.assert_not_awaited()
+    assert requested == ["acc-frame-usage-limit"]
+    schedule.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_usage_limit_stream_error_uses_unknown_request_id_outside_request_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -645,6 +736,11 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         ("quota_exceeded", 429, "quota exceeded"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
+        (
+            "misalignment_policy_violation",
+            None,
+            "This request was blocked by our safety systems.",
+        ),
         (
             "invalid_request_error",
             400,
@@ -4381,147 +4477,6 @@ async def test_opportunistic_admission_forwards_service_tier_to_selection_inputs
     assert selection.account is None
     assert selection.error_code == "no_plan_support_for_model"
     assert selection.error_message == "No accounts with a plan supporting model 'gpt-5.1' at service tier 'priority'"
-
-
-@pytest.mark.asyncio
-async def test_exhaustion_probe_ignores_account_caps_that_close_the_opportunistic_burn_window(monkeypatch):
-    """``lease_kind=None`` disables cap filtering: an exhausted pool at its stream cap is still exhausted."""
-    settings = _make_proxy_settings()
-    settings.proxy_account_stream_limit = 1
-    settings.proxy_account_response_create_limit = 64
-    settings.soft_drain_enabled = False
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    now = utcnow()
-    now_epoch = int(time.time())
-    reset_at = now_epoch + 1800
-    account = _make_account("acc_exhausted_at_cap")
-    # Mirror handle_quota_exceeded: status + blocked_at marker + reset deadline, with 100 % primary usage.
-    account.status = AccountStatus.QUOTA_EXCEEDED
-    account.reset_at = reset_at
-    account.blocked_at = now_epoch
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(
-            return_value=SelectionInputs(
-                accounts=[account],
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=100.0,
-                        reset_at=reset_at,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=40.0,
-                        reset_at=reset_at + 6 * 86400,
-                        window_minutes=10080,
-                    )
-                },
-                latest_monthly={},
-            )
-        ),
-    )
-    service._load_balancer._runtime[account.id] = RuntimeState(inflight_streams=1)
-
-    capped = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind="stream")
-    assert capped.account is None
-    assert capped.error_code == "opportunistic_burn_window_closed"
-
-    runtime_before = deepcopy(service._load_balancer._runtime)
-    exhaustion = await probe_pool_usage_exhaustion(
-        service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None
-    )
-    assert exhaustion is not None
-    assert exhaustion.resets_at == reset_at
-    assert exhaustion.selection.error_code == "usage_limit_reached"
-    assert service._load_balancer._runtime == runtime_before, "the probe leased nothing and touched no runtime state"
-
-
-@pytest.mark.asyncio
-async def test_exhaustion_probe_observes_health_tiers_without_refreshing_the_live_runtime(monkeypatch):
-    """A live admission check refreshes the usage-derived health tier; the observe-only probe must not."""
-    settings = _make_proxy_settings()
-    settings.soft_drain_enabled = True
-    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
-    monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings_cache", lambda: _SettingsCache(settings))
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
-    now = utcnow()
-    now_epoch = int(time.time())
-    account = _make_account("acc_draining_soon")
-    # ACTIVE at 96 % of the 5h window: past the soft-drain threshold, still selectable.
-    monkeypatch.setattr(
-        service._load_balancer,
-        "_load_selection_inputs",
-        AsyncMock(
-            return_value=SelectionInputs(
-                accounts=[account],
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=96.0,
-                        reset_at=now_epoch + 1800,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=20.0,
-                        reset_at=now_epoch + 6 * 86400,
-                        window_minutes=10080,
-                    )
-                },
-                latest_monthly={},
-            )
-        ),
-    )
-    runtime = service._load_balancer._runtime
-    assert runtime == {}
-
-    # The observation neither creates a runtime entry nor refreshes health.
-    assert (
-        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
-        is None
-    )
-    assert runtime == {}
-
-    # The same question asked as a live admission check performs the ordinary refresh.
-    live = await service.check_opportunistic_admission(api_key=None, model="gpt-5.1", lease_kind=None)
-    assert live.account is not None or live.error_code == "opportunistic_burn_window_closed"
-    refreshed = runtime[account.id]
-    assert refreshed.health_tier == HEALTH_TIER_DRAINING
-    assert refreshed.drain_entered_at is not None
-    assert refreshed.health_version == 1
-
-    # And a subsequent observation still leaves that live state exactly as the refresh left it.
-    snapshot = deepcopy(runtime)
-    assert (
-        await probe_pool_usage_exhaustion(service, settings=settings, api_key=None, model="gpt-5.1", service_tier=None)
-        is None
-    )
-    assert runtime == snapshot
 
 
 @pytest.mark.asyncio
@@ -12038,7 +11993,7 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
         upstream_base_url = "https://chatgpt.com/backend-api"
         upstream_connect_timeout_seconds = 8.0
         stream_idle_timeout_seconds = 45.0
-        trace_channels = frozenset()
+        trace_channels = frozenset({"upstream_payload"})
         proxy_request_budget_seconds = 75.0
 
     registry = SimpleNamespace(
@@ -12056,7 +12011,8 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "get_model_registry", lambda: registry)
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
-    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    log_request_start = MagicMock()
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", log_request_start)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     session = _SseSession(_SsePostResponse([b'data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']))
@@ -12098,6 +12054,10 @@ async def test_stream_responses_auto_transport_falls_back_to_http_when_websocket
     assert proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY not in cast(
         Mapping[str, JsonValue], upstream_payload.get("client_metadata", {})
     )
+    traced_payloads = [json.loads(call.kwargs["payload_json"]) for call in log_request_start.call_args_list]
+    assert len(traced_payloads) == 2
+    assert traced_payloads[0]["client_metadata"][proxy_module.CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY] == "true"
+    assert traced_payloads[1] == upstream_payload
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_http"}}\n\n']
 
 
@@ -16054,6 +16014,160 @@ async def test_stream_with_retry_retries_account_model_rejection_on_another_acco
     assert stream_accounts == [rejected.id, supported.id]
     assert selection_exclusions == [set(), {rejected.id}]
     handle_stream_error.assert_not_awaited()
+
+
+# Upstream serializes the usage-limit rejection into a terminal frame as well as
+# an HTTP body, and the frame form may carry no error code at all. Both gates
+# that read such a frame -- the retry decision before anything is downstream, and
+# the account-health decision once something is -- live inside ``_stream_once``,
+# which the rest of this file stubs. These drive the real one and put the frame
+# on the wire, which is why the behaviour had only ever been reachable from the
+# integration suite.
+_USAGE_LIMIT_SENTENCE = "The usage limit has been reached"
+_TERMINAL_FRAME_SPENT_ACCOUNT_ID = "acc_terminal_frame_spent"
+_TERMINAL_FRAME_SIBLING_ACCOUNT_ID = "acc_terminal_frame_sibling"
+_RESPONSE_CREATED_EVENT = 'data: {"type":"response.created","response":{"id":"resp_terminal_frame_created"}}\n\n'
+
+
+async def _run_stream_terminal_frame_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    frame_error: dict[str, str],
+    *,
+    lead_event: str | None = None,
+) -> tuple[list[set[str]], list[str], list[dict[str, Any]], list[str]]:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(
+        _repo_factory(_RequestLogsRecorder()),
+        scheduler=_RecordingSleepScheduler(),
+    )
+    spent = _make_account(_TERMINAL_FRAME_SPENT_ACCOUNT_ID)
+    sibling = _make_account(_TERMINAL_FRAME_SIBLING_ACCOUNT_ID)
+    selection_exclusions: list[set[str]] = []
+    dispatched: list[str] = []
+    health_writes: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        # The exclusion set is what selection is actually told, so it -- not
+        # account health, which is written either way -- is what separates
+        # "moved off this account" from "surfaced on it".
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        account = sibling if spent.id in excluded else spent
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    async def record_health(account: Account, *_args: object, **_kwargs: object) -> None:
+        health_writes.append(account.id)
+
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=record_health))
+
+    async def fake_core_stream(_payload, _headers, _token, account_id, base_url=None, raise_for_status=False):
+        dispatched.append(account_id)
+        if account_id != spent.chatgpt_account_id:
+            yield 'data: {"type":"response.completed","response":{"id":"resp_terminal_frame_sibling"}}\n\n'
+            return
+        if lead_event is not None:
+            yield lead_event
+        yield f"data: {json.dumps({'type': 'response.failed', 'response': {'error': frame_error}})}\n\n"
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-terminal-frame-walk"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+    events = [
+        json.loads(chunk.split("data: ", 1)[1])
+        for chunk in chunks
+        if "data: " in chunk and not chunk.split("data: ", 1)[1].startswith("[DONE]")
+    ]
+    return selection_exclusions, dispatched, events, health_writes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        # No code at all, which normalizes to ``upstream_error``.
+        {"message": _USAGE_LIMIT_SENTENCE},
+        # A curly apostrophe and a line break, as upstream actually sends it.
+        {"message": "You\u2019ve hit your\nusage limit."},
+        # The coded form, which the code table already answered for.
+        {"code": "usage_limit_reached", "message": _USAGE_LIMIT_SENTENCE},
+    ],
+)
+async def test_stream_usage_limit_frame_leaves_the_spent_account_whatever_code_it_carries(monkeypatch, frame_error):
+    """Nothing is downstream yet, so the request can still be moved -- and this rejection is one
+    it should be moved for. The frame's error code is the one piece of evidence upstream omits at
+    will, so a gate that reads only the code answers "surface it" for the majority of the traffic
+    and "walk the pool" for the rest, on identical rejections."""
+    selection_exclusions, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, frame_error
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID, _TERMINAL_FRAME_SIBLING_ACCOUNT_ID]
+    assert selection_exclusions[-1] == {_TERMINAL_FRAME_SPENT_ACCOUNT_ID}
+    assert [event for event in events if event.get("type") == "response.failed"] == []
+    assert [event["type"] for event in events if event.get("type") == "response.completed"] == ["response.completed"]
+    assert health_writes == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+
+
+@pytest.mark.asyncio
+async def test_stream_unrelated_terminal_frame_without_a_code_is_still_surfaced(monkeypatch):
+    """The predicate is consulted, not bypassed: a code-less frame that says nothing about the
+    account's usage limit stays terminal, so this widens no other rejection into a pool walk."""
+    selection_exclusions, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, {"message": "Your request was rejected as a result of our safety system."}
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+    assert selection_exclusions == [set()]
+    assert [event["type"] for event in events if event.get("type") == "response.failed"] == ["response.failed"]
+    assert health_writes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "frame_error",
+    [
+        {"message": _USAGE_LIMIT_SENTENCE},
+        {"code": "usage_limit_reached", "message": _USAGE_LIMIT_SENTENCE},
+    ],
+)
+async def test_stream_usage_limit_frame_after_a_visible_event_still_records_account_health(monkeypatch, frame_error):
+    """Once a lifecycle event is downstream the request is committed to this account, so the frame
+    is surfaced either way. What is left to decide is the account's health, and that decision is
+    for the next request: an account that just said its window is spent must not stay the pool's
+    healthiest just because upstream omitted the code."""
+    _, dispatched, events, health_writes = await _run_stream_terminal_frame_walk(
+        monkeypatch, frame_error, lead_event=_RESPONSE_CREATED_EVENT
+    )
+
+    assert dispatched == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
+    assert [event["type"] for event in events if event.get("type") == "response.failed"] == ["response.failed"]
+    assert health_writes == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
 
 
 @pytest.mark.asyncio

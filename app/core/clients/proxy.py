@@ -3779,8 +3779,6 @@ async def _stream_responses_with_session(
         websocket_payload_dict,
         responses_lite=_payload_has_responses_lite_websocket_marker(websocket_payload_dict),
     )
-    payload_json = json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":"))
-    payload_size_estimate_bytes = len(payload_json.encode("utf-8"))
     non_streaming_http = payload.stream is False
     transport_mode = (
         "http"
@@ -3790,6 +3788,12 @@ async def _stream_responses_with_session(
             transport_override=upstream_stream_transport_override,
         )
     )
+    has_image_generation_tool = _payload_uses_image_generation_tool(payload_dict)
+    payload_size_estimate_bytes = None
+    if transport_mode != "http" and not (transport_mode == "auto" and has_image_generation_tool):
+        payload_size_estimate_bytes = len(
+            json.dumps(websocket_payload_dict, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        )
     transport = (
         "http"
         if non_streaming_http
@@ -3798,14 +3802,18 @@ async def _stream_responses_with_session(
             transport_override=upstream_stream_transport_override,
             model=payload.model,
             headers=headers,
-            has_image_generation_tool=_payload_uses_image_generation_tool(payload_dict),
+            has_image_generation_tool=has_image_generation_tool,
             payload_size_estimate_bytes=payload_size_estimate_bytes,
         )
     )
     payload_dict = websocket_payload_dict if transport == "websocket" else http_payload_dict
-    payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
     active_native_egress_client = (
         native_egress_client or discover_native_egress_client() if route is None and transport == "http" else None
+    )
+    payload_json = (
+        json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        if active_native_egress_client is not None or "upstream_payload" in settings.trace_channels
+        else None
     )
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(
@@ -4040,7 +4048,7 @@ async def _stream_responses_with_session(
                             method="POST",
                             url=url,
                             headers=current_headers,
-                            body=payload_json.encode("utf-8"),
+                            body=cast(str, payload_json).encode("utf-8"),
                             timeout_seconds=current_timeout.total or request_total_timeout,
                             connect_timeout_seconds=current_timeout.sock_connect,
                             response_head_timeout_seconds=current_timeout.sock_read,
@@ -4221,7 +4229,11 @@ async def _stream_responses_with_session(
 
         transport = "http"
         payload_dict = http_payload_dict
-        payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+        payload_json = (
+            json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+            if "upstream_payload" in settings.trace_channels
+            else None
+        )
         upstream_headers = _build_upstream_headers(
             headers,
             access_token,
@@ -5609,9 +5621,13 @@ async def codex_control_request(
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept=headers.get("accept", "*/*"))
     content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), None)
     if content_type:
-        upstream_headers["Content-Type"] = content_type
+        _replace_header_preserving_position(
+            upstream_headers, "content-type", content_type, fallback_name="Content-Type"
+        )
     elif payload is None:
-        upstream_headers.pop("Content-Type", None)
+        for name in list(upstream_headers):
+            if name.lower() == "content-type":
+                del upstream_headers[name]
     total_timeout = (
         max(0.001, timeout_seconds)
         if timeout_seconds is not None

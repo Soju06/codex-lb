@@ -16,7 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSeparator, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
-import { stepUp } from "@/features/auth/api";
+import { startOidcStepUp, stepUp } from "@/features/auth/api";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { ACCESS_HASH } from "@/features/settings/advanced-settings-deeplink";
 import { setStepUpHandlers, type StepUpMethod } from "@/lib/api-client";
@@ -32,6 +32,13 @@ type PendingStepUp = {
  * factors their account holds (password and/or authenticator code). Mounted
  * once; the API client opens it on `403 step_up_required` and replays the
  * interrupted request when it succeeds, so callers never see the interruption.
+ *
+ * An account that holds neither is offered the one factor it does have: a fresh
+ * authentication at its identity provider. That leg cannot be a form post — it
+ * is a round trip through the provider — so it replaces the inputs with a
+ * button and leaves the page. The interrupted request is settled as "gave up"
+ * before the navigation, because nothing can replay it across a page load; the
+ * person repeats the action once the callback has brought them back.
  */
 export function StepUpDialog() {
   const { t } = useTranslation();
@@ -78,10 +85,33 @@ export function StepUpDialog() {
 
   const needsPassword = pending?.methods.includes("password") ?? false;
   const needsCode = pending?.methods.includes("totp") ?? false;
+  // The identity provider is never asked for alongside a factor the account
+  // holds: the server offers it only to an account that holds none, precisely
+  // so a live provider session cannot stand in for something an attacker would
+  // otherwise have to produce. Mirrored here rather than assumed, so a payload
+  // that ever mixed them would still ask for the stronger factors.
+  const needsProvider = !needsPassword && !needsCode && (pending?.methods.includes("oidc") ?? false);
   const complete = (!needsPassword || password.length > 0) && (!needsCode || code.length === 6);
 
+  const continueAtProvider = async () => {
+    if (!pending) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { authorizationUrl } = await startOidcStepUp();
+      settle(false);
+      window.location.assign(authorizationUrl);
+    } catch (caught) {
+      setError(getErrorMessage(caught));
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
-    if (!pending || !complete) return;
+    // `needsProvider` first: with neither input rendered, `complete` is
+    // vacuously true, so Enter inside the form would post the empty `/step-up`
+    // body the server refuses — the dead end this branch exists to remove.
+    if (!pending || needsProvider || !complete) return;
     setBusy(true);
     setError(null);
     try {
@@ -104,7 +134,9 @@ export function StepUpDialog() {
       <DialogContent className="sm:max-w-sm" onInteractOutside={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{t("auth.stepUp.title")}</DialogTitle>
-          <DialogDescription>{t("auth.stepUp.description")}</DialogDescription>
+          <DialogDescription>
+            {needsProvider ? t("auth.stepUp.provider.description") : t("auth.stepUp.description")}
+          </DialogDescription>
         </DialogHeader>
         <form
           className="space-y-4"
@@ -157,9 +189,15 @@ export function StepUpDialog() {
             <Button type="button" variant="outline" onClick={() => settle(false)} disabled={busy}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={busy || !complete}>
-              {t("auth.stepUp.submit")}
-            </Button>
+            {needsProvider ? (
+              <Button type="button" disabled={busy} onClick={() => void continueAtProvider()}>
+                {t("auth.stepUp.provider.submit")}
+              </Button>
+            ) : (
+              <Button type="submit" disabled={busy || !complete}>
+                {t("auth.stepUp.submit")}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>

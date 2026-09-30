@@ -406,6 +406,37 @@ async def test_api_key_list_includes_pooled_credit_fields_for_selectable_assigne
 
 
 @pytest.mark.asyncio
+async def test_api_key_list_reports_scoped_weekly_max_unknown_capacity(async_client):
+    max_id = await _import_account(async_client, "max-pool", "max-pool@example.com")
+    plus_id = await _import_account(async_client, "plus-pool", "plus-pool@example.com")
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == max_id).values(plan_type="promax"))
+        session.add(
+            UsageHistory(
+                account_id=max_id,
+                window="primary",
+                used_percent=20.0,
+                reset_at=int((utcnow() + timedelta(days=6)).timestamp()),
+                window_minutes=10080,
+            )
+        )
+        await session.commit()
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "max-pool-key", "assignedAccountIds": [max_id, plus_id]},
+    )
+    assert created.status_code == 200
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    [row] = listed.json()
+    assert row["unquantifiedAccountCountPrimary"] == 0
+    assert row["unquantifiedAccountCountSecondary"] == 1
+    assert row["pooledRemainingPercentSecondary"] is None
+    assert row["pooledCapacityCreditsPrimary"] == 225.0
+
+
+@pytest.mark.asyncio
 async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(async_client, monkeypatch):
     await _populate_test_registry()
     monkeypatch.setattr(
@@ -458,6 +489,8 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
     assert usage.json()["account_pool_usage"] == {
         "primary": None,
         "secondary": None,
+        "unquantified_account_count_primary": 0,
+        "unquantified_account_count_secondary": 0,
     }
 
     called = False

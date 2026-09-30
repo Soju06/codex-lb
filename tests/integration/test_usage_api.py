@@ -188,6 +188,47 @@ async def test_usage_window_secondary_includes_weekly_only_primary_entries(async
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_has_reset", [True, False])
+async def test_usage_routes_report_mixed_weekly_subtotal_and_max_capacity_unknown(
+    async_client, db_setup, max_has_reset
+):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        for plan, used in (("pro", 40.0), ("plus", 50.0), ("promax", 20.0)):
+            await accounts_repo.upsert(_make_account(plan, f"{plan}@example.com", plan_type=plan))
+            await usage_repo.add_entry(
+                plan,
+                used,
+                window="primary" if plan == "promax" else "secondary",
+                window_minutes=10080,
+                reset_at=int((now + timedelta(days=6)).timestamp()) if plan != "promax" or max_has_reset else None,
+                recorded_at=now,
+            )
+
+    summary_response = await async_client.get("/api/usage/summary")
+    assert summary_response.status_code == 200
+    summary = summary_response.json()
+    assert summary["secondaryWindow"]["capacityCredits"] == 57960
+    assert summary["secondaryWindow"]["remainingCredits"] == 34020
+    assert summary["secondaryWindow"]["unquantifiedAccountCount"] == 1
+    assert summary["primaryWindow"]["unquantifiedAccountCount"] == 0
+
+    window_response = await async_client.get("/api/usage/window?window=secondary")
+    assert window_response.status_code == 200
+    max_item = next(item for item in window_response.json()["accounts"] if item["accountId"] == "promax")
+    assert max_item["remainingPercentAvg"] == 80.0
+    assert max_item["capacityKnown"] is False
+    assert max_item["capacityCredits"] == 0.0
+
+    short_response = await async_client.get("/api/usage/window?window=primary")
+    assert short_response.status_code == 200
+    max_short = next(item for item in short_response.json()["accounts"] if item["accountId"] == "promax")
+    assert max_short["capacityKnown"] is True
+
+
+@pytest.mark.asyncio
 async def test_usage_history_team_plan_has_capacity(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

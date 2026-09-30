@@ -27,3 +27,10 @@ presented as zero allowance.
 - **THEN** weekly estimated capacity is 57960 and remaining credits are 34020
 - **AND** the weekly unquantified-account count is 1
 - **AND** an absent Pro Max short window does not increment the short count
+
+#### Scenario: Recorded usage omits optional reset metadata
+- **WHEN** a persisted Pro Max percentage observation omits its reset timestamp
+  or window duration
+- **THEN** its absolute allowance remains unquantified
+- **AND** its per-account capacity is not reported as known
+- **AND** synthetic rows for absent usage do not count as observations

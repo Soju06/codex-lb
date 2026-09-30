@@ -27,18 +27,32 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
   - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` (snapshot of `accounts.id -> status`; no TTL — the snapshot is authoritative once seeded, degraded local-set semantics when unseeded)
   - `account_selection` -> `AccountSelectionCache.invalidate(propagate=False)` (fallback TTL 5s)
   - `settings` -> `SettingsCache.invalidate(propagate=False)` (fallback TTL 5s)
-- Two bump flavors: `await bump(namespace)` (durable before the mutation response; used by
-  security-bearing endpoints: settings/dashboard-auth mutations, account pause/reactivate/delete,
-  OAuth re-auth) and sync `request_bump(namespace)` (coalesced into a pending set flushed at the
-  start of each poll cycle; used on hot/scheduler paths). Coalescing bounds writes to <=1 per
-  namespace per poll interval; worst-case cross-replica convergence is flush (<=0.5s) + peer poll
-  (<=0.5s) ~= 1s for coalesced bumps and one poll interval for awaited bumps.
-- Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff); a
-  final failure logs ERROR and increments
-  `codex_lb_cache_invalidation_bump_failures_total{namespace}` but never fails the mutation —
-  peers then converge via the cache's fallback TTL. Failed coalesced flushes stay pending and
-  retry next cycle. Poll failures escalate to WARNING after 3 and ERROR after 10 consecutive
-  failures and increment `codex_lb_cache_invalidation_poll_failures_total`.
+- Two bump flavors share the existing pending set. `await bump(namespace)` attempts immediate
+  publication before the mutation response (settings/dashboard-auth mutations, account
+  pause/reactivate/delete, OAuth re-auth); sync `request_bump(namespace)` queues a coalesced
+  write for the next poll cycle (hot/scheduler paths). An immediate attempt consumes earlier
+  queued work before its first await, not after completion, so a marker requested during that
+  write survives. Coalescing bounds queued work to one marker per namespace, not the number
+  of concurrent immediate writes. Normal convergence is one peer poll after an immediate
+  success, or source flush plus peer poll (about 1s at defaults) for queued work; contention,
+  retry time, and callback latency can extend those intervals.
+- Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff);
+  final failure logs ERROR, increments `codex_lb_cache_invalidation_bump_failures_total{namespace}`,
+  and returns false without failing the mutation. Both immediate and coalesced failures remain
+  pending for later poll cycles. Cancellation during a write, its session cleanup, or retry
+  backoff restores pending work and still propagates cancellation. An ambiguous accepted commit
+  may yield a duplicate version increment on retry; registered callbacks are idempotent.
+  Poll failures still escalate to WARNING after 3 and ERROR after 10 consecutive failures and
+  increment `codex_lb_cache_invalidation_poll_failures_total`.
+- Retention is process-local, not a durable outbox or shutdown-drain guarantee. Process exit
+  before publication or a poller that stops making progress can still lose or delay the signal;
+  existing per-cache recovery/backstop behavior applies, and caches without a TTL gain no new
+  process-loss guarantee. A failed `bump_local()` retries through ordinary publication and may
+  redundantly invalidate the source; successful local acknowledgement is unchanged.
+- Example: a key-disable PATCH commits on replica A, but all three notification writes hit
+  a database lock. The API succeeds and its local auth entry is cleared. A retains `api_key`;
+  once writes recover, the next source flush and peer poll clear B's cached active auth data,
+  and its next `/v1/usage` request returns 401 without waiting out the auth cache TTL.
 - Poller callbacks must be registered with non-propagating variants — a propagating callback
   would re-bump on every observed bump and loop.
 - Routing-unavailable derivation: an account is routing-unavailable when the snapshot says

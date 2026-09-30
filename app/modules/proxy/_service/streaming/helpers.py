@@ -432,7 +432,6 @@ from app.modules.usage.updater import UsageUpdater
 
 class _HTTPPhaseLogFields(TypedDict):
     latency_first_token_ms: int | None
-    latency_queue_ms: int
     latency_first_upstream_event_ms: int | None
     latency_response_created_ms: int | None
 
@@ -444,7 +443,7 @@ class _HTTPPhaseLatencies:
     response_created_ms: int | None = None
 
     def parse_event(
-        self, line: str, started_at: float, observed_at: float
+        self, line: str, started_at: float, observed_at: Callable[[], float]
     ) -> tuple[dict[str, JsonValue] | None, str | None]:
         payload = parse_sse_data_json(line)
         event_type = classify_event_type(payload)
@@ -453,18 +452,21 @@ class _HTTPPhaseLatencies:
             and event_type != "codex.keepalive"
             and not (isinstance(line, ParsedSseBlock) and line.is_local)
             and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
+            and (
+                self.first_upstream_event_ms is None
+                or (self.response_created_ms is None and event_type == "response.created")
+            )
         ):
-            elapsed_ms = max(0, int((observed_at - started_at) * 1000))
+            elapsed_ms = max(0, int((observed_at() - started_at) * 1000))
             if self.first_upstream_event_ms is None:
                 self.first_upstream_event_ms = elapsed_ms
             if self.response_created_ms is None and event_type == "response.created":
                 self.response_created_ms = elapsed_ms
         return payload, event_type
 
-    def log_fields(self, queue_ms: int) -> _HTTPPhaseLogFields:
+    def log_fields(self) -> _HTTPPhaseLogFields:
         return {
             "latency_first_token_ms": self.first_token_ms,
-            "latency_queue_ms": queue_ms,
             "latency_first_upstream_event_ms": self.first_upstream_event_ms,
             "latency_response_created_ms": self.response_created_ms,
         }

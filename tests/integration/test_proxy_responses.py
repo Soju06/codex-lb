@@ -202,6 +202,9 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     assert row.latency_first_token_ms == expected_ttft
     assert row.latency_first_upstream_event_ms == expected_first
     assert row.latency_response_created_ms == expected_created
+    if case == "oversized":
+        event = _extract_first_event(response.text.splitlines())
+        assert event["response"]["error"]["code"] == "stream_event_too_large"
     if expected_ttft is not None:
         assert response is not None
         assert response.status_code == 200

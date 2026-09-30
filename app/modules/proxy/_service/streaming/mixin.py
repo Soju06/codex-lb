@@ -633,7 +633,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
-            first_payload, event_type = latencies.parse_event(first, attempt_started_at, first_observed_at)
+            first_payload, event_type = latencies.parse_event(first, attempt_started_at, lambda: first_observed_at)
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -790,7 +790,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.downstream_visible = True
                     yield line
                     continue
-                event_payload, event_type = latencies.parse_event(line, attempt_started_at, clock.monotonic())
+                event_payload, event_type = latencies.parse_event(line, attempt_started_at, clock.monotonic)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -1068,7 +1068,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
-                **latencies.log_fields(latency_queue_ms),
+                **latencies.log_fields(),
+                latency_queue_ms=latency_queue_ms,
                 latency_upstream_send_ms=0,  # attempt_started_at is re-anchored right before the upstream send
                 latency_upstream_terminal_ms=_upstream_terminal_latency_ms(settlement, attempt_started_at),
                 session_id=session_id,

@@ -90,6 +90,29 @@ def test_detect_changed_areas_falls_back_to_full_suite_after_github_outage(monke
 @pytest.mark.parametrize(
     "path",
     [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/codex-lb-protocol/src/lib.rs",
+        "crates/codex-lb-protocol/tests/fixtures/handshake-v1.json",
+        "Dockerfile",
+        "Dockerfile.distroless",
+    ],
+)
+def test_native_packaging_paths_trigger_the_backend_suite(path: str) -> None:
+    """`tests/unit/test_native_egress_packaging.py` asserts on these files.
+
+    When they only matched the `rust` area, a change to them left the pytest
+    matrix on its placeholder step, so the assertions first ran after the merge,
+    against `main`.
+    """
+    detect_changed_areas = _load_script_module("detect_changed_areas")
+
+    assert detect_changed_areas._matches(path, detect_changed_areas.FILTERS["backend"])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "app/core/clients/codex.py",
         "app/core/clients/http.py",
         "app/core/clients/proxy.py",

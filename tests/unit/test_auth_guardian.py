@@ -22,7 +22,7 @@ from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.unit
 
-_STALE_AGE = timedelta(days=refresh_module.TOKEN_REFRESH_INTERVAL_DAYS + 1)
+_STALE_AGE = timedelta(hours=13)
 
 
 def _stale_refresh(now: datetime, extra_days: int = 0) -> datetime:
@@ -89,7 +89,6 @@ def test_select_auth_guardian_candidates_returns_stale_eligible_accounts_only() 
     now = datetime(2026, 1, 2, 12, 0, 0)
     accounts = [
         _account("fresh-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=1)),
-        _account("thirteen-hour-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)),
         _account("stale-active", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now)),
         _account(
             "oldest-active",
@@ -117,21 +116,28 @@ def test_select_auth_guardian_candidates_returns_stale_eligible_accounts_only() 
     assert [account.id for account in batched] == ["oldest-active", "stale-paused"]
 
 
-def test_select_auth_guardian_candidates_tracks_shared_refresh_window(
+@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.PAUSED])
+@pytest.mark.parametrize("request_window_days", [1, 8, 30])
+def test_select_auth_guardian_candidates_preserves_idle_keepalive(
     monkeypatch: pytest.MonkeyPatch,
+    status: AccountStatus,
+    request_window_days: int,
 ) -> None:
     now = datetime(2026, 1, 10, 12, 0, 0)
-    account = _account(
-        "policy",
-        status=AccountStatus.ACTIVE,
-        last_refresh=now - timedelta(days=2),
-    )
+    account = _account("policy", status=status, last_refresh=now - timedelta(hours=13))
 
-    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 1)
+    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", request_window_days)
+    assert not refresh_module.should_refresh(account.last_refresh, now)
     assert select_auth_guardian_candidates([account], now=now, limit=10) == [account]
 
-    monkeypatch.setattr(refresh_module, "TOKEN_REFRESH_INTERVAL_DAYS", 3)
-    assert select_auth_guardian_candidates([account], now=now, limit=10) == []
+
+@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.PAUSED])
+@pytest.mark.parametrize("age_hours, eligible", [(11, False), (12, False), (13, True), (-1, False)])
+def test_auth_guardian_keepalive_boundary(status: AccountStatus, age_hours: int, eligible: bool) -> None:
+    now = datetime(2026, 1, 10, 12, 0, 0)
+    account = _account("boundary", status=status, last_refresh=now - timedelta(hours=age_hours))
+
+    assert bool(select_auth_guardian_candidates([account], now=now, limit=10)) is eligible
 
 
 def test_default_auth_manager_factory_uses_owned_refresh_repo() -> None:
@@ -309,7 +315,7 @@ def _tick_scheduler(
 async def test_auth_guardian_ticks_follow_the_dashboard_toggle_without_restart() -> None:
     """M2: booted enabled -> dashboard off -> next tick skipped -> dashboard on -> next tick runs."""
     now = datetime(2026, 1, 2, 12, 0, 0)
-    # Advance beyond the shared refresh window on each synthetic tick so the
+    # Advance beyond the idle keepalive window on each synthetic tick so the
     # account refreshed on the first tick is due again by the third.
     clock = {"now": now}
     calls: list[str] = []
@@ -413,7 +419,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
 
 
 @pytest.mark.asyncio
-async def test_auth_guardian_rechecks_shared_freshness_before_refresh() -> None:
+async def test_auth_guardian_rechecks_idle_keepalive_before_refresh() -> None:
     now = datetime(2026, 1, 2, 12, 0, 0)
     account = _account("became-fresh", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now))
     calls: list[str] = []
@@ -422,7 +428,7 @@ async def test_auth_guardian_rechecks_shared_freshness_before_refresh() -> None:
         async def get_by_id(self, account_id: str) -> Account | None:
             current = await super().get_by_id(account_id)
             if current is not None:
-                current.last_refresh = now - timedelta(hours=13)
+                current.last_refresh = now - timedelta(hours=1)
             return current
 
     scheduler = _tick_scheduler(
@@ -828,6 +834,26 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
     await scheduler._refresh_once()
 
     assert calls == ["runnable-older", "runnable-newer"]
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_admits_only_oldest_hundred_then_deferred_idle_account() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    accounts = [
+        _account(f"idle-{index}", status=AccountStatus.ACTIVE, last_refresh=_stale_refresh(now, index))
+        for index in range(101)
+    ]
+    calls: list[str] = []
+    scheduler = _tick_scheduler(calls, now=now, dashboard_enabled=_always_enabled, repo=_Repo(accounts))
+    scheduler.batch_size = 100
+
+    await scheduler._refresh_once()
+
+    assert calls == [f"idle-{index}" for index in range(100, 0, -1)]
+    assert accounts[0].last_refresh == _stale_refresh(now)
+    await scheduler._refresh_once()
+    assert calls[-1] == "idle-0"
+    assert len(calls) == 101
 
 
 @pytest.mark.asyncio

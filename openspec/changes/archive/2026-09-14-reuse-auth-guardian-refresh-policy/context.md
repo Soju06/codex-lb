@@ -1,5 +1,11 @@
 # Context: reuse the shared refresh policy in Auth Guardian
 
+> Superseded during PR #2429 review by
+> `openspec/changes/preserve-auth-guardian-idle-keepalive/`.
+> The shared eight-day guardian gate described below was rejected: idle
+> refresh-token keepalive retains its independent twelve-hour window. This
+> document records the original proposal, not the current operator contract.
+
 ## Purpose
 
 Auth Guardian exists so accounts that receive no traffic, especially paused

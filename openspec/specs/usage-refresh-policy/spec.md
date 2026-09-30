@@ -536,12 +536,12 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 
 ### Requirement: Operators can probe an account to wake the upstream limiter
 
-The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe `responses.create` MUST set `max_output_tokens` to `16`, the current Codex token floor; values below that floor MUST NOT be used. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
+The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe request MUST omit `max_output_tokens`, which the Codex Responses endpoint rejects. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
 
 #### Scenario: Probe wakes the upstream limiter and refreshes usage state
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
-- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=16`, `stream=true`, `store=false`
+- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `stream=true`, `store=false`, and no `max_output_tokens` field
 - **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
 - **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
 
@@ -847,14 +847,13 @@ Usage refresh MUST write usage and change account status only for the credential
 Codex-LB SHALL periodically scan account credentials in the background.
 Accounts with status `active` or `paused` SHALL be eligible for proactive
 credential refresh; accounts with status `reauth_required` or `deactivated`
-SHALL NOT be selected. Age eligibility MUST use the same shared proactive token
-freshness predicate as request preflight (`should_refresh(last_refresh, now)`),
-whose fixed window is eight days. Auth Guardian MUST NOT maintain an independent
-maximum refresh age or shorten the shared window. Candidate selection and the
-fresh per-account recheck MUST both use that predicate. Once the fresh row is
-admitted, the worker MUST call `ensure_fresh(..., force=True)` to execute that
-already-approved refresh without making a second age decision on a different
-clock. The six-hour scan cadence bounds only the time until the next
+SHALL NOT be selected. Guardian age eligibility MUST require `last_refresh`
+to be strictly older than twelve hours. This keepalive window MUST remain
+independent of request-preflight access-token freshness. Candidate selection and
+the fresh per-account recheck MUST apply the same guardian age and status
+conditions. Once the fresh row is admitted, the worker MUST force credential
+refresh without applying the request-preflight age gate again.
+The six-hour scan cadence bounds only the time until the next
 eligibility scan. Each pass MUST exclude accounts in active failure backoff and
 MUST admit no more than the fixed 100-account batch, ordered by oldest
 `last_refresh`; an eligible account outside that batch can therefore wait
@@ -876,22 +875,27 @@ pass while it is `false`, so a change made in the dashboard applies on the next
 pass on every replica without a restart. The multi-replica leader guard remains
 a precondition for any refresh work.
 
-#### Scenario: Idle active account crosses the shared refresh window
+#### Scenario: Idle active account crosses the keepalive window
 
 - **GIVEN** an account has status `active`
-- **AND** its `last_refresh` is more than eight days old
-- **WHEN** Auth Guardian runs on the elected leader
+- **AND** its `last_refresh` is more than twelve hours old
+- **WHEN** Auth Guardian runs on the elected leader and admits that account
 - **THEN** Codex-LB refreshes that account without requiring request traffic to
   select it first
 
-#### Scenario: Account inside the shared refresh window is skipped
+#### Scenario: Account at the keepalive boundary is skipped
 
 - **GIVEN** an account has status `active` or `paused`
-- **AND** the shared request-preflight `should_refresh` policy says its
-  credentials are still fresh
+- **AND** it was refreshed exactly twelve hours ago or more recently
 - **WHEN** Auth Guardian selects refresh candidates
 - **THEN** the account is not selected
-- **AND** no guardian-specific shorter age can make it eligible
+
+#### Scenario: Fresh row prevents a redundant refresh
+
+- **GIVEN** an account was selected as older than twelve hours
+- **AND** another owner refreshes it before the worker reads the fresh account row
+- **WHEN** the worker rechecks that row
+- **THEN** it skips the credential exchange if the account is no longer keepalive-eligible
 
 #### Scenario: Eligible account is outside the per-pass batch
 
@@ -902,19 +906,17 @@ a precondition for any refresh work.
 - **THEN** that account is not selected during that pass
 - **AND** it remains eligible for admission during a later scan
 
-#### Scenario: Shared refresh-policy change applies to the guardian
+#### Scenario: Request freshness changes do not change idle keepalive
 
-- **GIVEN** the shared `should_refresh` policy's fixed window changes
-- **WHEN** Auth Guardian evaluates an account at the same `last_refresh` and
-  current time as request preflight
-- **THEN** both paths reach the same freshness decision without a separate
-  guardian threshold change
+- **GIVEN** the request-preflight freshness window changes
+- **WHEN** Auth Guardian evaluates an active or paused account more than twelve hours after its last refresh
+- **THEN** guardian age eligibility remains true independently of request freshness
 
 #### Scenario: Idle paused account keeps its refresh token alive
 
 - **GIVEN** an account has status `paused`
-- **AND** its `last_refresh` is more than eight days old
-- **WHEN** Auth Guardian runs on the elected leader
+- **AND** its `last_refresh` is more than twelve hours old
+- **WHEN** Auth Guardian runs on the elected leader and admits that account
 - **THEN** Codex-LB refreshes that account's credentials
 - **AND** the account's status remains `paused`
 - **AND** the account remains excluded from request routing
@@ -922,7 +924,7 @@ a precondition for any refresh work.
 #### Scenario: Known-bad credentials are not refreshed
 
 - **GIVEN** an account has status `reauth_required` or `deactivated`
-- **AND** the shared refresh-age predicate would otherwise consider it stale
+- **AND** its `last_refresh` is more than twelve hours old
 - **WHEN** Auth Guardian selects refresh candidates
 - **THEN** the account is not selected
 

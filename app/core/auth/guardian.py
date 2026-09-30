@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol, cast
 
-from app.core.auth.refresh import RefreshError, should_refresh
+from app.core.auth.refresh import RefreshError
 from app.core.config.background_jobs import auth_guardian_blocked_by_topology, background_job_enabled
 from app.core.scheduling.leader_election_handle import (
     LeaderElectionLike as _LeaderElectionLike,
@@ -30,9 +30,11 @@ logger = logging.getLogger(__name__)
 
 # Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
 # The guardian is a background refresher; these values are implementation
-# details, not operator contract. ``AuthGuardianScheduler`` keeps them as
-# constructor fields so tests can exercise the behavior.
+# details, not operator settings. The scheduler exposes cadence and worker
+# limits for tests; idle keepalive has one fixed threshold at both age checks.
 _INTERVAL_SECONDS = 21600
+# Idle refresh-token keepalive is independent of request access-token freshness.
+_MAX_REFRESH_AGE_SECONDS = 43200
 _BATCH_SIZE = 100
 _CONCURRENCY = 3
 _JITTER_SECONDS = 300.0
@@ -40,7 +42,7 @@ _FAILURE_BACKOFF_BASE_SECONDS = 300.0
 _FAILURE_BACKOFF_MAX_SECONDS = 3600.0
 
 # RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
-# reconciliation, then become guardian-eligible within the canonical refresh window.
+# reconciliation, then become guardian-eligible within the idle keepalive window.
 _AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
 
 
@@ -308,7 +310,8 @@ def _auth_guardian_account_is_stale_eligible(
 ) -> bool:
     if account.status not in _AUTH_GUARDIAN_ELIGIBLE_STATUSES:
         return False
-    return should_refresh(account.last_refresh, now)
+    age = to_utc_naive(now) - to_utc_naive(account.last_refresh)
+    return age > timedelta(seconds=_MAX_REFRESH_AGE_SECONDS)
 
 
 async def _dashboard_guardian_enabled() -> bool:

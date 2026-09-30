@@ -1,3 +1,8 @@
+> Superseded during PR #2429 review by
+> `openspec/changes/preserve-auth-guardian-idle-keepalive/`.
+> The shared eight-day guardian gate was rejected; the live implementation and
+> main spec preserve independent twelve-hour idle refresh-token keepalive.
+
 ## Why
 
 Auth Guardian currently maintains a second credential-age policy alongside the

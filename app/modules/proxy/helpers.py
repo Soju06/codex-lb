@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam, is_upstream_usage_limit_message
 from app.core.openai.chat_responses import _coerce_number
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
@@ -37,8 +37,24 @@ PLAN_TYPE_PRIORITY = (
     "k12",
 )
 
-_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
+_USAGE_LIMIT_CODE = "usage_limit_reached"
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", _USAGE_LIMIT_CODE})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
+# The one normalized code that carries no classification decision of its own:
+# ``upstream_error`` is what a *missing* code normalizes to, which is exactly
+# the shape a message has to speak for. Every other code -- rate-limit, quota,
+# ``overloaded_error``, any transient code -- already decided what the failure
+# is, and a sentence must not be allowed to reverse that decision.
+#
+# ``invalid_request_error`` is deliberately excluded even though upstream does
+# reuse it for rejections it has no code for. It is also upstream's catch-all
+# for request-shaped 400s, whose message can quote request content back; and the
+# HTTP paths forward their status to the health write as evidence only
+# (``upstream_http_status``), never as the positional ``http_status`` the
+# classifier reads, so a status guard could not tell the two apart here. Reading
+# that code off a message would let an echoed sentence bench a serving account,
+# which is a worse failure than the one this predicate exists to fix.
+_MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
@@ -105,6 +121,27 @@ def is_upstream_model_capacity_error(message: str | None) -> bool:
     return any(marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS)
 
 
+def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -> bool:
+    """True when upstream says this account's usage limit is spent.
+
+    Either the code names the limit or the message does. The message-only form
+    is how the serialized ``response.failed`` frame arrives -- upstream sends
+    that frame with no status and no error code at all -- and it is the same
+    rejection the coded form carries, so a caller that keys on the literal code
+    alone answers "this account is fine" for a form upstream chooses freely.
+
+    Deliberately status-free: the same rejection arrives with a status and
+    without one, so a status could only make the two forms disagree. The
+    message is allowed to decide only where the code decided nothing; a coded
+    envelope keeps what its code said. Plain ``rate_limit_exceeded`` throttling
+    is not included -- it says the request arrived too fast, not that the
+    subscription window is exhausted.
+    """
+    return error_code == _USAGE_LIMIT_CODE or (
+        error_code in _MESSAGE_CLASSIFIED_CODES and is_upstream_usage_limit_message(message)
+    )
+
+
 def classify_upstream_failure(
     *,
     error_code: str,
@@ -117,6 +154,14 @@ def classify_upstream_failure(
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
+    elif is_upstream_usage_limit_rejection(error_code=error_code, message=error.get("message")):
+        # The same rejection, in the delivery form that carries no code: a
+        # spent account cannot be waited out on itself, so this must not reach
+        # the transient branch below, where an account with nothing left to
+        # give would be treated as momentarily busy. Only the code that decided
+        # nothing is raised this way; a coded envelope keeps the class its code
+        # chose.
+        failure_class = "rate_limit"
     elif (
         error_code in _TRANSIENT_CODES
         or is_upstream_model_capacity_error(error.get("message"))

@@ -214,10 +214,10 @@ Phase 1 (24 removed, 1 added; zero-risk internals):
   of them breaks login.
 - Auth guardian tuning (7 fields removed): interval 21600, max refresh
   age 43200, batch size 100, concurrency 3, jitter 300.0, failure backoff
-  base 300.0 / max 3600.0. The separate max-age constant was later retired;
-  candidate selection now reuses the fixed eight-day
-  `TOKEN_REFRESH_INTERVAL_DAYS` policy in `app/core/auth/refresh.py`. The
-  remaining guardian constants live in `app/core/auth/guardian.py`, and the
+  base 300.0 / max 3600.0. The fixed twelve-hour guardian keepalive remains
+  independent of request preflight's eight-day `TOKEN_REFRESH_INTERVAL_DAYS`
+  policy in `app/core/auth/refresh.py`. Guardian constants live in
+  `app/core/auth/guardian.py`, and the
   single switch is the dashboard setting `auth_guardian_enabled`
   (`CODEX_LB_AUTH_GUARDIAN_ENABLED` is a deprecated fallback while the
   dashboard value is unset).
@@ -426,7 +426,7 @@ and `constantize-token-refresh-interval` finished it (below).
 ### Removed by `constantize-token-refresh-interval`
 
 `CODEX_LB_TOKEN_REFRESH_INTERVAL_DAYS` is the 28th and last field of the
-`MIGRATING` backlog. The proactive refresh window is now the fixed eight-day
+`MIGRATING` backlog. The request-preflight refresh window is now the fixed eight-day
 `TOKEN_REFRESH_INTERVAL_DAYS` in `app/core/auth/refresh.py`, its previous
 default. It was never a recovery lever: an account is refreshed on demand on
 any upstream 401 whatever the window says, so shortening it only adds

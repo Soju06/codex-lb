@@ -10,13 +10,15 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
 import app.core.usage.reset_credits_refresh_scheduler as reset_credits_module
 import app.modules.automations.scheduler as automations_scheduler_module
-from app.core.auth.guardian import AuthGuardianScheduler
+from app.core.auth.guardian import AuthGuardianScheduler, build_auth_guardian_scheduler
+from app.core.auth.refresh import TokenRefreshResult, should_refresh
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.usage.reset_credits_refresh_scheduler import RateLimitResetCreditsRefreshScheduler
@@ -130,6 +132,57 @@ async def _create_account(account_id: str) -> Account:
         )
         await AccountsRepository(session).upsert(account)
     return account
+
+
+@pytest.mark.asyncio
+async def test_guardian_keeps_idle_active_and_paused_credentials_alive_before_request_freshness_expires(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = utcnow()
+    account_ids = ["guardian-idle-active", "guardian-idle-paused"]
+    for account_id in account_ids:
+        await _create_account(account_id)
+    async with SessionLocal() as session:
+        for account_id, status in zip(account_ids, (AccountStatus.ACTIVE, AccountStatus.PAUSED), strict=True):
+            account = await session.get(Account, account_id)
+            assert account is not None
+            account.last_refresh = now - timedelta(hours=13)
+            account.status = status
+            assert not should_refresh(account.last_refresh, now)
+        await session.commit()
+
+    exchanges: list[str] = []
+
+    async def refresh_token(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        exchanges.append(refresh_token)
+        return TokenRefreshResult(
+            access_token="rotated-access",
+            refresh_token=f"rotated-{refresh_token}",
+            id_token="rotated-id",
+            account_id=None,
+            plan_type=None,
+            email=None,
+        )
+
+    monkeypatch.setattr("app.modules.accounts.auth_manager.refresh_access_token", refresh_token)
+    scheduler = build_auth_guardian_scheduler()
+    scheduler.leader_election_enabled = True
+    scheduler.leader_election_factory = _AlwaysLeader
+    scheduler.now = lambda: now
+    await scheduler._refresh_once()
+
+    assert set(exchanges) == {f"refresh-{account_id}" for account_id in account_ids}
+    async with SessionLocal() as session:
+        for account_id, status in zip(account_ids, (AccountStatus.ACTIVE, AccountStatus.PAUSED), strict=True):
+            account = await session.get(Account, account_id)
+            assert account is not None
+            assert account.status == status
+            assert account.last_refresh >= now
+
+    exchanges.clear()
+    await scheduler._refresh_once()
+    assert exchanges == []
 
 
 @pytest.mark.asyncio

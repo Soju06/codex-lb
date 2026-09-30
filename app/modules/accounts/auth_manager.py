@@ -35,7 +35,12 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
 from app.modules.accounts.refresh_claims import RefreshClaimCoordinatorPort, get_refresh_claim_coordinator
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    propagate_account_routing_change,
+    request_account_routing_change,
+)
 from app.modules.proxy.work_admission import ADMISSION_WAIT_TIMEOUT_SECONDS
 
 
@@ -358,7 +363,14 @@ class AuthManager:
             return "<redacted>"
         return value
 
+    async def _publish_plan_change(self, previous_plan_type: str | None, account: Account) -> None:
+        if account.plan_type == previous_plan_type:
+            return
+        get_account_selection_cache().invalidate()
+        await propagate_account_routing_change()
+
     async def refresh_account(self, account: Account) -> Account:
+        previous_plan_type = account.plan_type
         claims = self._refresh_claims if self._refresh_claims is not None else get_refresh_claim_coordinator()
         if claims is None:
             requested_fingerprint = _refresh_token_material_fingerprint(
@@ -371,12 +383,24 @@ class AuthManager:
                     _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
                     != requested_fingerprint
                 ):
-                    return _adopt_account_row(account, latest)
-                _adopt_account_row(account, latest)
-                if account.status in _TERMINAL_REFRESH_STATUSES:
-                    raise _terminal_status_refresh_error(account)
-            return await self._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
-        return await self._refresh_account_with_claim(account, claims)
+                    refreshed = _adopt_account_row(account, latest)
+                else:
+                    _adopt_account_row(account, latest)
+                    if account.status in _TERMINAL_REFRESH_STATUSES:
+                        raise _terminal_status_refresh_error(account)
+                    refreshed = await self._perform_refresh(
+                        account,
+                        refresh_token_encrypted=account.refresh_token_encrypted,
+                    )
+            else:
+                refreshed = await self._perform_refresh(
+                    account,
+                    refresh_token_encrypted=account.refresh_token_encrypted,
+                )
+        else:
+            refreshed = await self._refresh_account_with_claim(account, claims)
+        await self._publish_plan_change(previous_plan_type, refreshed)
+        return refreshed
 
     async def _refresh_account_with_claim(
         self,
@@ -960,6 +984,7 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
+                request_account_routing_change()
                 get_account_selection_cache().invalidate()
                 logger.warning(
                     "Token-refresh compare-and-set for account_id=%s could not persist the freshly "
@@ -1082,6 +1107,8 @@ class AuthManager:
                 account.deactivation_reason = reason
                 if status == AccountStatus.DEACTIVATED:
                     mark_account_routing_unavailable(account.id)
+                elif status == AccountStatus.REAUTH_REQUIRED:
+                    request_account_routing_change()
                 get_account_selection_cache().invalidate()
                 return None
             # CAS missed: the freshly observed account state changed between the

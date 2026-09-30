@@ -3,7 +3,9 @@
 ## Purpose
 
 Define API key lifecycle, enforcement, accounting, and dashboard management contracts for downstream clients.
+
 ## Requirements
+
 ### Requirement: API Key creation
 
 The system SHALL allow the admin to create API keys via `POST /api/api-keys` with a `name` (required), `allowedModels` (optional list), `weeklyTokenLimit` (optional integer), `expiresAt` (optional ISO 8601 datetime), `assignedAccountIds` (optional list), and `usageSections` (optional comma-separated string, defaults to `"upstream_limits,account_pool_usage"`). The system MUST generate a key in the format `sk-clb-{48 hex chars}`, store only the `sha256` hash in the database, and return the plain key exactly once in the creation response. The system MUST accept timezone-aware ISO 8601 datetimes for `expiresAt`, normalize them to UTC naive for persistence, and return the expiration as UTC in API responses.
@@ -1943,3 +1945,32 @@ The database SHALL provide an index that supports filtering request logs by API 
 - **THEN** the `request_logs` table includes an index whose leading key columns are `api_key_id` and descending `requested_at`
 - **AND** the 7-day account-cost breakdown query for an API key is satisfiable by that index for its filter phase
 
+### Requirement: API keys may cap their estimated share of subscription quota
+
+An API key MAY store `usage_share_percent` (`usageSharePercent` in dashboard API payloads) as an integer from 1 through 100 inclusive. `null` or omission SHALL disable this policy. Create, update, list, detail, regenerate, and authentication-cache projection SHALL preserve the field. Existing keys SHALL remain unrestricted after migration.
+
+The percentages of different keys SHALL be independent caps and SHALL NOT be required to sum to 100, because keys may have different account scopes and operators may intentionally overcommit capacity.
+
+#### Scenario: Create a key with an estimated usage share
+
+- **WHEN** an operator creates an API key with `usageSharePercent: 20`
+- **THEN** the response reports `usageSharePercent: 20`
+- **AND** later authenticated requests carry the policy in their `ApiKeyData`
+
+#### Scenario: Clear an estimated usage share
+
+- **GIVEN** a key has `usageSharePercent: 20`
+- **WHEN** an operator updates it with `usageSharePercent: null`
+- **THEN** subsequent responses report `null`
+- **AND** share admission is disabled for that key
+
+#### Scenario: Reject an invalid estimated usage share
+
+- **WHEN** create or update supplies `0`, `101`, or a non-integer value
+- **THEN** the API rejects the request as invalid
+
+#### Scenario: Existing and unrelated edits preserve policy
+
+- **GIVEN** a migrated key has no usage-share policy, or a configured key has one
+- **WHEN** the migration runs or an unrelated field is edited without supplying `usageSharePercent`
+- **THEN** the existing null or configured value is preserved

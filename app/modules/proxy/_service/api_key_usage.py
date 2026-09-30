@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 from collections.abc import Coroutine, Mapping
@@ -28,6 +29,10 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUsageReservationData,
 )
+from app.modules.api_keys.usage_share import (
+    API_KEY_USAGE_SHARE_LIMIT_REACHED,
+    usage_share_limit_message,
+)
 from app.modules.proxy._service.support import (
     _ApiKeyReservationTouchState,
     _consume_api_key_reservation_heartbeat_result,
@@ -36,6 +41,7 @@ from app.modules.proxy._service.support import (
     _WebSocketRequestState,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
+from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -120,7 +126,83 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
     return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
+def _request_usage_refresh(proxy: Any, account_id: str) -> None:
+    schedule = getattr(proxy, "_schedule_cancel_safe_cleanup", None)
+    if schedule is None:
+        return
+    refresh = None
+    try:
+        refresh = UsageUpdater.request_refresh(account_id)
+        if refresh is not None:
+            schedule(refresh, action="request_usage_refresh", request_id=get_request_id() or "unknown")
+    except Exception:
+        if refresh is not None:
+            with contextlib.suppress(RuntimeError):
+                refresh.close()
+        logger.warning("Failed to schedule usage refresh account_id=%s", account_id, exc_info=True)
+
+
 class _ApiKeyUsageMixin:
+    def _enforce_api_key_usage_share(
+        self,
+        api_key: ApiKeyData | None,
+        request_id: str,
+        kind: str,
+    ) -> None:
+        if api_key is None:
+            return
+        if api_key.usage_share_unavailable_account_ids:
+            # Bound request-path work; the staggered scheduler rotates the rest.
+            _request_usage_refresh(self, api_key.usage_share_unavailable_account_ids[0])
+            logger.debug(
+                "API key usage-share estimate unavailable; admission allowed "
+                "request_id=%s kind=%s key_id=%s unavailable_accounts=%d",
+                request_id,
+                kind,
+                api_key.id,
+                len(api_key.usage_share_unavailable_account_ids),
+            )
+            return
+        estimate = api_key.usage_share_estimate
+        if estimate is None:
+            return
+        snapshot_expires_at = estimate.snapshot_expires_at
+        if snapshot_expires_at is not None and snapshot_expires_at <= int(clock_for(self).time()):
+            logger.debug(
+                "API key usage-share snapshot expired before admission; admission allowed "
+                "request_id=%s kind=%s key_id=%s snapshot_expires_at=%d",
+                request_id,
+                kind,
+                api_key.id,
+                snapshot_expires_at,
+            )
+            return
+        if not estimate.exceeded:
+            return
+        logger.info(
+            "API key usage-share limit reached request_id=%s kind=%s key_id=%s "
+            "configured_percent=%d estimated_credits=%.3f allowance_credits=%.3f "
+            "capacity_credits=%.3f accounts=%d",
+            request_id,
+            kind,
+            api_key.id,
+            estimate.configured_percent,
+            estimate.estimated_used_credits,
+            estimate.allowance_credits,
+            estimate.capacity_credits,
+            estimate.account_count,
+        )
+        raise ProxyResponseError(
+            429,
+            openai_error(
+                API_KEY_USAGE_SHARE_LIMIT_REACHED,
+                usage_share_limit_message(estimate),
+                error_type="rate_limit_error",
+                resets_at=estimate.reset_at,
+            ),
+            local_pre_dispatch_refusal=True,
+        )
+
     async def _reserve_websocket_api_key_usage(
         self,
         api_key: ApiKeyData | None,

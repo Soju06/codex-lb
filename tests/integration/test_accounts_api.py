@@ -39,7 +39,15 @@ def _reset_credit_snapshot(credit_id: str) -> RateLimitResetCreditsSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_import_and_list_accounts(async_client):
+async def test_import_and_list_accounts(async_client, monkeypatch):
+    routing_changes = 0
+
+    async def publish_routing_change() -> bool:
+        nonlocal routing_changes
+        routing_changes += 1
+        return True
+
+    monkeypatch.setattr("app.modules.accounts.service.propagate_account_routing_change", publish_routing_change)
     email = "tester@example.com"
     raw_account_id = "acc_explicit"
     payload = {
@@ -64,6 +72,7 @@ async def test_import_and_list_accounts(async_client):
     assert data["accountId"] == expected_account_id
     assert data["email"] == email
     assert data["planType"] == "plus"
+    assert routing_changes == 1
 
     list_response = await async_client.get("/api/accounts")
     assert list_response.status_code == 200

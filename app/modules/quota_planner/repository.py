@@ -7,12 +7,9 @@ from typing import cast as typing_cast
 
 from sqlalchemy import (
     ColumnElement,
-    Integer,
     and_,
-    cast,
     false,
     func,
-    literal,
     literal_column,
     or_,
     select,
@@ -37,6 +34,7 @@ from app.modules.accounts.usage_time_rollup_read import (
     DemandSlotUnitsRow,
     RawWindow,
     demand_units_sql_expr,
+    raw_demand_grain_stmt,
     raw_windows_clause,
     read_demand_slot_units_window,
     read_demand_window,
@@ -611,7 +609,11 @@ class QuotaPlannerRepository:
         self, windows: list[RawWindow], bucket_seconds: int
     ) -> list[DemandSlotUnitsRow]:
         dialect = self._dialect_name()
-        grain = self._raw_demand_bins_stmt(windows, bucket_seconds, dialect).subquery("demand_grain")
+        grain = raw_demand_grain_stmt(
+            self._session,
+            bucket_seconds,
+            filters=(raw_windows_clause(windows),),
+        ).subquery("demand_grain")
         units_expr = demand_units_sql_expr(
             dialect=dialect,
             input_tokens=grain.c.input_tokens,
@@ -640,7 +642,11 @@ class QuotaPlannerRepository:
         return bind.dialect.name if bind else "sqlite"
 
     async def _aggregate_demand_bins_raw(self, windows: list[RawWindow], bucket_seconds: int) -> list[DemandBin]:
-        stmt = self._raw_demand_bins_stmt(windows, bucket_seconds, self._dialect_name())
+        stmt = raw_demand_grain_stmt(
+            self._session,
+            bucket_seconds,
+            filters=(raw_windows_clause(windows),),
+        )
         result = await self._session.execute(stmt)
         return [
             DemandBin(
@@ -659,48 +665,6 @@ class QuotaPlannerRepository:
             )
             for row in result.all()
         ]
-
-    @staticmethod
-    def _raw_demand_bins_stmt(windows: list[RawWindow], bucket_seconds: int, dialect: str):
-        """Legacy-grain GROUP BY over the raw ``request_logs`` tail."""
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
-        else:
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
-        bucket_col = bucket_expr.label("slot_epoch")
-        request_kind = func.coalesce(RequestLog.request_kind, literal("real")).label("request_kind")
-        stmt = (
-            select(
-                bucket_col,
-                RequestLog.account_id,
-                RequestLog.api_key_id,
-                RequestLog.model,
-                RequestLog.reasoning_effort,
-                request_kind,
-                RequestLog.status,
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(
-                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
-                    0,
-                ).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-                func.count(RequestLog.id).label("request_count"),
-            )
-            .where(and_(raw_windows_clause(windows), RequestLog.deleted_at.is_(None)))
-            .group_by(
-                bucket_col,
-                RequestLog.account_id,
-                RequestLog.api_key_id,
-                RequestLog.model,
-                RequestLog.reasoning_effort,
-                request_kind,
-                RequestLog.status,
-            )
-            .order_by(bucket_col)
-        )
-        return stmt
 
 
 def _settings_from_row(row: QuotaPlannerSettings) -> PlannerSettings:

@@ -27,6 +27,14 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+## Estimated usage-share limits
+
+An API key can optionally cap its estimated share of its subscription-account pool. A 20% cap gives it an estimated budget equal to 20% of the normalized long-window capacity of its assigned accounts, or of the eligible global pool when the key is unscoped. The cap can be combined with fixed token and dollar limits.
+
+For each account, Codex-LB attributes the account's used long-window credits in proportion to the key's tracked demand from the current quota-window start through that usage sample's recording time. Later requests wait for a later upstream sample instead of inheriting earlier pool usage. Unkeyed generation and internal warm-up remain unattributed pool demand. Model-source, file, metadata, control, thread-goal, and realtime traffic is excluded from attribution and is never denied by this policy. A key with no tracked generation demand therefore has zero estimated usage even when other keys have heavily used the pool. Quota resets, plan changes, and pool membership changes automatically resize the estimate.
+
+The estimate is deliberately approximate and slightly delayed. OpenAI does not report exact subscription-quota cost per request, request logs settle after work completes, and direct account usage outside Codex-LB cannot be attributed. Missing or stale upstream evidence fails open rather than falsely blocking the key. The request path requests at most one immediate coalesced account refresh; the normal staggered scheduler covers the rest of the pool without a refresh burst. A failure to schedule that best-effort wake-up is logged and does not reject the request. Local pre-dispatch refusals are account-neutral and therefore do not feed their own future estimate. Concurrent requests can briefly overshoot the cap.
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

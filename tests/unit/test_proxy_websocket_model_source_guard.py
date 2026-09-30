@@ -17,7 +17,7 @@ import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -152,8 +152,12 @@ async def _run_connect_guard(
 
 @pytest.mark.asyncio
 async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    usage_share_guard = Mock(side_effect=AssertionError("source routing must precede usage-share admission"))
+    monkeypatch.setattr(proxy_service.ProxyService, "_enforce_api_key_usage_share", usage_share_guard)
+
     account, upstream, emitted, selection_calls, _ = await _run_connect_guard(monkeypatch, is_source_owned=True)
 
+    usage_share_guard.assert_not_called()
     assert account is None
     assert upstream is None
     assert selection_calls == 0, "the guard must short-circuit before account selection"
@@ -169,6 +173,23 @@ async def test_connect_guard_ignores_subscription_models(monkeypatch: pytest.Mon
     assert account is None  # the stubbed selector returns no account
     assert selection_calls >= 1, "subscription models must proceed to account selection"
     assert emitted == {}
+
+
+@pytest.mark.asyncio
+async def test_subscription_connect_admits_with_the_refreshed_request_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_key = _api_key()
+    refreshed_key = _api_key(enforced_model="gpt-5.4")
+    usage_share_guard = Mock()
+    monkeypatch.setattr(proxy_service.ProxyService, "_enforce_api_key_usage_share", usage_share_guard)
+
+    await _run_connect_guard(
+        monkeypatch,
+        is_source_owned=False,
+        api_key=session_key,
+        request_state_api_key=refreshed_key,
+    )
+
+    usage_share_guard.assert_called_once_with(refreshed_key, "req-ws-guard", "websocket")
 
 
 @pytest.mark.asyncio
@@ -333,7 +354,8 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_ws_source_guard_reuse")
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
@@ -367,6 +389,11 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
     )
     assert len(upstream.sent_text) == 1, "the rejected turn must not be forwarded upstream"
     assert released.await_count >= 1, "the rejected turn must release its usage reservation"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    refusal = next(
+        call for call in request_logs.calls if call.get("error_code") == "model_source_requires_http_transport"
+    )
+    assert refusal["account_id"] is None
 
 
 def _alias_allowlist_api_key() -> ApiKeyData:

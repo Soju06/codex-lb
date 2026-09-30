@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -1399,6 +1399,43 @@ async def test_force_refresh_uses_access_token_override(monkeypatch: pytest.Monk
     assert calls == [{"access_token": "caller-token", "account_id": "workspace_override"}]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "error_code"),
+    [(401, None), (403, "account_deactivated")],
+)
+@pytest.mark.asyncio
+async def test_reauth_stored_token_auth_failure_neither_exchanges_nor_changes_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    error_code: str | None,
+) -> None:
+    from app.core.clients.usage import UsageFetchError
+
+    async def fetch_usage_failure(**_: Any) -> UsagePayload:
+        raise UsageFetchError(status_code, "Authorization failed", code=error_code)
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fetch_usage_failure)
+    account = _make_account("acc_reauth_probe_failure", "workspace_reauth_probe_failure")
+    account.status = AccountStatus.REAUTH_REQUIRED
+    accounts_repo = StubAccountsRepository()
+    accounts_repo.accounts_by_id[account.id] = account
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=accounts_repo)
+    assert updater._auth_manager is not None
+    ensure_fresh = AsyncMock()
+    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", ensure_fresh)
+
+    result = await updater._refresh_account(
+        account,
+        usage_account_id=account.chatgpt_account_id,
+        access_token_override="last-stored-access-token",
+    )
+
+    assert result.fetch_succeeded is False
+    ensure_fresh.assert_not_awaited()
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert accounts_repo.status_updates == []
+
+
 @pytest.mark.asyncio
 async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_available(monkeypatch) -> None:
 
@@ -2123,6 +2160,10 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
         )
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    selection_cache = Mock()
+    publish_pool_change = AsyncMock(return_value=True)
+    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(usage_updater_module, "propagate_account_routing_change", publish_pool_change)
 
     usage_repo = StubUsageRepository(return_rows=True)
     accounts_repo = StubAccountsRepository()
@@ -2137,6 +2178,31 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
     assert usage_repo.entries != []
     assert account.plan_type == "pro"
     assert account.workspace_id is None
+    selection_cache.invalidate.assert_called_once_with()
+    publish_pool_change.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_metadata_only_change_does_not_publish_pool_change(monkeypatch) -> None:
+    selection_cache = Mock()
+    publish_pool_change = AsyncMock(return_value=True)
+    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(usage_updater_module, "propagate_account_routing_change", publish_pool_change)
+
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=accounts_repo)
+    account = _make_account("acc_metadata_only", "upstream_user", email="same@example.com")
+    account.workspace_label = "Old label"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    assert await updater._sync_identity_metadata(
+        account,
+        UsagePayload(plan_type="plus", workspace_label="New label"),
+    )
+
+    assert account.workspace_label == "New label"
+    selection_cache.invalidate.assert_not_called()
+    publish_pool_change.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3106,6 +3172,8 @@ async def test_usage_updater_marks_session_failures_as_reauth_required(
         raise UsageFetchError(401, message, code=error_code)
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_session_failure)
+    routing_change = Mock()
+    monkeypatch.setattr(usage_updater_module, "request_account_routing_change", routing_change)
 
     usage_repo = StubUsageRepository()
     accounts_repo = StubAccountsRepository()
@@ -3123,6 +3191,7 @@ async def test_usage_updater_marks_session_failures_as_reauth_required(
     assert "401" in update["deactivation_reason"]
     assert message_hint in update["deactivation_reason"]
     assert acc.status == AccountStatus.REAUTH_REQUIRED
+    routing_change.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -5210,9 +5279,37 @@ async def test_requested_refresh_uses_fresh_row_and_bypasses_freshness(monkeypat
     assert stored_account.id not in usage_updater_module._usage_refresh_auth_cooldowns
 
 
+@pytest.mark.asyncio
+async def test_requested_refresh_uses_stored_access_token_for_reauth_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored_account = _make_account("acc_request_reauth", "workspace_request_reauth")
+    stored_account.status = AccountStatus.REAUTH_REQUIRED
+    lookups: list[str] = []
+    _install_owned_session_row(monkeypatch, stored_account, lookups=lookups)
+    refreshed: list[tuple[Account, str | None, str | None]] = []
+
+    async def fake_refresh_account(
+        self: UsageUpdater,
+        account: Account,
+        *,
+        usage_account_id: str | None,
+        access_token_override: str | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        refreshed.append((account, usage_account_id, access_token_override))
+        return usage_updater_module.AccountRefreshResult(usage_written=False, fetch_succeeded=True)
+
+    monkeypatch.setattr(UsageUpdater, "_refresh_account", fake_refresh_account)
+
+    await usage_updater_module._run_requested_refresh(stored_account.id)
+
+    assert lookups == [stored_account.id]
+    assert refreshed == [(stored_account, stored_account.chatgpt_account_id, "access")]
+
+
 @pytest.mark.parametrize(
     "stored_status",
-    [None, AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED],
+    [None, AccountStatus.PAUSED, AccountStatus.DEACTIVATED],
 )
 @pytest.mark.asyncio
 async def test_requested_refresh_skips_missing_or_ineligible_rows(

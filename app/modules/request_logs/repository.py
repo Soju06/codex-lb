@@ -1045,6 +1045,9 @@ class RequestLogsRepository:
         sticky_kind: str | None = None,
         sticky_key_hash: str | None = None,
     ) -> RequestLog:
+        if account_id is not None and model_source_id is not None:
+            raise ValueError("request log cannot belong to both an account and a model source")
+
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
             # row, so its commit may skip the synchronous WAL flush.

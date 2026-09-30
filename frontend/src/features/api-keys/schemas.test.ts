@@ -61,6 +61,7 @@ describe("ApiKeySchema", () => {
     expect(parsed.pooledRemainingPercentPrimary).toBeNull();
     expect(parsed.pooledRemainingPercentSecondary).toBeNull();
     expect(parsed.pooledCapacityCreditsPrimary).toBe(0);
+    expect(parsed.usageSharePercent).toBeNull();
   });
 
   it("parses pooled credit fields", () => {
@@ -151,6 +152,18 @@ describe("ModelItemSchema", () => {
 });
 
 describe("ApiKeyCreateRequestSchema", () => {
+  it("accepts an estimated usage-share percentage", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Adaptive key",
+      usageSharePercent: 20,
+    });
+
+    expect(parsed.usageSharePercent).toBe(20);
+    for (const usageSharePercent of [0, 101, 1.5]) {
+      expect(ApiKeyCreateRequestSchema.safeParse({ name: "Bad key", usageSharePercent }).success).toBe(false);
+    }
+  });
+
   it("accepts optional assigned accounts", () => {
     const parsed = ApiKeyCreateRequestSchema.parse({
       name: "Scoped Key",
@@ -227,6 +240,10 @@ describe("ApiKeyCreateRequestSchema", () => {
 });
 
 describe("ApiKeyUpdateRequestSchema", () => {
+  it("accepts clearing an estimated usage-share percentage", () => {
+    expect(ApiKeyUpdateRequestSchema.parse({ usageSharePercent: null }).usageSharePercent).toBeNull();
+  });
+
   it("accepts partial update payload", () => {
     const parsed = ApiKeyUpdateRequestSchema.parse({
       name: "Updated Key",

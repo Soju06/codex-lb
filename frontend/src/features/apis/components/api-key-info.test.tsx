@@ -108,10 +108,11 @@ describe("ApiKeyInfo", () => {
 		expect(screen.getByText(/\$1.23/)).toBeInTheDocument();
 	});
 
-	it("shows an empty limits state when no limits are configured", () => {
+	it("shows an empty fixed-limits state when no fixed limits are configured", () => {
 		render(<ApiKeyInfo apiKey={createApiKey({ limits: [] })} />);
 
-		expect(screen.getByText("No limits configured")).toBeInTheDocument();
+		expect(screen.getByText("Fixed limits")).toBeInTheDocument();
+		expect(screen.getByText("No fixed limits configured")).toBeInTheDocument();
 	});
 
 	it("renders configured token and cost limits with model filters", () => {
@@ -148,4 +149,15 @@ describe("ApiKeyInfo", () => {
 		expect(screen.getByText(/Cost \(USD\) \(monthly, all\)/)).toBeInTheDocument();
 		expect(screen.getByText(/\$1.50 \/ \$5.00/)).toBeInTheDocument();
 	});
+	it("shows the estimated allocation separately from fixed limits", () => {
+		render(
+			<ApiKeyInfo apiKey={createApiKey({ usageSharePercent: 20, limits: [] })} />,
+		);
+
+		expect(screen.getByText("Estimated pool allocation (%)")).toBeInTheDocument();
+		expect(screen.getByText("20%")).toBeInTheDocument();
+		expect(screen.getByText("Fixed limits")).toBeInTheDocument();
+		expect(screen.getByText("No fixed limits configured")).toBeInTheDocument();
+	});
+
 });

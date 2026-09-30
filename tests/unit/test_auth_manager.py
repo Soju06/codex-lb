@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -359,6 +360,10 @@ async def test_refresh_account_preserves_plan_type_when_missing(monkeypatch):
         )
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    selection_cache = Mock()
+    publish_pool_change = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth_manager_module, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(auth_manager_module, "propagate_account_routing_change", publish_pool_change)
 
     encryptor = TokenEncryptor()
     account = Account(
@@ -380,6 +385,91 @@ async def test_refresh_account_preserves_plan_type_when_missing(monkeypatch):
     assert updated.plan_type == "pro"
     assert repo.tokens_payload is not None
     assert repo.tokens_payload["plan_type"] == "pro"
+    selection_cache.invalidate.assert_not_called()
+    publish_pool_change.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_publishes_plan_change_after_token_rotation(monkeypatch):
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id="acc_plan_rotation",
+            plan_type="pro",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    selection_cache = Mock()
+    publish_pool_change = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth_manager_module, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(auth_manager_module, "propagate_account_routing_change", publish_pool_change)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_plan_rotation",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+
+    updated = await AuthManager(cast(AccountsRepositoryPort, repo)).refresh_account(account)
+
+    assert updated.plan_type == "pro"
+    selection_cache.invalidate.assert_called_once_with()
+    publish_pool_change.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_publishes_plan_change_when_adopting_peer_rotation(monkeypatch):
+    async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        raise AssertionError("a newer peer rotation must be adopted without another exchange")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+    selection_cache = Mock()
+    publish_pool_change = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth_manager_module, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(auth_manager_module, "propagate_account_routing_change", publish_pool_change)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_peer_plan_rotation",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    peer_refresh_token = encryptor.encrypt("refresh-peer")
+
+    class _InPlacePeerRepo(_DummyRepo):
+        async def get_by_id_fresh(self, account_id: str) -> Account | None:
+            assert account_id == account.id
+            # SQLAlchemy's populate_existing path may refresh the caller's
+            # identity-map object in place. Publication must compare against the
+            # plan captured before this read, not the already-mutated object.
+            account.plan_type = "pro"
+            account.refresh_token_encrypted = peer_refresh_token
+            return account
+
+    updated = await AuthManager(cast(AccountsRepositoryPort, _InPlacePeerRepo())).refresh_account(account)
+
+    assert updated is account
+    assert updated.plan_type == "pro"
+    assert updated.refresh_token_encrypted == peer_refresh_token
+    selection_cache.invalidate.assert_called_once_with()
+    publish_pool_change.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1609,6 +1699,12 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
         )
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    routing_changes: list[bool] = []
+    monkeypatch.setattr(
+        auth_manager_module,
+        "request_account_routing_change",
+        lambda: routing_changes.append(True),
+    )
 
     encryptor = TokenEncryptor()
     account = Account(
@@ -1646,6 +1742,7 @@ async def test_refresh_flags_reauth_when_cas_never_lands_on_same_plaintext_storm
     assert None not in repo.update_attempts
     assert all(expected is not None for expected in repo.update_attempts)
     assert repo.tokens_payload is None
+    assert routing_changes == [True]
 
 
 @pytest.mark.asyncio
@@ -2880,6 +2977,12 @@ async def test_refresh_account_requires_reauth_when_upstream_session_is_invalid(
         raise RefreshError(error_code, message, classify_refresh_error(error_code))
 
     monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+    routing_changes: list[bool] = []
+    monkeypatch.setattr(
+        auth_manager_module,
+        "request_account_routing_change",
+        lambda: routing_changes.append(True),
+    )
 
     encryptor = TokenEncryptor()
     stale_refresh = utcnow().replace(year=utcnow().year - 1)
@@ -2911,3 +3014,4 @@ async def test_refresh_account_requires_reauth_when_upstream_session_is_invalid(
     reason = repo.status_payload["deactivation_reason"]
     assert isinstance(reason, str)
     assert "re-login" in reason.lower() or "expired" in reason.lower()
+    assert routing_changes == [True]

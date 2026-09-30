@@ -103,6 +103,12 @@ export function ApiKeyInfo({
 						{expired ? t("common.states.expired") : formatExpiry(apiKey.expiresAt, t("common.time.never"), dateDisplayFormat)}
 					</dd>
 				</div>
+				{apiKey.usageSharePercent !== null ? (
+					<div className="flex items-center justify-between gap-2">
+						<dt className="text-muted-foreground">{t("apiKeys.form.usageSharePercent")}</dt>
+						<dd className="font-medium tabular-nums">{apiKey.usageSharePercent}%</dd>
+					</div>
+				) : null}
 				<div className="flex items-start justify-between gap-2">
 					<dt className="text-muted-foreground">{t("apiKeys.table.usage")}</dt>
 					<dd className="text-right tabular-nums">
@@ -133,7 +139,7 @@ export function ApiKeyInfo({
 				</div>
 				<div className="space-y-1.5">
 					<div className="flex items-center justify-between gap-2">
-						<dt className="text-muted-foreground">{t("apiKeys.form.limits")}</dt>
+						<dt className="text-muted-foreground">{t("apis.keyInfo.fixedLimits")}</dt>
 						<dd className="text-right tabular-nums">
 							{apiKey.limits.length > 0 ? (
 								<span className="font-medium">

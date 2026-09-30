@@ -38,7 +38,11 @@ from app.modules.automations.repository import (
     effective_compact_request_budget_seconds,
     run_stale_started_before,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    request_account_routing_change,
+)
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.request_policy import resolve_wire_reasoning_effort
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -2149,6 +2153,8 @@ class AutomationsService:
         account.blocked_at = None
         if status == AccountStatus.DEACTIVATED:
             mark_account_routing_unavailable(account.id)
+        elif status == AccountStatus.REAUTH_REQUIRED:
+            request_account_routing_change()
         get_account_selection_cache().invalidate()
 
 

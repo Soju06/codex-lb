@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 import anyio
 from sqlalchemy import select
 
+from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_API_KEY,
     get_cache_invalidation_poller,
 )
 from app.db.models import Account, AccountStatus
@@ -122,13 +124,13 @@ class RoutingAvailabilityCache:
 
     def mark_unavailable(self, account_id: str) -> None:
         self._local_marks.add(account_id)
-        _request_account_routing_bump()
+        request_account_routing_change()
 
     def clear_unavailable(self, account_id: str) -> None:
         self._local_marks.discard(account_id)
         if self._snapshot is not None:
             self._snapshot[account_id] = AccountStatus.ACTIVE
-        _request_account_routing_bump()
+        request_account_routing_change()
 
     def is_unavailable(self, account_id: str) -> bool:
         if account_id in self._local_marks:
@@ -192,10 +194,14 @@ def get_routing_availability_cache() -> RoutingAvailabilityCache:
     return _routing_availability_cache
 
 
-def _request_account_routing_bump() -> None:
+def request_account_routing_change() -> None:
+    """Evict allocation policy and publish each cache's own namespace."""
+
+    get_api_key_cache().clear()
     poller = get_cache_invalidation_poller()
     if poller is not None:
         poller.request_bump(NAMESPACE_ACCOUNT_ROUTING)
+        poller.request_bump(NAMESPACE_API_KEY)
 
 
 def mark_account_routing_unavailable(account_id: str) -> None:
@@ -215,15 +221,25 @@ def is_account_routing_unavailable(account_id: str) -> bool:
 
 
 async def propagate_account_routing_change() -> bool:
-    """Durably bump the ``account_routing`` namespace before returning.
+    """Durably publish routing and allocation-pool changes before returning.
 
-    Used by API-endpoint mutation paths (pause/reactivate/delete, OAuth re-auth,
-    proxy-binding reactivation) so the cross-replica signal is written before the
-    HTTP response returns. Returns False when no poller is wired or the bump failed
-    after retries; the coalesced bump enqueued by ``mark_``/``clear_`` remains the
-    fallback path.
+    Used by committed account-pool mutations (pause/reactivate/delete/import,
+    OAuth re-auth, proxy-binding reactivation, and plan sync) so peers refresh
+    routing state and evict cached API-key allocation snapshots through their
+    own namespaces. Returns False if no poller is wired or either write fails;
+    failed writes are explicitly queued through the existing retry path.
     """
+    # Keep this correct for callers that publish a committed routing change
+    # without first passing through mark_/clear_. Those helpers already clear
+    # locally; a second clear is cheap and also fences an in-flight stale load.
+    get_api_key_cache().clear()
     poller = get_cache_invalidation_poller()
     if poller is None:
         return False
-    return await poller.bump(NAMESPACE_ACCOUNT_ROUTING)
+    routing_published = await poller.bump(NAMESPACE_ACCOUNT_ROUTING)
+    if not routing_published:
+        poller.request_bump(NAMESPACE_ACCOUNT_ROUTING)
+    policy_published = await poller.bump(NAMESPACE_API_KEY)
+    if not policy_published:
+        poller.request_bump(NAMESPACE_API_KEY)
+    return routing_published and policy_published

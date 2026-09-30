@@ -82,6 +82,25 @@ async def test_add_log_persists_request_and_connection_kinds(db_setup) -> None:
 
 
 @pytest.mark.asyncio
+async def test_add_log_rejects_mixed_account_and_model_source_attribution(db_setup) -> None:
+    del db_setup
+    async with SessionLocal() as session:
+        repository = RequestLogsRepository(session)
+        with pytest.raises(ValueError, match="both an account and a model source"):
+            await repository.add_log(
+                account_id="account",
+                model_source_id="source",
+                request_id="mixed-attribution",
+                model="gpt-5.2",
+                input_tokens=10,
+                output_tokens=5,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+            )
+
+
+@pytest.mark.asyncio
 async def test_request_log_listing_preserves_optional_affinity_metadata(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

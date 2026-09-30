@@ -47,6 +47,21 @@ describe("ApiKeyTable", () => {
     expect(within(secondRow).getByText("No Limit")).toBeInTheDocument();
   });
 
+  it("renders the estimated pool cap without a no-limit label", () => {
+    renderWithProviders(
+      <ApiKeyTable
+        keys={[createApiKey({ usageSharePercent: 20 })]}
+        busy={false}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onRegenerate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Est\. pool cap 20%/)).toBeInTheDocument();
+    expect(screen.queryByText("No Limit")).not.toBeInTheDocument();
+  });
+
   it("renders traffic class labels in the traffic column", () => {
     const keys = [
       createApiKey({ id: "foreground-key", trafficClass: "foreground" }),

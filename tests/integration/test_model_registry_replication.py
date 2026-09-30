@@ -220,7 +220,7 @@ async def test_catalog_clear_propagates_to_follower(async_client) -> None:
 async def test_lost_bump_converges_via_non_leader_tick_without_upstream_fetch(db_setup, monkeypatch) -> None:
     del db_setup
     content_hash = await _leader_persist(await _refreshed_leader_export())
-    # No bump: simulate the documented bump() swallow-on-failure.
+    # No bump: simulate origin loss before its queued retry can drain.
 
     fetch_calls: list[str] = []
 

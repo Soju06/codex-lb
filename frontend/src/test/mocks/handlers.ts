@@ -166,6 +166,7 @@ const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
+  usageSharePercent: z.number().int().min(1).max(100).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
 });
@@ -179,6 +180,7 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
   allowedModels: z.array(z.string()).nullable().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
+  usageSharePercent: z.number().int().min(1).max(100).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
@@ -2855,18 +2857,25 @@ export const handlers = [
 
   http.post("/api/api-keys/", async ({ request }) => {
     const payload = await parseJsonBody(request, ApiKeyCreatePayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid payload" } },
+        { status: 422 },
+      );
+    }
     const sequence = state.apiKeys.length + 1;
     const created = createApiKeyCreateResponse({
       ...createApiKey({
         id: `key_${sequence}`,
-        name: payload?.name ?? `API Key ${sequence}`,
+        ...(payload.name !== undefined ? { name: payload.name } : {}),
         accountAssignmentScopeEnabled:
-          (payload?.assignedAccountIds?.length ?? 0) > 0,
+          (payload.assignedAccountIds?.length ?? 0) > 0,
         sourceAssignmentScopeEnabled:
-          (payload?.assignedSourceIds?.length ?? 0) > 0,
-        assignedAccountIds: payload?.assignedAccountIds ?? [],
-        assignedSourceIds: payload?.assignedSourceIds ?? [],
-        trafficClass: payload?.trafficClass ?? "foreground",
+          (payload.assignedSourceIds?.length ?? 0) > 0,
+        assignedAccountIds: payload.assignedAccountIds ?? [],
+        assignedSourceIds: payload.assignedSourceIds ?? [],
+        trafficClass: payload.trafficClass ?? "foreground",
+        usageSharePercent: payload.usageSharePercent ?? null,
       }),
       key: `sk-test-generated-${sequence}`,
     });
@@ -2885,7 +2894,10 @@ export const handlers = [
     }
     const payload = await parseJsonBody(request, ApiKeyUpdatePayloadSchema);
     if (!payload) {
-      return HttpResponse.json(existing);
+      return HttpResponse.json(
+        { error: { code: "validation_error", message: "Invalid payload" } },
+        { status: 422 },
+      );
     }
 
     // Build override with converted limits (create format → response format)
@@ -2897,6 +2909,9 @@ export const handlers = [
       ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
       ...(payload.trafficClass !== undefined
         ? { trafficClass: payload.trafficClass }
+        : {}),
+      ...(payload.usageSharePercent !== undefined
+        ? { usageSharePercent: payload.usageSharePercent }
         : {}),
       ...(payload.assignedAccountIds !== undefined
         ? {

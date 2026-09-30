@@ -899,8 +899,8 @@ class UsageUpdater:
         account.seat_type = next_seat_type
         if plan_changed:
             # Plan changes alter both routing inputs and usage-share capacity.
-            # Selection uses its narrow cache namespace; account_routing carries
-            # the existing cluster-wide allocation-policy eviction.
+            # Selection uses its narrow cache namespace; publish routing and
+            # API-key allocation eviction through their respective namespaces.
             get_account_selection_cache().invalidate()
             await propagate_account_routing_change()
         return True

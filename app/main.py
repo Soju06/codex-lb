@@ -589,7 +589,6 @@ async def lifespan(app: FastAPI):
     # Remote-bump callbacks must be non-propagating variants: a propagating callback
     # would re-bump on every observed bump and feedback-loop across replicas.
     cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, routing_availability_cache.refresh_from_db)
-    cache_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, get_api_key_cache().clear)
     cache_poller.on_invalidation(
         NAMESPACE_ACCOUNT_SELECTION,
         lambda: get_account_selection_cache().invalidate(propagate=False),

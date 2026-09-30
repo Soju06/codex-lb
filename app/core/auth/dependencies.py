@@ -63,6 +63,9 @@ from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
+# Bound repeated pool-wide reads without retaining fail-open evidence for 60s.
+_INCOMPLETE_USAGE_SHARE_CACHE_SECONDS = 5.0
+
 _bearer = HTTPBearer(description="API key (e.g. sk-clb-…)", auto_error=False)
 #: The only routes an account that still has to enrol a TOTP secret may reach
 #: (an explicit allow-list, not the module prefix: guest-password management,
@@ -179,8 +182,14 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
         )
         try:
             validated = await service.validate_key(token)
-            if not validated.usage_share_unavailable_account_ids:
-                await cache.set(token_hash, validated, if_version=version_before_read)
+            await cache.set(
+                token_hash,
+                validated,
+                if_version=version_before_read,
+                ttl_seconds=(
+                    _INCOMPLETE_USAGE_SHARE_CACHE_SECONDS if validated.usage_share_unavailable_account_ids else None
+                ),
+            )
             return validated
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc

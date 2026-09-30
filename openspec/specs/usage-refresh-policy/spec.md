@@ -536,12 +536,12 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 
 ### Requirement: Operators can probe an account to wake the upstream limiter
 
-The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe `responses.create` MUST set `max_output_tokens` to `16`, the current Codex token floor; values below that floor MUST NOT be used. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
+The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe request MUST omit `max_output_tokens`, which the Codex Responses endpoint rejects. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
 
 #### Scenario: Probe wakes the upstream limiter and refreshes usage state
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
-- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=16`, `stream=true`, `store=false`
+- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `stream=true`, `store=false`, and no `max_output_tokens` field
 - **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
 - **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
 
@@ -2228,7 +2228,7 @@ Account probes without an explicit model MUST use the same ordered registry sele
 
 An API-key usage-share estimate SHALL require, for every account contributing capacity, a known normalized long-window capacity and a fresh current long-window sample containing usage percentage, a future reset deadline, and the canonical duration for that long-window slot whose derived window start is no later than the sample's recording time. If required evidence is missing, stale, elapsed, or otherwise incomplete, the API-key policy snapshot SHALL record the affected account ids instead of treating them as unused or denying the key.
 
-When quota-consuming subscription work reaches usage-share admission with such a snapshot, Codex-LB SHALL admit it and request the existing debounced, singleflight usage refresh for at most one affected account per request. The normal staggered scheduler SHALL remain responsible for considering the other accounts. An incomplete usage-share snapshot MUST NOT enter the ordinary 60-second API-key authentication cache, so the next request can observe newly written evidence and rebuild the estimate immediately. Failure to create or schedule that best-effort refresh MUST NOT convert the fail-open admission into a request failure.
+When quota-consuming subscription work reaches usage-share admission with such a snapshot, Codex-LB SHALL admit it and request the existing debounced, singleflight usage refresh for at most one affected account per request. The normal staggered scheduler SHALL remain responsible for considering the other accounts. HTTP authentication SHALL reuse an incomplete snapshot through the existing API-key cache for at most five seconds, rather than repeating pool-wide policy reads on every sequential request or retaining incomplete evidence for the ordinary sixty-second TTL. Cache invalidation MUST discard incomplete and complete snapshots alike and MUST fence stale in-flight loads. Failure to create or schedule that best-effort refresh MUST NOT convert the fail-open admission into a request failure.
 
 #### Scenario: Noncanonical long-window duration fails open
 
@@ -2264,13 +2264,26 @@ When quota-consuming subscription work reaches usage-share admission with such a
 - **AND** schedules at most one immediate per-account usage refresh
 - **AND** leaves the other accounts to the normal staggered scheduler
 
-#### Scenario: Fresh evidence is observed without waiting for the auth-cache TTL
+#### Scenario: Incomplete evidence has bounded authentication reuse
+
+- **GIVEN** an HTTP request built an incomplete usage-share snapshot
+- **WHEN** the key authenticates repeatedly within five seconds without invalidation
+- **THEN** authentication reuses that snapshot without repeating pool-wide policy reads
+- **AND** admission retains its bounded best-effort refresh behavior
+
+#### Scenario: Fresh evidence is observed after short authentication expiry
 
 - **GIVEN** an HTTP request built an incomplete usage-share snapshot and was admitted fail-open
 - **AND** the requested usage refresh subsequently writes the missing long-window evidence
-- **WHEN** the key authenticates on its next request
+- **WHEN** the key authenticates after the incomplete snapshot's at-most-five-second TTL
 - **THEN** the policy snapshot is rebuilt from the fresh rows
-- **AND** the prior incomplete snapshot does not remain cached for the ordinary 60-second TTL
+- **AND** the prior incomplete snapshot does not remain cached for the ordinary sixty-second TTL
+
+#### Scenario: Invalidation fences an incomplete snapshot
+
+- **GIVEN** an incomplete snapshot is cached or being loaded
+- **WHEN** a key mutation invalidates API-key policy
+- **THEN** the old snapshot is discarded and an in-flight pre-mutation load cannot repopulate it
 
 #### Scenario: Reauth token expiry invalidates cached capacity
 

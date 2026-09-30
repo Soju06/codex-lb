@@ -12,8 +12,8 @@ from typing import cast
 
 import pytest
 from fastapi.responses import JSONResponse
+from sqlalchemy import delete, select, update
 from sqlalchemy import exc as sqlalchemy_exc
-from sqlalchemy import select, update
 
 import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
@@ -21,6 +21,7 @@ import app.modules.proxy.api as proxy_api
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
@@ -37,7 +38,13 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyInvalidError, ApiKeysService, LimitRuleInput
+from app.modules.api_keys.service import (
+    ApiKeyCreateData,
+    ApiKeyData,
+    ApiKeyInvalidError,
+    ApiKeysService,
+    LimitRuleInput,
+)
 from app.modules.model_sources.forwarding import (
     SourceChatCompletion,
     SourceResponsesStream,
@@ -4747,6 +4754,81 @@ async def test_api_key_usage_share_percent_crud_and_strict_validation(async_clie
             json={"usageSharePercent": invalid},
         )
         assert response.status_code == 422, invalid
+
+
+@pytest.mark.asyncio
+async def test_usage_share_incomplete_auth_snapshot_is_short_cached_and_revoked_at_public_route(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account_ids = [
+        await _import_account(async_client, "share-fresh", "share-fresh@example.com"),
+        await _import_account(async_client, "share-missing", "share-missing@example.com"),
+    ]
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "short-cache", "assignedAccountIds": account_ids, "usageSharePercent": 20},
+    )
+    assert created.status_code == 200
+    plain_key = created.json()["key"]
+    key_id = created.json()["id"]
+    headers = {"Authorization": f"Bearer {plain_key}"}
+    now = utcnow()
+
+    async def record_evidence(account_id: str) -> None:
+        async with SessionLocal() as session:
+            session.add(
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    used_percent=50.0,
+                    reset_at=int((now + timedelta(days=3)).timestamp()),
+                    window_minutes=10_080,
+                    recorded_at=now,
+                )
+            )
+            await session.commit()
+
+    await record_evidence(account_ids[0])
+    monotonic = {"now": 100.0}
+    monkeypatch.setattr("app.core.auth.api_key_cache.time", SimpleNamespace(monotonic=lambda: monotonic["now"]))
+    original_validate = ApiKeysService.validate_key
+    snapshots: list[ApiKeyData] = []
+
+    async def capture_validation(self: ApiKeysService, token: str) -> ApiKeyData:
+        result = await original_validate(self, token)
+        snapshots.append(result)
+        return result
+
+    monkeypatch.setattr(ApiKeysService, "validate_key", capture_validation)
+    for _ in range(10):
+        response = await async_client.get("/v1/reset-credit", headers=headers)
+        assert response.status_code == 200, response.text
+    assert len(snapshots) == 1
+    assert snapshots[0].usage_share_estimate is None
+    assert snapshots[0].usage_share_unavailable_account_ids == (account_ids[1],)
+
+    await record_evidence(account_ids[1])
+    assert (await async_client.get("/v1/reset-credit", headers=headers)).status_code == 200
+    assert len(snapshots) == 1
+    monotonic["now"] = 105.0
+    assert (await async_client.get("/v1/reset-credit", headers=headers)).status_code == 200
+    assert len(snapshots) == 2
+    assert snapshots[-1].usage_share_estimate is not None
+    assert snapshots[-1].usage_share_estimate.account_count == 2
+    assert snapshots[-1].usage_share_unavailable_account_ids == ()
+
+    # Incomplete snapshots must retain the same immediate mutation fence.
+    async with SessionLocal() as session:
+        await session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_ids[1]))
+        await session.commit()
+    get_api_key_cache().clear()
+    assert (await async_client.get("/v1/reset-credit", headers=headers)).status_code == 200
+    assert snapshots[-1].usage_share_unavailable_account_ids == (account_ids[1],)
+    deactivated = await async_client.patch(f"/api/api-keys/{key_id}", json={"isActive": False})
+    assert deactivated.status_code == 200
+    refused = await async_client.get("/v1/reset-credit", headers=headers)
+    assert refused.status_code == 401, refused.text
 
 
 @pytest.mark.asyncio

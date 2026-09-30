@@ -1204,7 +1204,7 @@ Demand attribution SHALL use the existing quota-planner demand-unit formula as a
 
 - **GIVEN** a cached policy snapshot was built while an account was `active`
 - **WHEN** a permanent credential failure moves that account to `reauth_required`
-- **THEN** local and peer API-key policy snapshots are evicted through the existing account-routing invalidation
+- **THEN** local and peer API-key policy snapshots are evicted through a published API-key invalidation
 - **AND** the rebuilt snapshot keeps the account routable only through its known stored access-token expiry
 
 #### Scenario: Known-expired reauthentication accounts leave the pool

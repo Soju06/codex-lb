@@ -102,9 +102,11 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_api_key_cache_does_not_retain_incomplete_usage_share_snapshot(
+async def test_api_key_cache_bounds_incomplete_usage_share_snapshot_reuse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monotonic = {"now": 100.0}
+    monkeypatch.setattr("app.core.auth.api_key_cache.time", SimpleNamespace(monotonic=lambda: monotonic["now"]))
     now = datetime.now(UTC)
     incomplete = _api_key_data(
         id="key_usage_share_incomplete",
@@ -133,8 +135,12 @@ async def test_api_key_cache_does_not_retain_incomplete_usage_share_snapshot(
     token = "sk-clb-usage-share-incomplete"
     key_hash = hashlib.sha256(token.encode()).hexdigest()
 
-    assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == incomplete
-    assert key_hash not in get_api_key_cache()._cache
+    for _ in range(10):
+        assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == incomplete
+    assert calls == [token]
+    assert get_api_key_cache()._cache[key_hash].expires_at == 105.0
+
+    monotonic["now"] = 105.0
     assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == complete
     assert await auth_dependencies.validate_required_proxy_api_key_authorization(f"Bearer {token}") == complete
     assert calls == [token, token]

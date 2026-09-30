@@ -1,5 +1,12 @@
 # Design: Estimated API-Key Usage Share
 
+> Review follow-up: `openspec/changes/address-usage-share-review/` supersedes
+> the cache bypass and cross-namespace wiring described in this initial design.
+> Incomplete auth snapshots now have at most five seconds of reuse; account
+> mutations publish the existing API-key namespace, and generic retained-bump
+> reliability is deferred. The migration follows current main's convergence,
+> not the branch-local alternate convergence. Feature/policy approval is pending.
+
 ## Decision
 
 Use a live proportional estimate rather than a persisted attribution ledger.

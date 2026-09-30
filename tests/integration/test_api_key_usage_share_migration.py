@@ -13,23 +13,23 @@ from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrad
 pytestmark = pytest.mark.integration
 
 _RELEASED_RETIREMENT = "20260914_000000_drop_subscription_overflow_schema"
-_GUARDED_RETIREMENT = "20260914_000001_drop_subscription_overflow_schema"
-_BASE = "20260914_000002_merge_overflow_retirement_heads"
-_REVISION = "20260918_000000_add_api_key_usage_share_percent"
+_SCIM = "20260914_000000_add_scim_tokens"
+_BASE = "20260918_000000_merge_scim_and_overflow_heads"
+_REVISION = "20260930_000000_add_api_key_usage_share_percent"
 _COLUMN = "usage_share_percent"
 _CONSTRAINT = "ck_api_keys_usage_share_percent"
 _ROLLUP_TABLE = "request_demand_quarter_rollups"
 _ROLLUP_INDEX = "idx_request_demand_account_slot"
 
 
-@pytest.mark.parametrize("retirement_revision", [_RELEASED_RETIREMENT, _GUARDED_RETIREMENT])
-def test_retirement_branch_stamps_converge_to_usage_share_head(
+@pytest.mark.parametrize("parent_revision", [_RELEASED_RETIREMENT, _SCIM, _BASE])
+def test_landed_parent_stamps_converge_to_usage_share_head(
     tmp_path: Path,
-    retirement_revision: str,
+    parent_revision: str,
 ) -> None:
-    path = tmp_path / f"{retirement_revision}.sqlite"
+    path = tmp_path / f"{parent_revision}.sqlite"
     url = f"sqlite+aiosqlite:///{path}"
-    assert run_upgrade(url, retirement_revision, bootstrap_legacy=False).current_revision == retirement_revision
+    assert run_upgrade(url, parent_revision, bootstrap_legacy=False).current_revision == parent_revision
     engine = create_engine(f"sqlite:///{path}")
     try:
         with engine.begin() as connection:
@@ -49,7 +49,7 @@ def test_retirement_branch_stamps_converge_to_usage_share_head(
         assert merge_revision is not None
         merge_parents = merge_revision.down_revision
         assert isinstance(merge_parents, tuple)
-        assert set(merge_parents) == {_RELEASED_RETIREMENT, _GUARDED_RETIREMENT}
+        assert set(merge_parents) == {_RELEASED_RETIREMENT, _SCIM}
         with engine.connect() as connection:
             assert (
                 connection.execute(text("SELECT name FROM api_keys WHERE id='branch-key'")).scalar_one() == "Branch key"

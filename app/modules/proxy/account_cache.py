@@ -12,6 +12,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import (
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_API_KEY,
     get_cache_invalidation_poller,
 )
 from app.db.models import Account, AccountStatus
@@ -194,15 +195,13 @@ def get_routing_availability_cache() -> RoutingAvailabilityCache:
 
 
 def request_account_routing_change() -> None:
-    """Evict local allocation policy and coalesce the existing peer routing bump."""
+    """Evict allocation policy and publish each cache's own namespace."""
 
-    # API-key policy snapshots may embed this account's allocation capacity.
-    # Evict locally at the same seam that marks routing state; the durable
-    # account_routing bump makes peers do the same.
     get_api_key_cache().clear()
     poller = get_cache_invalidation_poller()
     if poller is not None:
         poller.request_bump(NAMESPACE_ACCOUNT_ROUTING)
+        poller.request_bump(NAMESPACE_API_KEY)
 
 
 def mark_account_routing_unavailable(account_id: str) -> None:
@@ -226,9 +225,9 @@ async def propagate_account_routing_change() -> bool:
 
     Used by committed account-pool mutations (pause/reactivate/delete/import,
     OAuth re-auth, proxy-binding reactivation, and plan sync) so peers refresh
-    routing state and evict cached API-key allocation snapshots promptly. It
-    returns False when no poller is wired or the immediate bump failed after
-    retries; a failed publication remains queued for the poller's next cycle.
+    routing state and evict cached API-key allocation snapshots through their
+    own namespaces. Returns False if no poller is wired or either write fails;
+    failed writes are explicitly queued through the existing retry path.
     """
     # Keep this correct for callers that publish a committed routing change
     # without first passing through mark_/clear_. Those helpers already clear
@@ -237,4 +236,10 @@ async def propagate_account_routing_change() -> bool:
     poller = get_cache_invalidation_poller()
     if poller is None:
         return False
-    return await poller.bump(NAMESPACE_ACCOUNT_ROUTING)
+    routing_published = await poller.bump(NAMESPACE_ACCOUNT_ROUTING)
+    if not routing_published:
+        poller.request_bump(NAMESPACE_ACCOUNT_ROUTING)
+    policy_published = await poller.bump(NAMESPACE_API_KEY)
+    if not policy_published:
+        poller.request_bump(NAMESPACE_API_KEY)
+    return routing_published and policy_published

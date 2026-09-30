@@ -4,9 +4,13 @@ model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 
+[features]
+api_key_model_discovery = true
+
 [model_providers.codex-lb]
 name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true
@@ -15,6 +19,7 @@ requires_openai_auth = true
 [model_providers.codex-lb-daybreak-blue]
 name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true

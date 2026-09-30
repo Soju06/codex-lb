@@ -1733,8 +1733,16 @@ async def v1_usage(
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
         hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
+        aggregate_limits, unquantified_windows = (
+            await _build_aggregate_credit_limits(
+                session,
+                assigned_account_ids=api_key.assigned_account_ids,
+                account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
+            )
+            if "upstream_limits" in usage_sections and not hide_upstream_limits
+            else ({}, [])
+        )
         account_pool_usage = (
             await _build_account_pool_usage(
                 session,
@@ -1758,6 +1766,7 @@ async def v1_usage(
         total_cost_usd=usage.total_cost_usd,
         limits=own_limits or upstream_limits,
         upstream_limits=upstream_limits,
+        upstream_limits_unquantified_windows=unquantified_windows,
         account_pool_usage=account_pool_usage,
     )
 
@@ -2181,6 +2190,8 @@ async def _build_account_pool_usage(
     return AccountPoolUsageResponse(
         primary=data.remaining_percent_primary,
         secondary=data.remaining_percent_secondary,
+        unquantified_account_count_primary=data.unquantified_account_count_primary,
+        unquantified_account_count_secondary=data.unquantified_account_count_secondary,
     )
 
 
@@ -2469,11 +2480,19 @@ def _attach_codex_usage_reset_credits(
     return replace(payload, rate_limit_reset_credits=reset_credits)
 
 
-async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
+async def _build_aggregate_credit_limits(
+    session: AsyncSession,
+    *,
+    assigned_account_ids: list[str],
+    account_assignment_scope_enabled: bool,
+) -> tuple[dict[str, V1UsageLimitResponse], list[str]]:
+    if account_assignment_scope_enabled and not assigned_account_ids:
+        return {}, []
     usage_repository = UsageRepository(session)
-    primary_latest = await usage_repository.latest_by_account(window="primary")
-    secondary_latest = await usage_repository.latest_by_account(window="secondary")
-    monthly_latest = await usage_repository.latest_by_account(window="monthly")
+    scoped_ids = assigned_account_ids if account_assignment_scope_enabled else None
+    primary_latest = await usage_repository.latest_by_account(window="primary", account_ids=scoped_ids)
+    secondary_latest = await usage_repository.latest_by_account(window="secondary", account_ids=scoped_ids)
+    monthly_latest = await usage_repository.latest_by_account(window="monthly", account_ids=scoped_ids)
 
     primary_rows = [usage_history_to_window_row(entry) for entry in primary_latest.values()]
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
@@ -2486,17 +2505,18 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         | {row.account_id for row in monthly_rows}
     )
     if not account_ids:
-        return {}
+        return {}, []
 
     account_map = {account.id: account for account in await _load_accounts_by_id(session, account_ids)}
     if not account_map:
-        return {}
+        return {}, []
 
     active_account_ids = set(account_map)
     primary_rows = [row for row in primary_rows if row.account_id in active_account_ids]
     secondary_rows = [row for row in secondary_rows if row.account_id in active_account_ids]
     monthly_rows = [row for row in monthly_rows if row.account_id in active_account_ids]
     limits: dict[str, V1UsageLimitResponse] = {}
+    unquantified_windows: list[str] = []
 
     for window_key, rows, label in (
         ("primary", primary_rows, "5h"),
@@ -2506,6 +2526,8 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
         if not rows:
             continue
         summary = usage_core.summarize_usage_window(rows, account_map, window_key)
+        if summary.unquantified_account_count:
+            unquantified_windows.append("30d" if window_key == "monthly" else label)
         max_value = max(0, int(round(summary.capacity_credits or 0.0)))
         if max_value <= 0:
             continue
@@ -2523,7 +2545,7 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
             source="aggregate",
         )
 
-    return limits
+    return limits, unquantified_windows
 
 
 async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> list[Account]:

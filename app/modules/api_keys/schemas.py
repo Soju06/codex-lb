@@ -102,6 +102,8 @@ class ApiKeyResponse(DashboardModel):
     pooled_remaining_percent_primary: float | None = None
     pooled_remaining_percent_secondary: float | None = None
     pooled_capacity_credits_primary: float = 0.0
+    unquantified_account_count_primary: int = 0
+    unquantified_account_count_secondary: int = 0
 
 
 class ApiKeyCreateResponse(ApiKeyResponse):

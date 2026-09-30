@@ -72,7 +72,8 @@ export function AccountList({
         (account.alias?.toLowerCase().includes(needle) ?? false) ||
         account.displayName.toLowerCase().includes(needle) ||
         account.accountId.toLowerCase().includes(needle) ||
-        account.planType.toLowerCase().includes(needle)
+        account.planType.toLowerCase().includes(needle) ||
+        formatSlug(account.planType).toLowerCase().includes(needle)
       );
     });
   }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);

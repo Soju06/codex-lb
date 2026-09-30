@@ -28,6 +28,7 @@ EXPECTED_CORE_MODEL_PLANS = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "team",
     "business",
     "enterprise",

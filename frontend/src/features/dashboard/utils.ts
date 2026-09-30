@@ -183,9 +183,15 @@ export function buildRemainingItems(
   isDark = false,
 ): RemainingItem[] {
   const usageIndex = buildWindowIndex(window);
+  const unquantifiedAccountIds = new Set(
+    window?.accounts.filter((entry) => entry.capacityKnown === false).map((entry) => entry.accountId),
+  );
   const palette = buildDonutPalette(accounts.length, isDark);
   return accounts
     .map((account, index) => {
+      if (unquantifiedAccountIds.has(account.accountId)) {
+        return null;
+      }
       if (isMonthlyOnlyAccount(account)) {
         return null;
       }
@@ -740,6 +746,8 @@ export function buildDashboardView(
   const { isDark, showAccountBurnrate } = resolveDashboardViewOptions(optionsOrIsDark);
   const primaryWindow = overview.windows.primary;
   const secondaryWindow = overview.windows.secondary;
+  const primaryIncomplete = overview.summary.primaryWindow.unquantifiedAccountCount > 0;
+  const secondaryIncomplete = (overview.summary.secondaryWindow?.unquantifiedAccountCount ?? 0) > 0;
   const metrics = overview.summary.metrics;
   const cost = overview.summary.cost.totalUsd;
   const timeframeLabel = (() => {
@@ -861,9 +869,11 @@ export function buildDashboardView(
     primaryTotal: sumRemaining(primaryUsageItems),
     secondaryTotal: sumRemaining(secondaryUsageItems),
     requestLogs,
-    safeLinePrimary: buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
-    safeLineSecondary: buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
-    // A present overview pace is the freshest verdict and always wins.
+    safeLinePrimary: primaryIncomplete ? null : buildDepletionView(projections?.depletionPrimary ?? overview.depletionPrimary),
+    safeLineSecondary: secondaryIncomplete ? null : buildDepletionView(projections?.depletionSecondary ?? overview.depletionSecondary),
+    // Incomplete coverage invalidates every fleet credit forecast, including
+    // retained projections and the local fallback for older backends.
+    // Otherwise a present overview pace is the freshest verdict and wins.
     // TanStack Query retains the last successful projections payload across
     // later failures, so a stale projections copy must never override it.
     // Older backends serve `weeklyCreditPace: null` (they cannot compute the
@@ -871,6 +881,8 @@ export function buildDashboardView(
     // eligible accounts — so null falls back to the projections copy and then
     // to the local projection instead of hiding the card entirely.
     weeklyCreditPace:
-      overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
+      secondaryIncomplete
+        ? null
+        : overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
   };
 }

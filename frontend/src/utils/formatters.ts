@@ -122,6 +122,7 @@ export type AccountAuthStatus = {
 
 export function formatSlug(value: string): string {
   if (!value) return "";
+  if (value === "promax") return "Pro 500";
   const words = value.split("_");
   words[0] = words[0].charAt(0).toUpperCase() + words[0].slice(1);
   return words.join(" ");

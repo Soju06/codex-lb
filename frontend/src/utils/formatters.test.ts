@@ -23,6 +23,7 @@ import {
   formatRate,
   formatResetRelative,
   formatSingleUnitRemaining,
+  formatSlug,
   formatRefreshTokenLabel,
   formatRelative,
   formatTimeLong,
@@ -49,6 +50,19 @@ describe("formatters", () => {
     expect(toNumber("42.5")).toBe(42.5);
     expect(toNumber("")).toBeNull();
     expect(toNumber("abc")).toBeNull();
+  });
+
+  it.each([
+    ["promax", "Pro 500"],
+    ["pro", "Pro"],
+    ["pro_lite", "Pro lite"],
+    ["plus", "Plus"],
+    ["unknown", "Unknown"],
+    ["owner_seat", "Owner seat"],
+    ["gpt-5.6-sol", "Gpt-5.6-sol"],
+    ["", ""],
+  ])("formats %s without changing other plan, seat, or model slugs", (value, expected) => {
+    expect(formatSlug(value)).toBe(expected);
   });
 
   it("parses dates safely", () => {

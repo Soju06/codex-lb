@@ -107,11 +107,15 @@ def build_weekly_credit_pace(
     forecast_burn_rate_credits_per_hour = 0.0
 
     for summary in account_summaries:
+        account = accounts_by_id.get(summary.account_id)
+        if account is not None and account.status in PACE_ELIGIBLE_ACCOUNT_STATUSES and summary.plan_type == "promax":
+            rows = secondary_history.get(summary.account_id, [])
+            if any(row.recorded_at >= freshness_cutoff for row in rows):
+                return None
         timing = _weekly_timing(summary, now_ms)
         if timing is None:
             continue
 
-        account = accounts_by_id.get(summary.account_id)
         if account is None or account.status not in PACE_ELIGIBLE_ACCOUNT_STATUSES:
             inactive_account_count += 1
             continue

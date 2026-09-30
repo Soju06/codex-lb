@@ -379,6 +379,8 @@ class PooledCreditData:
     remaining_percent_primary: float | None = None
     remaining_percent_secondary: float | None = None
     capacity_credits_primary: float = 0.0
+    unquantified_account_count_primary: int = 0
+    unquantified_account_count_secondary: int = 0
 
 
 def _compute_pooled_credits(
@@ -433,8 +435,16 @@ def _compute_pooled_credits(
     primary_summary = usage_core.summarize_usage_window(primary_rows, account_map, "primary")
     secondary_summary = usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
 
-    primary_remaining = usage_core.remaining_percent_from_used(primary_summary.used_percent)
-    secondary_remaining = usage_core.remaining_percent_from_used(secondary_summary.used_percent)
+    primary_remaining = (
+        usage_core.remaining_percent_from_used(primary_summary.used_percent)
+        if primary_summary.unquantified_account_count == 0
+        else None
+    )
+    secondary_remaining = (
+        usage_core.remaining_percent_from_used(secondary_summary.used_percent)
+        if secondary_summary.unquantified_account_count == 0
+        else None
+    )
 
     if primary_summary.capacity_credits == 0.0 or not has_live_primary:
         primary_remaining = None
@@ -443,6 +453,8 @@ def _compute_pooled_credits(
         remaining_percent_primary=primary_remaining,
         remaining_percent_secondary=secondary_remaining,
         capacity_credits_primary=primary_summary.capacity_credits,
+        unquantified_account_count_primary=primary_summary.unquantified_account_count,
+        unquantified_account_count_secondary=secondary_summary.unquantified_account_count,
     )
 
 

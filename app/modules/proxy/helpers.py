@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Iterable, cast
 
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ PLAN_TYPE_PRIORITY = (
     "enterprise",
     "business",
     "team",
+    "promax",
     "pro",
     "plus",
     "education",
@@ -205,7 +207,18 @@ def _summarize_window(
 ) -> UsageWindowSummary | None:
     if not rows:
         return None
-    return usage_core.summarize_usage_window(rows, account_map, window)
+    summary = usage_core.summarize_usage_window(rows, account_map, window)
+    if summary.unquantified_account_count:
+        if len(rows) != 1 or len(account_map) != 1:
+            return None
+        row = rows[0]
+        return replace(
+            summary,
+            used_percent=row.used_percent,
+            reset_at=row.reset_at,
+            window_minutes=row.window_minutes,
+        )
+    return summary
 
 
 def _window_snapshot(

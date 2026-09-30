@@ -27,6 +27,136 @@ def models_dev(cost=None):
     }
 
 
+@pytest.mark.parametrize("source", ["models_dev", "litellm"])
+def test_ultrafast_prices_survive_catalog_snapshot_roundtrip(source):
+    if source == "models_dev":
+        data = models_dev(
+            {
+                "input": 10,
+                "output": 50,
+                "cache_read": 1,
+                "tiers": [{"tier": {"type": "context", "size": 272000}, "input": 20, "output": 75}],
+            }
+        )
+        data["openai"]["models"]["gpt-test"]["experimental"] = {
+            "modes": {
+                "ultrafast": {
+                    "provider": {"body": {"service_tier": "ultrafast"}},
+                    "cost": {
+                        "input": 60,
+                        "output": 300,
+                        "cache_read": 6,
+                        "tiers": [
+                            {"tier": {"type": "context", "size": 272000}, "input": 120, "output": 450, "cache_read": 12}
+                        ],
+                    },
+                }
+            }
+        }
+        prices = catalog.parse_models_dev(data)
+    else:
+        prices = catalog.parse_litellm(
+            {
+                "gpt-test": {
+                    "litellm_provider": "openai",
+                    "mode": "chat",
+                    "input_cost_per_token": 0.00001,
+                    "output_cost_per_token": 0.00005,
+                    "cache_read_input_token_cost": 0.000001,
+                    "input_cost_per_token_above_272k_tokens": 0.00002,
+                    "output_cost_per_token_above_272k_tokens": 0.000075,
+                    "input_cost_per_token_ultrafast": 0.00006,
+                    "output_cost_per_token_ultrafast": 0.0003,
+                    "cache_read_input_token_cost_ultrafast": 0.000006,
+                    "input_cost_per_token_above_272k_tokens_ultrafast": 0.00012,
+                    "output_cost_per_token_above_272k_tokens_ultrafast": 0.00045,
+                    "cache_read_input_token_cost_above_272k_tokens_ultrafast": 0.000012,
+                }
+            }
+        )
+    restored = catalog.decode_snapshot(json.loads(catalog.encode_snapshot(prices)))
+    assert restored == prices
+    price = restored["gpt-test"]
+    assert calculate_cost_from_usage(UsageTokens(100000, 10000, 20000), price, service_tier="ultrafast") == (
+        pytest.approx(7.92)
+    )
+    assert calculate_cost_from_usage(UsageTokens(300000, 10000, 50000), price, service_tier="ultrafast") == (
+        pytest.approx(35.1)
+    )
+
+
+@pytest.mark.parametrize("source", ["models_dev", "litellm"])
+@pytest.mark.parametrize("input_price", [None, -1, float("nan"), float("inf"), True])
+def test_invalid_ultrafast_prices_do_not_enter_catalog(source, input_price):
+    if source == "models_dev":
+        data = models_dev()
+        data["openai"]["models"]["gpt-test"]["experimental"] = {
+            "modes": {
+                "ultrafast": {
+                    "provider": {"body": {"service_tier": "ultrafast"}},
+                    "cost": {"input": input_price, "output": 300},
+                }
+            }
+        }
+        parser = catalog.parse_models_dev
+    else:
+        data = {
+            "gpt-test": {
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": 0.00001,
+                "output_cost_per_token": 0.00005,
+                "input_cost_per_token_ultrafast": input_price,
+                "output_cost_per_token_ultrafast": 0.0003,
+            }
+        }
+        parser = catalog.parse_litellm
+    with pytest.raises(ValueError):
+        parser(data)
+
+
+def test_compatible_refresh_retains_bundled_ultrafast_prices():
+    bundled = catalog.get_active_prices()["gpt-6-astra"]
+    catalog.install_prices({"gpt-6-astra": ModelPrice(10, 50, 1, long_context_threshold_tokens=272000)})
+
+    price = catalog.get_active_prices()["gpt-6-astra"]
+    assert price == bundled
+    assert calculate_cost_from_usage(UsageTokens(100000, 10000), price, service_tier="ultrafast") == 9.0
+    assert calculate_cost_from_usage(UsageTokens(272001, 10000, 20000), price, service_tier="ultrafast") == (
+        pytest.approx(34.98012)
+    )
+
+
+@pytest.mark.parametrize(
+    "tiers",
+    [
+        "invalid",
+        [{"tier": {"type": "context", "size": 300000}, "input": 120, "output": 450}],
+        [{"tier": {"type": "other", "size": 272000}, "input": 120, "output": 450}],
+        [{"tier": {"type": "context", "size": 272000}, "input": 120}],
+        [
+            {"tier": {"type": "context", "size": 272000}, "input": 120, "output": 450},
+            {"tier": {"type": "context", "size": 300000}, "input": 120, "output": 450},
+        ],
+    ],
+)
+def test_invalid_ultrafast_mode_context_tiers_are_rejected(tiers):
+    data = models_dev(
+        {"input": 10, "output": 50, "tiers": [{"tier": {"type": "context", "size": 272000}, "input": 20, "output": 75}]}
+    )
+    data["openai"]["models"]["gpt-test"]["experimental"] = {
+        "modes": {
+            "ultrafast": {
+                "provider": {"body": {"service_tier": "ultrafast"}},
+                "cost": {"input": 60, "output": 300, "tiers": tiers},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError):
+        catalog.parse_models_dev(data)
+
+
 def test_models_dev_units_context_threshold_and_priority():
     data = models_dev(
         {

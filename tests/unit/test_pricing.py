@@ -19,6 +19,21 @@ from app.core.usage.pricing import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-astra-2026-09-01"])
+@pytest.mark.parametrize(
+    ("input_tokens", "cached_tokens", "expected"),
+    [(100000, 0, 9.0), (272000, 20000, 18.24), (272001, 20000, 34.98012)],
+)
+def test_astra_ultrafast_cost_uses_published_token_rates(model, input_tokens, cached_tokens, expected):
+    resolved = get_pricing_for_model(model)
+    assert resolved is not None
+    usage = UsageTokens(input_tokens, 10000, cached_tokens)
+
+    cost = calculate_cost_from_usage(usage, resolved[1], service_tier=" UltraFast ")
+
+    assert cost == pytest.approx(expected)
+
+
 def test_resolve_model_alias_longest_match():
     aliases = {
         "gpt-5*": "gpt-5",

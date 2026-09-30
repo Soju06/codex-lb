@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-28T07:03:49.648438+00:00",
+  "updated_at": "2026-09-30T20:00:00+00:00",
   "sources": [
     "https://models.dev/api.json",
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    "https://learn.chatgpt.com/api/docs/pricing"
   ],
   "models": {
     "chat-latest": {
@@ -627,7 +628,13 @@
       "priority_long_context_cached_input_per_1m": 4.0,
       "flex_long_context_input_per_1m": 10.0,
       "flex_long_context_output_per_1m": 37.5,
-      "flex_long_context_cached_input_per_1m": 1.0
+      "flex_long_context_cached_input_per_1m": 1.0,
+      "ultrafast_input_per_1m": 60.0,
+      "ultrafast_output_per_1m": 300.0,
+      "ultrafast_cached_input_per_1m": 6.0,
+      "ultrafast_long_context_input_per_1m": 120.0,
+      "ultrafast_long_context_output_per_1m": 450.0,
+      "ultrafast_long_context_cached_input_per_1m": 12.0
     },
     "gpt-6-luna": {
       "input_per_1m": 0.1,

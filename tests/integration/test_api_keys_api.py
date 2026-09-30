@@ -3298,6 +3298,137 @@ async def test_compact_cost_limit_prefers_response_service_tier_over_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+@pytest.mark.parametrize("actual_tier", ["ultrafast", "default"])
+@pytest.mark.parametrize(
+    "input_tokens,cached_tokens,output_tokens,ultrafast_costs,standard_costs",
+    [
+        pytest.param(100_000, 0, 10_000, (6.0, 0.0, 3.0), (1.0, 0.0, 0.5), id="uncached-output"),
+        pytest.param(100_000, 100_000, 0, (0.0, 0.6, 0.0), (0.0, 0.1, 0.0), id="cached"),
+        pytest.param(0, 0, 10_000, (0.0, 0.0, 3.0), (0.0, 0.0, 0.5), id="output"),
+        pytest.param(272_000, 20_000, 10_000, (15.12, 0.12, 3.0), (2.52, 0.02, 0.5), id="short-boundary"),
+        pytest.param(272_001, 20_000, 10_000, (30.24012, 0.24, 4.5), (5.04002, 0.04, 0.75), id="long-boundary"),
+    ],
+)
+async def test_v1_responses_ultrafast_cost_logs_and_settlement(
+    async_client,
+    monkeypatch,
+    stream,
+    actual_tier,
+    input_tokens,
+    cached_tokens,
+    output_tokens,
+    ultrafast_costs,
+    standard_costs,
+):
+    expected_costs = ultrafast_costs if actual_tier == "ultrafast" else standard_costs
+    expected_total = sum(expected_costs)
+    expected_microdollars = round(expected_total * 1_000_000)
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "ultrafast-cost",
+            "limits": [{"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": expected_microdollars - 1}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()
+    await _import_account(async_client, "acc_ultrafast_cost", "ultrafast-cost@example.test")
+    seen = {"calls": 0}
+    recorded = asyncio.Event()
+    settled = asyncio.Event()
+    original_add_log = RequestLogsRepository.add_log
+    original_finalize = ApiKeysService.finalize_usage_reservation
+
+    async def observed_add_log(self, *args, **kwargs):
+        result = await original_add_log(self, *args, **kwargs)
+        recorded.set()
+        return result
+
+    async def observed_finalize(self, *args, **kwargs):
+        result = await original_finalize(self, *args, **kwargs)
+        settled.set()
+        return result
+
+    monkeypatch.setattr(RequestLogsRepository, "add_log", observed_add_log)
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", observed_finalize)
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        seen["calls"] += 1
+        assert _payload.service_tier == "ultrafast"
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ultrafast_cost",
+                "model": "gpt-6-astra",
+                "status": "completed",
+                "service_tier": actual_tier,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "input_tokens_details": {"cached_tokens": cached_tokens},
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    body = {"model": "gpt-6-astra", "input": "hi", "stream": stream, "service_tier": "ultrafast"}
+    response = await async_client.post("/v1/responses", headers=headers, json=body)
+    assert response.status_code == 200
+    await asyncio.wait_for(recorded.wait(), timeout=10)
+    await asyncio.wait_for(settled.wait(), timeout=10)
+    if stream:
+        events = [
+            json.loads(line.removeprefix("data: ")) for line in response.text.splitlines() if line.startswith("data: {")
+        ]
+        completed = next(event["response"] for event in events if event["type"] == "response.completed")
+    else:
+        completed = response.json()
+    assert completed["service_tier"] == actual_tier
+    async with SessionLocal() as session:
+        log = (await session.scalars(select(RequestLog))).one()
+        assert (log.requested_service_tier, log.actual_service_tier, log.service_tier) == (
+            "ultrafast",
+            actual_tier,
+            actual_tier,
+        )
+        assert log.cost_usd == pytest.approx(expected_total)
+        reservation = (await session.scalars(select(ApiKeyUsageReservation))).one()
+        assert reservation.status == "finalized"
+        assert reservation.cost_microdollars == expected_microdollars
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key["id"])
+        assert limits[0].current_value == expected_microdollars
+        await ApiKeysService(repo).finalize_usage_reservation(
+            reservation.id,
+            model="gpt-6-astra",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_tokens,
+            service_tier=actual_tier,
+        )
+        limits = await repo.get_limits_by_key(key["id"])
+        assert limits[0].current_value == expected_microdollars
+
+    logs = await async_client.get("/api/request-logs?limit=1")
+    assert logs.status_code == 200
+    logged = logs.json()["requests"][0]
+    assert logged["costUsd"] == pytest.approx(expected_total)
+    for field, expected in zip(("inputUsd", "cachedInputUsd", "outputUsd"), expected_costs):
+        assert logged["costBreakdown"][field] == pytest.approx(expected)
+    assert logged["costBreakdown"]["totalUsd"] == pytest.approx(expected_total)
+    blocked = await async_client.post("/v1/responses", headers=headers, json=body)
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
+    assert seen["calls"] == 1
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

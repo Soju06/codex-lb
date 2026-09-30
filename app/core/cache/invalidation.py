@@ -168,19 +168,35 @@ class CacheInvalidationPoller:
         self._pending_bumps.add(namespace)
 
     async def bump(self, namespace: str) -> bool:
-        for attempt in range(_BUMP_RETRY_ATTEMPTS):
-            try:
-                await self._bump_once(namespace)
-                return True
-            except OperationalError:
-                if attempt == _BUMP_RETRY_ATTEMPTS - 1:
+        """Publish now, retaining unfinished work for a later poll cycle.
+
+        Consume only markers queued before this attempt. A request arriving
+        during the write re-adds the marker and must survive completion. An
+        interrupted write may already have committed; a redundant retry is
+        safe, while losing its invalidation is not.
+        """
+        self._pending_bumps.discard(namespace)
+        succeeded = False
+        try:
+            for attempt in range(_BUMP_RETRY_ATTEMPTS):
+                try:
+                    await self._bump_once(namespace)
+                    succeeded = True
+                    return True
+                except OperationalError:
+                    if attempt == _BUMP_RETRY_ATTEMPTS - 1:
+                        self._record_bump_failure(namespace)
+                        return False
+                    await asyncio.sleep(_BUMP_RETRY_BASE_SECONDS * (2**attempt))
+                except Exception:
                     self._record_bump_failure(namespace)
                     return False
-                await asyncio.sleep(_BUMP_RETRY_BASE_SECONDS * (2**attempt))
-            except Exception:
-                self._record_bump_failure(namespace)
-                return False
-        return False
+            return False
+        finally:
+            # Synchronous cleanup also covers cancellation during retry backoff
+            # and session cleanup without swallowing the cancellation.
+            if not succeeded:
+                self.request_bump(namespace)
 
     async def bump_local(self, namespace: str) -> bool:
         """Bump a namespace this replica has ALREADY invalidated locally.
@@ -280,30 +296,16 @@ class CacheInvalidationPoller:
 
     async def _flush_pending_bumps(self) -> None:
         for namespace in sorted(self._pending_bumps):
-            # Clear the pending marker BEFORE awaiting the bump: a request_bump()
-            # arriving while the bump write is in flight must re-queue the
-            # namespace so a mutation committing mid-flush still produces a
-            # later bump instead of being coalesced into the version already
-            # being written.
-            self._pending_bumps.discard(namespace)
             try:
-                if not await self.bump(namespace):
-                    self._pending_bumps.add(namespace)
+                await self.bump(namespace)
             except asyncio.CancelledError:
-                # The marker is cleared before the write, so an aborted write
-                # would otherwise leave the namespace neither written nor
-                # pending, breaking the required retry. Restored even when the
-                # abort is ambiguous — a redundant bump only re-runs peers'
-                # idempotent callbacks.
-                self._pending_bumps.add(namespace)
+                # Defensive if bump() is replaced: cancellation still retains
+                # the current namespace and propagates to the flush owner.
+                self.request_bump(namespace)
                 raise
             except Exception:
-                # ``bump()`` reports normal failure by returning False, so a
-                # raise is abnormal — but re-raising would abort the flush and,
-                # since the loop is sorted, a persistently raising namespace
-                # would starve every namespace sorting after it on every cycle.
-                # Restore it and keep flushing the rest.
-                self._pending_bumps.add(namespace)
+                # An abnormal raise must not starve later namespaces.
+                self.request_bump(namespace)
                 logger.warning(
                     "cache_invalidation flush bump raised for namespace %s; kept pending",
                     _NAMESPACE_LOG_LABELS.get(namespace, "unknown"),
@@ -405,7 +407,7 @@ def set_cache_invalidation_poller(poller: CacheInvalidationPoller | None) -> Non
 
 
 async def bump_cache_invalidation(namespace: str) -> None:
-    """Best-effort version bump; a no-op outside the lifespan poller's lifetime."""
+    """Publish now or queue a retry; a no-op outside the poller's lifetime."""
     poller = _poller
     if poller is None:
         return

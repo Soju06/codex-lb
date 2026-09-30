@@ -76,6 +76,42 @@ def test_summarize_usage_window_includes_prolite_capacity():
     assert summary.used_percent == pytest.approx(25.0)
 
 
+def test_summarize_mixed_weekly_usage_discloses_unknown_max_allowance():
+    accounts = {
+        plan: Account(id=plan, plan_type=plan, status=AccountStatus.ACTIVE) for plan in ("pro", "plus", "promax")
+    }
+    rows = [
+        UsageWindowRow(account_id=plan, used_percent=used, window_minutes=10080, reset_at=1800000000)
+        for plan, used in (("pro", 40.0), ("plus", 50.0), ("promax", 20.0))
+    ]
+
+    summary = summarize_usage_window(rows, accounts, "secondary")
+    assert summary.capacity_credits == 57960
+    assert summary.capacity_credits - summary.used_credits == 34020
+    assert summary.unquantified_account_count == 1
+    assert normalize_usage_window(summary).unquantified_account_count == 1
+    assert (
+        summarize_usage_window(
+            [UsageWindowRow(account_id="promax", used_percent=0.0)],
+            accounts,
+            "primary",
+        ).unquantified_account_count
+        == 0
+    )
+
+
+@pytest.mark.parametrize("used_percent", [0.0, 20.0])
+def test_recorded_max_usage_without_optional_metadata_remains_unquantified(used_percent):
+    account = Account(id="max", plan_type="promax", status=AccountStatus.ACTIVE)
+    row = UsageWindowRow(account_id=account.id, used_percent=used_percent, recorded_at=utcnow())
+
+    summary = summarize_usage_window([row], {account.id: account}, "secondary")
+
+    assert summary.unquantified_account_count == 1
+    assert summary.capacity_credits == 0.0
+    assert summary.used_percent is None
+
+
 def test_normalize_weekly_only_rows_prefers_newer_primary_over_stale_secondary():
     now = utcnow()
     weekly_primary = UsageWindowRow(

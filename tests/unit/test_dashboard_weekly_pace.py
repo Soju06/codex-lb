@@ -109,6 +109,28 @@ def test_weekly_pace_verdict_branches_and_legacy_status_mapping(
     assert pace.depletion_eta_hours is not None
 
 
+@pytest.mark.parametrize("missing_reset", [False, True])
+def test_weekly_pace_omits_fleet_forecast_with_fresh_max_weekly_usage(missing_reset: bool) -> None:
+    known = _summary("pro", used_percent=40.0, reset_in_hours=24.0)
+    unknown = _summary("max", used_percent=20.0, reset_in_hours=24.0, capacity=0.0)
+    unknown.plan_type = "promax"
+    if missing_reset:
+        unknown.reset_at_secondary = None
+
+    result = build_weekly_credit_pace(
+        accounts=[_account("pro"), _account("max")],
+        account_summaries=[known, unknown],
+        secondary_history={
+            "pro": [_row("pro", 40.0, NOW - timedelta(minutes=1))],
+            "max": [_row("max", 20.0, NOW - timedelta(minutes=1))],
+        },
+        now=NOW,
+        usage_refresh_interval_seconds=60,
+    )
+
+    assert result is None
+
+
 def test_weekly_pace_relief_clusters_resets_within_one_hour() -> None:
     summaries = [
         _summary("acc-first", used_percent=96.0, reset_in_hours=2.0),

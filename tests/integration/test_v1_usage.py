@@ -19,6 +19,7 @@ async def _create_api_key(
     name: str,
     limits: list[LimitRuleInput] | None = None,
     usage_sections: str = "upstream_limits,account_pool_usage",
+    assigned_account_ids: list[str] | None = None,
 ) -> tuple[str, str]:
     async with SessionLocal() as session:
         service = ApiKeysService(ApiKeysRepository(session))
@@ -27,6 +28,7 @@ async def _create_api_key(
                 name=name,
                 allowed_models=None,
                 usage_sections=usage_sections,
+                assigned_account_ids=assigned_account_ids,
                 limits=limits or [],
             )
         )
@@ -292,9 +294,12 @@ async def test_v1_usage_returns_zero_usage_for_key_without_logs(async_client):
         "total_cost_usd": 0.0,
         "limits": [],
         "upstream_limits": [],
+        "upstream_limits_unquantified_windows": [],
         "account_pool_usage": {
             "primary": None,
             "secondary": None,
+            "unquantified_account_count_primary": 0,
+            "unquantified_account_count_secondary": 0,
         },
     }
 
@@ -316,6 +321,7 @@ async def test_v1_usage_omits_disabled_account_pool_usage_section(async_client):
         "total_cost_usd": 0.0,
         "limits": [],
         "upstream_limits": [],
+        "upstream_limits_unquantified_windows": [],
         "account_pool_usage": None,
     }
 
@@ -756,3 +762,102 @@ async def test_v1_usage_ignores_paused_and_deactivated_accounts_in_aggregate_cre
         },
     ]
     assert payload["limits"] == payload["upstream_limits"]
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_discloses_only_assigned_reported_max_weekly_window(async_client):
+    now = utcnow()
+    reset_at = int((now + timedelta(days=6)).timestamp())
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                Account(
+                    id=account_id,
+                    chatgpt_account_id=f"chatgpt-{account_id}",
+                    email=f"{account_id}@example.com",
+                    plan_type="promax",
+                    access_token_encrypted=b"a",
+                    refresh_token_encrypted=b"b",
+                    id_token_encrypted=b"c",
+                    last_refresh=now,
+                    status=status,
+                )
+                for account_id, status in (
+                    ("max-assigned", AccountStatus.ACTIVE),
+                    ("max-paused", AccountStatus.PAUSED),
+                    ("max-unassigned", AccountStatus.ACTIVE),
+                )
+            ]
+            + [
+                UsageHistory(
+                    account_id=account_id,
+                    recorded_at=now,
+                    window="primary",
+                    used_percent=20.0,
+                    reset_at=reset_at,
+                    window_minutes=10080,
+                )
+                for account_id in ("max-assigned", "max-paused", "max-unassigned")
+            ]
+        )
+        await session.commit()
+    _, key = await _create_api_key(
+        name="max-scoped",
+        assigned_account_ids=["max-assigned", "max-paused"],
+        limits=[LimitRuleInput(limit_type="credits", limit_window="7d", max_value=250)],
+    )
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upstream_limits"] == []
+    assert payload["upstream_limits_unquantified_windows"] == ["7d"]
+    assert payload["account_pool_usage"]["secondary"] is None
+    assert payload["account_pool_usage"]["unquantified_account_count_primary"] == 0
+    assert payload["account_pool_usage"]["unquantified_account_count_secondary"] == 1
+    assert payload["limits"][0]["max_value"] == 250
+    assert payload["limits"][0]["source"] == "api_key_limit"
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_hides_max_coverage_when_disclosure_disabled(async_client):
+    now = utcnow()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id="max-private",
+                chatgpt_account_id="chatgpt-max-private",
+                email="max-private@example.com",
+                plan_type="promax",
+                access_token_encrypted=b"a",
+                refresh_token_encrypted=b"b",
+                id_token_encrypted=b"c",
+                last_refresh=now,
+                status=AccountStatus.ACTIVE,
+            )
+        )
+        session.add(
+            UsageHistory(
+                account_id="max-private",
+                recorded_at=now,
+                window="primary",
+                used_percent=20,
+                reset_at=int((now + timedelta(days=6)).timestamp()),
+                window_minutes=10080,
+            )
+        )
+        await session.commit()
+    _, key = await _create_api_key(name="max-private-key", usage_sections="account_pool_usage")
+
+    section_response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+    assert section_response.status_code == 200
+    assert section_response.json()["upstream_limits_unquantified_windows"] == []
+    assert section_response.json()["account_pool_usage"]["unquantified_account_count_secondary"] == 1
+
+    settings = await async_client.put("/api/settings", json={"hideUpstreamQuotaFromApiKeys": True})
+    assert settings.status_code == 200
+    hidden = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
+    assert hidden.status_code == 200
+    assert hidden.json()["upstream_limits_unquantified_windows"] == []
+    assert hidden.json()["account_pool_usage"] is None

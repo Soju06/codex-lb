@@ -1,12 +1,12 @@
 ## 1. Identity and routing
-- [ ] 1.1 Recognize Pro Max and preserve Pro-family fallback with catalog authority.
-- [ ] 1.2 Fix constructed routing weights and percentage-based quota availability.
-- [ ] 1.3 Verify deterministic routing and unknown/zero-capacity regressions.
+- [x] 1.1 Recognize Pro Max and preserve Pro-family fallback with catalog authority.
+- [x] 1.2 Fix constructed routing weights and percentage-based quota availability.
+- [x] 1.3 Verify deterministic routing and unknown/zero-capacity regressions.
 
 ## 2. Usage reporting
-- [ ] 2.1 Add unquantified-window and per-account capacity-known metadata.
-- [ ] 2.2 Propagate scoped pooled metadata through dashboard and client APIs.
-- [ ] 2.3 Suppress incomplete backend fleet forecasts and verify API/privacy cases.
+- [x] 2.1 Add unquantified-window and per-account capacity-known metadata.
+- [x] 2.2 Propagate scoped pooled metadata through dashboard and client APIs.
+- [x] 2.3 Suppress incomplete backend fleet forecasts and verify API/privacy cases.
 
 ## 3. Dashboard
 - [ ] 3.1 Display Pro 500 and truthful percentage-only / subtotal usage.

@@ -44,7 +44,7 @@ and credit-based forecast are unavailable.
 
 - Usage window: `unquantifiedAccountCount`, default 0.
 - Per-account usage history/window: `capacityKnown`, default true.
-- Pooled usage: primary/secondary/monthly unquantified-account counts,
+- Pooled usage: primary/secondary unquantified-account counts,
   camelCase in dashboard responses and snake_case in OpenAI-compatible
   responses, matching the owning response conventions.
 - `/v1/usage`: `upstream_limits_unquantified_windows`, containing reported

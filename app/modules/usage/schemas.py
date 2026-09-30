@@ -13,6 +13,7 @@ class UsageWindow(DashboardModel):
     remaining_credits: float
     reset_at: datetime | None = None
     window_minutes: int | None = None
+    unquantified_account_count: int = 0
 
 
 class UsageCost(DashboardModel):
@@ -42,6 +43,7 @@ class UsageHistoryItem(DashboardModel):
     remaining_percent_avg: float | None = None
     capacity_credits: float
     remaining_credits: float
+    capacity_known: bool = True
 
 
 class UsageHistoryResponse(DashboardModel):

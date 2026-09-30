@@ -2551,7 +2551,10 @@ def _state_from_account(
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
+    # Pro Max reports percentages, not an absolute allowance. Use the Pro
+    # reference only for scheduling and lease pressure, never usage totals.
+    capacity_plan = "pro" if normalize_account_plan_type(account.plan_type) == "promax" else account.plan_type
+    capacity_credits = usage_core.capacity_for_plan(capacity_plan, long_window_key) or 0.0
     if capacity_credits > 0.0 and runtime.leased_tokens > 0:
         leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct

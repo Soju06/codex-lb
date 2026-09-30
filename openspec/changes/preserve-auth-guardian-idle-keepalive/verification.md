@@ -12,4 +12,6 @@ Initial verification baseline: published PR #2429 head `c4041d24`, integrated lo
 
 Implementation commit `4c232bf3b` integrates current main without rewriting the published history. All **61 backend tests**, `make lint`, migration topology, and `uv run --frozen ty check` passed again after committing.
 
+Before/after English dashboard screenshots are in `screenshots/auth-guardian-before.png` and `screenshots/auth-guardian-after.png`. Headless Playwright captured the actual Background jobs card from separate local Vite instances of `main@f8ffbac20` and this branch, using repository-owned authentication/settings/telemetry mock factories. The expected source copy was asserted before each capture; layout/styling were not altered. Both local servers and the browser were closed after capture. No production data or service was used.
+
 Publication and new-head cloud gates are separate from these local results. No PR merge or production operation is authorized. Final local review is verified; the follow-up remains active for the reworked PR's maintainer review.

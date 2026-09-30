@@ -30,6 +30,7 @@ const UsageHistoryItemSchema = z.object({
   remainingPercentAvg: z.number().nullable(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
+  capacityKnown: z.boolean().default(true),
 });
 
 export const UsageWindowSchema = z.object({
@@ -42,6 +43,7 @@ const UsageSummaryWindowSchema = z.object({
   remainingPercent: z.number(),
   capacityCredits: z.number(),
   remainingCredits: z.number(),
+  unquantifiedAccountCount: z.number().int().nonnegative().default(0),
   resetAt: z.iso.datetime({ offset: true }).nullable(),
   windowMinutes: z.number().nullable(),
 });

@@ -19,3 +19,8 @@ using retained projections or local fallback calculations.
 - **WHEN** old forecast projections exist and current weekly coverage is incomplete
 - **THEN** the dashboard does not resurrect a fleet forecast from those projections
 - **AND** the unknown allowance explanation remains visible on desktop and mobile
+
+#### Scenario: Search the displayed Pro Max plan
+- **WHEN** an operator searches accounts by `Pro 500` or `promax`
+- **THEN** the Pro Max account remains selectable
+- **AND** the stored plan identifier is unchanged

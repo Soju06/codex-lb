@@ -72,6 +72,8 @@ export const ApiKeySchema = z.object({
   pooledRemainingPercentPrimary: z.number().nullable().default(null),
   pooledRemainingPercentSecondary: z.number().nullable().default(null),
   pooledCapacityCreditsPrimary: z.number().default(0),
+  unquantifiedAccountCountPrimary: z.number().int().nonnegative().default(0),
+  unquantifiedAccountCountSecondary: z.number().int().nonnegative().default(0),
 });
 
 export const USAGE_SECTIONS = ["upstream_limits", "account_pool_usage"] as const;

@@ -61,6 +61,31 @@ describe("ApiKeySchema", () => {
     expect(parsed.pooledRemainingPercentPrimary).toBeNull();
     expect(parsed.pooledRemainingPercentSecondary).toBeNull();
     expect(parsed.pooledCapacityCreditsPrimary).toBe(0);
+    expect(parsed.unquantifiedAccountCountPrimary).toBe(0);
+    expect(parsed.unquantifiedAccountCountSecondary).toBe(0);
+  });
+
+  it("preserves suffix-style unquantified counts and unavailable pool percentages", () => {
+    const parsed = ApiKeySchema.parse({
+      id: "key-max",
+      name: "Max pool",
+      keyPrefix: "sk-test",
+      allowedModels: null,
+      expiresAt: null,
+      isActive: true,
+      createdAt: ISO,
+      lastUsedAt: null,
+      pooledRemainingPercentPrimary: null,
+      pooledRemainingPercentSecondary: null,
+      unquantifiedAccountCountPrimary: 1,
+      unquantifiedAccountCountSecondary: 2,
+    });
+
+    expect(parsed.unquantifiedAccountCountPrimary).toBe(1);
+    expect(parsed.unquantifiedAccountCountSecondary).toBe(2);
+    expect(parsed.pooledRemainingPercentPrimary).toBeNull();
+    expect(parsed.pooledRemainingPercentSecondary).toBeNull();
+    expect(ApiKeySchema.safeParse({ ...parsed, unquantifiedAccountCountSecondary: "2" }).success).toBe(false);
   });
 
   it("parses pooled credit fields", () => {

@@ -9,12 +9,12 @@
 - [x] 2.3 Suppress incomplete backend fleet forecasts and verify API/privacy cases.
 
 ## 3. Dashboard
-- [ ] 3.1 Display Pro 500 and truthful percentage-only / subtotal usage.
-- [ ] 3.2 Prevent incomplete forecasts through every frontend fallback.
-- [ ] 3.3 Verify schemas, utility behavior and dashboard flows.
+- [x] 3.1 Display Pro 500 and truthful percentage-only / subtotal usage.
+- [x] 3.2 Prevent incomplete forecasts through every frontend fallback.
+- [x] 3.3 Verify schemas, utility behavior and dashboard flows.
 
 ## 4. Verification and completion
-- [ ] 4.1 Run diagnostics, relevant tests, frontend build and strict spec validation.
-- [ ] 4.2 Exercise real HTTP and catalog-tier routing with captured evidence.
-- [ ] 4.3 Capture desktop/mobile screenshots and clean all owned QA resources.
-- [ ] 4.4 Sync specifications/context, archive verified change and commit.
+- [x] 4.1 Run diagnostics, relevant tests, frontend build and strict spec validation.
+- [x] 4.2 Exercise real HTTP and catalog-tier routing with captured evidence.
+- [x] 4.3 Capture desktop/mobile screenshots and clean all owned QA resources.
+- [x] 4.4 Sync specifications/context, archive verified change and commit.

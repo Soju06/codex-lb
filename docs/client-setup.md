@@ -188,9 +188,13 @@ environment proxies and connect directly.
 When [API key auth](api-keys.md) is enabled:
 
 ```toml
+[features]
+api_key_model_discovery = true
+
 [model_providers.codex-lb]
 name = "openai"
 base_url = "http://127.0.0.1:2455/backend-api/codex"
+model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true

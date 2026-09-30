@@ -20,11 +20,13 @@ The usage payload supplied percentages, reset times and a separate purchased
 credit balance, but no absolute included allowance. `chatpass.windows`
 repeated the weekly percentage; `additional_rate_limits` was null.
 
-No authoritative numeric Max allowance was established. The Pro tiers
-documentation also distinguishes grandfathered and reduced Pro 200
-allowances under the same plan identifier. Subscription price and purchased
-credits are therefore not reliable allowance conversions. Ultrafast's
-8x included-usage / 6x purchased-credit consumption is not a plan multiplier.
+No absolute included-credit allowance was established. Relative plan
+multipliers can inform estimates against a chosen reference, but do not
+provide that absolute allowance. The Pro tiers documentation also distinguishes
+grandfathered and reduced Pro 200 allowances under the same plan identifier.
+Subscription price and purchased credits are therefore not reliable allowance
+conversions. Ultrafast's 8x included-usage / 6x purchased-credit consumption is
+not a plan multiplier.
 
 ## Decision
 
@@ -33,6 +35,10 @@ has unknown absolute subscription capacity. Existing numeric aggregate
 fields remain legacy estimated-credit subtotals, with explicit coverage
 metadata. The existing Pro reference weight is used only by routing, so an
 upgraded account is not treated as Free or zero-capacity.
+
+Calibrating relative capacity estimates and modeling transitional Pro allowance
+cohorts are separate changes. This change keeps the existing estimates for
+other plans and makes the missing Max coverage explicit.
 
 For example, Pro at 40% used and Plus at 50% used contribute 57960 estimated
 weekly capacity and 34020 remaining credits. A Pro Max account at 20% used

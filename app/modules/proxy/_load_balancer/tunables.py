@@ -36,12 +36,17 @@ RUNTIME_PRESSURE_USED_PERCENT_CEILING = 99.0
 
 
 def apply_runtime_pressure(persisted: float | None, pressure_pct: float) -> float | None:
-    """Add in-flight pressure (percentage points) without letting it exhaust a window by itself."""
+    """Add in-flight pressure (percentage points) without letting it exhaust a window by itself.
+
+    An unexhausted window (persisted below 100) never reaches 100: pressure lifts it at most to
+    the ceiling, and a window already at or above the ceiling keeps its persisted value. Persisted
+    exhaustion (100) is preserved.
+    """
     if persisted is None:
         return None
-    if persisted >= RUNTIME_PRESSURE_USED_PERCENT_CEILING:
+    if persisted >= 100.0:
         return min(100.0, persisted + pressure_pct)
-    return min(persisted + pressure_pct, RUNTIME_PRESSURE_USED_PERCENT_CEILING)
+    return min(persisted + pressure_pct, max(persisted, RUNTIME_PRESSURE_USED_PERCENT_CEILING))
 
 
 @dataclass(frozen=True, slots=True)

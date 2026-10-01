@@ -866,7 +866,13 @@ async def test_open_stream_leases_let_sticky_reallocation_leave_exhausted_accoun
 @pytest.mark.asyncio
 async def test_max_lease_adds_weight_points_and_never_crosses_ceiling(db_setup):
     await _seed_plus_accounts_with_weekly_usage(
-        {"acc_pressure_mid": 38.0, "acc_pressure_high": 98.9, "acc_pressure_full": 100.0}
+        {
+            "acc_pressure_mid": 38.0,
+            "acc_pressure_high": 98.9,
+            "acc_pressure_at_ceiling": 99.0,
+            "acc_pressure_above_ceiling": 99.5,
+            "acc_pressure_full": 100.0,
+        }
     )
     balancer = LoadBalancer(_repo_factory)
     async with SessionLocal() as session:
@@ -897,4 +903,7 @@ async def test_max_lease_adds_weight_points_and_never_crosses_ceiling(db_setup):
     assert tunables.lease_token_weight == 1.0
     assert state_for("acc_pressure_high").secondary_used_percent == RUNTIME_PRESSURE_USED_PERCENT_CEILING
     assert RUNTIME_PRESSURE_USED_PERCENT_CEILING == 99.0
+    # An unexhausted window at or above the ceiling keeps its persisted value: pressure never reaches 100.
+    assert state_for("acc_pressure_at_ceiling").secondary_used_percent == 99.0
+    assert state_for("acc_pressure_above_ceiling").secondary_used_percent == 99.5
     assert state_for("acc_pressure_full").secondary_used_percent == 100.0

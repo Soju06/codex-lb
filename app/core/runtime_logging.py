@@ -26,11 +26,13 @@ _SENSITIVE_LOG_VALUE_PATTERNS = (
 # Fail closed for authorization values whose scheme is not Bearer or Basic
 # (Digest, AWS SigV4, ...): their auth-param lists carry secrets after the
 # first ``,``/``&``, so redact to the end of the current line (#2028). Basic
-# keeps the comma bound via pattern 2. Only a double quote may follow the key
-# so single-quoted Python-repr keys stay with
-# ``_PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN``.
+# keeps the comma bound via pattern 2. A value is skipped only when the
+# Bearer/Basic passes above already redacted its token, so a malformed
+# ``Bearer-x ...`` or ``Bearer, ...`` value is not mistaken for a handled one.
+# Only a double quote may follow the key so single-quoted Python-repr keys
+# stay with ``_PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN``.
 _FAIL_CLOSED_AUTHORIZATION_PATTERN = re.compile(
-    r"""(?i)(authorization"?\s*[=:]\s*)(?!["']?\s*(?:bearer|basic)\b|["']?\[REDACTED\])(\S.*)"""
+    r"""(?i)(authorization"?\s*[=:]\s*)(?!["']?\s*(?:(?:bearer|basic)\s+)?\[REDACTED\])(\S.*)"""
 )
 _LINE_BREAKS = re.compile(r"(\r\n|\n|\r)")
 # RFC 7617 ``Basic <base64>`` token: a reversible encoding of ``user:password``

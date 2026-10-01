@@ -16,6 +16,15 @@ rendered log text. Resolves the auth-param-list and quoted-key classes of
 - Basic keeps the `,`/`&` bound from the existing pattern. That behavior is
   pinned by existing tests (`Authorization: Basic dXNlcjpwYXNz, status=failed`
   keeps `, status=failed`), and Basic has no auth-param list to protect.
+- A value is exempt only when the Bearer or Basic pass already replaced its
+  token with `[REDACTED]`. A value that merely begins with `Bearer` (such as
+  `Bearer-x a, response=...`, `Bearer, ...` or `Bearer "..."`) was never
+  redacted by the Bearer pass and previously leaked whole; it now fails
+  closed too.
+- Known limit: a value that already contains a literal `[REDACTED]` at the
+  start (`Authorization: [REDACTED], response=...`) is treated as handled.
+  The pattern cannot tell it apart from its own Basic output on a second
+  pass, and skipping it is what keeps redaction idempotent.
 - Only a double quote may sit between the key and the separator. Single-quoted
   Python-repr keys stay with the Python-repr pattern.
 

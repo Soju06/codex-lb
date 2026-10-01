@@ -67,6 +67,17 @@ updateStrategy:
 terminationGracePeriodSeconds: 65
 # @param preStopSleepSeconds Minimum routing dwell from Python preStop helper start
 preStopSleepSeconds: 15
+startupProbe:
+  # @param startupProbe.initialDelaySeconds Initial delay before startup probes begin
+  initialDelaySeconds: 5
+  # @param startupProbe.periodSeconds Interval between startup probes
+  periodSeconds: 2
+  # @param startupProbe.timeoutSeconds Startup probe timeout
+  timeoutSeconds: 1
+  # @param startupProbe.failureThreshold Consecutive failures before startup is considered failed
+  failureThreshold: 30
+  # @param startupProbe.successThreshold Consecutive successes required for startup (must remain 1)
+  successThreshold: 1
 resources:
   requests:
     # @param resources.requests.cpu CPU request

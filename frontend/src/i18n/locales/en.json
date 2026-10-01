@@ -1447,7 +1447,7 @@
   "settings.routing.overload.inflightPenaltyPctLabel": "In-flight penalty (% per request)",
   "settings.routing.overload.inflightPenaltyPctDescription": "Usage percent added per in-flight request so busy accounts look fuller to weighted routing (0-100).",
   "settings.routing.overload.leaseTokenWeightLabel": "Leased-token weight",
-  "settings.routing.overload.leaseTokenWeightDescription": "Multiplier applied to a turn's reserved tokens before they count as usage pressure.",
+  "settings.routing.overload.leaseTokenWeightDescription": "Percentage points added to an account's used percent per full-size in-flight lease (scaled down for smaller leases).",
   "settings.routing.overload.leaseTtlSecondsLabel": "Account lease TTL (seconds)",
   "settings.routing.overload.leaseTtlSecondsDescription": "A per-account lease older than this is reclaimed as stale; long streams stay covered by their request budget plus a grace period. Must be at least the proxy and compact request budgets.",
   "settings.routing.overload.errorRateWeightingLabel": "Weight selection by recent error rate",

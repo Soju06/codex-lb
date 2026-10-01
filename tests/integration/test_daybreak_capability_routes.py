@@ -75,6 +75,7 @@ _LOCAL_AUTHENTICATED_ROUTES: frozenset[_RouteKey] = frozenset(
     {
         ("HTTP", "GET", "/backend-api/codex/models"),
         ("HTTP", "GET", "/v1/models"),
+        ("HTTP", "GET", "/v1/models/{model_id:path}"),
         ("HTTP", "GET", "/v1/usage"),
         ("HTTP", "POST", "/v1/images/variations"),
         ("HTTP", "GET", "/v1/reset-credit"),

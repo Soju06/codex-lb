@@ -42752,7 +42752,9 @@ async def test_submit_fails_closed_when_the_quarantine_arms_after_planning() -> 
 
 
 @pytest.mark.asyncio
-async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None:
+async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A remotely written abandonment tombstone arms no quarantine by
     # design; when planning served a cached view that predates it, the
     # payload was serialized with the injected anchor the tombstone
@@ -42760,16 +42762,36 @@ async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None
     # fail closed instead of dispatching the known-dead anchor once.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="bridge-submit-tombstone-gate")
+    session.durable_session_id = "durable-submit-tombstone-gate"
+    session.durable_owner_epoch = 4
+    session.last_completed_response_id = "resp_abandoned_anchor"
+    session.last_completed_response_account_id = "acc-bridge"
+    session.last_completed_input_count = 12
+    session.last_completed_input_prefix_fingerprint = "fingerprint-abandoned"
+    session.previous_response_ids.add("resp_abandoned_anchor")
     tombstone_state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
         last_touched_monotonic=time.monotonic()
     )
     tombstone_state.consecutive_failures = 0
     tombstone_state.last_detail = "anchor_abandoned"
     cast(Any, service)._http_bridge_retry_circuits[session.key] = tombstone_state
+    clear_anchor = AsyncMock(return_value=SimpleNamespace())
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
+        clear_live_session_response_anchor_if_matches=clear_anchor,
     )
+
+    async def unregister_previous_response_id(
+        target_session: proxy_service._HTTPBridgeSession,
+        response_id: str,
+        **_kwargs: Any,
+    ) -> bool:
+        target_session.previous_response_ids.discard(response_id)
+        return True
+
+    unregister_anchor = AsyncMock(side_effect=unregister_previous_response_id)
+    monkeypatch.setattr(service, "_unregister_http_bridge_previous_response_id", unregister_anchor)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-submit-tombstone-gate",
         model="gpt-5.4",
@@ -42797,6 +42819,19 @@ async def test_submit_fails_closed_on_an_adopted_abandonment_tombstone() -> None
     assert excinfo.value.status_code == 404
     assert "bridge_previous_response_not_found" in str(excinfo.value.payload), (
         "a proxy-injected anchor over an adopted tombstone must fail closed at submission"
+    )
+    clear_anchor.assert_awaited_once()
+    assert clear_anchor.await_args is not None
+    assert clear_anchor.await_args.kwargs["session_id"] == "durable-submit-tombstone-gate"
+    assert clear_anchor.await_args.kwargs["owner_epoch"] == 4
+    assert clear_anchor.await_args.kwargs["response_id"] == "resp_abandoned_anchor"
+    unregister_anchor.assert_awaited_once()
+    assert session.last_completed_response_id is None, (
+        "the refusal must retire the dead live carrier so the next full resend cannot receive it again"
+    )
+    assert "resp_abandoned_anchor" not in session.previous_response_ids
+    assert tombstone_state.last_detail == "anchor_abandoned", (
+        "carrier retirement must preserve the tombstone that still guards delta-only follow-ups"
     )
 
 

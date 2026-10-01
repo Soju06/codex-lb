@@ -154,6 +154,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _abandon_durable_http_bridge_continuity,
+    _invalidate_denied_http_bridge_anchor,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -1175,6 +1176,26 @@ class _HTTPBridgeRequestSubmitMixin:
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
+            if submit_time_anchor_tombstoned:
+                # The tombstone is a durable verdict that the proxy's own
+                # injected carrier is dead. Retire that exact carrier before
+                # asking for a full resend, otherwise planning injects it
+                # again and every retry receives this same refusal. Keep the
+                # tombstone itself: it still guards a delta-only follow-up.
+                try:
+                    await _invalidate_denied_http_bridge_anchor(
+                        self,
+                        session,
+                        denied_response_id=request_state.previous_response_id,
+                    )
+                except Exception:
+                    # Cleanup is bookkeeping attached to the already chosen
+                    # 404. Preserve that public contract while the invalidator
+                    # keeps its denial fence and schedules bounded retries.
+                    logger.warning(
+                        "Failed to retire tombstoned proxy-injected HTTP bridge anchor",
+                        exc_info=True,
+                    )
             raise ProxyResponseError(
                 404,
                 openai_error(

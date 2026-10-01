@@ -23,6 +23,15 @@ _SENSITIVE_LOG_VALUE_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=:-]+"),
     re.compile(r"(?i)(authorization\s*[=:]\s*)(?!\s*bearer\b)([^,&]+)"),
 )
+# Fail closed for authorization values whose scheme is not Bearer or Basic
+# (Digest, AWS SigV4, ...): their auth-param lists carry secrets after the
+# first ``,``/``&``, so redact to the end of the current line (#2028). Basic
+# keeps the comma bound via pattern 2. Only a double quote may follow the key
+# so single-quoted Python-repr keys stay with
+# ``_PYTHON_REPR_SENSITIVE_LOG_VALUE_PATTERN``.
+_FAIL_CLOSED_AUTHORIZATION_PATTERN = re.compile(
+    r"""(?i)(authorization"?\s*[=:]\s*)(?!["']?\s*(?:bearer|basic)\b|["']?\[REDACTED\])(\S.*)"""
+)
 _LINE_BREAKS = re.compile(r"(\r\n|\n|\r)")
 # RFC 7617 ``Basic <base64>`` token: a reversible encoding of ``user:password``
 # that aiohttp reprs verbatim (``ClientHttpProxyError.request_info.headers``
@@ -158,6 +167,7 @@ def _redact_secret_patterns_on_line(text: str) -> str:
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[0].sub(_redact_keyed_secret, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[1].sub(_redact_bearer_token, redacted)
     redacted = _BASIC_TOKEN_PATTERN.sub(_redact_bearer_token, redacted)
+    redacted = _FAIL_CLOSED_AUTHORIZATION_PATTERN.sub(_redact_authorization_value, redacted)
     redacted = _SENSITIVE_LOG_VALUE_PATTERNS[2].sub(_redact_authorization_value, redacted)
     # Last, so ``'Proxy-Authorization': 'Basic [REDACTED]'`` keeps the scheme
     # the token passes above already exposed.

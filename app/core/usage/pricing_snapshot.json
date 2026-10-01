@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-30T06:51:01.999410+00:00",
+  "updated_at": "2026-10-01T06:52:13.400265+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -176,9 +176,9 @@
       "input_per_1m": 0.1,
       "output_per_1m": 0.4,
       "cached_input_per_1m": 0.025,
-      "priority_input_per_1m": 0.19999999999999998,
-      "priority_output_per_1m": 0.7999999999999999,
-      "priority_cached_input_per_1m": 0.049999999999999996
+      "priority_input_per_1m": 0.2,
+      "priority_output_per_1m": 0.8,
+      "priority_cached_input_per_1m": 0.05
     },
     "gpt-4.1-nano-2025-04-14": {
       "input_per_1m": 0.09999999999999999,
@@ -198,7 +198,9 @@
     },
     "gpt-4o-2024-05-13": {
       "input_per_1m": 5.0,
-      "output_per_1m": 15.0
+      "output_per_1m": 15.0,
+      "priority_input_per_1m": 8.75,
+      "priority_output_per_1m": 26.25
     },
     "gpt-4o-2024-08-06": {
       "input_per_1m": 2.5,
@@ -288,12 +290,12 @@
       "input_per_1m": 0.25,
       "output_per_1m": 2.0,
       "cached_input_per_1m": 0.025,
-      "priority_input_per_1m": 0.44999999999999996,
-      "priority_output_per_1m": 3.5999999999999996,
+      "priority_input_per_1m": 0.45,
+      "priority_output_per_1m": 3.6,
       "priority_cached_input_per_1m": 0.045,
       "flex_input_per_1m": 0.125,
       "flex_output_per_1m": 1.0,
-      "flex_cached_input_per_1m": 0.012499999999999999
+      "flex_cached_input_per_1m": 0.0125
     },
     "gpt-5-mini-2025-08-07": {
       "input_per_1m": 0.25,
@@ -309,7 +311,10 @@
     "gpt-5-nano": {
       "input_per_1m": 0.05,
       "output_per_1m": 0.4,
-      "cached_input_per_1m": 0.005
+      "cached_input_per_1m": 0.005,
+      "flex_input_per_1m": 0.025,
+      "flex_output_per_1m": 0.2,
+      "flex_cached_input_per_1m": 0.0025
     },
     "gpt-5-pro": {
       "input_per_1m": 15.0,
@@ -400,7 +405,10 @@
     "gpt-5.3-codex": {
       "input_per_1m": 1.75,
       "output_per_1m": 14.0,
-      "cached_input_per_1m": 0.175
+      "cached_input_per_1m": 0.175,
+      "priority_input_per_1m": 3.5,
+      "priority_output_per_1m": 28.0,
+      "priority_cached_input_per_1m": 0.35
     },
     "gpt-5.3-codex-spark": {
       "input_per_1m": 1.75,
@@ -469,7 +477,7 @@
       "input_per_1m": 0.2,
       "output_per_1m": 1.25,
       "cached_input_per_1m": 0.02,
-      "flex_input_per_1m": 0.09999999999999999,
+      "flex_input_per_1m": 0.1,
       "flex_output_per_1m": 0.625,
       "flex_cached_input_per_1m": 0.01
     },
@@ -770,7 +778,7 @@
       "priority_cached_input_per_1m": 0.5,
       "flex_input_per_1m": 0.55,
       "flex_output_per_1m": 2.2,
-      "flex_cached_input_per_1m": 0.13799999999999998
+      "flex_cached_input_per_1m": 0.138
     },
     "o4-mini-2025-04-16": {
       "input_per_1m": 1.1,

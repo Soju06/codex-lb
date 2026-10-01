@@ -44,3 +44,15 @@ negative and non-finite tier groups must not enter the active catalog.
 PR #2504 separately introduces cache-write accounting. This change does not
 duplicate its storage, migration, prices or writer plumbing. PR #2544 is a
 metadata refresh, not an alternative Ultrafast implementation.
+
+## Source-unit precision
+
+LiteLLM publishes per-token prices that need conversion to per-million rates.
+The adapter uses decimal multiplication for this conversion before returning
+the existing float-valued model-price contract. Binary multiplication can
+otherwise distort a source rate before exact monetary settlement sees it.
+
+For example, 0.0000002 USD per token becomes 0.2 USD per million, so 100 input
+tokens settle at exactly 20 microdollars. The adapter does not round arbitrary
+prices, and final genuinely fractional microdollar costs remain truncated.
+Validation, catalog merging and historical non-NULL costs are unchanged.

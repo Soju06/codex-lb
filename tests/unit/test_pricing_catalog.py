@@ -6,7 +6,13 @@ from dataclasses import replace
 import pytest
 
 from app.core.usage import pricing_catalog as catalog
-from app.core.usage.pricing import ModelPrice, UsageTokens, calculate_cost_from_usage, get_pricing_for_model
+from app.core.usage.pricing import (
+    ModelPrice,
+    UsageTokens,
+    calculate_cost_from_usage,
+    calculate_cost_microdollars_from_usage,
+    get_pricing_for_model,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -202,6 +208,25 @@ def test_litellm_units_and_non_openai_filter():
     assert set(prices) == {"gpt-test"}
     assert prices["gpt-test"].input_per_1m == 10
     assert prices["gpt-test"].priority_output_per_1m == 100
+
+
+@pytest.mark.parametrize("source_rate, expected", [(0.0000002, 20), (0.000000009999999999999999, 0)])
+@pytest.mark.parametrize("tier", [None, "ultrafast"])
+def test_litellm_rates_settle_integral_and_fractional_microdollars(source_rate, expected, tier):
+    price = catalog.parse_litellm(
+        {
+            "gpt-test": {
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": source_rate,
+                "output_cost_per_token": 0,
+                "input_cost_per_token_ultrafast": source_rate,
+                "output_cost_per_token_ultrafast": 0,
+            }
+        }
+    )["gpt-test"]
+
+    assert calculate_cost_microdollars_from_usage(UsageTokens(100, 0), price, service_tier=tier) == expected
 
 
 def test_supplement_only_when_base_prices_agree():

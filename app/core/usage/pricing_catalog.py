@@ -7,6 +7,7 @@ import logging
 import math
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import aiohttp
@@ -34,7 +35,7 @@ def _rates(data: dict[str, JsonValue], names: dict[str, str], scale: float = 1.0
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise ValueError(f"Invalid price field: {source}")
-        scaled = float(value) * scale
+        scaled = float(Decimal(str(value)) * Decimal(str(scale)))
         if not math.isfinite(scaled):
             raise ValueError(f"Invalid scaled price: {source}")
         result[target] = scaled

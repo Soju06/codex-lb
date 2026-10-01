@@ -1447,7 +1447,7 @@
   "settings.routing.overload.inflightPenaltyPctLabel": "进行中请求惩罚（每请求 %）",
   "settings.routing.overload.inflightPenaltyPctDescription": "每个进行中的请求额外计入的用量百分比，使繁忙账户在加权路由中显得更满（0-100）。",
   "settings.routing.overload.leaseTokenWeightLabel": "预留 token 权重",
-  "settings.routing.overload.leaseTokenWeightDescription": "在把一轮预留的 token 计入用量压力之前所乘的系数。",
+  "settings.routing.overload.leaseTokenWeightDescription": "每个满额进行中预留为账户已用百分比增加的百分点数(较小的预留按比例缩小)。",
   "settings.routing.overload.leaseTtlSecondsLabel": "账户租约 TTL（秒）",
   "settings.routing.overload.leaseTtlSecondsDescription": "超过此时长的账户租约会被视为过期并回收；长流仍由其请求预算加宽限期保护。不得低于代理与压缩请求预算。",
   "settings.routing.overload.errorRateWeightingLabel": "按近期错误率加权选择",

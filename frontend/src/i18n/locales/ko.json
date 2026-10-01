@@ -1621,7 +1621,7 @@
   "settings.routing.overload.inflightPenaltyPctLabel": "진행 중 요청 페널티 (요청당 %)",
   "settings.routing.overload.inflightPenaltyPctDescription": "진행 중인 요청 하나마다 사용량에 더하는 퍼센트입니다. 바쁜 계정이 가중 라우팅에 더 꽉 찬 것으로 보이게 합니다 (0~100).",
   "settings.routing.overload.leaseTokenWeightLabel": "예약 토큰 가중치",
-  "settings.routing.overload.leaseTokenWeightDescription": "턴이 예약한 토큰을 사용량 압력으로 계산하기 전에 곱하는 배수입니다.",
+  "settings.routing.overload.leaseTokenWeightDescription": "최대 크기의 진행 중 예약 하나당 계정 사용률에 더해지는 퍼센트 포인트입니다(작은 예약은 비례하여 줄어듭니다).",
   "settings.routing.overload.leaseTtlSecondsLabel": "계정 리스 TTL (초)",
   "settings.routing.overload.leaseTtlSecondsDescription": "이 시간보다 오래된 계정별 리스는 만료로 회수합니다. 긴 스트림은 요청 예산과 여유 시간까지 보호됩니다. 프록시·컴팩트 요청 예산 이상이어야 합니다.",
   "settings.routing.overload.errorRateWeightingLabel": "최근 에러율로 선택 가중치 조정",

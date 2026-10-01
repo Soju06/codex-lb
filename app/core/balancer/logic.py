@@ -144,6 +144,9 @@ class AccountState:
     inflight_response_creates: int = 0
     inflight_streams: int = 0
     leased_tokens: float = 0.0
+    # Usage before runtime in-flight pressure; ``None`` means unknown (use the effective value).
+    persisted_used_percent: float | None = None
+    persisted_secondary_used_percent: float | None = None
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
     # Multiplier applied to this candidate's draw weight by the weighted
@@ -1064,11 +1067,7 @@ def _select_relative_availability(
         membership_seed=selection_seed,
     )
     if not weighted_candidates:
-        winner = (
-            _seeded_least_used(available, selection_seed)
-            if selection_seed is not None
-            else min(available, key=_usage_sort_key)
-        )
+        winner = _persisted_least_used(available, selection_seed)
         _log_relative_availability_winner(
             winner,
             current=current,
@@ -1086,11 +1085,7 @@ def _select_relative_availability(
     weights = [weight * _selection_weight_multiplier(state) for state, weight, _ in weighted_candidates]
     total = sum(weights)
     if total <= 0.0:
-        winner = (
-            _seeded_least_used(available, selection_seed)
-            if selection_seed is not None
-            else min(available, key=_usage_sort_key)
-        )
+        winner = _persisted_least_used(available, selection_seed)
         _log_relative_availability_winner(
             winner,
             current=current,
@@ -1126,6 +1121,31 @@ def _select_relative_availability(
 def _seeded_account(pool: list[AccountState], seed: str) -> AccountState:
     """The seed's choice among candidates the strategy was about to draw from."""
     return min(pool, key=lambda state: _decorrelated_tie_breaker(state.account_id, seed))
+
+
+def _persisted_usage_rank(state: AccountState) -> tuple[float, float]:
+    """Pressure-free (secondary, primary) usage; unknown values use the effective ones."""
+    primary = state.persisted_used_percent if state.persisted_used_percent is not None else state.used_percent
+    secondary = (
+        state.persisted_secondary_used_percent
+        if state.persisted_secondary_used_percent is not None
+        else state.secondary_used_percent
+    )
+    primary = primary if primary is not None else 0.0
+    return (secondary if secondary is not None else primary), primary
+
+
+def _persisted_least_used(available: list[AccountState], seed: str | None) -> AccountState:
+    """Relative-availability zero-score fallback: rank by persisted usage first.
+
+    Runtime pressure must not erase the real usage difference between accounts,
+    so the pressure-free usage decides before the recency/id/seed tie-break.
+    """
+    least_used = min(_persisted_usage_rank(state) for state in available)
+    tied = [state for state in available if _persisted_usage_rank(state) == least_used]
+    if seed is not None:
+        return _seeded_account(tied, seed)
+    return min(tied, key=_usage_sort_key)
 
 
 def _seeded_least_used(available: list[AccountState], seed: str) -> AccountState:

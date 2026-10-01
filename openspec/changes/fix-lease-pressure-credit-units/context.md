@@ -11,7 +11,7 @@ Purpose of the measurement section below: it records why the fix avoids the plan
 Options considered were a price-based conversion (lease tokens x model credit rate / plan capacity), a fixed number of points per lease, and removing the term. Fixed points was chosen:
 
 - Removing the term would drop the leased-estimate input that the `responses-api-compat` pressure requirement keeps.
-- A price-based term needs per-plan capacities. The measurement below shows codex-lb's capacity constants do not describe OpenAI's limits, so it would rest on uncalibrated numbers. It would also be negligible: a maximum-size lease on `gpt-6.1-sol` is about 37 OpenAI credits, about 0.1-0.15% of a Plus 5-hour window.
+- A price-based term needs per-plan capacities. The measurement below shows codex-lb's capacity constants do not describe OpenAI's limits, so it would rest on uncalibrated numbers. It would also be negligible: a maximum-size lease on `gpt-6.1-sol` is 8,192 x 50/1M + 2,048 x 250/1M = about 0.92 OpenAI credits, about 0.34% of a Plus 5-hour window (~272 credits) and about 0.05% of a Plus weekly window (~1,940 credits).
 - A second opinion (Jev, `jev-1.13.0`, given primary evidence only) split between fixed points (0.51) and removal (0.38), with price-based at 0.10.
 
 ## Measurement: what OpenAI's quota percent tracks (Plus, 2026-07-14 to 2026-10-01)
@@ -50,7 +50,7 @@ Plus capacity 7,560 credits. Account A persisted at 95%, account B at 38%. Each 
 
 `AccountState.used_percent` / `secondary_used_percent` carry the pressure-adjusted values; the new `persisted_used_percent` / `persisted_secondary_used_percent` carry the pressure-free ones. Reviewed readers:
 
-- Sticky budget gate (`_state_above_sticky_budget_threshold`) and `_state_above_budget_threshold`: read the adjusted values. Behavior change (intended): pressure is now at most `lease_token_weight` + the in-flight penalty points instead of up to 100, so these gates no longer fire on one open stream. A threshold of 100 can no longer be crossed by pressure (the ceiling is 99.0 for a persisted value below 99); a persisted value of 99 or more keeps today's `min(100, persisted + pressure)`.
+- Sticky budget gate (`_state_above_sticky_budget_threshold`) and `_state_above_budget_threshold`: read the adjusted values. Behavior change (intended): pressure is now at most `lease_token_weight` + the in-flight penalty points instead of up to 100, so these gates no longer fire on one open stream. A threshold of 100 can no longer be crossed by pressure: a persisted value below 99 is lifted at most to 99.0, a persisted value in [99, 100) keeps its persisted value, and persisted exhaustion (100) is preserved.
 - Health tiers (`_sync_runtime_health_tier`): evaluated from persisted values before pressure is added. No change.
 - Exhaustion evidence (`_usage_exhausted*`, `priority_*_used_percent`): gated on QUOTA_EXCEEDED / RATE_LIMITED status and fed from persisted values. No change.
 - `relative_availability` scoring and `_usage_sort_key`: read the adjusted values, so scores stay positive under one open stream; only the zero-score fallback uses the persisted values.

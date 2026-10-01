@@ -46,7 +46,7 @@ No new setting. No schema change or migration. `proxy_account_lease_token_weight
 
 ### Why points and not a price-based conversion
 
-The measurement in `context.md` shows OpenAI's quota percent tracks model-priced consumption: tokens x each model's published credit rate. A correctly priced maximum-size lease on `gpt-6.1-sol` is about 37 OpenAI credits: about 0.1-0.15% of a Plus 5-hour window and about 0.02% of a Plus weekly window at the measured capacities. A price-based term would therefore be accurate but negligible. It would also need per-model rates and per-plan capacities in the balancer's lock path. Both rest on constants that #2420 and this measurement show are uncalibrated. A fixed point value keeps the burst-spreading behaviour `responses-api-compat` requires and needs no calibration.
+The measurement in `context.md` shows OpenAI's quota percent tracks model-priced consumption: tokens x each model's published credit rate. A correctly priced maximum-size lease on `gpt-6.1-sol` is 8,192 x 50/1M + 2,048 x 250/1M = about 0.92 OpenAI credits: about 0.34% of a Plus 5-hour window (~272 credits) and about 0.05% of a Plus weekly window (~1,940 credits) at the measured capacities. A price-based term would therefore be accurate but negligible. It would also need per-model rates and per-plan capacities in the balancer's lock path. Both rest on constants that #2420 and this measurement show are uncalibrated. A fixed point value keeps the burst-spreading behaviour `responses-api-compat` requires and needs no calibration.
 
 ## Related issues
 

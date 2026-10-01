@@ -503,13 +503,64 @@ def test_info_records_keep_python_repr_secret_keyed_mappings(text_formatter):
 
 
 def test_authorization_midline_redaction_truncates_to_separator(text_formatter):
-    # Pins the existing pattern-2 behavior: the redaction consumes the rest of
+    # Pins the existing pattern-2 behavior (Basic keeps the comma bound): the redaction consumes the rest of
     # the line up to ',' or '&', so trailing fields on the same line are lost.
     output = _render(text_formatter, _record("upstream rejected Authorization: Basic dXNlcjpwYXNz status=failed"))
 
     assert "dXNlcjpwYXNz" not in output
     assert output.endswith("upstream rejected Authorization: [REDACTED]\n")
     assert "status=failed" not in output
+
+
+_FAIL_CLOSED_AUTHORIZATION_CASES = [
+    ('authorization=Digest username="a,b", response="QA_SECRET"', "authorization=[REDACTED]"),
+    ('authorization=Digest username="public",,response="QA_SECRET"', "authorization=[REDACTED]"),
+    ("authorization=Digest username=u, malformed, response=QA_SECRET", "authorization=[REDACTED]"),
+    ("authorization='Digest username=x, response=QA_SECRET', status=failed", "authorization=[REDACTED]"),
+    (
+        'Authorization: Digest username="svc", realm="api", nonce="n1", response="6629fae4"',
+        "Authorization: [REDACTED]",
+    ),
+    (
+        "Authorization: AWS4-HMAC-SHA256 Credential=AKID/aws4_request, SignedHeaders=host;x-amz-date, "
+        "Signature=fe5f80f7",
+        "Authorization: [REDACTED]",
+    ),
+    (
+        '{"authorization": Digest username="public", malformed, response="QA_SECRET"}',
+        '{"authorization": [REDACTED]',
+    ),
+]
+_FAIL_CLOSED_LEAK_MARKERS = ("QA_SECRET", "response=", "Signature=", "6629fae4", "fe5f80f7")
+
+
+@pytest.mark.parametrize(("value", "expected"), _FAIL_CLOSED_AUTHORIZATION_CASES)
+def test_redact_log_value_fails_closed_for_non_basic_authorization(value, expected):
+    redacted = _redact_log_value(value)
+
+    assert redacted is not None
+    assert redacted == expected
+    for marker in _FAIL_CLOSED_LEAK_MARKERS:
+        assert marker not in redacted
+    assert _redact_log_value(redacted) == redacted
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_non_basic_authorization_redaction_stops_at_end_of_line(monkeypatch, log_format):
+    import sys
+
+    formatter = _formatter_from_config(monkeypatch, log_format)
+    try:
+        raise RuntimeError('Authorization: Digest username="svc", realm="api", response="QA_SECRET"\nstatus=failed')
+    except RuntimeError:
+        record = _record("request failed", exc_info=sys.exc_info())
+
+    output = _render(formatter, record)
+    rendered = json.loads(output)["exception"] if log_format == "json" else output
+
+    assert "QA_SECRET" not in rendered
+    assert "response=" not in rendered
+    assert "Authorization: [REDACTED]\nstatus=failed" in rendered
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])
@@ -591,6 +642,8 @@ def test_bearer_redaction_consumes_glued_colon_tail(monkeypatch, log_format):
 def test_secret_pattern_redaction_preserves_terminators_and_is_idempotent():
     text = (
         "authorization=Digest username=a\n"
+        'Authorization: Digest username="svc", realm="api", response="6629fae4"\n'
+        "Authorization: AWS4-HMAC-SHA256 Credential=AKID/aws4_request, Signature=fe5f80f7\n"
         "retrying upstream\r\n"
         "cr-only diagnostic\r"
         'payload={"token":"QAJSONSECRET\n'
@@ -608,6 +661,8 @@ def test_secret_pattern_redaction_preserves_terminators_and_is_idempotent():
     assert "abc.def" not in once
     assert "GLUEDTAIL" not in once
     assert "QAJSONSECRET" not in once
+    assert "6629fae4" not in once
+    assert "fe5f80f7" not in once
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])

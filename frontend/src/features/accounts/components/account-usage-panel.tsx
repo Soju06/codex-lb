@@ -224,7 +224,13 @@ function ResetCreditsRow({
   );
 }
 
-export function AccountUsagePanel({
+/** Remount display state when switching to a different account. */
+export function AccountUsagePanel(props: AccountUsagePanelProps) {
+  return <AccountUsagePanelContent key={props.account.accountId} {...props} />;
+}
+
+/** Present the selected account's usage, quota windows, and trend chart. */
+function AccountUsagePanelContent({
   account,
   trends,
   resetCredits,
@@ -331,14 +337,18 @@ export function AccountUsagePanel({
           <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.trendTitle")}</h4>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-                5h
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-                {monthlyOnly ? t("common.quota.monthly") : t("common.quota.weekly")}
-              </span>
+              {primaryTrendPoints.length > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+                  5h
+                </span>
+              )}
+              {secondaryTrendPoints.length > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+                  {monthlyOnly ? t("common.quota.monthly") : t("common.quota.weekly")}
+                </span>
+              )}
               {secondaryScheduledTrendPoints.length > 0 ? (
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
@@ -349,6 +359,7 @@ export function AccountUsagePanel({
           </div>
           <Suspense fallback={<div className="h-[220px]" />}>
             <AccountTrendChart
+              monthly={monthlyOnly}
               primary={primaryTrendPoints}
               secondary={secondaryTrendPoints}
               secondaryScheduled={secondaryScheduledTrendPoints}

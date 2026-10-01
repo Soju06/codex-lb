@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Iterator
 from importlib import import_module
+from typing import cast
 
 import pytest
 
@@ -876,6 +878,7 @@ async def test_in_flight_middleware_tracks_websocket_connections() -> None:
 async def test_in_flight_middleware_checks_websocket_drain_after_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Register before the drain check and release the rejected connection."""
     app_called = False
 
     async def inner_app(scope, receive, send):  # noqa: ANN001, ARG001
@@ -899,7 +902,17 @@ async def test_in_flight_middleware_checks_websocket_drain_after_registration(
     await middleware({"type": "websocket", "path": "/v1/responses"}, ws_receive, ws_send)
 
     assert app_called is False
-    assert sent_messages == [{"type": "websocket.close", "code": 1013, "reason": "Server is draining"}]
+    # A pre-handshake ``websocket.close`` reaches the client as an opaque HTTP
+    # 403; the drain must deny the upgrade with a retryable 503 instead.
+    assert [message["type"] for message in sent_messages] == [
+        "websocket.http.response.start",
+        "websocket.http.response.body",
+    ]
+    assert sent_messages[0]["status"] == 503
+    assert dict(cast(list[tuple[bytes, bytes]], sent_messages[0]["headers"]))[b"retry-after"] == b"5"
+    payload = json.loads(cast(bytes, sent_messages[1]["body"]).decode("utf-8"))
+    assert payload["error"]["code"] == "proxy_unavailable"
+    assert payload["error"]["message"] == "Server is draining"
     assert shutdown_state.get_in_flight() == 0
 
 
@@ -926,7 +939,9 @@ async def test_in_flight_middleware_does_not_hold_non_responses_websocket_open()
 
 
 @pytest.mark.asyncio
-async def test_in_flight_middleware_rejects_new_websocket_during_drain() -> None:
+@pytest.mark.parametrize("path", ["/v1/responses", "/ws/events"])
+async def test_in_flight_middleware_rejects_new_websocket_during_drain(path: str) -> None:
+    """Deny proxy and generic upgrades during drain without invoking the route."""
     shutdown_state.set_draining(True)
     app_called = False
 
@@ -944,10 +959,23 @@ async def test_in_flight_middleware_rejects_new_websocket_during_drain() -> None
     async def ws_send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
 
-    await middleware({"type": "websocket", "path": "/v1/responses"}, ws_receive, ws_send)
+    await middleware({"type": "websocket", "path": path}, ws_receive, ws_send)
 
     assert app_called is False
-    assert sent_messages == [{"type": "websocket.close", "code": 1013, "reason": "Server is draining"}]
+    # A pre-handshake ``websocket.close`` reaches the client as an opaque HTTP
+    # 403; the drain must deny the upgrade with a retryable 503 instead.
+    assert [message["type"] for message in sent_messages] == [
+        "websocket.http.response.start",
+        "websocket.http.response.body",
+    ]
+    assert sent_messages[0]["status"] == 503
+    assert dict(cast(list[tuple[bytes, bytes]], sent_messages[0]["headers"]))[b"retry-after"] == b"5"
+    payload = json.loads(cast(bytes, sent_messages[1]["body"]).decode("utf-8"))
+    if path == "/v1/responses":
+        assert payload["error"]["code"] == "proxy_unavailable"
+        assert payload["error"]["message"] == "Server is draining"
+    else:
+        assert payload == {"detail": "Server is draining"}
     assert shutdown_state.get_in_flight() == 0
 
 

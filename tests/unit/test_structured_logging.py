@@ -530,6 +530,10 @@ _FAIL_CLOSED_AUTHORIZATION_CASES = [
         '{"authorization": Digest username="public", malformed, response="QA_SECRET"}',
         '{"authorization": [REDACTED]',
     ),
+    # A value that only starts with "Bearer" was never redacted by the Bearer pass.
+    ("Authorization: Bearer-x a, response=QA_SECRET", "Authorization: [REDACTED]"),
+    ("Authorization: Bearer, response=QA_SECRET", "Authorization: [REDACTED]"),
+    ('Authorization: Bearer "QA_SECRET", status=failed', "Authorization: [REDACTED]"),
 ]
 _FAIL_CLOSED_LEAK_MARKERS = ("QA_SECRET", "response=", "Signature=", "6629fae4", "fe5f80f7")
 
@@ -543,6 +547,15 @@ def test_redact_log_value_fails_closed_for_non_basic_authorization(value, expect
     for marker in _FAIL_CLOSED_LEAK_MARKERS:
         assert marker not in redacted
     assert _redact_log_value(redacted) == redacted
+
+
+@pytest.mark.parametrize(("value", "expected"), _FAIL_CLOSED_AUTHORIZATION_CASES)
+def test_warning_record_fails_closed_for_non_basic_authorization(text_formatter, value, expected):
+    output = _render(text_formatter, _record(f"upstream rejected {value}", level=logging.WARNING))
+
+    assert output.endswith(f"upstream rejected {expected}\n")
+    for marker in _FAIL_CLOSED_LEAK_MARKERS:
+        assert marker not in output
 
 
 @pytest.mark.parametrize("log_format", ["text", "json"])

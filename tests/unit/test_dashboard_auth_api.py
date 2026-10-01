@@ -304,7 +304,7 @@ async def test_login_password_caps_later_duplicate_forwarded_identity_from_loopb
 
 
 @pytest.mark.asyncio
-async def test_remote_admin_sessions_are_capped_at_twelve_hours_even_under_thirty_days():
+async def test_remote_admin_and_operator_sessions_honor_the_configured_thirty_days():
     thirty_days = 30 * 24 * 60 * 60
     _, admin_store, _, _ = await _login(
         _build_login_request("/api/dashboard-auth/password/login"),
@@ -317,7 +317,7 @@ async def test_remote_admin_sessions_are_capped_at_twelve_hours_even_under_thirt
         configured_ttl=thirty_days,
     )
 
-    assert admin_store.create_user_session.call_args.kwargs["ttl_seconds"] == REMOTE_DASHBOARD_SESSION_TTL_SECONDS
+    assert admin_store.create_user_session.call_args.kwargs["ttl_seconds"] == thirty_days
     assert operator_store.create_user_session.call_args.kwargs["ttl_seconds"] == thirty_days
 
 

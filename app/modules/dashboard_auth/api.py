@@ -14,7 +14,6 @@ from app.core.auth.dashboard_access import (
     DashboardPrincipal,
     DashboardRole,
     Permission,
-    PresetRoleSlug,
     permission_strings,
 )
 from app.core.auth.dashboard_mode import (
@@ -22,10 +21,7 @@ from app.core.auth.dashboard_mode import (
     get_dashboard_request_auth,
     password_management_enabled,
 )
-from app.core.auth.dashboard_session_ttl import (
-    resolve_admin_dashboard_session_ttl_seconds,
-    resolve_dashboard_session_ttl_seconds,
-)
+from app.core.auth.dashboard_session_ttl import resolve_dashboard_session_ttl_seconds
 from app.core.auth.dashboard_users_cache import get_dashboard_users_cache
 from app.core.auth.dependencies import (
     ensure_dashboard_permission,
@@ -178,12 +174,6 @@ def _password_login_key(request: Request, username: str | None) -> str:
     return f"{_password_login_address_key(request)}:{digest}"
 
 
-def _session_ttl_seconds(request: Request, user: DashboardUser, configured_ttl_seconds: int) -> int:
-    if user.role.slug == PresetRoleSlug.ADMIN.value:
-        return resolve_admin_dashboard_session_ttl_seconds(request, configured_ttl_seconds)
-    return resolve_dashboard_session_ttl_seconds(request, configured_ttl_seconds)
-
-
 async def _create_user_session(
     request: Request,
     user: DashboardUser,
@@ -194,7 +184,7 @@ async def _create_user_session(
     step_up_verified_at: int | None = None,
 ) -> tuple[str, int]:
     settings = await get_settings_cache().get()
-    ttl_seconds = _session_ttl_seconds(request, user, settings.dashboard_session_ttl_seconds)
+    ttl_seconds = resolve_dashboard_session_ttl_seconds(request, settings.dashboard_session_ttl_seconds)
     if max_ttl_seconds is not None:
         ttl_seconds = max(1, min(ttl_seconds, max_ttl_seconds))
     session_id = get_dashboard_session_store().create_user_session(
@@ -1118,7 +1108,7 @@ async def verify_totp(
         return await _step_up_header_account(request, context, resolved.user, limiter, rate_key, code=payload.code)
     try:
         configured_ttl_seconds = (await get_settings_cache().get()).dashboard_session_ttl_seconds
-        session_ttl_seconds = _session_ttl_seconds(request, resolved.user, configured_ttl_seconds)
+        session_ttl_seconds = resolve_dashboard_session_ttl_seconds(request, configured_ttl_seconds)
         session_id, applied_ttl_seconds = await context.service.verify_totp(
             session_id=current_session_id,
             code=payload.code,

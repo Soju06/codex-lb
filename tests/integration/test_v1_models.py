@@ -528,8 +528,10 @@ async def _enable_api_key_auth(async_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v1_model_retrieve_matches_list_entry(async_client):
+async def test_v1_model_retrieve_matches_list_entry(async_client, monkeypatch):
     await _populate_test_registry()
+    # Each catalog read stamps `created` from time.time(); pin it so the two reads compare equal.
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
     listed = await async_client.get("/v1/models")
     assert listed.status_code == 200
     entry = next(item for item in listed.json()["data"] if item["id"] == "gpt-5.2")
@@ -591,7 +593,8 @@ async def test_v1_model_retrieve_respects_api_key_allowlist(async_client):
 
 
 @pytest.mark.asyncio
-async def test_v1_model_retrieve_filters_sources_by_api_key_assignment(async_client):
+async def test_v1_model_retrieve_filters_sources_by_api_key_assignment(async_client, monkeypatch):
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
     first_source_id = await _create_model_source(async_client, name="retrieve-first", model="org/visible-model")
     await _create_model_source(async_client, name="retrieve-second", model="org/hidden-model")
     await _enable_api_key_auth(async_client)

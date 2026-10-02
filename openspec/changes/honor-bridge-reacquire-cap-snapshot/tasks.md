@@ -15,7 +15,7 @@
 
 ## 4. Authorized publication and rollout
 
-- [ ] 4.1 Publish the focused branch and PR without merging; report actual cloud CI/review state.
-- [ ] 4.2 Build and fingerprint a minimal immutable image from the deployed base, rehearse without production data/network access, and assess the baseline reader-handoff timeout.
+- [x] 4.1 Publish the focused branch and PR without merging; report actual cloud CI/review state.
+- [x] 4.2 Build and fingerprint a minimal immutable image from the deployed base, rehearse without production data/network access, and assess the baseline reader-handoff timeout.
 - [ ] 4.3 Preserve rollback assets, take and verify a consistent database backup, drain safely, and deploy only the rehearsed image; roll back if acceptance gates fail.
 - [ ] 4.4 Verify fresh/reused traffic and a bounded production observation window; record deployment, remaining risks, and rollback instructions without archiving ahead of maintainer gates.

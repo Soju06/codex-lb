@@ -244,7 +244,11 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps, effective_routing_tunables
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    effective_account_concurrency_caps,
+    effective_routing_tunables,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -262,6 +266,13 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeReacquireSnapshot:
+    concurrency_caps: AccountConcurrencyCaps
+    fair_share_threshold_pct: int
+    routing_tunables: RoutingTunables
 
 
 @dataclass(frozen=True, slots=True)
@@ -1742,15 +1753,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # critical section (issue #1971) — and only when the reacquire can
             # actually run: a session already holding its lease never depended
             # on a settings read to admit a turn.
-            fair_share_threshold_pct, routing_tunables = (
-                await self._http_bridge_reacquire_snapshot(session) if needs_stream_lease else (0, None)
-            )
+            reacquire_snapshot = await self._http_bridge_reacquire_snapshot(session) if needs_stream_lease else None
             async with session.pending_lock:
                 await self._ensure_http_bridge_session_stream_lease_locked(
                     session,
                     request_state=request_state,
-                    fair_share_threshold_pct=fair_share_threshold_pct,
-                    routing_tunables=routing_tunables,
+                    snapshot=reacquire_snapshot,
                 )
         except BaseException:
             # Recovery claims are made before admission. If reacquiring an
@@ -1820,8 +1828,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 await self._ensure_http_bridge_session_stream_lease_locked(
                     session,
                     request_state=request_state,
-                    fair_share_threshold_pct=fair_share_threshold_pct,
-                    routing_tunables=routing_tunables,
+                    snapshot=reacquire_snapshot,
                 )
                 session.queued_request_count += 1
                 if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
@@ -1859,7 +1866,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state,
                 response_create_gate=session.response_create_gate,
                 account_id=session.account.id,
-                routing_tunables=routing_tunables,
+                routing_tunables=reacquire_snapshot.routing_tunables if reacquire_snapshot is not None else None,
                 surface="http_bridge",
                 bridge_session=session,
             )
@@ -2802,45 +2809,37 @@ class _HTTPBridgeRequestSubmitMixin:
     async def _http_bridge_reacquire_snapshot(
         self: Any,
         session: "_HTTPBridgeSession",
-    ) -> tuple[int, RoutingTunables | None]:
-        """Resolve the reacquire's settings inputs WITHOUT holding pending_lock.
+    ) -> _HTTPBridgeReacquireSnapshot:
+        """Resolve all reacquire settings from one row BEFORE pending_lock.
 
-        For a keyed session one cached dashboard row yields both the fair-share
-        threshold and the routing tunables the lease is judged against (C2-2
-        routing/overload: the lease TTL). An unkeyed session reads no settings
-        here, as before: its threshold is ``0`` and the balancer falls back to
-        the snapshot of its most recent request. The settings-cache refresh
-        runs a DB query behind a process-global lock; awaiting it while holding
-        a session's ``pending_lock`` let one stalled query wedge every keyed
-        submit process-wide (issue #1971). Callers resolve the snapshot first
-        and pass both values into ``_ensure_http_bridge_session_stream_lease_locked``.
+        Keyed and unkeyed warm sessions must use the dashboard's effective
+        caps, just like initial selection. Omitting caps here makes the
+        balancer silently fall back to the startup limit. Resolving settings
+        under pending_lock can wedge session cleanup on a DB read (#1971).
         """
-        if session.key.api_key_id is None:
-            return 0, None
         dashboard_settings = await _service_get_settings_cache().get()
-        return (
-            _api_key_fair_share_threshold_pct_from_settings(dashboard_settings),
-            effective_routing_tunables(dashboard_settings),
+        return _HTTPBridgeReacquireSnapshot(
+            concurrency_caps=effective_account_concurrency_caps(dashboard_settings),
+            fair_share_threshold_pct=(
+                _api_key_fair_share_threshold_pct_from_settings(dashboard_settings)
+                if session.key.api_key_id is not None
+                else 0
+            ),
+            routing_tunables=effective_routing_tunables(dashboard_settings),
         )
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
         session: "_HTTPBridgeSession",
         *,
+        snapshot: _HTTPBridgeReacquireSnapshot | None,
         request_state: _WebSocketRequestState | None = None,
-        fair_share_threshold_pct: int | None = None,
-        routing_tunables: RoutingTunables | None = None,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
-        Callers hold ``session.pending_lock`` and MUST pass both
-        ``fair_share_threshold_pct`` and ``routing_tunables`` (see
-        ``_http_bridge_reacquire_snapshot``) computed before acquiring it:
-        resolving either reads the settings cache, whose refresh runs a DB
-        query behind a process-global lock — one stalled refresh under
-        ``pending_lock`` wedged every keyed submit for days (issue #1971).
-        The ``None`` fallback resolves them inline from one cached row and
-        exists for lock-free callers only.
+        Callers hold ``session.pending_lock`` and pass the snapshot resolved
+        before acquiring it. ``None`` is valid only when no reacquire is
+        needed; this helper never reads the settings cache under the lock.
 
         The lease is released when the
         session's last in-flight turn detaches, so an idle session does not
@@ -2865,21 +2864,14 @@ class _HTTPBridgeRequestSubmitMixin:
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
+        assert snapshot is not None, "stream reacquisition requires a pre-lock settings snapshot"
         api_key_id = session.key.api_key_id
-        if api_key_id is None:
-            fair_share_threshold_pct = 0
-        elif fair_share_threshold_pct is None:
-            # Lock-free callers only (see the docstring): one cached row serves
-            # both inputs.
-            dashboard_settings = await _service_get_settings_cache().get()
-            fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(dashboard_settings)
-            if routing_tunables is None:
-                routing_tunables = effective_routing_tunables(dashboard_settings)
         try:
             lease = await load_balancer.acquire_account_lease(
                 session.account.id,
                 kind="stream",
-                routing_tunables=routing_tunables,
+                concurrency_caps=snapshot.concurrency_caps,
+                routing_tunables=snapshot.routing_tunables,
                 # Carry the turn's usage-budget estimate like initial selection
                 # and reconnect do, so capacity-weighted routing pressure still
                 # sees large turns on reused warm sessions.
@@ -2887,7 +2879,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.request_usage_budget if request_state is not None else None
                 ),
                 api_key_id=api_key_id,
-                api_key_stream_fair_share_threshold_pct=fair_share_threshold_pct,
+                api_key_stream_fair_share_threshold_pct=snapshot.fair_share_threshold_pct,
             )
         except ApiKeyFairShareDenialError as denial:
             raise ProxyResponseError(

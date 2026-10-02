@@ -1,5 +1,6 @@
 import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, type LucideIcon } from "lucide-react";
 
+import { quotaBreakdown } from "@/utils/quota";
 import i18n from "@/i18n";
 import type {
   AccountSummary,
@@ -36,6 +37,7 @@ export type RemainingItem = {
   isEmail: boolean;
   value: number;
   remainingPercent: number | null;
+  reservedValue?: number;
   color: string;
 };
 
@@ -192,7 +194,13 @@ export function buildRemainingItems(
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
         return null;
       }
-      const remaining = usageIndex.get(account.accountId) ?? 0;
+      const providerRemaining = usageIndex.get(account.accountId) ?? 0;
+      const providerPercent = accountRemainingPercent(account, windowKey);
+      const cap = windowKey === "primary" ? account.effectiveLimitPrimary : account.effectiveLimitSecondary;
+      const capacity = windowKey === "primary" ? account.capacityCreditsPrimary : account.capacityCreditsSecondary;
+      const reserved = (capacity ?? 0) * (100 - (cap ?? 100)) / 100;
+      const remaining = Math.max(0, providerRemaining - reserved);
+      const usablePercent = providerPercent == null ? null : quotaBreakdown(providerPercent, cap).usable;
       const rawLabel = account.displayName || account.email || account.accountId;
       const labelIsEmail = !!account.email && rawLabel === account.email;
       const labelSuffix = account.isEmailDuplicate === true
@@ -204,7 +212,8 @@ export function buildRemainingItems(
         labelSuffix,
         isEmail: labelIsEmail,
         value: remaining,
-        remainingPercent: accountRemainingPercent(account, windowKey),
+        ...(reserved > 0 ? { reservedValue: Math.min(providerRemaining, reserved) } : {}),
+        remainingPercent: usablePercent,
         color: palette[index % palette.length],
       };
     })

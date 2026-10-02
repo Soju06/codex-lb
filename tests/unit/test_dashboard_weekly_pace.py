@@ -479,3 +479,13 @@ def test_weekly_pace_is_unchanged_by_ewma_tail_cap_under_fleet_burn_floor() -> N
     assert full_pace.burn_rate_recent_credits_per_hour is not None
     assert full_pace.burn_rate_recent_credits_per_hour > 0
     _assert_close(tail_pace.model_dump(), full_pace.model_dump())
+
+
+def test_weekly_pace_reserves_capacity_without_scaling_observed_burn():
+    summary = _summary("capped", used_percent=54, reset_in_hours=60, capacity=1000)
+    history = {"capped": _three_hour_history("capped", final_used_percent=54, hourly_delta=2)}
+    uncapped = _build([summary], history)
+    capped = _build([summary.model_copy(update={"effective_limit_secondary": 80})], history)
+    assert capped.total_full_credits == pytest.approx(800)
+    assert capped.total_actual_remaining_credits == pytest.approx(260)
+    assert capped.burn_rate_recent_credits_per_hour == pytest.approx(uncapped.burn_rate_recent_credits_per_hour)

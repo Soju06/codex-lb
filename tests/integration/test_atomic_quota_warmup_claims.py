@@ -20,7 +20,7 @@ from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import (
     Account,
     AccountLimitWarmup,
@@ -31,9 +31,11 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import SessionLocal
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup import repository as limit_warmup_repository_module
+from app.modules.limit_warmup import service as limit_warmup_service_module
 from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.limit_warmup.service import LimitWarmupService
+from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
 from app.modules.quota_planner import repository as quota_planner_repository_module
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
@@ -41,6 +43,7 @@ from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage, _warmup_request_id
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -76,6 +79,87 @@ def _account(account_id: str) -> Account:
 
 def _midnight():
     return utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+@pytest.mark.asyncio
+async def test_reset_warmup_settlement_preserves_newer_operator_policy(async_client, monkeypatch, db_setup):
+    del db_setup
+    account_id = "reset-warmup-observational-authorization"
+    now = utcnow()
+    reset_at = naive_utc_to_epoch(now) + 18_000
+    async with SessionLocal() as session:
+        account = _account(account_id)
+        account.limit_warmup_enabled = True
+        account.usage_limit_enabled = True
+        account.usage_limit_percent = 10
+        after = UsageHistory(
+            account_id=account_id,
+            used_percent=0,
+            reset_at=reset_at,
+            window="primary",
+            window_minutes=300,
+            recorded_at=now,
+        )
+        session.add_all([account, after])
+        dashboard_settings = await SettingsRepository(session).get_or_create()
+        dashboard_settings.limit_warmup_enabled = True
+        dashboard_settings.limit_warmup_windows = "primary"
+        dashboard_settings.limit_warmup_model = "gpt-5.1-codex-mini"
+        await session.commit()
+
+    async def save_policy(percent: float) -> None:
+        response = await async_client.put(
+            f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": percent}
+        )
+        assert response.status_code == 200
+
+    original_snapshot = UsageRepository.account_usage_limit_snapshot
+
+    async def authorize_after_edit(self, owner_id: str):
+        # The sender's session still owns the account loaded at 10%.
+        await save_policy(20)
+        return await original_snapshot(self, owner_id)
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def send_probe(*args, **kwargs):
+        await save_policy(30)
+        yield 'data: {"type":"response.completed","response":{"id":"reset-warmup-completed"}}\n\n'
+
+    monkeypatch.setattr(UsageRepository, "account_usage_limit_snapshot", authorize_after_edit)
+    monkeypatch.setattr(limit_warmup_service_module, "stream_responses", send_probe)
+    async with SessionLocal() as session:
+        saved = await session.get(Account, account_id)
+        assert saved is not None
+        sender = StreamingLimitWarmupSender(AccountsRepository(session))
+        monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+        service = LimitWarmupService(LimitWarmupRepository(session), RequestLogsRepository(session), sender=sender)
+        await service.run_after_usage_refresh(
+            accounts=[saved],
+            settings=dashboard_settings,
+            before_primary={
+                account_id: UsageHistory(
+                    account_id=account_id,
+                    used_percent=100,
+                    reset_at=reset_at - 18_000,
+                    window="primary",
+                    window_minutes=300,
+                    recorded_at=now - timedelta(minutes=1),
+                )
+            },
+            before_secondary={},
+            after_primary={account_id: after},
+            after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
+        )
+
+    async with SessionLocal() as session:
+        saved = await session.get(Account, account_id)
+        attempt = await session.scalar(select(AccountLimitWarmup).where(AccountLimitWarmup.account_id == account_id))
+        assert attempt is not None and attempt.status == "succeeded"
+        assert saved is not None and saved.usage_limit_percent == 30
 
 
 async def _seed_planner(*accounts: Account, max_warmups_per_day: int = 1) -> None:
@@ -908,6 +992,8 @@ async def test_concurrent_initial_free_quota_claims_allow_one_sliding_deadline(
                 after_secondary={candidate.id: monthly},
                 previous_plan_types={candidate.id: "free"},
                 refresh_started_at=refresh_started_at,
+                usage_limit_secondary={},
+                usage_limit_monthly={},
             )
 
     await asyncio.gather(replica(first_reset_at), replica(first_reset_at + 60))

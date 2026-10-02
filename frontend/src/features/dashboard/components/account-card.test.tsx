@@ -22,6 +22,17 @@ describe("AccountCard", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
   });
 
+  it("colors provider remaining by usable quota when a reserve applies", () => {
+    const account = createAccountSummary({
+      usage: { primaryRemainingPercent: 75, secondaryRemainingPercent: 67 },
+      effectiveLimitPrimary: 50,
+    });
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("75%")).toHaveClass("text-red-600");
+    expect(screen.getByRole("img", { name: /5h; 75% provider remaining; 50% reserved for you · 25% available/ })).toBeInTheDocument();
+  });
+
   it("keeps the last quota visible while a refreshed value is temporarily unknown", () => {
     const account = createAccountSummary({
       usage: { primaryRemainingPercent: 64, secondaryRemainingPercent: 73 },
@@ -160,6 +171,48 @@ describe("AccountCard", () => {
 
     expect(screen.getByText("Re-auth required")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Re-auth" })).toBeInTheDocument();
+  });
+
+  it("shows a reached local usage limit for an otherwise active account", () => {
+    const account = createAccountSummary({
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Limit reached")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
+  it("keeps a non-active upstream status ahead of a reached local limit", () => {
+    const account = createAccountSummary({
+      status: "quota_exceeded",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Quota exceeded")).toBeInTheDocument();
+    expect(screen.queryByText("Limit reached")).not.toBeInTheDocument();
+  });
+
+  it("shows unavailable usage as blocked for an otherwise active account", () => {
+    const account = createAccountSummary({
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "data_unavailable",
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("Usage unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
   });
 
   it("disables the limit warm-up toggle for read-only guests", () => {

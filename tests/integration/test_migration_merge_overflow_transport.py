@@ -22,6 +22,7 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_USAGE_BRANCH = "20260910_010000_add_usage_limit_overrides"
 
 
 @dataclass
@@ -215,8 +216,10 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # branches' schema coexists. Stepping back there re-creates the overflow
     # schema empty, so seed it in every starting state and the direct-downgrade
     # cases all run with retained settings and non-empty pins.
+    # Targeting the old main merge leaves the independently applied usage
+    # lineage in place; only the branch descended from this target rewinds.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    assert _revisions(database.engine) == tuple(sorted((_MERGE, _USAGE_BRANCH)))
     with database.engine.begin() as connection:
         _seed_overflow(connection)
     at_merge = _state(database.engine)
@@ -228,13 +231,14 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
         command.downgrade(_build_alembic_config(database.url), parent)
         # A direct downgrade to either immediate parent executes only the
         # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        # it does not execute either parent's schema-removing downgrade or
+        # rewind the independent usage-policy branch.
+        assert _revisions(database.engine) == tuple(sorted((*_PARENTS, _USAGE_BRANCH)))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 
         command.upgrade(_build_alembic_config(database.url), _MERGE)
-        assert _revisions(database.engine) == (_MERGE,)
+        assert _revisions(database.engine) == tuple(sorted((_MERGE, _USAGE_BRANCH)))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

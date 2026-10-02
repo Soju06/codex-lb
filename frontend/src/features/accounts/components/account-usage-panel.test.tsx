@@ -33,6 +33,17 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("--")).toBeInTheDocument();
   });
 
+  it("colors provider remaining by usable quota when a reserve applies", () => {
+    const account = createAccountSummary({
+      usage: { primaryRemainingPercent: 75, secondaryRemainingPercent: 67 },
+      effectiveLimitPrimary: 50,
+    });
+    render(<AccountUsagePanel account={account} trends={null} />);
+
+    expect(screen.getByText("75%")).toHaveClass("text-red-600");
+    expect(screen.getByRole("img", { name: /5h; 75% provider remaining; 50% reserved for you · 25% available/ })).toBeInTheDocument();
+  });
+
   it("hides 5h row for weekly-only accounts", () => {
     const account = createAccountSummary({
       planType: "free",

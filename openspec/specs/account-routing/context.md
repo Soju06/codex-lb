@@ -6,6 +6,79 @@ The normative routing contract is in [spec.md](spec.md). This context explains
 why transient health is replica-local and how drained accounts return to normal
 routing without becoming permanently invisible behind healthier accounts.
 
+## Account usage limits
+
+Account limits reserve part of the observed standard quota for direct use. They
+are optional hard policies, separate from advisory routing preferences and
+upstream rate-limit status. One shared evaluator supplies routing, dashboard,
+and warmup decisions, including weekly-only and monthly-only account shapes.
+See the usage-limit requirements in [spec.md](spec.md) for the exact contract.
+
+For example, a 10% maximum leaves roughly 90% reserved. Once a current standard
+observation reaches 10%, newly dispatched work is blocked. Delayed observations
+and work already sent upstream can overshoot the threshold. Missing or stale
+observations also block an enabled policy until current data becomes available.
+Disabling the policy restores ordinary advisory usage behavior.
+
+The saved policy has a default threshold and optional duration-matched 5-hour
+and weekly overrides. Overrides replace the default only for their matching
+window; monthly and nonstandard windows use the default. Without a default,
+unmatched windows remain unrestricted. The editor asks for reserve percentages
+and stores maximum-used percentages. At 54% used and an 80% cap, provider
+remaining is 46%, reserved capacity is 20%, and usable capacity is 26%.
+
+Both toggle directions retain the latest saved percentage in the database.
+A tab showing a disabled 10% limit therefore enables a newer saved 20% value
+without overwriting it. If another client removed the value, the API returns a
+validation error so the operator can reload or explicitly set a new limit.
+
+Selection invalidation keeps committed telemetry and policy edits visible.
+Capped live observations invalidate selection immediately; uncapped observations
+retain the existing throttled refresh. Fresh owner authorization reads committed policy, status, and standard telemetry
+in one database snapshot, independently of selection caching. Peer selection
+retains the existing invalidation and TTL fallback; acknowledging a mutation
+does not synchronously invalidate every replica.
+
+Shared transports authorize each new turn, including after admission waits.
+Policy reads run outside the HTTP bridge pending-response lock and within the request
+deadline, so a slow read cannot hold up older responses. A denied new turn
+leaves already-dispatched work to settle; a failed read returns a separate
+authorization error. WebSocket dispatch also checks pending ownership after
+asynchronous authorization to avoid sending or settling reader-finalized work.
+
+Dispatch authorization follows the lifecycle-lock wait and durable preparation.
+It holds send serialization while loading policy, so a newer sender cannot pass
+it; older responses can still be processed and settled through the pending lock.
+A denial after a recovery alias was persisted restores its prior owner before
+the unsent request is discarded. Sticky admission detects policy invalidation
+after affinity persistence, releases the provisional lease, and returns
+`selection_state_changed` without compensating writes to the stored affinity.
+
+For example, a second turn can pass queue admission while its account is at 5%
+against a 10% limit, then wait for dispatch. If telemetry reaches 10% during that
+wait, the turn fails before sending. Already-dispatched turns retain their
+ownership and settlement. A successful poll with no standard windows likewise
+supersedes earlier below-limit observations for capped accounts; the dashboard
+reports `data_unavailable` and direct Responses requests return HTTP 429 with
+`rate_limit_error`, without an upstream reset deadline. Authorization
+infrastructure failures instead return HTTP 503 and retain a healthy transport.
+
+Usage-policy freshness follows the shared fixed refresh cadence. Synthetic
+warmup claims retain upstream's execution/lease fence during policy-denial
+cleanup so a stale worker cannot skip another worker's reclaimed decision.
+
+Warmup authorization projects committed policy and status onto transient account
+copies. The original session-owned account stays observational: claim, request-log,
+and completion commits cannot write those projected fields over a later operator
+edit. For example, a warmup can load 10%, authorize 20%, and then overlap an
+acknowledged 30% policy; its settlement preserves 30% while admitted work finishes.
+Quota-planner probes reuse the dashboard snapshot already resolved for their
+claim lease and stream budget, including resilience toggles, so dispatch adds no
+settings wait after final owner authorization. Once standard telemetry commits
+for a capped account, the refresh owns routing invalidation even if its subsequent
+policy read is cancelled; the committed measurement becomes visible and
+cancellation propagates.
+
 ## Reauthentication warning state
 
 `reauth_required` means refresh-token exchange needs operator repair; it does not

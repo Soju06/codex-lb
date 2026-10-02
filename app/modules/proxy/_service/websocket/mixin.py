@@ -26,6 +26,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -205,6 +206,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_previous_response_owner_unavailable_error as _http_bridge_previous_response_owner_unavailable_error,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
@@ -458,6 +462,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_eligibility import account_access_token_expires_at, reauth_access_token_is_expired
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -498,7 +503,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -519,6 +524,7 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 
 def _facade() -> Any:
@@ -531,6 +537,7 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS = 5.0
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -1352,6 +1359,43 @@ async def _process_upstream_websocket_transport_end(
             downstream_activity,
         )
     return True
+
+
+async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> None:
+    try:
+        owner_authorization = await scheduler_for(proxy).wait_for(
+            proxy._load_balancer.authorize_account_fresh(account.id),
+            timeout=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning("WebSocket owner authorization timed out account_id=%s", account.id)
+        owner_authorization = OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
+    if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        raise ProxyResponseError(
+            503,
+            openai_error(
+                "account_usage_limit_authorization_failed",
+                "Unable to verify account usage limit; retry later.",
+                error_type="server_error",
+            ),
+        )
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE or (
+        owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
+        and reauth_access_token_is_expired(
+            AccountStatus.REAUTH_REQUIRED,
+            account_access_token_expires_at(account, proxy._encryptor),
+        )
+    ):
+        raise _http_bridge_previous_response_owner_unavailable_error()
+    if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
+        status_code, error_payload = selection_failure_response(
+            AccountSelection(
+                account=None,
+                error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+            )
+        )
+        raise ProxyResponseError(status_code, error_payload)
 
 
 class _WebSocketMixin:
@@ -2648,14 +2692,22 @@ class _WebSocketMixin:
                     )
 
                 try:
-                    if (
+                    is_response_create = (
                         text_data is not None
                         and request_state is not None
                         and payload is not None
                         and account is not None
                         and _is_websocket_response_create(payload)
+                    )
+                    if (
+                        is_response_create
+                        and request_state is not None
+                        and account is not None
                         and request_state.account_response_create_lease is None
                     ):
+                        # Reject a blocked owner before lease admission; the
+                        # later check covers policy changes during that await.
+                        await _authorize_websocket_dispatch_owner(proxy, account)
                         # Account-cap spillover belongs to connect selection.
                         # Once this shared socket exists, a late create-cap race
                         # rejects only this frame; switching/retiring the socket
@@ -2671,11 +2723,10 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                     ):
                         text_data = _websocket_text_with_account_installation_id(text_data, account)
                         if request_state.fresh_upstream_request_text is not None:
@@ -2687,13 +2738,88 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
+                    if is_response_create and account is not None:
+                        await _authorize_websocket_dispatch_owner(proxy, account)
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
+                        and account is not None
+                    ):
+                        # The reader can retire the socket or finalize an
+                        # unsent request while authorization awaits. Sample
+                        # reconnect and claim dispatch under the same lock as
+                        # expiry, with no further await before send_text().
+                        request_budget_seconds = _facade()._stream_request_budget_seconds(
+                            runtime_settings, request_transport="websocket"
+                        )
+                        dispatch_owner_bound = False
+                        async with pending_lock:
+                            dispatch_requires_reconnect = (
+                                upstream_control is not None and upstream_control.reconnect_requested
+                            )
+                            if not dispatch_requires_reconnect:
+                                dispatch_pending = request_state in pending_requests
+                                dispatch_expired = (
+                                    dispatch_pending
+                                    and clock.monotonic() >= request_state.started_at + request_budget_seconds
+                                )
+                                if dispatch_pending and not dispatch_expired:
+                                    dispatch_owner_bound = _bind_websocket_request_dispatch_owner(
+                                        request_state,
+                                        account_id=account.id,
+                                        exact_request_text=text_data,
+                                    )
+                                    if dispatch_owner_bound:
+                                        request_state.response_create_sent_at = clock.monotonic()
+                        if not dispatch_requires_reconnect:
+                            if not dispatch_pending:
+                                # Admission may have acquired a lease after the
+                                # reader finalized this unsent frame.
+                                retired_create_lease_release_task = scheduler_for(proxy).create_task(
+                                    proxy._release_request_state_account_response_create_lease(request_state),
+                                    name="proxy-websocket-finalization-late-create-lease",
+                                )
+                                _track_websocket_owned_task(proxy, retired_create_lease_release_task)
+                                await asyncio.shield(retired_create_lease_release_task)
+                                retired_create_lease_release_task = None
+                                continue
+                            if dispatch_expired:
+                                expired_timeout = _websocket_receive_timeout_for_pending_requests(
+                                    (request_state.started_at,),
+                                    proxy_request_budget_seconds=request_budget_seconds,
+                                    stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                                    now=clock.monotonic(),
+                                )
+                                assert expired_timeout is not None
+                                await proxy._fail_expired_pending_websocket_requests(
+                                    account_id_value=account.id,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    request_budget_seconds=request_budget_seconds,
+                                    error_code=expired_timeout.error_code,
+                                    error_message=expired_timeout.error_message,
+                                    api_key=api_key,
+                                    websocket=websocket,
+                                    client_send_lock=client_send_lock,
+                                    response_create_gate=response_create_gate,
+                                )
+                                continue
+                            if not dispatch_owner_bound:
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "previous_response_owner_unavailable",
+                                        "Request payload owner account is unavailable; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
+                    if (
+                        is_response_create
+                        and text_data is not None
+                        and request_state is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
-                        and _is_websocket_response_create(payload)
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at
@@ -2771,20 +2897,8 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
-                            if account is None or not _bind_websocket_request_dispatch_owner(
-                                request_state,
-                                account_id=account.id,
-                                exact_request_text=text_data,
-                            ):
-                                raise ProxyResponseError(
-                                    502,
-                                    openai_error(
-                                        "previous_response_owner_unavailable",
-                                        "Request payload owner account is unavailable; retry later.",
-                                        error_type="server_error",
-                                    ),
-                                )
-                            request_state.response_create_sent_at = clock.monotonic()
+                            if account is None:
+                                raise _http_bridge_previous_response_owner_unavailable_error()
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -2793,15 +2907,34 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
-                        await proxy._release_websocket_request_state_reservation(request_state)
+                        rejection_owned = True
                         if request_state_registered:
                             async with pending_lock:
-                                if request_state in pending_requests:
+                                rejection_owned = request_state in pending_requests
+                                if rejection_owned:
                                     pending_requests.remove(request_state)
+                        await proxy._release_request_state_account_response_create_lease(request_state)
+                        if not rejection_owned:
+                            # The reader already settled and reported this frame.
+                            continue
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                        if request_state_registered:
                             await _release_websocket_response_create_gate(
-                                request_state,
-                                response_create_gate,
-                                scheduler=scheduler_for(proxy),
+                                request_state, response_create_gate, scheduler=scheduler_for(proxy)
+                            )
+                        try:
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id if account is not None else None,
+                                api_key=api_key,
+                                request_state=request_state,
+                                error_code=error_code or "upstream_error",
+                                error_message=error_message,
+                            )
+                        except Exception:
+                            _facade().logger.warning(
+                                "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                request_state.request_log_id or request_state.request_id,
+                                exc_info=True,
                             )
                         await proxy._emit_websocket_terminal_error(
                             websocket,

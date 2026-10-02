@@ -51,6 +51,33 @@ describe("AccountList", () => {
     expect(screen.getByTestId("dashboard-account-list").firstElementChild).toHaveClass("min-w-[76rem]");
   });
 
+  it("keeps quota meter identifiers when a reserve is configured", () => {
+    render(
+      <AccountList accounts={[createAccountSummary({ effectiveLimitPrimary: 50, effectiveLimitSecondary: 80 })]} />,
+    );
+
+    expect(screen.getAllByTestId("account-list-quota-meter")).toHaveLength(2);
+    expect(screen.getAllByTestId("account-list-quota-meter")[0]).toHaveAttribute("role", "img");
+  });
+
+  it("shows a reached usage limit for an otherwise active account", () => {
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            status: "active",
+            usageLimitEnabled: true,
+            usageLimitPercent: 10,
+            usageLimitState: "reached",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Limit reached")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
   it("renders primary idle warm-up attempts as 5h", () => {
     const attemptedAt = new Date("2026-06-03T12:00:00Z").toISOString();
     const account = createAccountSummary({

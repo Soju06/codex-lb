@@ -80,12 +80,10 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import stream_responses as core_stream_responses  # noqa: F401
 from app.core.clients.proxy import thread_goal_request as core_thread_goal_request
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocket as UpstreamWebSocket
 from app.core.clients.proxy_websocket import (
-    connect_live_websocket as connect_live_websocket,
-)
-from app.core.clients.proxy_websocket import (
-    connect_responses_websocket as connect_responses_websocket,
+    UpstreamWebSocket,  # noqa: F401
+    connect_live_websocket,
+    connect_responses_websocket,  # noqa: F401
 )
 from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.dashboard_overrides import with_dashboard_overrides
@@ -709,6 +707,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_event_error_param,  # noqa: F401
     _websocket_event_error_payload,  # noqa: F401
     _websocket_event_error_type,  # noqa: F401
+    _websocket_event_upstream_error,  # noqa: F401
     _websocket_full_resend_conflicts_with_visible_pending,  # noqa: F401
     _websocket_input_item_type,  # noqa: F401
     _websocket_owner_pinned_quota_error_code,  # noqa: F401

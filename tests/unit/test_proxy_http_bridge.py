@@ -33677,7 +33677,17 @@ async def test_http_bridge_submit_cooldown_suppression_spares_session_owned_by_c
         return allowed
 
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", gate)
-    monkeypatch.setattr(service, "_http_bridge_reacquire_snapshot", AsyncMock(return_value=(0, RoutingTunables())))
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_reacquire_snapshot",
+        AsyncMock(
+            return_value=http_bridge_request_submit_module._HTTPBridgeReacquireSnapshot(
+                concurrency_caps=http_bridge_request_submit_module.effective_account_concurrency_caps(),
+                fair_share_threshold_pct=0,
+                routing_tunables=RoutingTunables(),
+            )
+        ),
+    )
     monkeypatch.setattr(
         service,
         "_ensure_http_bridge_session_stream_lease_locked",

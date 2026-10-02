@@ -1532,6 +1532,17 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "DongwonTTuna",
+      "name": "DongwonTuna",
+      "avatar_url": "https://avatars.githubusercontent.com/u/38794795?v=4",
+      "profile": "https://github.com/DongwonTTuna",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -5,9 +5,10 @@
 When the terminal transcript persistence bound expires, or the caller waiting
 on it is cancelled, the event spooler MUST stop waiting and MUST NOT cancel the
 terminal append task. The task MUST remain owned by the spooler until it
-commits or fails. The caller MUST still receive the not-persisted,
-settlement-required result within the bound. A late commit of that append MUST
-NOT make the transcript replayable or rewrite a settled outcome.
+commits or fails. When the bound expires, the caller MUST receive the
+not-persisted, settlement-required result within the bound. When the caller is
+cancelled, the cancellation MUST propagate to the caller. A late commit of that
+append MUST NOT make the transcript replayable or rewrite a settled outcome.
 
 #### Scenario: Bound expires while the append holds the SQLite writer
 

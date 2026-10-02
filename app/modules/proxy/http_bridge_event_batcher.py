@@ -322,7 +322,6 @@ class HttpBridgeOperationEventBatcher:
                 timeout=max(self._terminal_append_timeout_seconds, 0.0),
             )
         except asyncio.CancelledError:
-            append_task.cancel()
             await self._clear_operation(operation_id, attempt=attempt)
             raise
         if append_task in done:
@@ -343,7 +342,13 @@ class HttpBridgeOperationEventBatcher:
                 )
             return append_result
 
-        append_task.cancel()
+        # Leave the append running; ``_terminal_append_tasks`` owns it until it
+        # commits or fails under busy_timeout. Cancelling it here lands inside
+        # a statement or commit under ``sqlite_writer_section()``: SQLAlchemy
+        # invalidates the connection mid-statement and the aiosqlite handle can
+        # keep its write transaction open, so every later writer fails with
+        # ``database is locked`` (issue #1981). Fallback settlement refuses or
+        # overwrites a late commit through ``terminal_append_phase``.
         await self._clear_operation(operation_id, attempt=attempt)
         logger.info(
             "Timed out persisting HTTP bridge terminal transcript operation_id=%s timeout_seconds=%.1f",

@@ -12,7 +12,8 @@ Apply one short internal deadline around the terminal operation's pending drain
 and append. The append persists the terminal data and state while keeping the
 spool incomplete. Only an append observed to finish within the deadline schedules
 an owner-, recovery-generation-, and state-fenced finalization that makes the
-spool replayable. On expiry, cancel the append task, clear its in-memory batcher
+spool replayable. On expiry, leave the append task running under the batcher's
+ownership (see `detach-terminal-append-at-bound`), clear its in-memory batcher
 context, and return the existing `settlement_required` result. The relay then
 queues the terminal event and end marker before attempting the existing
 owner/session/epoch-fenced fallback settlement, which keeps

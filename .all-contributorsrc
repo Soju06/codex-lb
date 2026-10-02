@@ -1513,7 +1513,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
     },
     {
       "login": "nhdong1993",
@@ -1531,6 +1532,17 @@
       "profile": "https://github.com/tubededentifrice-dev",
       "contributions": [
         "code"
+      ]
+    },
+    {
+      "login": "netguy204",
+      "name": "Brian Taylor",
+      "avatar_url": "https://avatars.githubusercontent.com/u/66466?v=4",
+      "profile": "https://github.com/netguy204",
+      "contributions": [
+        "bug",
+        "code",
+        "test"
       ]
     }
   ],

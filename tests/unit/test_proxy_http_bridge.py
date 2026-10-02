@@ -7634,12 +7634,14 @@ async def test_stalled_terminal_spool_does_not_block_downstream_delivery() -> No
     )
 
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
-    assert append_cancelled.is_set()
+    # The stalled append is left running at the bound (issue #1981).
+    assert not append_cancelled.is_set()
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
     assert persist_task.done() is False
     release_settlement.set()
     assert await asyncio.wait_for(persist_task, timeout=1.0) is True
+    await service._http_bridge_operation_event_batcher.close()
 
 
 @pytest.mark.asyncio

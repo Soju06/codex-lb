@@ -102,12 +102,11 @@ class _CancellationResistantTerminalDurableBridge(_FakeDurableBridge):
     async def _stall_terminal_append(self) -> bool:
         self.append_started.set()
         try:
-            await asyncio.Future()
+            await self.release_append.wait()
         except asyncio.CancelledError:
             self.append_cancelled.set()
             await self.release_append.wait()
-            return False
-        raise AssertionError("stalled terminal append unexpectedly resumed")
+        return False
 
     async def append_terminal_operation_event(self, **kwargs) -> bool:
         del kwargs
@@ -123,12 +122,11 @@ class _LateSuccessfulTerminalDurableBridge(_CancellationResistantTerminalDurable
         self.terminal_append_kwargs.append(dict(kwargs))
         self.append_started.set()
         try:
-            await asyncio.Future()
+            await self.release_append.wait()
         except asyncio.CancelledError:
             self.append_cancelled.set()
             await self.release_append.wait()
-            return True
-        raise AssertionError("stalled terminal append unexpectedly resumed")
+        return True
 
     async def append_terminal_operation_event(self, **kwargs) -> bool:
         return await self._append_late(kwargs)
@@ -493,11 +491,15 @@ async def test_stalled_terminal_append_is_bounded_and_requires_settlement(spool_
     )
 
     assert durable.append_started.is_set()
-    await asyncio.wait_for(durable.append_cancelled.wait(), timeout=1.0)
+    # The append is left running at the bound; cancelling it mid-statement
+    # leaks the SQLite writer slot (issue #1981).
+    assert not durable.append_cancelled.is_set()
+    assert len(batcher._terminal_append_tasks) == 1
     assert result.persisted is False
     assert result.settlement_required is True
     assert batcher._contexts == {}
     assert batcher._closing_operations == set()
+    await batcher.close()
 
 
 @pytest.mark.asyncio
@@ -527,7 +529,7 @@ async def test_cancellation_resistant_terminal_append_does_not_extend_delivery_b
         )
 
         assert durable.append_started.is_set()
-        await asyncio.wait_for(durable.append_cancelled.wait(), timeout=1.0)
+        assert not durable.append_cancelled.is_set()
         assert result.persisted is False
         assert result.settlement_required is True
         assert batcher._contexts == {}
@@ -674,7 +676,7 @@ async def test_stalled_pending_drain_is_bounded_and_requires_settlement(spool_fo
         )
 
         assert durable.append_started.is_set()
-        await asyncio.wait_for(durable.append_cancelled.wait(), timeout=1.0)
+        assert not durable.append_cancelled.is_set()
         assert result.persisted is False
         assert result.settlement_required is True
         assert batcher._pending == {}
@@ -817,7 +819,7 @@ async def test_close_owns_terminal_append_pending_past_bound(caplog: pytest.LogC
         )
         assert result.persisted is False
         assert result.settlement_required is True
-        await asyncio.wait_for(durable.append_stall.cancelled.wait(), timeout=1.0)
+        assert not durable.append_stall.cancelled.is_set()
         late_tasks = tuple(batcher._terminal_append_tasks)
         assert len(late_tasks) == 1
         late_task = late_tasks[0]

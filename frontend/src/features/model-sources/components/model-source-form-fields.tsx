@@ -2,7 +2,7 @@ import type { Control } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
 import { Checkbox } from "@/components/ui/checkbox";
-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type {
@@ -95,7 +95,7 @@ export function ModelSourceFormFields({
             <FormControl>
               <Input {...field} placeholder="local-coder, cd/gpt-6-astra=cd/linxaq" autoComplete="off" />
             </FormControl>
-            <p className="text-xs text-muted-foreground">{t("modelSources.fields.aliasesDescription")}</p>
+            <FormDescription className="text-xs">{t("modelSources.fields.aliasesDescription")}</FormDescription>
             <FormMessage />
           </FormItem>
         )}

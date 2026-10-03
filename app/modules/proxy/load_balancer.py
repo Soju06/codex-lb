@@ -14,6 +14,7 @@ from app.core.balancer import (
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
+    RATE_LIMITED_COOLDOWN_SECONDS,
     AccountState,
     RoutingStrategy,
     SelectionResult,
@@ -1057,8 +1058,11 @@ def _state_from_account(
     # observed and the debounce period is over.
     #
     # QUOTA_EXCEEDED uses a persisted blocked_at marker so recovery survives
-    # process restarts. RATE_LIMITED keeps the narrower runtime-only behavior,
-    # because its cooldown duration is not persisted today.
+    # process restarts. RATE_LIMITED normally relies on its in-memory cooldown
+    # (not persisted), so after a restart we fall back to the persisted
+    # blocked_at marker with the same debounce — otherwise a stale reset_at
+    # left in the DB keeps the account blocked even though the quota window
+    # has already reset.
     cooldown_ready = False
     if account.status == AccountStatus.QUOTA_EXCEEDED:
         cooldown_ready = (
@@ -1066,6 +1070,12 @@ def _state_from_account(
         )
     elif (
         runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None
+    ):
+        cooldown_ready = True
+    elif (
+        account.status == AccountStatus.RATE_LIMITED
+        and effective_blocked_at is not None
+        and time.time() >= effective_blocked_at + RATE_LIMITED_COOLDOWN_SECONDS
     ):
         cooldown_ready = True
 
@@ -1149,6 +1159,53 @@ def _state_from_account(
     )
 
 
+async def reconcile_blocked_account_statuses(
+    accounts_repo: AccountsRepository,
+    accounts: Iterable[Account],
+    latest_primary: dict[str, UsageHistory],
+    latest_secondary: dict[str, UsageHistory],
+) -> int:
+    """Tự bỏ trạng thái chặn khi quota đã reset — dùng cho vòng refresh usage định kỳ.
+
+    Trước đây trạng thái trong DB chỉ được tính lại khi có request đi qua balancer, nên tài khoản
+    đã hết rate limit vẫn hiển thị "Rate limited" trên dashboard cho tới khi có traffic hoặc ai đó
+    bấm Reactivate. Hàm này dùng đúng logic ``_state_from_account`` (đã có debounce + freshness)
+    để tính lại cho các tài khoản đang chặn và ghi lại nếu trạng thái đổi.
+    """
+    recovered = 0
+    for account in accounts:
+        if account.status not in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED):
+            continue
+        state = _state_from_account(
+            account=account,
+            primary_entry=latest_primary.get(account.id),
+            secondary_entry=latest_secondary.get(account.id),
+            runtime=RuntimeState(),
+        )
+        if state.status == account.status:
+            continue
+        reset_at_int = int(state.reset_at) if state.reset_at else None
+        blocked_at_int = int(state.blocked_at) if state.blocked_at else None
+        updated = await accounts_repo.update_status_if_current(
+            account.id,
+            state.status,
+            state.deactivation_reason,
+            reset_at_int,
+            blocked_at=blocked_at_int,
+            expected_status=account.status,
+            expected_deactivation_reason=account.deactivation_reason,
+            expected_reset_at=account.reset_at,
+            expected_blocked_at=account.blocked_at,
+        )
+        if updated:
+            account.status = state.status
+            account.deactivation_reason = state.deactivation_reason
+            account.reset_at = reset_at_int
+            account.blocked_at = blocked_at_int
+            recovered += 1
+    return recovered
+
+
 def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
     if recorded_at is None:
         return False
@@ -1162,7 +1219,7 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
 
 def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Account]:
     allowed_plans = get_model_registry().plan_types_for_model(model)
-    if allowed_plans is None:
+    if not allowed_plans:  # None hoặc rỗng = registry chưa biết model → không lọc cứng
         return accounts
     return [a for a in accounts if a.plan_type in allowed_plans]
 

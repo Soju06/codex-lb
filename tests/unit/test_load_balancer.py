@@ -16,7 +16,11 @@ from app.core.balancer import (
 )
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, UsageHistory
-from app.modules.proxy.load_balancer import RuntimeState, _state_from_account
+from app.modules.proxy.load_balancer import (
+    RuntimeState,
+    _state_from_account,
+    reconcile_blocked_account_statuses,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -155,6 +159,50 @@ def test_select_account_skips_rate_limited_until_reset():
     result = select_account(states, now=now)
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_keeps_rate_limited_with_reset_in_future():
+    now = 1_700_000_000.0
+    state = AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, reset_at=int(now + 600))
+    result = select_account([state], now=now)
+    assert result.account is None
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_select_account_recovers_rate_limited_without_reset_after_cooldown():
+    # Có cooldown runtime ⇒ hành vi cũ giữ nguyên: vẫn chờ, không tự hồi phục ở đây
+    # (đường hồi phục trong process là apply_usage_quota khi có snapshot usage mới).
+    now = 1_700_000_000.0
+    state = AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, cooldown_until=now - 1)
+    result = select_account([state], now=now)
+    assert result.account is None
+    assert state.status == AccountStatus.RATE_LIMITED
+
+
+def test_select_account_recovers_stale_rate_limited_after_grace_period():
+    # Trạng thái còn lại sau restart: RATE_LIMITED, không reset_at, không cooldown, blocked_at cũ.
+    now = 1_700_000_000.0
+    state = AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, blocked_at=now - 7200)
+    result = select_account([state], now=now)
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_select_account_recovers_restored_rate_limited_without_markers():
+    # Khôi phục từ DB sau restart mà mất cả cooldown lẫn blocked_at → không được chặn vĩnh viễn.
+    now = 1_700_000_000.0
+    state = AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0)
+    result = select_account([state], now=now)
+    assert result.account is not None
+    assert state.status == AccountStatus.ACTIVE
+
+
+def test_select_account_keeps_rate_limited_without_reset_during_grace_period():
+    now = 1_700_000_000.0
+    state = AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, blocked_at=now - 60)
+    result = select_account([state], now=now)
+    assert result.account is None
+    assert state.status == AccountStatus.RATE_LIMITED
 
 
 def test_select_account_round_robin_prefers_least_recently_selected():
@@ -548,6 +596,176 @@ def test_state_from_account_clears_quota_exceeded_after_restart_with_persisted_b
     )
     assert state.status == AccountStatus.ACTIVE
     assert state.blocked_at is None
+
+
+def test_state_from_account_clears_rate_limited_after_restart_with_persisted_blocked_at(monkeypatch):
+    """Sau restart: RATE_LIMITED + reset_at cũ trong DB + usage mới cho thấy cửa sổ 5h đã reset → phải tự về ACTIVE."""
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    stale_reset = int(now + 3600)
+    next_reset = int(now + 7200)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=stale_reset,
+        blocked_at=int(blocked),
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=5.0,
+        reset_at=next_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.ACTIVE
+    assert state.reset_at is None
+
+
+def test_state_from_account_keeps_rate_limited_after_restart_when_usage_still_exhausted(monkeypatch):
+    """Sau restart: usage mới vẫn 100% (quota chưa reset) → không được chuyển sang ACTIVE.
+
+    Khi cửa sổ vẫn cạn, trạng thái được nâng thành QUOTA_EXCEEDED (đúng bản chất: hết quota)
+    và chỉ hồi phục khi tới mốc reset.
+    """
+    now = 1_700_000_000.0
+    blocked = now - 130.0
+    stale_reset = int(now + 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    account = _make_test_account(
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=stale_reset,
+        blocked_at=int(blocked),
+    )
+    primary = _make_test_usage(
+        window="primary",
+        used_percent=100.0,
+        reset_at=stale_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+    )
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=primary,
+        secondary_entry=None,
+        runtime=RuntimeState(),
+    )
+    assert state.status == AccountStatus.QUOTA_EXCEEDED
+    assert state.reset_at == stale_reset
+
+
+class _StubAccountsRepo:
+    """Repo tối giản cho test: ghi lại các lần đổi trạng thái, kiểm tra điều kiện optimistic."""
+
+    def __init__(self, accounts: list[Account]) -> None:
+        self._accounts = accounts
+        self.updates: list[tuple[str, AccountStatus]] = []
+
+    async def update_status_if_current(
+        self,
+        account_id: str,
+        status: AccountStatus,
+        deactivation_reason: str | None = None,
+        reset_at: int | None = None,
+        blocked_at: int | None = None,
+        *,
+        expected_status: AccountStatus,
+        expected_deactivation_reason: str | None = None,
+        expected_reset_at: int | None = None,
+        expected_blocked_at: int | None = None,
+    ) -> bool:
+        account = next((entry for entry in self._accounts if entry.id == account_id), None)
+        if account is None:
+            return False
+        if (
+            account.status != expected_status
+            or account.reset_at != expected_reset_at
+            or account.blocked_at != expected_blocked_at
+        ):
+            return False
+        account.status = status
+        account.deactivation_reason = deactivation_reason
+        account.reset_at = reset_at
+        account.blocked_at = blocked_at
+        self.updates.append((account_id, status))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_blocked_account_statuses_recovers_after_quota_reset(monkeypatch):
+    """Vòng refresh định kỳ tự hồi phục tài khoản đã hết rate limit (không cần request đi qua)."""
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.utcnow", lambda: _epoch_to_naive_utc(now))
+
+    rate_limited = _make_test_account(
+        account_id="rl",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=int(now + 3600),
+        blocked_at=int(now - 130),
+    )
+    still_blocked = _make_test_account(
+        account_id="qe",
+        status=AccountStatus.QUOTA_EXCEEDED,
+        reset_at=int(now + 3600),
+        blocked_at=int(now - 130),
+    )
+    repo = _StubAccountsRepo([rate_limited, still_blocked])
+
+    recovered = await reconcile_blocked_account_statuses(
+        repo,
+        [rate_limited, still_blocked],
+        {
+            "rl": _make_test_usage(
+                account_id="rl",
+                window="primary",
+                used_percent=5.0,
+                reset_at=int(now + 7200),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+            ),
+            "qe": _make_test_usage(
+                account_id="qe",
+                window="primary",
+                used_percent=100.0,
+                reset_at=int(now + 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+            ),
+        },
+        {},
+    )
+
+    assert recovered == 1
+    assert rate_limited.status == AccountStatus.ACTIVE
+    assert rate_limited.reset_at is None
+    assert still_blocked.status == AccountStatus.QUOTA_EXCEEDED
+    assert repo.updates == [("rl", AccountStatus.ACTIVE)]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_blocked_account_statuses_skips_healthy_accounts(monkeypatch):
+    now = 1_700_000_000.0
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    active = _make_test_account(account_id="ok", status=AccountStatus.ACTIVE)
+    repo = _StubAccountsRepo([active])
+
+    recovered = await reconcile_blocked_account_statuses(repo, [active], {}, {})
+
+    assert recovered == 0
+    assert repo.updates == []
 
 
 def test_state_from_account_keeps_quota_exceeded_after_restart_when_persisted_blocked_at_is_recent(monkeypatch):

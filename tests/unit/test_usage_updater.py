@@ -4,7 +4,9 @@ import asyncio
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -115,6 +117,45 @@ async def test_usage_refresh_scheduler_stop_cancels_inflight_singleflight_withou
         await task
     assert cancelled.is_set()
     assert usage_updater_module._USAGE_REFRESH_SINGLEFLIGHT._inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_loop_recovers_blocked_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Một vòng refresh phải gọi hàm hồi phục trạng thái chặn sau khi đã lấy usage mới."""
+    usage_repo = AsyncMock()
+    usage_repo.latest_by_account = AsyncMock(return_value={})
+    accounts_repo = AsyncMock()
+    accounts_repo.list_accounts = AsyncMock(return_value=[])
+    additional_repo = AsyncMock()
+    updater = AsyncMock()
+    updater.refresh_accounts = AsyncMock(return_value=True)
+    reconcile = AsyncMock(return_value=2)
+    leader = SimpleNamespace(try_acquire=AsyncMock(return_value=True))
+
+    class FakeSession:
+        async def __aenter__(self) -> AsyncMock:
+            return AsyncMock()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: leader)
+
+    with (
+        patch.object(refresh_scheduler_module, "get_background_session", FakeSession),
+        patch.object(refresh_scheduler_module, "UsageRepository", return_value=usage_repo),
+        patch.object(refresh_scheduler_module, "AccountsRepository", return_value=accounts_repo),
+        patch.object(refresh_scheduler_module, "AdditionalUsageRepository", return_value=additional_repo),
+        patch.object(refresh_scheduler_module, "UsageUpdater", return_value=updater),
+        patch.object(refresh_scheduler_module, "reconcile_blocked_account_statuses", reconcile),
+    ):
+        scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+        await scheduler._refresh_once()
+
+    updater.refresh_accounts.assert_awaited_once()
+    reconcile.assert_awaited_once()
+    # Đọc usage lần đầu cho updater, sau đó đọc lại cả primary + secondary cho bước hồi phục.
+    assert usage_repo.latest_by_account.await_count == 3
 
 
 @dataclass(frozen=True, slots=True)

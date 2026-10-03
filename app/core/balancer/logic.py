@@ -97,6 +97,9 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
+RATE_LIMITED_FALLBACK_RECOVERY_SECONDS = 3600.0
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -148,6 +151,18 @@ def select_account(
                 state.status = AccountStatus.ACTIVE
                 state.error_count = 0
                 state.reset_at = None
+            elif (
+                state.reset_at is None
+                and state.cooldown_until is None
+                and (state.blocked_at is None or current >= state.blocked_at + RATE_LIMITED_FALLBACK_RECOVERY_SECONDS)
+            ):
+                # Trạng thái RATE_LIMITED không có reset_at VÀ không còn cooldown runtime → chỉ xảy ra
+                # khi state được khôi phục từ DB sau restart (cooldown là in-memory). Nếu không có nhánh
+                # này tài khoản bị chặn vĩnh viễn cho tới khi có người bấm Reactivate. Khi vẫn đang có
+                # cooldown thì giữ nguyên hành vi cũ (chờ hết cooldown / mốc reset).
+                state.status = AccountStatus.ACTIVE
+                state.error_count = 0
+                state.cooldown_until = None
             else:
                 continue
         if state.status == AccountStatus.QUOTA_EXCEEDED:
@@ -297,6 +312,9 @@ def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
 
 
 QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
+# Debounce cho RATE_LIMITED sau restart: cooldown runtime là in-memory nên mất khi khởi động lại;
+# dùng mốc blocked_at đã lưu để vẫn cho phép hồi phục khi usage mới chứng minh cửa sổ đã reset.
+RATE_LIMITED_COOLDOWN_SECONDS = 120.0
 
 
 def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:

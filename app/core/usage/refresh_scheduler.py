@@ -11,6 +11,7 @@ from app.core.config.settings import get_settings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.load_balancer import reconcile_blocked_account_statuses
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -74,6 +75,17 @@ class UsageRefreshScheduler:
                     accounts = await accounts_repo.list_accounts()
                     updater = UsageUpdater(usage_repo, accounts_repo, additional_usage_repo)
                     await updater.refresh_accounts(accounts, latest_usage)
+                    # Sau khi có usage mới: tự bỏ trạng thái chặn nếu quota đã reset, không cần chờ request.
+                    fresh_primary = await usage_repo.latest_by_account(window="primary")
+                    fresh_secondary = await usage_repo.latest_by_account(window="secondary")
+                    recovered = await reconcile_blocked_account_statuses(
+                        accounts_repo,
+                        accounts,
+                        fresh_primary,
+                        fresh_secondary,
+                    )
+                    if recovered:
+                        logger.info("Recovered %d blocked account(s) after usage refresh", recovered)
                     await get_rate_limit_headers_cache().invalidate()
                     get_account_selection_cache().invalidate()
             except Exception:

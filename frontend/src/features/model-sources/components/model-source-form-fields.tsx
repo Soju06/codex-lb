@@ -22,6 +22,7 @@ type ModelSourceFormFieldsProps = {
 const CAPABILITY_TOGGLES = [
   ["supportsChatCompletions", "modelSources.capabilities.chatCompletions"] as const,
   ["supportsResponses", "modelSources.capabilities.responses"] as const,
+  ["supportsResponsesWebsocket", "modelSources.capabilities.responsesWebsocket"] as const,
   ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
   ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
   ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
@@ -184,6 +185,12 @@ export function ModelSourceFormFields({
               onCheckedChange={(checked) =>
                 updateDraft({
                   [key]: checked === true,
+                  ...(key === "supportsResponsesWebsocket" && checked === true
+                    ? { supportsResponses: true, supportsStreaming: true }
+                    : {}),
+                  ...((key === "supportsResponses" || key === "supportsStreaming") && checked !== true
+                    ? { supportsResponsesWebsocket: false }
+                    : {}),
                   ...(key === "supportsReasoning" && checked === true
                     ? {
                         reasoningEffortsInput:

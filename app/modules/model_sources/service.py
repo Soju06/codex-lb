@@ -45,6 +45,7 @@ class ModelSourcesService:
         return await self._repository.list_enabled_sources()
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
+        _validate_websocket_capability(payload.supports_responses, payload.supports_responses_websocket)
         model_rows = _model_inputs_to_rows(payload.models)
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
@@ -56,6 +57,7 @@ class ModelSourcesService:
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
             supports_responses=payload.supports_responses,
+            supports_responses_websocket=payload.supports_responses_websocket,
             supports_audio_transcriptions=payload.supports_audio_transcriptions,
             supports_embeddings=payload.supports_embeddings,
             timeout_seconds=payload.timeout_seconds,
@@ -75,6 +77,12 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
         fields = payload.model_fields_set
+        _validate_websocket_capability(
+            payload.supports_responses if payload.supports_responses is not None else row.supports_responses,
+            payload.supports_responses_websocket
+            if payload.supports_responses_websocket is not None
+            else row.supports_responses_websocket,
+        )
         if "name" in fields and payload.name is not None:
             row.name = _normalize_name(payload.name)
         if "base_url" in fields and payload.base_url is not None:
@@ -91,6 +99,8 @@ class ModelSourcesService:
             row.supports_chat_completions = payload.supports_chat_completions
         if "supports_responses" in fields and payload.supports_responses is not None:
             row.supports_responses = payload.supports_responses
+        if "supports_responses_websocket" in fields and payload.supports_responses_websocket is not None:
+            row.supports_responses_websocket = payload.supports_responses_websocket
         if "supports_audio_transcriptions" in fields and payload.supports_audio_transcriptions is not None:
             row.supports_audio_transcriptions = payload.supports_audio_transcriptions
         if "supports_embeddings" in fields and payload.supports_embeddings is not None:
@@ -125,6 +135,11 @@ class ModelSourcesService:
         deleted = await self._repository.delete(source_id)
         if not deleted:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
+
+
+def _validate_websocket_capability(responses: bool, websocket: bool) -> None:
+    if websocket and not responses:
+        raise ModelSourceValidationError("Responses WebSocket requires Responses support")
 
 
 def _normalize_name(value: str) -> str:
@@ -258,6 +273,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,
         supports_responses=row.supports_responses,
+        supports_responses_websocket=row.supports_responses_websocket,
         supports_audio_transcriptions=row.supports_audio_transcriptions,
         supports_embeddings=row.supports_embeddings,
         timeout_seconds=row.timeout_seconds,

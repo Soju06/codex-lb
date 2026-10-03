@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from app.core.openai.model_registry import (
     MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
@@ -19,7 +20,25 @@ DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 _SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
 
 
-def source_models_to_upstream_models(sources: list[ModelSource]) -> list[UpstreamModel]:
+def source_websocket_models(sources: list[ModelSource]) -> dict[str, bool]:
+    candidates: dict[str, list[bool]] = {}
+    for source in sources:
+        if not source.is_enabled or source.kind != "openai_compatible" or not source.supports_responses:
+            continue
+        for model in source.models:
+            if model.is_enabled:
+                candidates.setdefault(model.model, []).append(
+                    bool(source.supports_responses_websocket and model.supports_streaming)
+                )
+    return {model: all(flags) for model, flags in candidates.items()}
+
+
+def source_models_to_upstream_models(
+    sources: list[ModelSource],
+    *,
+    websocket_capabilities: dict[str, bool] | None = None,
+) -> list[UpstreamModel]:
+    websocket_models = websocket_capabilities or {}
     models: list[UpstreamModel] = []
     for source in sources:
         if not source.is_enabled:
@@ -29,7 +48,12 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
         for source_model in source.models:
             if not source_model.is_enabled:
                 continue
-            models.append(_to_upstream_model(source, source_model))
+            models.append(
+                replace(
+                    _to_upstream_model(source, source_model),
+                    prefer_websockets=websocket_models.get(source_model.model, False),
+                )
+            )
     return models
 
 

@@ -69,6 +69,7 @@ export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
 export type ModelSourceDraft = {
   supportsChatCompletions: boolean;
   supportsResponses: boolean;
+  supportsResponsesWebsocket: boolean;
   supportsAudioTranscriptions: boolean;
   supportsEmbeddings: boolean;
   supportsStreaming: boolean;
@@ -89,6 +90,7 @@ export type ModelSourceDraft = {
 export const initialModelSourceDraft: ModelSourceDraft = {
   supportsChatCompletions: true,
   supportsResponses: false,
+  supportsResponsesWebsocket: false,
   supportsAudioTranscriptions: false,
   supportsEmbeddings: false,
   supportsStreaming: true,
@@ -301,6 +303,7 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
   return {
     supportsChatCompletions: source.supportsChatCompletions,
     supportsResponses: source.supportsResponses,
+    supportsResponsesWebsocket: source.supportsResponsesWebsocket,
     supportsAudioTranscriptions: source.supportsAudioTranscriptions,
     supportsEmbeddings: source.supportsEmbeddings,
     supportsStreaming: firstModel?.supportsStreaming ?? true,

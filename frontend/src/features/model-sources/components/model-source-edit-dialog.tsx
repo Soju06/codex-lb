@@ -197,6 +197,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       baseUrl: values.baseUrl,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      supportsResponsesWebsocket: draft.supportsResponsesWebsocket,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
     };

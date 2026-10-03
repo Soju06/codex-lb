@@ -19,7 +19,7 @@ REVISION = "20260926_010000_add_source_ownership_history"
 def test_history_migration_preserves_expired_and_live_credential_evidence(tmp_path: Path) -> None:
     url = os.environ.get("CODEX_LB_TEST_MIGRATION_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'history.db'}")
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20260926_010000_add_source_ownership_history"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20260929_000000_add_source_websocket"]
     run_upgrade(url, PARENT, bootstrap_legacy=False)
     # The explicitly isolated migration database may already be at head after
     # another migration test. Exercise this revision from its parent each time.

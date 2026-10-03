@@ -1896,6 +1896,9 @@ class ModelSource(Base):
         server_default=false(),
         nullable=False,
     )
+    supports_responses_websocket: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     supports_audio_transcriptions: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

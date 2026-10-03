@@ -55,6 +55,7 @@ export function ModelSourceCreateDialog({
       apiKey: values.apiKey.trim() ? values.apiKey.trim() : undefined,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      supportsResponsesWebsocket: draft.supportsResponsesWebsocket,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
       models: modelInputsFromForm(values, draft),

@@ -1419,6 +1419,10 @@ class SourceStreamUsageParser:
             return
         if not isinstance(parsed, dict):
             return
+        self.observe_event(parsed)
+
+    def observe_event(self, parsed: dict[str, JsonValue]) -> None:
+        """Observe an owned JSON event from either streaming transport."""
         if self._model is not None and self._upstream_model is not None:
             restore_model_identity(parsed, model=self._model, upstream_model=self._upstream_model)
         if self._response_shape == "responses":

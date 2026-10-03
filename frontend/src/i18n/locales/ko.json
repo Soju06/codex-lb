@@ -943,6 +943,7 @@
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",
+  "modelSources.capabilities.responsesWebsocket": "Responses WebSocket",
   "modelSources.capabilities.streaming": "Streaming",
   "modelSources.capabilities.tools": "Tools",
   "modelSources.capabilities.vision": "Vision",

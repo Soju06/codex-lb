@@ -11,3 +11,7 @@ The alias-only port keeps upstream catalog sanitization and supported tool decla
 - Before/after screenshots in `evidence/` captured from baseline and port builds with synthetic fixtures.
 
 Cloud CI and current-head upstream review remain merge gates. No live provider or production configuration was changed. The active change remains unarchived for contributor review.
+
+## Current-head review corrections
+
+Alias-to-alias renaming preserves disabled state, pricing and metadata by matching an unambiguous existing target; ambiguous edits stop with a form error. Models help now uses the form description association. The Embeddings scenario explicitly records public model restoration. All 31 frontend tests and ESLint/TypeScript checks passed; backend behavior is unchanged.

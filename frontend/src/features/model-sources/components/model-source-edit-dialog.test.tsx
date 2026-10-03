@@ -432,3 +432,39 @@ describe("ModelSourceEditDialog aliases", () => {
     expect(metadata.upstream_model).toBe(removeAlias ? undefined : "cd/linxaq");
   });
 });
+
+
+describe("model alias rename identity", () => {
+  it.each([false, true])("preserves a renamed alias with a shared target peer: %s", async (shared) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0] = { ...source.models[0], model: "alpha", isEnabled: false,
+      rawMetadataJson: JSON.stringify({ upstream_model: "vendor-x", custom: "retained" }) };
+    if (shared) source.models.push({ ...source.models[0], id: 2, model: "peer", inputPer1M: 99, isEnabled: true });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByLabelText("Models", { exact: true });
+    expect(models).toHaveAccessibleDescription(/Clients use the alias/);
+    await user.clear(models);
+    await user.type(models, shared ? "peer=vendor-x, beta=vendor-x" : "beta=vendor-x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const renamed = onSubmit.mock.calls[0][1].models.find((model: {model: string}) => model.model === "beta");
+    expect(renamed).toMatchObject({ isEnabled: false, inputPer1M: 0.5, outputPer1M: 1.5, supportsTools: true });
+    expect(JSON.parse(renamed.rawMetadataJson)).toEqual({ upstream_model: "vendor-x", custom: "retained" });
+  });
+
+  it("rejects an ambiguous rename without submitting replacement rows", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const source = createModelSource();
+    source.models = ["alpha", "peer"].map((model, i) => ({ ...source.models[0], id: i + 1, model,
+      rawMetadataJson: JSON.stringify({ upstream_model: "vendor-x" }) }));
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    await user.clear(screen.getByLabelText("Models", { exact: true }));
+    await user.type(screen.getByLabelText("Models", { exact: true }), "beta=vendor-x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Several existing models share this upstream ID/)).toBeVisible();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+});

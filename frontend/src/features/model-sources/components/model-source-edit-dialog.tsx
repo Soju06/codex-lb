@@ -90,11 +90,24 @@ function buildModelInputs(
   draft: ModelSourceDraft,
   draftChangeFlags: ModelDraftChangeFlags,
   existingModelsByName: Map<string, ModelSourceModel>,
-): ModelSourceModelInput[] {
-  return modelEntries.map(({ model, upstreamModel }) => {
-    const existingModel =
-      existingModelsByName.get(model) ??
-      (upstreamModel ? existingModelsByName.get(upstreamModel) : undefined);
+): ModelSourceModelInput[] | null {
+  const existingMatches = modelEntries.map(({ model, upstreamModel }) => {
+    const exact = existingModelsByName.get(model);
+    if (exact || !upstreamModel) return exact ? [exact] : [];
+    const candidates = [...existingModelsByName.values()].filter((existing) => {
+      const metadata = existing.rawMetadataJson ? JSON.parse(existing.rawMetadataJson) : {};
+      return (metadata.upstream_model ?? existing.model) === upstreamModel;
+    });
+    const bare = candidates.find((existing) => existing.model === upstreamModel);
+    if (bare) return [bare];
+    // A retained public entry already identifies its row. Prefer the one
+    // removed alias when this edit renames only part of a shared target set.
+    const removed = candidates.filter((existing) => !modelEntries.some((entry) => entry.model === existing.model));
+    return removed.length ? removed : candidates;
+  });
+  if (existingMatches.some((matches) => matches.length > 1)) return null;
+  return modelEntries.map(({ model, upstreamModel }, index) => {
+    const existingModel = existingMatches[index][0];
 
     return {
       model,
@@ -190,12 +203,17 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
 
     if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {
       const existingModelsByName = new Map(source.models.map((model) => [model.model, model]));
-      payload.models = buildModelInputs(
+      const models = buildModelInputs(
         modelEntries,
         draft,
         draftChangeFlags,
         existingModelsByName,
       );
+      if (models === null) {
+        form.setError("models", { message: t("modelSources.validation.aliasRenameAmbiguous") });
+        return;
+      }
+      payload.models = models;
     }
 
     // The stored key is never returned, so a blank field means "keep it";

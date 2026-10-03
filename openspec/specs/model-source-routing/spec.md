@@ -47,7 +47,8 @@ forwarded to the source verbatim.
   the requested model enabled
 - **WHEN** a client posts to `/v1/embeddings`
 - **THEN** the proxy forwards the payload to that source's `/embeddings`
-  endpoint and returns the upstream JSON response
+  endpoint and returns the upstream JSON response, replacing a matching upstream
+  `model` value with the configured public alias while preserving all other fields
 
 #### Scenario: no capable source is a model error
 
@@ -206,3 +207,11 @@ The create and edit source forms SHALL accept `alias=upstream-id` entries alongs
 - **WHEN** an operator edits existing `cd/linxaq` into `cd/gpt-6-astra=cd/linxaq`
 - **THEN** the saved public model is `cd/gpt-6-astra` with target `cd/linxaq`
 - **AND** its existing multi-agent metadata and model settings are retained
+
+#### Scenario: Rename a configured alias without resetting its settings
+
+- **GIVEN** a disabled `alpha=vendor-x` model with custom pricing and metadata
+- **WHEN** the operator changes only the public alias to `beta=vendor-x`
+- **THEN** the saved row retains its enablement, pricing and metadata
+- **AND** ambiguous matches among existing aliases are rejected rather than silently resetting model settings
+

@@ -37,6 +37,7 @@ from app.core.clients.oauth import (
     request_device_code,
 )
 from app.core.config.settings import OAUTH_CALLBACK_PORT, OAUTH_REDIRECT_URI, get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
@@ -967,6 +968,7 @@ class OauthService:
             DEFAULT_PLAN,
         )
 
+        dashboard_settings = await get_settings_cache().get()
         account = Account(
             id=intended_account_id or account_id,
             chatgpt_account_id=raw_account_id,
@@ -982,6 +984,7 @@ class OauthService:
             last_refresh=utcnow(),
             status=AccountStatus.ACTIVE,
             deactivation_reason=None,
+            limit_warmup_enabled=dashboard_settings.limit_warmup_auto_enable_new_accounts,
         )
         if self._repo_factory:
             async with self._repo_factory() as repo:

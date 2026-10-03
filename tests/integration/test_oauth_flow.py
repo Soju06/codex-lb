@@ -211,7 +211,10 @@ def test_oauth_error_html_escapes_message():
 
 
 @pytest.mark.asyncio
-async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
+@pytest.mark.parametrize("auto_enable_warmup", [False, True])
+async def test_device_oauth_flow_creates_account(async_client, monkeypatch, auto_enable_warmup):
+    settings = await async_client.put("/api/settings", json={"limitWarmupAutoEnableNewAccounts": auto_enable_warmup})
+    assert settings.status_code == 200
     email = "device@example.com"
     raw_account_id = "acc_device"
 
@@ -263,7 +266,12 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
     data = accounts.json()["accounts"]
-    assert any(account["accountId"] == expected_account_id for account in data)
+    account = next(account for account in data if account["accountId"] == expected_account_id)
+    assert account["limitWarmupEnabled"] is auto_enable_warmup
+    assert account["limitWarmup"] is None
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    assert settings.json()["limitWarmupEnabled"] is False
 
 
 @pytest.mark.asyncio
@@ -325,9 +333,13 @@ async def test_starting_new_device_flow_cancels_previous_pending_poll(async_clie
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("warmup_enabled", [False, True])
+@pytest.mark.parametrize("auto_enable_warmup", [False, True])
 async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity(
     async_client,
     monkeypatch,
+    warmup_enabled,
+    auto_enable_warmup,
 ):
     """OAuth reauth for the same ChatGPT identity must reuse the existing
     local row even when ``importWithoutOverwrite`` is enabled.
@@ -350,6 +362,7 @@ async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity
             "stickyThreadsEnabled": False,
             "preferEarlierResetAccounts": False,
             "importWithoutOverwrite": True,
+            "limitWarmupAutoEnableNewAccounts": auto_enable_warmup,
             "totpRequiredOnLogin": False,
         },
     )
@@ -418,17 +431,20 @@ async def test_device_oauth_reauth_reuses_existing_row_for_same_chatgpt_identity
         assert payload and payload["status"] == "success"
 
     await _run_device_flow_once()
+    base_id = generate_unique_account_id(raw_account_id, email)
+    update = await async_client.put(f"/api/accounts/{base_id}/limit-warmup", json={"enabled": warmup_enabled})
+    assert update.status_code == 200
     await _run_device_flow_once()
 
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
     data = [account for account in accounts.json()["accounts"] if account["email"] == email]
     assert len(data) == 1
-    base_id = generate_unique_account_id(raw_account_id, email)
     assert data[0]["accountId"] == base_id
     # Second reauth carried the team plan; it must be applied to the
     # existing row rather than a new __copy row.
     assert data[0]["planType"] == "team"
+    assert data[0]["limitWarmupEnabled"] is warmup_enabled
 
 
 @pytest.mark.asyncio
@@ -1336,16 +1352,25 @@ async def test_device_oauth_flow_reports_proxy_route_errors(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_manual_callback_returns_success_and_creates_account(async_client, monkeypatch):
+@pytest.mark.parametrize("existing_warmup", [None, False, True])
+@pytest.mark.parametrize("auto_enable_warmup", [False, True])
+async def test_manual_callback_creates_account_or_preserves_warmup_on_reauth(
+    async_client, monkeypatch, existing_warmup, auto_enable_warmup
+):
+    settings = await async_client.put("/api/settings", json={"limitWarmupAutoEnableNewAccounts": auto_enable_warmup})
+    assert settings.status_code == 200
+
     async def fake_callback_server_start(self) -> None:
         return None
 
     email = "manual@example.com"
     raw_account_id = "acc_manual"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
 
     async def fake_exchange_authorization_code(**_):
         payload = {
             "email": email,
+            "sub": "manual-user",
             "chatgpt_account_id": raw_account_id,
             "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
         }
@@ -1358,7 +1383,29 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
     monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
 
-    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
+    start_payload = {"forceMethod": "browser"}
+    if existing_warmup is not None:
+        encryptor = TokenEncryptor()
+        async with SessionLocal() as session:
+            session.add(
+                Account(
+                    id=expected_account_id,
+                    chatgpt_account_id=raw_account_id,
+                    chatgpt_user_id="manual-user",
+                    email=email,
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("old-access"),
+                    refresh_token_encrypted=encryptor.encrypt("old-refresh"),
+                    id_token_encrypted=encryptor.encrypt("old-id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.REAUTH_REQUIRED,
+                    limit_warmup_enabled=existing_warmup,
+                )
+            )
+            await session.commit()
+        start_payload["accountId"] = expected_account_id
+
+    start = await async_client.post("/api/oauth/start", json=start_payload)
     assert start.status_code == 200
     payload = start.json()
     assert payload["method"] == "browser"
@@ -1379,11 +1426,18 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
     assert status.status_code == 200
     assert status.json()["status"] == "success"
 
-    expected_account_id = generate_unique_account_id(raw_account_id, email)
     accounts = await async_client.get("/api/accounts")
     assert accounts.status_code == 200
-    data = accounts.json()["accounts"]
-    assert any(account["accountId"] == expected_account_id for account in data)
+    data = [account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id]
+    assert len(data) == 1
+    account = data[0]
+    assert account["limitWarmupEnabled"] is (auto_enable_warmup if existing_warmup is None else existing_warmup)
+    assert account["limitWarmup"] is None
+    async with SessionLocal() as session:
+        saved = await session.get(Account, expected_account_id)
+        assert saved is not None
+        assert saved.status == AccountStatus.ACTIVE
+        assert TokenEncryptor().decrypt(saved.access_token_encrypted) == "manual-access-token"
 
 
 @pytest.mark.asyncio

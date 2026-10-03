@@ -93,8 +93,9 @@ export function ModelSourceFormFields({
           <FormItem>
 	            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
             <FormControl>
-              <Input {...field} placeholder="deepseek-v4-flash, local-coder" autoComplete="off" />
+              <Input {...field} placeholder="local-coder, cd/gpt-6-astra=cd/linxaq" autoComplete="off" />
             </FormControl>
+            <p className="text-xs text-muted-foreground">{t("modelSources.fields.aliasesDescription")}</p>
             <FormMessage />
           </FormItem>
         )}

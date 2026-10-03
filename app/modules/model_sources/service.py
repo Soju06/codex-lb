@@ -154,6 +154,11 @@ def _validate_raw_metadata_json(value: str | None) -> str | None:
         raise ModelSourceValidationError("raw_metadata_json must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ModelSourceValidationError("raw_metadata_json must be a JSON object")
+    if "upstream_model" in parsed:
+        upstream_model = parsed["upstream_model"]
+        if not isinstance(upstream_model, str) or not 1 <= len(upstream_model.strip()) <= 255:
+            raise ModelSourceValidationError("upstream_model must be a nonblank string of at most 255 characters")
+        parsed["upstream_model"] = upstream_model.strip()
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 

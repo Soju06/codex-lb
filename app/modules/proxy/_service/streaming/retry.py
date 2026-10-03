@@ -2724,12 +2724,15 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
-                                await proxy._handle_stream_error(
+                                # Terminal owner-bound failures still hold the
+                                # keyed reservation. Use the same settlement-
+                                # ordered health path as pre-visible failover.
+                                await _handle_or_defer_keyed_stream_health(
                                     account,
                                     _upstream_error_from_openai(error),
                                     code,
                                     http_status=tex.status_code,
-                                    **_retry_after_kwargs(tex.retry_after_seconds),
+                                    retry_after_seconds=tex.retry_after_seconds,
                                 )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:

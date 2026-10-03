@@ -27172,6 +27172,39 @@ def test_websocket_client_previous_response_full_resend_retry_requires_matching_
     )
 
 
+def test_websocket_client_previous_response_full_resend_retry_rejects_delta_chained_to_empty_prewarm() -> None:
+    prewarm_input: list[JsonValue] = [
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "workspace rules"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        empty_prewarm_response_id="resp_prewarm",
+        empty_prewarm_input_count=len(prewarm_input),
+        empty_prewarm_input_fingerprint=proxy_service._fingerprint_input_items(prewarm_input),
+    )
+    turn_delta: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "environment context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "summarize the notes"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=turn_delta,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=[*prewarm_input, *turn_delta],
+            continuity_state=continuity_state,
+        )
+        is True
+    )
+
+
 def test_websocket_client_previous_response_full_resend_retry_rejects_tool_output_delta() -> None:
     tool_output_delta: list[JsonValue] = [
         {"type": "function_call_output", "call_id": "call_a", "output": "ok"},

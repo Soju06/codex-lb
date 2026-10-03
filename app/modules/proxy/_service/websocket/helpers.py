@@ -789,6 +789,15 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
         return False
     if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
         return False
+    if continuity_state is not None and continuity_state.empty_prewarm_response_id == previous_response_id:
+        # Codex chains its first turn to an empty prewarm and sends only the
+        # new items, so dropping the anchor would drop the tools and developer
+        # context that only the prewarm carried.
+        return _facade()._input_prefix_matches_stored_context(
+            input_value,
+            stored_count=continuity_state.empty_prewarm_input_count,
+            stored_fingerprint=continuity_state.empty_prewarm_input_fingerprint,
+        )
     if (
         continuity_state is not None
         and continuity_state.last_completed_response_id == previous_response_id
@@ -831,6 +840,22 @@ def _record_websocket_continuity_completion(
         continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = list(request_state.pending_function_call_ids)
     continuity_state.last_pending_tool_call_types = dict(request_state.pending_tool_call_types)
+
+
+def _record_websocket_empty_prewarm_completion(
+    continuity_state: _WebSocketContinuityState,
+    *,
+    request_state: _WebSocketRequestState,
+    response_id: str | None,
+) -> None:
+    """Record the context of an empty prewarm without treating it as turn progress."""
+    continuity_state.empty_prewarm_response_id = response_id
+    if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
+        continuity_state.empty_prewarm_input_count = request_state.input_item_count
+        continuity_state.empty_prewarm_input_fingerprint = request_state.input_full_fingerprint
+    else:
+        continuity_state.empty_prewarm_input_count = 0
+        continuity_state.empty_prewarm_input_fingerprint = None
 
 
 def _record_websocket_responses_lite_acceptance(

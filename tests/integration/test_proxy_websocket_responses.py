@@ -6356,6 +6356,131 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
     assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
 
 
+@pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
+def test_responses_websocket_close_replay_keeps_context_of_turn_chained_to_empty_prewarm(
+    endpoint,
+    app_instance,
+    monkeypatch,
+):
+    # Codex CLI opens a session with an empty ``generate: false`` prewarm that
+    # carries the tools and developer context, then sends the first turn as
+    # ``previous_response_id`` plus only the new items. If the upstream closes
+    # before accepting that turn, the replay must not drop the anchor: the new
+    # items alone lack everything the prewarm carried.
+    first_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_ws_prewarm", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_prewarm",
+                                "status": "completed",
+                                "usage": {"input_tokens": 11000, "output_tokens": 0, "total_tokens": 11000},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+            [_FakeUpstreamMessage("close")],
+        ],
+    )
+    recovered_upstream = _recovered_upstream("resp_ws_prewarm_replay_unused")
+    connect_count = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        nonlocal connect_count
+        connect_count += 1
+        upstream = first_upstream if connect_count == 1 else recovered_upstream
+        return SimpleNamespace(id="acct_ws_prewarm_replay", codex_installation_id="account-installation"), upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    prewarm_input = [
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "workspace rules"}]},
+    ]
+    turn_delta = [
+        {"role": "user", "content": [{"type": "input_text", "text": "environment context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "summarize the notes"}]},
+    ]
+    headers = {
+        "x-codex-turn-metadata": json.dumps(
+            {"request_kind": "prewarm", "turn_id": "turn_prewarm_replay"},
+            separators=(",", ":"),
+        )
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(endpoint, headers=headers) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "instructions": "",
+                        "generate": False,
+                        "input": prewarm_input,
+                        "stream": True,
+                    }
+                )
+            )
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "instructions": "",
+                        "previous_response_id": "resp_ws_prewarm",
+                        "input": turn_delta,
+                        "stream": True,
+                    }
+                )
+            )
+            terminal = json.loads(websocket.receive_text())
+
+    turn_payload = json.loads(first_upstream.sent_text[-1])
+    assert turn_payload["previous_response_id"] == "resp_ws_prewarm"
+    assert turn_payload["input"] == turn_delta
+    # Without the anchor the replay would reach the model with only
+    # ``turn_delta``, so the turn fails and the client resends it in full.
+    assert recovered_upstream.sent_text == []
+    assert connect_count == 1
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["code"] == "stream_incomplete"
+
+
 def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,

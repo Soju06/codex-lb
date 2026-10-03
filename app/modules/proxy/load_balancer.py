@@ -64,6 +64,10 @@ from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
+from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
+)
 from app.modules.proxy._load_balancer.error_rate import (
     ErrorRateWeightingPolicy,
     error_rate_weight_multiplier,
@@ -137,6 +141,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 from app.modules.proxy._load_balancer.tunables import (
     RoutingTunables,
     account_lease_stale_ttl_seconds,
+    apply_runtime_pressure,
     resolve_routing_tunables,
 )
 from app.modules.proxy._load_balancer.types import (
@@ -186,6 +191,9 @@ logger = logging.getLogger(__name__)
 # other; a sibling row only proves a *later* fetch (one that no longer
 # reported the stale window) when it is newer by more than this margin.
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
+# Largest per-request lease estimate (see ``_estimated_lease_tokens_from_request_usage_budget``);
+# one lease of this size adds exactly ``lease_token_weight`` percentage points of pressure.
+MAX_LEASE_ESTIMATE_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET + API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
@@ -2547,16 +2555,16 @@ def _state_from_account(
     inflight_pressure_pct = (
         runtime.inflight_response_creates + runtime.inflight_streams
     ) * tunables.inflight_penalty_pct
-    leased_token_pressure_pct = 0.0
+    # Pressure terms are percentage points: one maximum-size lease adds exactly
+    # ``lease_token_weight`` points on every plan (no plan-capacity scaling).
+    leased_token_pressure_pct = tunables.lease_token_weight * runtime.leased_tokens / MAX_LEASE_ESTIMATE_TOKENS
     long_window_key = "secondary"
     if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
         long_window_key = "monthly"
     capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
-    if capacity_credits > 0.0 and runtime.leased_tokens > 0:
-        leased_token_pressure_pct = runtime.leased_tokens * tunables.lease_token_weight / capacity_credits * 100.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
-    effective_used_percent = None if used_percent is None else min(100.0, used_percent + pressure_pct)
-    effective_secondary_used_percent = None if secondary_used is None else min(100.0, secondary_used + pressure_pct)
+    effective_used_percent = apply_runtime_pressure(used_percent, pressure_pct)
+    effective_secondary_used_percent = apply_runtime_pressure(secondary_used, pressure_pct)
     usage_exhaustion_evidence_status = status in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED)
 
     return AccountState(
@@ -2569,6 +2577,8 @@ def _state_from_account(
         blocked_at=next_blocked_at,
         cooldown_until=runtime.cooldown_until,
         secondary_used_percent=effective_secondary_used_percent,
+        persisted_used_percent=used_percent,
+        persisted_secondary_used_percent=secondary_used,
         secondary_reset_at=secondary_reset,
         last_error_at=runtime.last_error_at,
         last_selected_at=runtime.last_selected_at,

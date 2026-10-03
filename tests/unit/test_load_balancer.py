@@ -2326,7 +2326,8 @@ def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monk
         runtime=RuntimeState(inflight_streams=1),
     )
 
-    assert state.used_percent == 100.0
+    # Pressure (98 + 2.5) is capped at the 99.0 ceiling while persisted usage is below 100.
+    assert state.used_percent == 99.0
     assert state.priority_used_percent == 98.0
 
 
@@ -5973,6 +5974,36 @@ def test_select_account_relative_availability_prefers_more_urgent_weekly_capacit
         counts[result.account.account_id] += 1
 
     assert counts["soon-plus"] > counts["later-pro"]
+
+
+def test_select_account_relative_availability_zero_score_fallback_ranks_by_persisted_usage():
+    # Every candidate scores zero, so relative availability falls back to the
+    # least-used account. Equal effective usage must not hide the persisted gap.
+    now = time.time()
+    heavy, light = (
+        AccountState(
+            account_id,
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            persisted_used_percent=10.0,
+            persisted_secondary_used_percent=persisted_secondary,
+            secondary_reset_at=int(now + 24 * 3600),
+            plan_type="plus",
+            capacity_credits=7_560.0,
+        )
+        for account_id, persisted_secondary in (("acc-heavy", 95.0), ("acc-light", 38.0))
+    )
+
+    result = select_account(
+        [heavy, light],
+        now=now,
+        routing_strategy="relative_availability",
+        deterministic_probe=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "acc-light"
 
 
 def test_select_account_relative_availability_filters_higher_planner_costs():

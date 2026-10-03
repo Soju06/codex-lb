@@ -34,6 +34,7 @@ PERMANENT_FAILURE_CODES = {
     # instead of remaining active while every request retries the dead token.
     "invalid_refresh_token": "Refresh token invalid - re-login required",
     "account_deactivated": "Account has been deactivated",
+    "deactivated_workspace": "Workspace has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
 }
@@ -1489,10 +1490,14 @@ def failover_decision(
     if downstream_visible:
         return "surface"
     if owner_bound:
-        return "retry_same_account" if same_account_retry_available else "surface"
+        return (
+            "retry_same_account"
+            if same_account_retry_available and failure_class != "account_unavailable"
+            else "surface"
+        )
     if candidates_remaining <= 0:
         return "surface"
-    if failure_class in ("rate_limit", "quota", "retryable_transient"):
+    if failure_class in ("rate_limit", "quota", "retryable_transient", "account_unavailable"):
         return "failover_next"
     return "surface"
 

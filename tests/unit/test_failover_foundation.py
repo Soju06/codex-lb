@@ -28,6 +28,26 @@ pytestmark = pytest.mark.unit
 
 
 class TestClassifyUpstreamFailure:
+    @pytest.mark.parametrize("http_status", [402, None, 500])
+    def test_deactivated_workspace_is_account_unavailable(self, http_status: int | None) -> None:
+        result = classify_upstream_failure(
+            error_code="deactivated_workspace",
+            error=UpstreamError(message="Workspace has been deactivated"),
+            http_status=http_status,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "account_unavailable"
+
+    @pytest.mark.parametrize("error_code", ["payment_required", "unknown_error"])
+    def test_bare_402_is_not_account_unavailable(self, error_code: str) -> None:
+        result = classify_upstream_failure(
+            error_code=error_code,
+            error=UpstreamError(message="Payment Required"),
+            http_status=402,
+            phase="connect",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_rate_limit_exceeded(self) -> None:
         result = classify_upstream_failure(
             error_code="rate_limit_exceeded",
@@ -342,6 +362,33 @@ class TestUsageLimitClassificationDeliveryForm:
 
 
 class TestFailoverDecision:
+    @pytest.mark.parametrize(
+        ("downstream_visible", "owner_bound", "candidates_remaining", "expected"),
+        [
+            (False, False, 1, "failover_next"),
+            (True, False, 1, "surface"),
+            (False, True, 1, "surface"),
+            (False, False, 0, "surface"),
+        ],
+    )
+    def test_workspace_unavailable_respects_visibility_and_ownership(
+        self,
+        downstream_visible: bool,
+        owner_bound: bool,
+        candidates_remaining: int,
+        expected: str,
+    ) -> None:
+        assert (
+            failover_decision(
+                failure_class="account_unavailable",
+                downstream_visible=downstream_visible,
+                candidates_remaining=candidates_remaining,
+                owner_bound=owner_bound,
+                same_account_retry_available=True,
+            )
+            == expected
+        )
+
     def test_surface_when_downstream_visible(self) -> None:
         assert (
             failover_decision(

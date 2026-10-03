@@ -2,7 +2,7 @@
 
 Based on upstream main `f8ffbac2`.
 
-- 36 component tests passed (donut chart and Accounts page).
+- 37 component tests passed (donut chart and Accounts page, including colliding formatted plan names).
 - 2 Accounts flow integration tests passed.
 - Full frontend ESLint, TypeScript build and production Vite build passed.
 - Playwright screenshot/overflow checks passed at 1440px and 390px.

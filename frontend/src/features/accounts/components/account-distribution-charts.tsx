@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { DonutChart } from "@/components/donut-chart";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import type { DashboardAccountStatus } from "@/utils/account-status";
-import { formatSlug } from "@/utils/formatters";
 
 const STATUS_GROUPS: Record<string, { label: DashboardAccountStatus; color: string }> = {
   active: { label: "active", color: "#10b981" },
@@ -43,7 +42,7 @@ export function AccountDistributionCharts({ accounts }: { accounts: AccountSumma
         total={accounts.length}
         items={plans.map(([plan, count]) => ({
           id: `plan:${plan}`,
-          label: plan ? formatSlug(plan) : t("accounts.distribution.unknown"),
+          label: plan || t("accounts.distribution.unknown"),
           value: count,
         }))}
       />

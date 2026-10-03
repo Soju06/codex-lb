@@ -156,11 +156,23 @@ describe("AccountsPage", () => {
     const plans = within(screen.getByRole("region", { name: "Accounts by plan" }));
     expect(plans.getByTestId("donut-center-total")).toHaveTextContent(/^5$/);
     expect(plans.getAllByRole("button").map((row) => row.textContent)).toEqual([
-      "Plus2 (40%)",
+      "plus2 (40%)",
       "Unknown1 (20%)",
-      "Custom plan1 (20%)",
-      "Prolite1 (20%)",
+      "custom_plan1 (20%)",
+      "prolite1 (20%)",
     ]);
+  });
+
+  it("keeps plan identifiers and the blank-plan label distinguishable", () => {
+    mockAccountsData(["pro_lite", "pro lite", "unknown", " "].map((planType, index) =>
+      account({ accountId: `distinct-${index}`, planType }),
+    ));
+    render(<MemoryRouter><AccountsPage /></MemoryRouter>);
+    const plans = within(screen.getByRole("region", { name: "Accounts by plan" }));
+    for (const label of ["pro_lite", "pro lite", "unknown", "Unknown"]) {
+      expect(plans.getByRole("button", { name: `${label} 1 (25%)` })).toBeInTheDocument();
+    }
+    expect(plans.getAllByRole("button")).toHaveLength(4);
   });
 
   it("counts all account statuses and keeps unknown statuses separate from active", () => {
@@ -202,7 +214,7 @@ describe("AccountsPage", () => {
     expect(plans.getByTestId("donut-center-total")).toHaveTextContent(/^3$/);
     expect(statuses.getByTestId("donut-center-total")).toHaveTextContent(/^3$/);
     expect(plans.getAllByRole("button").map((row) => row.textContent)).toEqual([
-      "Pro2 (66.7%)", "Plus1 (33.3%)",
+      "pro2 (66.7%)", "plus1 (33.3%)",
     ]);
     expect(statuses.getAllByRole("button").map((row) => row.textContent)).toEqual([
       "Re-auth required3 (100%)",

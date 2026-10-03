@@ -4237,7 +4237,8 @@ The Accounts page SHALL display Dashboard-style donut charts by plan and account
 - **THEN** each status is counted separately
 - **AND** plan keys that differ only in case or surrounding whitespace share a category
 - **AND** blank plans and unrecognized statuses appear as Unknown, rather than being omitted or counted as Active
-- **AND** unrecognized nonblank plans retain their own category
+- **AND** nonblank plan labels preserve their normalized keys, including underscores and spaces, so distinct plans remain distinguishable
+- **AND** a literal `unknown` plan remains distinguishable from a blank plan
 
 #### Scenario: Filtering and refreshed data
 

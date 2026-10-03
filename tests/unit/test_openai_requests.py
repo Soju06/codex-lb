@@ -860,6 +860,29 @@ def test_responses_input_developer_message_stays_in_input(request_type, instruct
 
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+def test_responses_input_developer_message_is_sanitized_like_other_messages(request_type):
+    # Upstream rejects these keys and part types on every message role, so the
+    # developer message stays in ``input`` but loses them like a user message would.
+    developer = {
+        "type": "message",
+        "role": "developer",
+        "reasoning_content": "echo",
+        "reasoning_details": [{"type": "detail"}],
+        "tool_calls": [{"id": "call_1", "name": "f"}],
+        "function_call": {"name": "f", "arguments": "{}"},
+        "content": [{"type": "input_text", "text": "dev"}, {"type": "reasoning", "text": "echo"}],
+    }
+    user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+
+    request = request_type.model_validate({"model": "gpt-5.1", "instructions": "", "input": [developer, user]})
+
+    expected = [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev"}]}, user]
+    assert request.instructions == ""
+    assert request.input == expected
+    assert request.to_payload()["input"] == expected
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
 def test_responses_input_additional_tools_item_is_preserved(request_type):
     additional_tools = {
         "type": "additional_tools",

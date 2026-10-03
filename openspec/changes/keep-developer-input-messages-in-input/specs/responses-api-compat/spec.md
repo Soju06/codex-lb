@@ -7,9 +7,12 @@
 When normalizing Responses or compact request `input`, the service MUST only
 hoist items that are system instruction messages — `system`-role items whose
 `type` is omitted or `"message"` — into the top-level `instructions` field.
-`developer`-role messages MUST be forwarded upstream unchanged and in their
-original input position, because `previous_response_id` carries `input` but
-not `instructions` into chained responses. Any `system`/`developer`-role input item carrying any other `type`
+`developer`-role messages MUST remain in `input`, in their original position,
+because `previous_response_id` carries `input` but not `instructions` into
+chained responses. They receive the same input sanitization as other message
+items: interleaved-reasoning keys (`reasoning_content`, `reasoning_details`,
+`tool_calls`, `function_call`) and reasoning content parts are removed, because
+upstream rejects them on every message role. Any `system`/`developer`-role input item carrying any other `type`
 value, including item types the service does not model, MUST be forwarded
 upstream unchanged and in its original input position. This preservation MUST
 hold both when the request is validated and when the request is serialized for
@@ -80,3 +83,11 @@ top-level `instructions` unchanged.
 - **THEN** the developer message remains in `input` unchanged, in its
   original position, including in the upstream-serialized payload
 - **AND** `instructions` keeps its value, or defaults to `""` when absent
+
+#### Scenario: developer messages are sanitized like other messages
+
+- **WHEN** a Responses or compact request `input` contains a developer
+  message carrying `reasoning_content`, `reasoning_details`, `tool_calls`,
+  `function_call`, or a `reasoning` content part
+- **THEN** the developer message remains in `input`, in its original position
+- **AND** those keys and content parts are removed from it before forwarding

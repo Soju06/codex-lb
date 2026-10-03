@@ -11,8 +11,12 @@ Probed against `chatgpt.com/backend-api/codex/responses` (HTTP, `gpt-6.1-sol`):
 | developer message + user message | absent | 200 |
 | user message only | absent | 200 |
 | system message + user message | non-empty | 400 `{"detail":"System messages are not allowed"}` |
+| developer or user message with `reasoning_content`, `reasoning_details`, `tool_calls`, or `function_call` | `""` | 400 `unknown_parameter` |
+| developer message with a `reasoning` content part | `""` | 400 invalid content part type |
 
-Hoisting was introduced to avoid that rejection (#950); it only needs to apply to `system` messages.
+Hoisting was introduced to avoid that rejection (#950); it only needs to apply to `system` messages. The
+interleaved-reasoning sanitizer still applies to developer messages: upstream rejects those keys on every message role,
+so forwarding them would turn a silently cleaned request into a 400.
 
 ## Chained responses
 

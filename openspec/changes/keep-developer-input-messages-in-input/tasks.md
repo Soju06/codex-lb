@@ -7,8 +7,8 @@
 
 ## 2. Verification
 
-- [x] 2.1 Unit test `test_responses_input_developer_message_stays_in_input` (Responses and compact, with and without
-  `instructions`); updated `test_responses_input_system_message_moves_to_instructions`,
+- [x] 2.1 Unit tests `test_responses_input_developer_message_stays_in_input` (Responses and compact, with and without
+  `instructions`) and `test_responses_input_developer_message_is_sanitized_like_other_messages`; updated `test_responses_input_system_message_moves_to_instructions`,
   `test_responses_input_non_message_system_and_developer_items_are_preserved` and
   `test_responses_input_developer_message_keeps_single_non_text_part`, the integration test
   `test_backend_responses_preserves_non_message_developer_directive` and the chat JSON-mode test

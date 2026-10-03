@@ -974,6 +974,7 @@ export function createDashboardSettings(
 		apiKeyAuthEnabled: true,
 		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,
+		limitWarmupAutoEnableNewAccounts: false,
 		limitWarmupWindows: "both",
 		limitWarmupModel: "auto",
 		limitWarmupPrompt: "Say OK.",

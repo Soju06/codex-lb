@@ -276,6 +276,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         api_key_auth_enabled=settings.api_key_auth_enabled,
         hide_upstream_quota_from_api_keys=settings.hide_upstream_quota_from_api_keys,
         limit_warmup_enabled=settings.limit_warmup_enabled,
+        limit_warmup_auto_enable_new_accounts=settings.limit_warmup_auto_enable_new_accounts,
         limit_warmup_windows=settings.limit_warmup_windows,
         limit_warmup_model=settings.limit_warmup_model,
         limit_warmup_prompt=settings.limit_warmup_prompt,
@@ -1337,6 +1338,11 @@ async def update_settings(
                     if payload.limit_warmup_enabled is not None
                     else current.limit_warmup_enabled
                 ),
+                limit_warmup_auto_enable_new_accounts=(
+                    payload.limit_warmup_auto_enable_new_accounts
+                    if payload.limit_warmup_auto_enable_new_accounts is not None
+                    else current.limit_warmup_auto_enable_new_accounts
+                ),
                 limit_warmup_windows=payload.limit_warmup_windows or current.limit_warmup_windows,
                 limit_warmup_model=payload.limit_warmup_model or current.limit_warmup_model,
                 limit_warmup_prompt=payload.limit_warmup_prompt or current.limit_warmup_prompt,
@@ -1557,6 +1563,7 @@ async def update_settings(
             "api_key_auth_enabled",
             "hide_upstream_quota_from_api_keys",
             "limit_warmup_enabled",
+            "limit_warmup_auto_enable_new_accounts",
             "limit_warmup_windows",
             "limit_warmup_model",
             "limit_warmup_prompt",

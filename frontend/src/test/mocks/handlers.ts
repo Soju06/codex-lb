@@ -253,6 +253,7 @@ const SettingsPayloadSchema = z.looseObject({
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
   apiKeyAuthEnabled: z.boolean().optional(),
+  limitWarmupAutoEnableNewAccounts: z.boolean().optional(),
   limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
   hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
 });

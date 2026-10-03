@@ -45,6 +45,27 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
 
 
 @pytest.mark.asyncio
+async def test_new_account_warmup_default_round_trip_and_existing_account_preservation(async_client):
+    first = await _import_account(async_client, "warmup-first", "first@example.com")
+    for enabled in (False, True):
+        updated = await async_client.put("/api/settings", json={"limitWarmupAutoEnableNewAccounts": enabled})
+        assert updated.status_code == 200
+        assert updated.json()["limitWarmupAutoEnableNewAccounts"] is enabled
+        assert updated.json()["limitWarmupEnabled"] is False
+        unrelated = await async_client.put("/api/settings", json={"prohibitFastMode": True})
+        assert unrelated.status_code == 200
+        settings = await async_client.get("/api/settings")
+        assert settings.status_code == 200
+        assert settings.json()["limitWarmupAutoEnableNewAccounts"] is enabled
+        account_id = await _import_account(async_client, f"warmup-{enabled}", f"warmup-{enabled}@example.com")
+        accounts = await async_client.get("/api/accounts")
+        assert accounts.status_code == 200
+        by_id = {account["accountId"]: account for account in accounts.json()["accounts"]}
+        assert by_id[account_id]["limitWarmupEnabled"] is enabled
+        assert by_id[first]["limitWarmupEnabled"] is False
+
+
+@pytest.mark.asyncio
 async def test_settings_api_get_and_update(async_client):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -90,6 +111,7 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["apiKeyAuthEnabled"] is False
     assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
+    assert payload["limitWarmupAutoEnableNewAccounts"] is False
     assert payload["limitWarmupWindows"] == "both"
     assert payload["limitWarmupModel"] == "auto"
     assert payload["limitWarmupPrompt"] == "Say OK."

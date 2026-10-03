@@ -834,8 +834,29 @@ def test_responses_input_system_message_moves_to_instructions():
     }
     request = ResponsesRequest.model_validate(payload)
 
-    assert request.instructions == "primary\nsys\ndev"
-    assert request.input == [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    assert request.instructions == "primary\nsys"
+    assert request.input == [
+        {"type": "message", "role": "developer", "content": "dev"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+    ]
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+@pytest.mark.parametrize("instructions", ["primary", None])
+def test_responses_input_developer_message_stays_in_input(request_type, instructions):
+    # ``previous_response_id`` carries a response's ``input`` forward but not its
+    # ``instructions`` (issue #2563), so developer messages must stay in ``input``.
+    developer = {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev"}]}
+    user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}
+    payload = {"model": "gpt-5.1", "input": [developer, user]}
+    if instructions is not None:
+        payload["instructions"] = instructions
+
+    request = request_type.model_validate(payload)
+
+    assert request.instructions == (instructions or "")
+    assert request.input == [developer, user]
+    assert request.to_payload()["input"] == [developer, user]
 
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
@@ -912,9 +933,10 @@ def test_responses_input_non_message_system_and_developer_items_are_preserved(re
 
     request = request_type.model_validate(payload)
 
-    assert request.instructions == "dev"
+    assert request.instructions == ""
     assert request.input == [
         developer_directive,
+        {"type": "message", "role": "developer", "content": "dev"},
         system_directive,
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
@@ -1045,7 +1067,7 @@ def test_responses_input_system_message_preserves_non_text_parts():
     assert [ref.file_id for ref in extract_input_image_file_references(request.input)] == ["file_456"]
 
 
-def test_responses_input_developer_message_preserves_single_non_text_part():
+def test_responses_input_developer_message_keeps_single_non_text_part():
     payload = {
         "model": "gpt-5.1",
         "instructions": "primary",
@@ -1063,7 +1085,7 @@ def test_responses_input_developer_message_preserves_single_non_text_part():
     assert request.input == [
         {
             "type": "message",
-            "role": "user",
+            "role": "developer",
             "content": {"type": "input_file", "file_id": "file_123"},
         }
     ]

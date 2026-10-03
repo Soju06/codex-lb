@@ -76,3 +76,7 @@ If overview, projections, and request-log options return successfully while the 
 ### Testing notes
 
 The product-boundary regression renders the real `/dashboard` App route with the production query retry policy and MSW handlers. It counts each request family, seeds unique values for a statistic, quota surface, projection metric, and account control, focuses and keyboard-activates native Retry, holds the recovered listing response pending long enough to assert all healthy surfaces remain mounted, and then verifies the recovered row.
+
+## Add apis list view unused filter
+
+The optional List view allows operators to scan and sort API keys while the original Detail view remains the default. Usage means a non-null last-use timestamp or a positive lifetime request count, so delayed summary loading does not label an already-used key as unused. Existing read and write permissions apply to both layouts and the detail dialog. For example, a read-only operator can inspect an unused key but cannot create, edit, regenerate or delete keys.

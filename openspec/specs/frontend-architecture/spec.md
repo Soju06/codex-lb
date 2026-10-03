@@ -4222,7 +4222,7 @@ model-source models without assuming one global effort vocabulary.
 
 ### Requirement: Sequential multi-file account import
 
-The Accounts import dialog SHALL accept one or more auth.json files and send them sequentially in selection order through the existing single-file import callback. It SHALL disable selection and submission while imports run. The dialog SHALL close and clear selection only after every selected file succeeds. A failure SHALL keep the dialog open, retain the failed and unattempted files for retry, and exclude already successful files from retries. The existing API multipart contract and successful-import refresh behavior SHALL remain unchanged.
+The Accounts import dialog SHALL accept one or more auth.json files and send them sequentially in selection order through the existing single-file import callback. It SHALL disable selection and submission and prevent dialog dismissal while imports run. The dialog SHALL close and clear selection only after every selected file succeeds. A failure SHALL keep the dialog open, retain the failed and unattempted files for retry, and exclude already successful files from retries. The existing API multipart contract and successful-import refresh behavior SHALL remain unchanged.
 
 #### Scenario: Successful batch
 

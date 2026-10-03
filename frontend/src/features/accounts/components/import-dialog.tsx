@@ -64,7 +64,9 @@ export function ImportDialog({
   const importBusy = busy || submitting;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!importBusy) onOpenChange(nextOpen);
+    }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t("accounts.importDialog.title")}</DialogTitle>

@@ -19,6 +19,14 @@ function deferred(): {
 }
 
 describe("ImportDialog", () => {
+  it("allows dismissal while idle", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(<ImportDialog open busy={false} error={null} onOpenChange={onOpenChange} onImport={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
   it("imports a multi-file selection sequentially and resets after success", async () => {
     const user = userEvent.setup();
     const firstImport = deferred();
@@ -51,6 +59,12 @@ describe("ImportDialog", () => {
     await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
     expect(onImport).toHaveBeenNthCalledWith(1, firstFile);
     expect(screen.getByRole("button", { name: "Import" })).toBeDisabled();
+
+    expect(input).toBeDisabled();
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
 
     firstImport.resolve();
 

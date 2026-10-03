@@ -26,6 +26,8 @@ from app.core.utils.shared_future import (
 from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import extract_sse_data
 from app.db.models import ModelSource
+from app.modules.model_sources.aliases import restore_model_identity, source_request_payload, source_response_payload
+from app.modules.model_sources.catalog import source_model_upstream_id
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +305,7 @@ async def forward_chat_completion(
             session.post(
                 _source_url(source, "/chat/completions"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                json=source_request_payload(source, payload),
                 timeout=_source_client_timeout(source),
             )
         )
@@ -313,7 +315,7 @@ async def forward_chat_completion(
         if data is None:
             raise _invalid_upstream_response_error(response.status)
         result = SourceChatCompletion(
-            payload=data,
+            payload=source_response_payload(source, payload, data),
             usage=_usage_from_chat_payload(data),
             timings=_timings_from_payload(data),
             upstream_status_code=response.status,
@@ -395,7 +397,7 @@ async def forward_responses(
             async with session.post(
                 _source_url(source, "/responses"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                json=source_request_payload(source, payload),
                 timeout=_source_client_timeout(source),
             ) as response:
                 if response.status >= 400:
@@ -409,7 +411,7 @@ async def forward_responses(
                 if data is None:
                     raise _invalid_upstream_response_error(response.status)
                 return SourceResponsesCompletion(
-                    payload=data,
+                    payload=source_response_payload(source, payload, data),
                     usage=_usage_from_responses_payload(data),
                     timings=_timings_from_payload(data),
                     upstream_status_code=response.status,
@@ -437,7 +439,7 @@ async def forward_audio_transcription(
         content_type=normalized_content_type,
     )
     for key, value in fields:
-        form.add_field(key, value)
+        form.add_field(key, source_model_upstream_id(source, value) if key == "model" else value)
     try:
         async with lease_model_source_session() as session:
             async with session.post(
@@ -455,6 +457,18 @@ async def forward_audio_transcription(
                         encryptor=encryptor,
                         error_payload=_error_payload_from_body(body, response_content_type),
                     )
+                public_model = next((value for key, value in fields if key == "model"), None)
+                if public_model is not None and _is_json_content_type(response_content_type):
+                    upstream_model = source_model_upstream_id(source, public_model)
+                    if upstream_model != public_model:
+                        try:
+                            parsed = json.loads(body)
+                        except (ValueError, UnicodeDecodeError):
+                            parsed = None
+                        if is_json_mapping(parsed):
+                            mapped = dict(parsed)
+                            if restore_model_identity(mapped, model=public_model, upstream_model=upstream_model):
+                                body = json.dumps(mapped, ensure_ascii=True, separators=(",", ":")).encode()
                 return SourceAudioTranscription(
                     body=body,
                     content_type=response_content_type,
@@ -478,7 +492,7 @@ async def forward_embeddings(
             async with session.post(
                 _source_url(source, "/embeddings"),
                 headers=_source_headers(source, encryptor=encryptor),
-                json=payload,
+                json=source_request_payload(source, payload),
                 timeout=_source_client_timeout(source),
             ) as response:
                 data = await _response_json(response)
@@ -489,7 +503,7 @@ async def forward_embeddings(
                 if data is None:
                     raise _invalid_upstream_response_error(response.status)
                 return SourceEmbeddings(
-                    payload=data,
+                    payload=source_response_payload(source, payload, data),
                     usage=_usage_from_embeddings_payload(data),
                     upstream_status_code=response.status,
                 )
@@ -508,7 +522,13 @@ async def stream_responses(
     clock: Clock = REAL_CLOCK,
 ) -> SourceResponsesStream:
     usage_holder = SourceUsageHolder()
-    usage_parser = SourceStreamUsageParser(usage_holder, response_shape="responses")
+    model = payload.get("model")
+    usage_parser = SourceStreamUsageParser(
+        usage_holder,
+        response_shape="responses",
+        model=model if isinstance(model, str) else None,
+        upstream_model=source_model_upstream_id(source, model) if isinstance(model, str) else None,
+    )
     stack, response, first_chunk = await _open_source_stream(
         source,
         "/responses",
@@ -747,7 +767,7 @@ async def _open_source_stream(
                     session.post(
                         _source_url(source, path),
                         headers=_source_headers(source, encryptor=encryptor, stream=True),
-                        json=payload,
+                        json=source_request_payload(source, payload),
                         timeout=_source_client_timeout(source),
                     )
                 )
@@ -1289,9 +1309,18 @@ class SourceStreamUsageParser:
     # parser must not buffer the whole stream in memory.
     _MAX_BUFFER_CHARS = 1_048_576
 
-    def __init__(self, usage_holder: SourceUsageHolder, *, response_shape: str) -> None:
+    def __init__(
+        self,
+        usage_holder: SourceUsageHolder,
+        *,
+        response_shape: str,
+        model: str | None = None,
+        upstream_model: str | None = None,
+    ) -> None:
         self._usage_holder = usage_holder
         self._response_shape = response_shape
+        self._model = model
+        self._upstream_model = upstream_model
         self._buffer = ""
         self._bom_pending = True
         self._cr_pending = False
@@ -1366,6 +1395,8 @@ class SourceStreamUsageParser:
             return
         if not isinstance(parsed, dict):
             return
+        if self._model is not None and self._upstream_model is not None:
+            restore_model_identity(parsed, model=self._model, upstream_model=self._upstream_model)
         if self._response_shape == "responses":
             usage = _usage_from_responses_event(parsed)
             timings = _timings_from_responses_event(parsed)

@@ -390,3 +390,45 @@ describe("ModelSourceEditDialog", () => {
     expect(onSubmit.mock.calls[0][1].apiKey).toBe("sk-new-token");
   });
 });
+
+describe("ModelSourceEditDialog aliases", () => {
+  it("renames an upstream model into an alias without losing capabilities or disabled state", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({ multi_agent_version: "v2", base_instructions: "Spawn agents" });
+    source.models[0].isEnabled = false;
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByDisplayValue(source.models[0].model);
+    await user.clear(models);
+    await user.type(models, `cd/gpt-6-astra=${source.models[0].model}`);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const model = onSubmit.mock.calls[0][1].models[0];
+    expect(model).toMatchObject({ model: "cd/gpt-6-astra", displayName: "cd/gpt-6-astra", contextWindow: 32768,
+      supportsTools: true, inputPer1M: 0.5, outputPer1M: 1.5, isEnabled: false });
+    expect(JSON.parse(model.rawMetadataJson)).toEqual({ multi_agent_version: "v2", base_instructions: "Spawn agents", upstream_model: source.models[0].model });
+  });
+
+  it.each([false, true])("preserves an alias through pricing edits or explicitly removes it: %s", async (removeAlias) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({ upstream_model: "cd/linxaq", multi_agent_version: "v2" });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByDisplayValue(`${source.models[0].model}=cd/linxaq`);
+    if (removeAlias) {
+      await user.clear(models);
+      await user.type(models, source.models[0].model);
+    } else {
+      const price = screen.getByDisplayValue("1.5");
+      await user.clear(price);
+      await user.type(price, "2");
+    }
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const metadata = JSON.parse(onSubmit.mock.calls[0][1].models[0].rawMetadataJson);
+    expect(metadata.multi_agent_version).toBe("v2");
+    expect(metadata.upstream_model).toBe(removeAlias ? undefined : "cd/linxaq");
+  });
+});

@@ -76,3 +76,7 @@ If overview, projections, and request-log options return successfully while the 
 ### Testing notes
 
 The product-boundary regression renders the real `/dashboard` App route with the production query retry policy and MSW handlers. It counts each request family, seeds unique values for a statistic, quota surface, projection metric, and account control, focuses and keyboard-activates native Retry, holds the recovered listing response pending long enough to assert all healthy surfaces remain mounted, and then verifies the recovered row.
+
+## Add account distribution charts
+
+Inventory charts summarize all loaded accounts independently of the account list search and status filter. For example, filtering to active accounts keeps deactivated accounts in the status chart. Unknown statuses remain a separate category; the initial loading state does not claim an empty inventory. This upstream port uses the existing account management layout.

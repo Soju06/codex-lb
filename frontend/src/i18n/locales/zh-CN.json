@@ -2027,5 +2027,11 @@
   "organisation.automaticAccounts.secret.description": "这是“{{label}}”的凭据。",
   "organisation.automaticAccounts.secret.warning": "请立即复制。它只显示这一次，之后无法再查看；如果丢失，请更换凭据。",
   "organisation.automaticAccounts.secret.copy": "复制凭据",
-  "organisation.errors.scim_token_not_found": "该凭据已不存在。"
+  "organisation.errors.scim_token_not_found": "该凭据已不存在。",
+  "accounts.distribution.byPlan": "按套餐统计账户",
+  "accounts.distribution.byStatus": "按状态统计账户",
+  "accounts.distribution.description": "全部账户 · 数量与占比",
+  "accounts.distribution.unknown": "未知",
+  "components.donut.total": "总计",
+  "components.donut.noData": "暂无数据"
 }

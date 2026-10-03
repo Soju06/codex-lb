@@ -80,18 +80,89 @@ function renderApisPage({
 	return renderWithProviders(<ApisPage />);
 }
 
-// The store boots least-privilege, so every page test that exercises admin
-// controls must seed write access explicitly rather than rely on defaults.
 beforeEach(() => {
-	useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true, initialized: true });
+  localStorage.removeItem("codex-lb-apis-view-mode");
+  useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true, initialized: true });
 });
-
 afterEach(() => {
 	vi.clearAllMocks();
-	useAuthStore.setState({ role: "admin", permissions: ADMIN_PERMISSIONS, canWrite: true });
+	vi.restoreAllMocks();
 });
 
 describe("ApisPage", () => {
+	it("preserves filters across views and opens management for a selected List key", async () => {
+		const user = userEvent.setup();
+		const updateMutation = createMutationMock();
+		updateMutation.mutateAsync.mockResolvedValue({});
+		const key = createApiKey({
+			name: "Unused client",
+			lastUsedAt: null,
+			usageSummary: null,
+		});
+		renderApisPage({ apiKeys: [key], updateMutation });
+		expect(screen.getByTestId("api-key-info")).toBeInTheDocument();
+		await user.click(
+			screen.getByRole("combobox", { name: "Filter keys by usage" }),
+		);
+		await user.click(screen.getByRole("option", { name: "Key not used" }));
+		await user.click(screen.getByRole("button", { name: "List view" }));
+		expect(localStorage.getItem("codex-lb-apis-view-mode")).toBe("list");
+		expect(screen.queryByTestId("api-key-info")).not.toBeInTheDocument();
+		expect(
+			screen.getByRole("combobox", { name: "Filter keys by usage" }),
+		).toHaveTextContent("Key not used");
+		expect(hookMocks.useApiKeyTrends).toHaveBeenLastCalledWith(null, { enabled: true });
+		expect(hookMocks.useApiKeyUsage7Day).toHaveBeenLastCalledWith(null, { enabled: true });
+		const row = screen.getByRole("button", {
+			name: "Details for Unused client",
+		});
+		row.focus();
+		await user.keyboard("{Enter}");
+		const dialog = screen.getByRole("dialog", {
+			name: "Details for Unused client",
+		});
+		expect(hookMocks.useApiKeyTrends).toHaveBeenLastCalledWith(key.id, { enabled: true });
+		await user.click(within(dialog).getByRole("button", { name: "Disable" }));
+		expect(updateMutation.mutateAsync).toHaveBeenCalledWith({
+			keyId: key.id,
+			payload: { isActive: false },
+		});
+		await user.click(within(dialog).getByRole("button", { name: "Actions" }));
+		await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+		expect(
+			await screen.findByRole("dialog", { name: "Edit API key" }),
+		).toBeInTheDocument();
+		await user.keyboard("{Escape}");
+		await user.keyboard("{Escape}");
+		await waitFor(() =>
+			expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+		);
+		expect(hookMocks.useApiKeyUsage7Day).toHaveBeenLastCalledWith(null, { enabled: true });
+		await user.click(screen.getByRole("button", { name: "Detail view" }));
+		expect(screen.getByTestId("api-key-info")).toBeInTheDocument();
+		expect(
+			screen.getByRole("combobox", { name: "Filter keys by usage" }),
+		).toHaveTextContent("Key not used");
+	});
+
+	it("restores List and tolerates blocked browser storage", async () => {
+		const user = userEvent.setup();
+		localStorage.setItem("codex-lb-apis-view-mode", "list");
+		const view = renderApisPage();
+		expect(screen.getByTestId("api-list-overview-row")).toBeInTheDocument();
+		expect(hookMocks.useApiKeyTrends).toHaveBeenLastCalledWith(null, { enabled: true });
+		view.unmount();
+		vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+			throw new Error("blocked");
+		});
+		vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+			throw new Error("blocked");
+		});
+		renderApisPage();
+		expect(screen.getByTestId("api-key-info")).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "List view" }));
+		expect(screen.getByTestId("api-list-overview-row")).toBeInTheDocument();
+	});
 	it("keeps the create dialog open when creation fails", async () => {
 		const user = userEvent.setup();
 		const createMutation = createMutationMock();
@@ -100,7 +171,9 @@ describe("ApisPage", () => {
 		renderApisPage({ createMutation });
 
 		await user.click(screen.getByRole("button", { name: "Create API Key" }));
-		const dialog = await screen.findByRole("dialog", { name: "Create API key" });
+		const dialog = await screen.findByRole("dialog", {
+			name: "Create API key",
+		});
 		const nameInput = within(dialog).getByLabelText("Name");
 
 		await user.type(nameInput, "Broken key");
@@ -109,7 +182,9 @@ describe("ApisPage", () => {
 		await waitFor(() => {
 			expect(createMutation.mutateAsync).toHaveBeenCalledTimes(1);
 		});
-		expect(screen.getByRole("dialog", { name: "Create API key" })).toBeInTheDocument();
+		expect(
+			screen.getByRole("dialog", { name: "Create API key" }),
+		).toBeInTheDocument();
 		expect(screen.getByLabelText("Name")).toHaveValue("Broken key");
 	});
 
@@ -132,13 +207,16 @@ describe("ApisPage", () => {
 		await waitFor(() => {
 			expect(updateMutation.mutateAsync).toHaveBeenCalledTimes(1);
 		});
-		expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
+		expect(
+			screen.getByRole("dialog", { name: "Edit API key" }),
+		).toBeInTheDocument();
 		expect(screen.getByLabelText("Name")).toHaveValue("Renamed key");
 	});
 
 	it("shows a retry state when the initial API key query fails", async () => {
 		const user = userEvent.setup();
-		const apiKeysQuery = createQueryMock<ReturnType<typeof createApiKey>[]>(undefined);
+		const apiKeysQuery =
+			createQueryMock<ReturnType<typeof createApiKey>[]>(undefined);
 		apiKeysQuery.error = new Error("boom list");
 
 		renderApisPage({ apiKeys: [], apiKeysQuery });
@@ -171,7 +249,8 @@ describe("ApisPage", () => {
 		expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
 	});
 
-	it("lists keys without create, edit, regenerate or delete for api_keys:read without the write alias", () => {
+	it.each(["detail", "list"])("lists keys without write actions for api_keys:read in %s view", async (mode) => {
+    localStorage.setItem("codex-lb-apis-view-mode", mode);
 		useAuthStore.setState({
 			role: "admin",
 			permissions: ["read", "api_keys:read:all", "dashboard:read:all"],
@@ -184,6 +263,10 @@ describe("ApisPage", () => {
 		expect(hookMocks.useApiKeys).toHaveBeenCalledWith({ enabled: true });
 		expect(screen.getByText("Overview")).toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Create API Key" })).not.toBeInTheDocument();
+    if (mode === "list") {
+      await userEvent.setup().click(screen.getAllByTestId("api-list-overview-row")[0]);
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+    }
 		expect(screen.queryByRole("button", { name: "Actions" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
 	});
@@ -241,7 +324,9 @@ describe("ApisPage", () => {
 		expect(screen.getByText("Lifetime Cost by API Key")).toBeInTheDocument();
 		expect(screen.getByText("Lifetime Tokens by API Key")).toBeInTheDocument();
 		expect(
-			within(screen.getByTestId("api-keys-overview-cost-panel")).getByText("Secondary key"),
+			within(screen.getByTestId("api-keys-overview-cost-panel")).getByText(
+				"Secondary key",
+			),
 		).toBeInTheDocument();
 	});
 });

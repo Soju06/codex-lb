@@ -1,11 +1,14 @@
-import { ShieldCheck } from "lucide-react";
-import { lazy, Suspense, useCallback, useMemo } from "react";
+import { List, PanelsTopLeft, ShieldCheck } from "lucide-react";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { AlertMessage } from "@/components/alert-message";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
+import type { ApiViewMode } from "@/features/apis/list-utils";
 import type {
 	ApiKey,
 	ApiKeyCreateRequest,
@@ -39,9 +42,27 @@ const ApiKeyEditDialog = lazy(() =>
 export function ApisPage() {
 	const { t } = useTranslation();
 	const [searchParams, setSearchParams] = useSearchParams();
-	// The backend answers every API-key read with 403 for principals without
-	// `api_keys:read`, so the queries stay idle and the page explains instead.
-	// Mutations still run behind the coarse write alias, so the controls follow it.
+	const [viewMode, setViewMode] = useState<ApiViewMode>(() => {
+		try {
+			return localStorage.getItem("codex-lb-apis-view-mode") === "list"
+				? "list"
+				: "detail";
+		} catch {
+			return "detail";
+		}
+	});
+	const [detailOpen, setDetailOpen] = useState(
+		Boolean(searchParams.get("selected")),
+	);
+	const changeView = (mode: ApiViewMode) => {
+		setViewMode(mode);
+		setDetailOpen(false);
+		try {
+			localStorage.setItem("codex-lb-apis-view-mode", mode);
+		} catch {
+			/* View switching remains usable when storage is unavailable. */
+		}
+	};
 	const canReadKeys = usePermission("api_keys:read");
 	const canWrite = useAuthStore((state) => state.canWrite);
 	const {
@@ -65,8 +86,9 @@ export function ApisPage() {
 			const nextSearchParams = new URLSearchParams(searchParams);
 			nextSearchParams.set("selected", keyId);
 			setSearchParams(nextSearchParams);
+			setDetailOpen(viewMode === "list");
 		},
-		[searchParams, setSearchParams],
+		[searchParams, setSearchParams, viewMode],
 	);
 
 	const resolvedSelectedKeyId = useMemo(() => {
@@ -84,8 +106,10 @@ export function ApisPage() {
 		[apiKeys, resolvedSelectedKeyId],
 	);
 
-	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null, { enabled: canReadKeys });
-	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null, { enabled: canReadKeys });
+	const visibleKeyId =
+		viewMode === "detail" || detailOpen ? (selectedApiKey?.id ?? null) : null;
+	const trendsQuery = useApiKeyTrends(visibleKeyId, { enabled: canReadKeys });
+	const usage7DayQuery = useApiKeyUsage7Day(visibleKeyId, { enabled: canReadKeys });
 
 	const mutationBusy =
 		createMutation.isPending ||
@@ -135,13 +159,70 @@ export function ApisPage() {
 		);
 	}
 
+
+	const detailPanel = (
+		<ApiDetail
+			apiKey={selectedApiKey}
+			trends={trendsQuery.data}
+			usage7Day={usage7DayQuery.data}
+			usage7DayLoading={usage7DayQuery.isPending}
+			usage7DayError={usage7DayError}
+			busy={mutationBusy}
+			readOnly={!canWrite}
+			onEdit={(apiKey) => editDialog.show(apiKey)}
+			onToggleActive={(apiKey) => {
+				void updateMutation
+					.mutateAsync({
+						keyId: apiKey.id,
+						payload: { isActive: !apiKey.isActive },
+					})
+					.catch(() => null);
+			}}
+			onDelete={(apiKey) => deleteDialog.show(apiKey)}
+			onRegenerate={(apiKey) => {
+				void regenerateMutation
+					.mutateAsync(apiKey.id)
+					.then((result) => {
+						createdDialog.show(result.key);
+					})
+					.catch(() => null);
+			}}
+		/>
+	);
+
 	return (
 		<div className="animate-fade-in-up space-y-6">
-			<div>
-				<h1 className="text-2xl font-semibold tracking-tight">{t("apis.page.title")}</h1>
-				<p className="mt-1 text-sm text-muted-foreground">
-					{t("apis.page.subtitle")}
-				</p>
+			<div className="flex flex-wrap items-start justify-between gap-4">
+				<div>
+					<h1 className="text-2xl font-semibold tracking-tight">
+						{t("apis.page.title")}
+					</h1>
+					<p className="mt-1 text-sm text-muted-foreground">
+						{t("apis.page.subtitle")}
+					</p>
+				</div>
+				<div
+					className="flex flex-wrap gap-1 rounded-lg border bg-card p-1"
+					role="group"
+					aria-label={t("apis.view.label")}
+				>
+					{(["detail", "list"] as const).map((mode) => {
+						const Icon = mode === "detail" ? PanelsTopLeft : List;
+						return (
+							<Button
+								key={mode}
+								type="button"
+								variant={viewMode === mode ? "secondary" : "ghost"}
+								size="sm"
+								aria-pressed={viewMode === mode}
+								onClick={() => changeView(mode)}
+							>
+								<Icon className="mr-1 size-4" aria-hidden />
+								{t(`apis.view.${mode}`)}
+							</Button>
+						);
+					})}
+				</div>
 			</div>
 
 			{pageError ? (
@@ -171,10 +252,16 @@ export function ApisPage() {
 				<div className="space-y-6">
 					<ApiKeysOverview apiKeys={apiKeys} />
 
-					<div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
-						<div className="rounded-xl border bg-card p-4">
+					<div
+						className={cn(
+							"grid min-w-0 gap-4",
+							viewMode === "detail" && "lg:grid-cols-[22rem_minmax(0,1fr)]",
+						)}
+					>
+						<div className="min-w-0 rounded-xl border bg-card p-3 sm:p-4">
 							<ApiList
 								apiKeys={apiKeys}
+								viewMode={viewMode}
 								selectedKeyId={resolvedSelectedKeyId}
 								onSelect={handleSelectKey}
 								onOpenCreate={() => createDialog.show()}
@@ -182,37 +269,25 @@ export function ApisPage() {
 							/>
 						</div>
 
-						<ApiDetail
-							apiKey={selectedApiKey}
-							trends={trendsQuery.data}
-							usage7Day={usage7DayQuery.data}
-							usage7DayLoading={usage7DayQuery.isPending}
-							usage7DayError={usage7DayError}
-							busy={mutationBusy}
-							readOnly={!canWrite}
-							onEdit={(apiKey) => editDialog.show(apiKey)}
-							onToggleActive={(apiKey) => {
-								void updateMutation
-									.mutateAsync({
-										keyId: apiKey.id,
-										payload: { isActive: !apiKey.isActive },
-									})
-									.catch(() => null);
-							}}
-							onDelete={(apiKey) => deleteDialog.show(apiKey)}
-							onRegenerate={(apiKey) => {
-								void regenerateMutation
-									.mutateAsync(apiKey.id)
-									.then((result) => {
-										createdDialog.show(result.key);
-									})
-									.catch(() => null);
-							}}
-						/>
+						{viewMode === "detail" ? detailPanel : null}
 					</div>
 				</div>
 			)}
 
+			<Dialog
+				open={viewMode === "list" && detailOpen && !!selectedApiKey}
+				onOpenChange={setDetailOpen}
+			>
+				<DialogContent
+					className="max-h-[90dvh] overflow-y-auto sm:max-w-5xl"
+					aria-describedby={undefined}
+				>
+					<DialogTitle className="sr-only">
+						{t("apis.list.detailsFor", { name: selectedApiKey?.name ?? "" })}
+					</DialogTitle>
+					{detailPanel}
+				</DialogContent>
+			</Dialog>
 			<Suspense fallback={null}>
 				<ApiKeyCreateDialog
 					open={createDialog.open}

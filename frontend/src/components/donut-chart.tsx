@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { Cell, Pie, PieChart, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
 
 import { buildDonutPalette } from "@/utils/colors";
-import { formatCompactNumber, formatNumber } from "@/utils/formatters";
+import { formatCompactNumber, formatNumber, formatPercentNullable } from "@/utils/formatters";
+import { cn } from "@/lib/utils";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useThemeStore } from "@/hooks/use-theme";
@@ -26,6 +27,8 @@ export type DonutChartProps = {
   centerValue?: number;
   title: string;
   subtitle?: string;
+  /** Distribution mode shows category counts and percentages without credit usage labels. */
+  variant?: "capacity" | "distribution";
   safeLine?: { safePercent: number; riskLevel: "safe" | "warning" | "danger" | "critical" } | null;
   /**
    * Layout for the donut center label/value pair.
@@ -108,11 +111,13 @@ function formatUsedPercent(percent: number): string {
   return `${percent.toLocaleString("en-US", { maximumFractionDigits })}%`;
 }
 
-export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining" }: DonutChartProps) {
+export function DonutChart({ items, total, centerValue, title, subtitle, safeLine, centerLayout = "remaining", variant = "capacity" }: DonutChartProps) {
   const { t } = useTranslation();
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
+  const isDistribution = variant === "distribution";
+  const visibleLegendCount = isDistribution ? 6 : LEGEND_VISIBLE_COUNT;
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
@@ -126,7 +131,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
 
   const usedSum = normalizedItems.reduce((acc, item) => acc + Math.max(0, item.value), 0);
   const safeCapacity = Math.max(0, total);
-  const consumed = Math.max(0, total - usedSum);
+  const consumed = isDistribution ? 0 : Math.max(0, total - usedSum);
   const displayTotal = Math.max(0, centerValue ?? total);
   const usedPercent = safeCapacity > 0 ? (consumed / safeCapacity) * 100 : 0;
 
@@ -173,13 +178,17 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
   };
 
   return (
-    <div className="min-w-0 rounded-xl border bg-card p-5">
+    <div
+      className={cn("min-w-0 rounded-xl border bg-card p-5", isDistribution && "@container")}
+      role={isDistribution ? "region" : undefined}
+      aria-label={isDistribution ? title : undefined}
+    >
       <div className="mb-5">
         <h3 className="text-sm font-semibold">{title}</h3>
         {subtitle ? <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p> : null}
       </div>
 
-      <div className="flex min-w-0 items-center gap-6">
+      <div className={cn("flex min-w-0 items-center gap-6", isDistribution && "flex-col @min-[22rem]:flex-row")}>
         <div className="flex shrink-0 flex-col items-center gap-2">
           <div className="relative h-[152px] w-[152px] overflow-visible">
             <PieChart width={CHART_SIZE} height={CHART_SIZE} margin={{ top: CHART_MARGIN, right: CHART_MARGIN, bottom: CHART_MARGIN, left: CHART_MARGIN }}>
@@ -226,7 +235,12 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
           ) : null}
           <div className="absolute inset-[22px] flex items-center justify-center rounded-full text-center pointer-events-none">
              <div>
-               {centerLayout === "credits" ? (
+               {isDistribution ? (
+                 <>
+                   <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.total")}</p>
+                   <p className="text-base font-semibold tabular-nums" data-testid="donut-center-total">{formatNumber(safeCapacity)}</p>
+                 </>
+               ) : centerLayout === "credits" ? (
                  <>
                    <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{t("components.donut.credits")}</p>
                    <p
@@ -252,19 +266,22 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
             </div>
           </div>
           </div>
-          <p className="text-[11px] tabular-nums text-muted-foreground" data-testid="donut-caption">
+          {!isDistribution && <p className="text-[11px] tabular-nums text-muted-foreground" data-testid="donut-caption">
             {t("components.donut.caption", {
               total: formatCompactNumber(safeCapacity),
               used: formatUsedPercent(usedPercent),
             })}
-          </p>
+          </p>}
         </div>
 
         <div
-          className="min-w-0 flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className={cn("min-w-0 flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden", isDistribution && "w-full")}
           data-testid="donut-legend-list"
-          style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(LEGEND_VISIBLE_COUNT - 1) * LEGEND_ROW_GAP_REM}rem)` }}
+          style={{ maxHeight: `calc(${visibleLegendCount} * ${LEGEND_ROW_HEIGHT_REM}rem + ${(visibleLegendCount - 1) * LEGEND_ROW_GAP_REM}rem)` }}
         >
+          {isDistribution && !hasData ? (
+            <p className="text-center text-xs text-muted-foreground">{t("components.donut.noData")}</p>
+          ) : null}
           {normalizedItems.map((item, i) => {
             const legendId = item.id ?? item.label;
             const isActive = activeLegendId === legendId;
@@ -297,13 +314,15 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
                     : <>{item.label}{item.labelSuffix}</>}
                 </span>
               </div>
-              <span className="tabular-nums text-muted-foreground">
-                {formatCompactNumber(item.value)}
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {isDistribution
+                  ? `${formatNumber(item.value)} (${formatPercentNullable(safeCapacity > 0 ? item.value / safeCapacity * 100 : 0, 1)})`
+                  : formatCompactNumber(item.value)}
               </span>
             </button>
             );
           })}
-          <button
+          {!isDistribution && <button
             ref={(node) => {
               legendRefs.current.__consumed__ = node;
             }}
@@ -328,7 +347,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
             <span className="tabular-nums text-muted-foreground" data-testid="donut-used-value">
               {formatCompactNumber(consumed)}
             </span>
-          </button>
+          </button>}
         </div>
       </div>
     </div>

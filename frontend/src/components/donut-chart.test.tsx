@@ -247,6 +247,42 @@ describe("DonutChart", () => {
     expect(screen.getByText("Remaining")).toBeInTheDocument();
   });
 
+  it("shows exact distribution counts and shares without credit usage labels", () => {
+    render(
+      <DonutChart
+        title="Accounts by plan"
+        variant="distribution"
+        total={3000}
+        items={[{ id: "plus", label: "Plus", value: 2000 }, { id: "pro", label: "Pro", value: 1000 }]}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Accounts by plan" })).toBeInTheDocument();
+    expect(screen.getByTestId("donut-center-total")).toHaveTextContent("3,000");
+    const plus = screen.getByRole("button", { name: "Plus 2,000 (66.7%)" });
+    expect(screen.getByRole("button", { name: "Pro 1,000 (33.3%)" })).toBeInTheDocument();
+    expect(screen.queryByText("Remaining")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("donut-caption")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("donut-used-row")).not.toBeInTheDocument();
+
+    fireEvent.focus(plus);
+    expect(plus).toHaveAttribute("data-active", "true");
+    fireEvent.blur(plus);
+    expect(plus).toHaveAttribute("data-active", "false");
+  });
+
+  it("shows a neutral empty distribution without inventing a legend category", () => {
+    const { container } = render(
+      <DonutChart title="Accounts by status" variant="distribution" total={0} items={[]} />,
+    );
+
+    expect(screen.getByTestId("donut-center-total")).toHaveTextContent(/^0$/);
+    expect(screen.getByText("No data yet")).toBeInTheDocument();
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    expect(container.querySelectorAll(".recharts-pie-sector")).toHaveLength(1);
+    expect(container.textContent).not.toMatch(/NaN|Infinity|%/);
+  });
+
   it("renders without safeLine (no regression)", () => {
     render(<DonutChart title="No Line" total={200} items={BASE_ITEMS} />);
 

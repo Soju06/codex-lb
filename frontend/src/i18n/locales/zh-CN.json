@@ -36,7 +36,7 @@
   "accounts.detail.emptyTitle": "选择账户",
   "accounts.detail.saveAlias": "保存别名",
   "accounts.detail.unknownWorkspace": "个人 / 未知 workspace",
-  "accounts.importDialog.description": "上传从 Codex 导出的 auth.json 文件。",
+  "accounts.importDialog.description": "上传一个或多个从 Codex 导出的 auth.json 文件。",
   "accounts.importDialog.fileLabel": "auth.json 文件",
   "accounts.importDialog.title": "导入账户",
   "accounts.list.addAccount": "添加账户",
@@ -2027,5 +2027,6 @@
   "organisation.automaticAccounts.secret.description": "这是“{{label}}”的凭据。",
   "organisation.automaticAccounts.secret.warning": "请立即复制。它只显示这一次，之后无法再查看；如果丢失，请更换凭据。",
   "organisation.automaticAccounts.secret.copy": "复制凭据",
-  "organisation.errors.scim_token_not_found": "该凭据已不存在。"
+  "organisation.errors.scim_token_not_found": "该凭据已不存在。",
+  "accounts.importDialog.selectedFiles": "已选择的文件"
 }

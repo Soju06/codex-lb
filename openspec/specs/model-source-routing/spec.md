@@ -214,4 +214,3 @@ The create and edit source forms SHALL accept `alias=upstream-id` entries alongs
 - **WHEN** the operator changes only the public alias to `beta=vendor-x`
 - **THEN** the saved row retains its enablement, pricing and metadata
 - **AND** ambiguous matches among existing aliases are rejected rather than silently resetting model settings
-

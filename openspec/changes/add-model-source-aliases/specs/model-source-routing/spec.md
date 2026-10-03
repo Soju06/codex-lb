@@ -98,4 +98,3 @@ forwarded to the source verbatim.
 - **WHEN** the only embeddings-capable source for the model is outside that
   set
 - **THEN** the proxy returns `model_not_found`
-

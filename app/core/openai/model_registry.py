@@ -72,7 +72,14 @@ class ModelRegistry:
     def plan_types_for_model(self, slug: str) -> frozenset[str] | None:
         if self._snapshot is None:
             return None
-        return self._snapshot.model_plans.get(slug, frozenset())
+        plans = self._snapshot.model_plans.get(slug)
+        if plans is None:
+            # Model không có trong snapshot (ví dụ lần refresh theo plan bị thiếu model đó).
+            # Trả None = "không biết" để router KHÔNG lọc cứng toàn bộ tài khoản — nếu model
+            # thật sự không dùng được, upstream sẽ trả lỗi cụ thể thay vì
+            # `no_plan_support_for_model` gây hiểu nhầm.
+            return None
+        return plans
 
     def prefers_websockets(self, slug: str | None) -> bool:
         if not isinstance(slug, str):

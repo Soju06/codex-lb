@@ -46,11 +46,17 @@ async def test_plan_types_for_model_returns_none_when_uninitialized():
 
 
 @pytest.mark.asyncio
-async def test_plan_types_for_model_returns_empty_for_unknown_model():
+async def test_plan_types_for_model_returns_none_for_unknown_model():
+    """Model không có trong snapshot = "không biết" (None), KHÔNG phải "không plan nào".
+
+    Trả frozenset rỗng sẽ khiến router lọc sạch tài khoản và trả
+    `no_plan_support_for_model` oan cho model vẫn dùng được — xem
+    tests/unit/test_model_plan_filter.py.
+    """
     registry = ModelRegistry(ttl_seconds=60.0)
     await registry.update({"plus": [_model("model-a")]})
     result = registry.plan_types_for_model("unknown-model")
-    assert result == frozenset()
+    assert result is None
 
 
 @pytest.mark.asyncio

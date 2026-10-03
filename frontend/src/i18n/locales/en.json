@@ -2027,5 +2027,11 @@
   "organisation.automaticAccounts.secret.description": "This is the credential for “{{label}}”.",
   "organisation.automaticAccounts.secret.warning": "Copy it now. It is shown once and cannot be read again; if you lose it, replace the credential.",
   "organisation.automaticAccounts.secret.copy": "Copy credential",
-  "organisation.errors.scim_token_not_found": "That credential no longer exists."
+  "organisation.errors.scim_token_not_found": "That credential no longer exists.",
+  "accounts.distribution.byPlan": "Accounts by plan",
+  "accounts.distribution.byStatus": "Accounts by status",
+  "accounts.distribution.description": "All accounts · count and share",
+  "accounts.distribution.unknown": "Unknown",
+  "components.donut.total": "Total",
+  "components.donut.noData": "No data yet"
 }

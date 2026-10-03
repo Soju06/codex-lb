@@ -2027,5 +2027,7 @@
   "organisation.automaticAccounts.secret.description": "这是“{{label}}”的凭据。",
   "organisation.automaticAccounts.secret.warning": "请立即复制。它只显示这一次，之后无法再查看；如果丢失，请更换凭据。",
   "organisation.automaticAccounts.secret.copy": "复制凭据",
-  "organisation.errors.scim_token_not_found": "该凭据已不存在。"
+  "organisation.errors.scim_token_not_found": "该凭据已不存在。",
+  "settings.routing.limitWarmup.newAccounts.label": "自动为新账户启用预热",
+  "settings.routing.limitWarmup.newAccounts.description": "适用于新 OAuth 登录和 auth.json 导入。现有账户的设置保持不变。发送请求仍需启用全局预热。"
 }

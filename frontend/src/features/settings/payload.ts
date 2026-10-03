@@ -43,6 +43,7 @@ export function buildSettingsUpdateRequest(
     totpRequiredForAdminRole: settings.totpRequiredForAdminRole,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,
     limitWarmupEnabled: settings.limitWarmupEnabled,
+    limitWarmupAutoEnableNewAccounts: settings.limitWarmupAutoEnableNewAccounts,
     limitWarmupWindows: settings.limitWarmupWindows,
     limitWarmupModel: settings.limitWarmupModel,
     limitWarmupPrompt: settings.limitWarmupPrompt,

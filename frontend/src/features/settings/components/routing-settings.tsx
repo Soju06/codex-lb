@@ -1366,6 +1366,24 @@ export function RoutingSettings({
               />
             </div>
 
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 p-2.5">
+              <div>
+                <p id="warmup-new-accounts-label" className="text-xs font-medium">
+                  {t("settings.routing.limitWarmup.newAccounts.label")}
+                </p>
+                <p id="warmup-new-accounts-description" className="text-[11px] text-muted-foreground">
+                  {t("settings.routing.limitWarmup.newAccounts.description")}
+                </p>
+              </div>
+              <Switch
+                aria-labelledby="warmup-new-accounts-label"
+                aria-describedby="warmup-new-accounts-description"
+                checked={settings.limitWarmupAutoEnableNewAccounts}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ limitWarmupAutoEnableNewAccounts: checked })}
+              />
+            </div>
+
             <>
                 {/* --- Shared warm-up settings --- */}
                 <div className="grid gap-2 sm:grid-cols-[10rem_minmax(0,1fr)_7rem_7rem]">

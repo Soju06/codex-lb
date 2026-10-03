@@ -39,7 +39,18 @@ def _reset_credit_snapshot(credit_id: str) -> RateLimitResetCreditsSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_import_and_list_accounts(async_client):
+@pytest.mark.parametrize("global_warmup_enabled", [False, True])
+@pytest.mark.parametrize("auto_enable_warmup", [False, True])
+async def test_import_and_list_accounts(async_client, global_warmup_enabled, auto_enable_warmup):
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "limitWarmupEnabled": global_warmup_enabled,
+            "limitWarmupAutoEnableNewAccounts": auto_enable_warmup,
+        },
+    )
+    assert settings.status_code == 200
+
     email = "tester@example.com"
     raw_account_id = "acc_explicit"
     payload = {
@@ -70,6 +81,55 @@ async def test_import_and_list_accounts(async_client):
     accounts = list_response.json()["accounts"]
     account = next(account for account in accounts if account["accountId"] == expected_account_id)
     assert "usageRefreshedAt" not in account
+    assert account["limitWarmupEnabled"] is auto_enable_warmup
+    assert account["limitWarmup"] is None
+    settings = await async_client.get("/api/settings")
+    assert settings.status_code == 200
+    assert settings.json()["limitWarmupEnabled"] is global_warmup_enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup_enabled", [False, True])
+@pytest.mark.parametrize("auto_enable_warmup", [False, True])
+async def test_reimport_preserves_account_warmup_preference(async_client, warmup_enabled, auto_enable_warmup):
+    settings = await async_client.put(
+        "/api/settings",
+        json={"importWithoutOverwrite": False, "limitWarmupAutoEnableNewAccounts": auto_enable_warmup},
+    )
+    assert settings.status_code == 200
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt({"email": "warmup-reimport@example.com"}),
+            "accessToken": "original-access",
+            "refreshToken": "original-refresh",
+            "accountId": "acc_warmup_reimport",
+        },
+    }
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    account_id = response.json()["accountId"]
+    update = await async_client.put(f"/api/accounts/{account_id}/limit-warmup", json={"enabled": warmup_enabled})
+    assert update.status_code == 200
+
+    auth_json["tokens"]["accessToken"] = "replacement-access"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+    assert response.json()["accountId"] == account_id
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matching = [account for account in accounts.json()["accounts"] if account["email"] == "warmup-reimport@example.com"]
+    assert len(matching) == 1
+    assert matching[0]["limitWarmupEnabled"] is warmup_enabled
+    async with SessionLocal() as session:
+        saved = await session.get(Account, account_id)
+        assert saved is not None
+        assert TokenEncryptor().decrypt(saved.access_token_encrypted) == "replacement-access"
 
 
 @pytest.mark.asyncio

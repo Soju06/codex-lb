@@ -18,8 +18,11 @@ import {
   createModelSourceFormSchema,
   draftFromSource,
   mergeReasoningMetadata,
+  mergeUpstreamModelMetadata,
   modelIdsToInput,
   modelSourceDraftReducer,
+  parseModelEntries,
+  type ModelEntry,
   type ModelSourceDraft,
   type ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
@@ -57,18 +60,6 @@ function parseNonNegativeFloat(value: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function splitModelIds(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((model) => model.trim())
-    .filter(Boolean);
-}
-
-function modelIdsMatch(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false;
-  return left.every((model, index) => model === right[index]);
-}
-
 function getModelDraftChangeFlags(
   draft: ModelSourceDraft,
   initialDraft: ModelSourceDraft,
@@ -95,17 +86,35 @@ function hasAnyModelDraftChange(flags: ModelDraftChangeFlags): boolean {
 }
 
 function buildModelInputs(
-  modelNames: string[],
+  modelEntries: ModelEntry[],
   draft: ModelSourceDraft,
   draftChangeFlags: ModelDraftChangeFlags,
   existingModelsByName: Map<string, ModelSourceModel>,
-): ModelSourceModelInput[] {
-  return modelNames.map((model) => {
-    const existingModel = existingModelsByName.get(model);
+): ModelSourceModelInput[] | null {
+  const existingMatches = modelEntries.map(({ model, upstreamModel }) => {
+    const exact = existingModelsByName.get(model);
+    if (exact || !upstreamModel) return exact ? [exact] : [];
+    const candidates = [...existingModelsByName.values()].filter((existing) => {
+      const metadata = existing.rawMetadataJson ? JSON.parse(existing.rawMetadataJson) : {};
+      return (metadata.upstream_model ?? existing.model) === upstreamModel;
+    });
+    const bare = candidates.find((existing) => existing.model === upstreamModel);
+    if (bare) return [bare];
+    // A retained public entry already identifies its row. Prefer the one
+    // removed alias when this edit renames only part of a shared target set.
+    const removed = candidates.filter((existing) => !modelEntries.some((entry) => entry.model === existing.model));
+    return removed.length ? removed : candidates;
+  });
+  if (existingMatches.some((matches) => matches.length > 1)) return null;
+  return modelEntries.map(({ model, upstreamModel }, index) => {
+    const existingModel = existingMatches[index][0];
 
     return {
       model,
-      displayName: existingModel?.displayName ?? model,
+      displayName:
+        existingModel?.displayName && existingModel.displayName !== existingModel.model
+          ? existingModel.displayName
+          : model,
       contextWindow: draftChangeFlags.contextWindow
         ? parsePositiveInt(draft.contextWindow)
         : existingModel?.contextWindow ?? null,
@@ -133,14 +142,17 @@ function buildModelInputs(
       audioPerMinute: draftChangeFlags.audioPerMinute
         ? parseNonNegativeFloat(draft.audioPerMinute)
         : existingModel?.audioPerMinute ?? null,
-      rawMetadataJson: draftChangeFlags.supportsReasoning
-        ? mergeReasoningMetadata(
-            existingModel?.rawMetadataJson,
-            draft.supportsReasoning,
-            draft.reasoningEfforts,
-            draft.defaultReasoningEffort,
-          )
-        : existingModel?.rawMetadataJson ?? null,
+      rawMetadataJson: mergeUpstreamModelMetadata(
+        draftChangeFlags.supportsReasoning
+          ? mergeReasoningMetadata(
+              existingModel?.rawMetadataJson,
+              draft.supportsReasoning,
+              draft.reasoningEfforts,
+              draft.defaultReasoningEffort,
+            )
+          : existingModel?.rawMetadataJson ?? null,
+        upstreamModel,
+      ),
       isEnabled: existingModel?.isEnabled ?? true,
     };
   });
@@ -177,27 +189,32 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
   const handleSubmit = async (values: ModelSourceFormValues) => {
     const initialDraft = draftFromSource(source);
     const draftChangeFlags = getModelDraftChangeFlags(draft, initialDraft);
-    const sourceModelIds = source.models.map((model) => model.model);
-    const modelNames = splitModelIds(values.models);
-    const modelIdsChanged = !modelIdsMatch(modelNames, sourceModelIds);
+    const modelEntries = parseModelEntries(values.models);
+    const modelIdsChanged = JSON.stringify(modelEntries) !== JSON.stringify(parseModelEntries(modelIdsToInput(source)));
 
     const payload: ModelSourceUpdateRequest = {
       name: values.name,
       baseUrl: values.baseUrl,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      supportsResponsesWebsocket: draft.supportsResponsesWebsocket,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
     };
 
     if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {
       const existingModelsByName = new Map(source.models.map((model) => [model.model, model]));
-      payload.models = buildModelInputs(
-        modelNames,
+      const models = buildModelInputs(
+        modelEntries,
         draft,
         draftChangeFlags,
         existingModelsByName,
       );
+      if (models === null) {
+        form.setError("models", { message: t("modelSources.validation.aliasRenameAmbiguous") });
+        return;
+      }
+      payload.models = models;
     }
 
     // The stored key is never returned, so a blank field means "keep it";

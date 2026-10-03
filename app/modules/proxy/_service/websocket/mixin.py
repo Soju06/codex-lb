@@ -5,10 +5,11 @@ import json
 import logging
 import sys
 from collections import deque
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Iterator, Mapping, NoReturn, cast
+from typing import Any, Iterator, Literal, Mapping, NoReturn, cast
 
 import aiohttp
 import anyio
@@ -519,6 +520,7 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
 )
+from app.modules.proxy.websocket_input import WebSocketInputBuffer
 
 
 def _facade() -> Any:
@@ -1454,9 +1456,16 @@ class _WebSocketMixin:
         client_ip: str | None = None,
         synthesized_turn_state: str | None = None,
         capability_header_values: tuple[str, ...] | None = None,
+        source_handler: Callable[
+            [dict[str, JsonValue], bool, anyio.Lock, WebSocketInputBuffer],
+            Awaitable[Literal["subscription", "handled", "closed"]],
+        ]
+        | None = None,
     ) -> None:
         proxy = cast(_WebSocketServiceProtocol, self)
+        subscription_bound = False
         clock = clock_for(proxy)
+        input_buffer = WebSocketInputBuffer(websocket, clock=clock)
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         runtime_settings = _facade().get_settings()
@@ -1711,7 +1720,7 @@ class _WebSocketMixin:
                     message: Any | None = None
                     try:
                         message = await scheduler_for(proxy).wait_for(
-                            websocket.receive(),
+                            input_buffer.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
                             ),
@@ -1740,7 +1749,7 @@ class _WebSocketMixin:
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
                                 try:
-                                    message = await scheduler_for(proxy).wait_for(websocket.receive(), timeout=0.05)
+                                    message = await scheduler_for(proxy).wait_for(input_buffer.receive(), timeout=0.05)
                                 except asyncio.TimeoutError:
                                     try:
                                         await websocket.close(
@@ -1786,6 +1795,14 @@ class _WebSocketMixin:
                                 )
                             continue
                         if _is_websocket_response_create(payload):
+                            if source_handler is not None:
+                                source_result = await source_handler(
+                                    payload, subscription_bound, client_send_lock, input_buffer
+                                )
+                                if source_result == "closed":
+                                    return
+                                if source_result == "handled":
+                                    continue
                             if shutdown_state.is_draining():
                                 async with client_send_lock:
                                     await websocket.send_text(
@@ -1962,6 +1979,10 @@ class _WebSocketMixin:
                                         downstream_activity=downstream_activity,
                                     )
                                     continue
+                                # Subscription-only validation can still
+                                # reject a first create after source handoff.
+                                # Bind only once preparation has succeeded.
+                                subscription_bound = True
                             except ProxyResponseError as exc:
                                 error = _parse_openai_error(exc.payload)
                                 error_code = _normalize_error_code(

@@ -2,7 +2,7 @@ import type { Control } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
 import { Checkbox } from "@/components/ui/checkbox";
-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type {
@@ -22,6 +22,7 @@ type ModelSourceFormFieldsProps = {
 const CAPABILITY_TOGGLES = [
   ["supportsChatCompletions", "modelSources.capabilities.chatCompletions"] as const,
   ["supportsResponses", "modelSources.capabilities.responses"] as const,
+  ["supportsResponsesWebsocket", "modelSources.capabilities.responsesWebsocket"] as const,
   ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
   ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
   ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
@@ -93,8 +94,9 @@ export function ModelSourceFormFields({
           <FormItem>
 	            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
             <FormControl>
-              <Input {...field} placeholder="deepseek-v4-flash, local-coder" autoComplete="off" />
+              <Input {...field} placeholder="local-coder, cd/gpt-6-astra=cd/linxaq" autoComplete="off" />
             </FormControl>
+            <FormDescription className="text-xs">{t("modelSources.fields.aliasesDescription")}</FormDescription>
             <FormMessage />
           </FormItem>
         )}
@@ -183,6 +185,12 @@ export function ModelSourceFormFields({
               onCheckedChange={(checked) =>
                 updateDraft({
                   [key]: checked === true,
+                  ...(key === "supportsResponsesWebsocket" && checked === true
+                    ? { supportsResponses: true, supportsStreaming: true }
+                    : {}),
+                  ...((key === "supportsResponses" || key === "supportsStreaming") && checked !== true
+                    ? { supportsResponsesWebsocket: false }
+                    : {}),
                   ...(key === "supportsReasoning" && checked === true
                     ? {
                         reasoningEffortsInput:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from app.core.openai.model_registry import (
     MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
@@ -19,7 +20,25 @@ DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 _SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
 
 
-def source_models_to_upstream_models(sources: list[ModelSource]) -> list[UpstreamModel]:
+def source_websocket_models(sources: list[ModelSource]) -> dict[str, bool]:
+    candidates: dict[str, list[bool]] = {}
+    for source in sources:
+        if not source.is_enabled or source.kind != "openai_compatible" or not source.supports_responses:
+            continue
+        for model in source.models:
+            if model.is_enabled:
+                candidates.setdefault(model.model, []).append(
+                    bool(source.supports_responses_websocket and model.supports_streaming)
+                )
+    return {model: all(flags) for model, flags in candidates.items()}
+
+
+def source_models_to_upstream_models(
+    sources: list[ModelSource],
+    *,
+    websocket_capabilities: dict[str, bool] | None = None,
+) -> list[UpstreamModel]:
+    websocket_models = websocket_capabilities or {}
     models: list[UpstreamModel] = []
     for source in sources:
         if not source.is_enabled:
@@ -29,7 +48,12 @@ def source_models_to_upstream_models(sources: list[ModelSource]) -> list[Upstrea
         for source_model in source.models:
             if not source_model.is_enabled:
                 continue
-            models.append(_to_upstream_model(source, source_model))
+            models.append(
+                replace(
+                    _to_upstream_model(source, source_model),
+                    prefer_websockets=websocket_models.get(source_model.model, False),
+                )
+            )
     return models
 
 
@@ -39,6 +63,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     # time (see source_model_request_overrides); it must never reach the
     # client-visible catalog payloads built from UpstreamModel.raw.
     raw.pop("source_request_overrides", None)
+    raw.pop("upstream_model", None)
     context_window = source_model.context_window or DEFAULT_SOURCE_CONTEXT_WINDOW
     raw.setdefault("visibility", "list")
     raw.setdefault("shell_type", "shell_command")
@@ -194,6 +219,15 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
     if entry is None:
         return False
     return _raw_metadata(entry).get("supports_reasoning") is True
+
+
+def source_model_upstream_id(source: ModelSource, model: str) -> str:
+    """Resolve one source-local mapping after selection; never resolve recursively."""
+    entry = next((item for item in source.models if item.model == model and item.is_enabled), None)
+    if entry is None:
+        return model
+    upstream = _raw_metadata(entry).get("upstream_model")
+    return upstream.strip() if isinstance(upstream, str) and upstream.strip() else model
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:

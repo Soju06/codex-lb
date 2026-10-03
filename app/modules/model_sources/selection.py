@@ -28,6 +28,21 @@ def allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | Non
     return set(api_key.assigned_source_ids)
 
 
+def responses_source_model_candidates(
+    model: str, api_key: ApiKeyData | None, *, raw_model: str | None = None
+) -> list[str]:
+    """Ordered public names after exact permissions and subscription precedence."""
+    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    registry_models = get_model_registry().get_models_with_fallback()
+    source_scoped = allowed_source_ids_for_api_key(api_key) is not None
+    return [
+        candidate
+        for candidate in dict.fromkeys(name for name in (raw_model, model) if name)
+        if (exact_allowed_models is None or candidate in exact_allowed_models)
+        and (source_scoped or candidate not in registry_models)
+    ]
+
+
 async def select_responses_model_source(
     model: str,
     api_key: ApiKeyData | None,
@@ -48,20 +63,12 @@ async def select_responses_model_source(
     two lookups from drifting apart the way the transports once did.
     """
     assigned_source_ids = allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    candidates = [candidate for candidate in (raw_model, model) if candidate]
+    candidates = responses_source_model_candidates(model, api_key, raw_model=raw_model)
     if not candidates:
         return None
-    deduped_candidates = list(dict.fromkeys(candidates))
-    registry_models = get_model_registry().get_models_with_fallback()
     async with get_background_session() as session:
         repository = ModelSourcesRepository(session)
-        for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
-                continue
-            subscription_model = registry_models.get(candidate)
-            if assigned_source_ids is None and subscription_model is not None:
-                continue
+        for candidate in candidates:
             source = await repository.find_responses_source_for_model(
                 candidate,
                 allowed_source_ids=assigned_source_ids,

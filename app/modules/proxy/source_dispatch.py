@@ -72,7 +72,7 @@ from app.core.utils.shared_future import (
     _await_result_deferring_cancellation,
     _await_task_deferring_cancellation,
 )
-from app.core.utils.sse import _SSE_LINE_BOUNDARY, parse_sse_data_json
+from app.core.utils.sse import _SSE_LINE_BOUNDARY, format_sse_event, parse_sse_data_json
 from app.db.models import ModelSource
 from app.db.session import get_background_session
 from app.modules.api_keys.service import (
@@ -96,6 +96,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.proxy._service.support import _request_log_client_fields
 from app.modules.proxy.affinity import _owner_lookup_session_id_from_headers
 from app.modules.proxy.source_admission import SourceAdmission
+from app.modules.proxy.source_ownership import SourceOwnershipError, SourceOwnershipRecorder, source_revision
 from app.modules.request_logs.repository import RequestLogsRepository
 
 logger = logging.getLogger(__name__)
@@ -351,6 +352,8 @@ class SourceDispatch:
     # (streams expose it through the usage holder).
     source_response_id: str | None = None
     settlement_failed: bool = False
+    reservation_release_failed: bool = False
+    ownership: SourceOwnershipRecorder | None = None
     _source_closed: bool = field(default=False, init=False, repr=False)
     _reservation_done: bool = field(default=False, init=False, repr=False)
     _claims_released: bool = field(default=False, init=False, repr=False)
@@ -491,6 +494,7 @@ class SourceDispatch:
     async def _release_reservation_step(self, reservation: ApiKeyUsageReservationData) -> None:
         release = self.release_reservation
         if release is None:
+            self.reservation_release_failed = True
             logger.error(
                 "source_dispatch_missing_releaser request_id=%s source_id=%s reservation_id=%s",
                 self.request_id,
@@ -501,6 +505,7 @@ class SourceDispatch:
         try:
             await _await_cleanup_deferring_cancellation(release(reservation), scheduler=self.scheduler)
         except Exception:
+            self.reservation_release_failed = True
             logger.warning(
                 "source_dispatch_release_failed request_id=%s source_id=%s",
                 self.request_id,
@@ -557,6 +562,7 @@ class SourceDispatch:
                     request_id=source_response_id or proxy_request_id,
                     archive_request_id=proxy_request_id,
                     model_source_id=self.source.id,
+                    model_source_revision=source_revision(self.source, self.model),
                     model_source_kind=self.source.kind,
                     api_key_id=self.api_key.id if self.api_key is not None else None,
                     session_id=_owner_lookup_session_id_from_headers(headers),
@@ -897,6 +903,8 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
     owner.body_started = True
     try:
         async for chunk in wrapped:
+            if owner.ownership is not None:
+                await owner.ownership.record_frame(chunk)
             if _is_event_frame(chunk):
                 if relayed_kind not in _FAILURE_TERMINAL_KINDS:
                     frame_kind = relayed_terminal_kind(chunk)
@@ -966,6 +974,11 @@ async def settlement_stream(owner: SourceDispatch, wrapped: AsyncIterator[str]) 
         # wrapper's own ``finally`` blocks release everything below it.
         await _aclose_best_effort(wrapped, scheduler=owner.scheduler)
         raise
+    except SourceOwnershipError as exc:
+        await _aclose_best_effort(wrapped, scheduler=owner.scheduler)
+        await owner.finish_with_forwarding_error(exc)
+        yield format_sse_event({"type": "error", **exc.payload})
+        return
     except ModelSourceForwardingError as exc:
         status = "error"
         error_code = error_code_from_payload(exc.payload)

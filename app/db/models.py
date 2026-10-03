@@ -77,6 +77,32 @@ class FileAccountPin(Base):
     __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
 
 
+class ModelSourceOwnership(Base):
+    """Direct Responses reference ownership; survives source/key deletion."""
+
+    __tablename__ = "model_source_ownership"
+
+    reference_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (Index("ix_model_source_ownership_expires_at", "expires_at"),)
+
+
+class ModelSourceOwnershipHistory(Base):
+    """Durable source/revision evidence for references after live-row expiry."""
+
+    __tablename__ = "model_source_ownership_history"
+
+    reference_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (Index("ix_model_source_ownership_history_reference_key", "reference_key"),)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -493,6 +519,7 @@ class RequestLog(Base):
         String,
         nullable=True,
     )
+    model_source_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)

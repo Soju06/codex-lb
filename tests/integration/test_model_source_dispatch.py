@@ -885,10 +885,12 @@ async def test_cancellation_between_the_reservation_and_the_open_releases(
     )
     key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
 
-    def interrupt(*args: object, **kwargs: object) -> dict[str, Any]:
+    async def interrupt(*args: object, **kwargs: object) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(proxy_api, "_shape_source_responses_payload", interrupt)
+    # Payload shaping also runs during pre-admission ownership validation.
+    # Interrupt the owned open to exercise cleanup after reservation/transfer.
+    monkeypatch.setattr(proxy_api, "_open_owned_source_stream", interrupt)
     stream = _AsgiStream(
         app=_app(async_client),
         path="/v1/responses",

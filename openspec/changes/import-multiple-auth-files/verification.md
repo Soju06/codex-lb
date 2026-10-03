@@ -2,7 +2,7 @@
 
 Based on upstream main `f8ffbac2`.
 
-- 4 tests passed across the import dialog and Accounts flow integration suite, including ordered success and partial-failure retry.
+- 5 tests passed across the import dialog and Accounts flow integration suite, including ordered success, partial-failure retry, dismissal blocked during a pending import, and idle dismissal.
 - Full frontend ESLint, TypeScript build and production Vite build passed.
 - Playwright before/after captures passed at 1440px and 390px.
 - Strict OpenSpec validation passed for this change and all 67 main specifications.

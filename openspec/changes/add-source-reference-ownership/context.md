@@ -1,22 +1,3 @@
-# Model Source Routing — Context
-
-## Purpose
-
-Capability-based routing and accounting for OpenAI-compatible model sources,
-including field-preserving embeddings forwarding.
-
-This capability keeps source selection separate from subscription-account
-routing: embeddings traffic is served only by sources that declare the
-embeddings capability, while Responses/chat/audio continue to use their own
-capability gates. Field presence (including explicit nulls) is preserved on
-embeddings forwards so compatible sources see the same payload shape the
-client sent.
-
-
-## Public model aliases
-
-Operators may enter `public-model=provider-model` in the model-source form. The public ID governs selection, permissions and accounting; the selected source resolves its upstream target only at forwarding. Structured response model fields return to the public ID without rewriting generated text or tool arguments. A missing mapping preserves the existing identity behavior.
-
 # Source reference ownership
 
 Equivalent sources expose the same public model through separate credentials. Fresh source-neutral Responses requests may select an available authorized credential. References to responses, tool calls, items, prompts, containers and vector stores must remain on the owning source and credential revision. Publishing ownership before returning output prevents a later replica from guessing a different credential.

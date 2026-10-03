@@ -71,6 +71,7 @@ class ModelSourceForwardingError(Exception):
         upstream_status_code: int | None = None,
         retry_after: str | None = None,
         timeout_phase: TimeoutPhase | None = None,
+        connection_failed: bool = False,
     ) -> None:
         super().__init__(str(payload))
         self.status_code = status_code
@@ -80,6 +81,8 @@ class ModelSourceForwardingError(Exception):
         self.retry_after = retry_after
         # Which bounded phase expired for ``model_source_timeout``/``model_source_idle_timeout``.
         self.timeout_phase = timeout_phase
+        # Only connection establishment proves the request was not submitted.
+        self.connection_failed = connection_failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,7 +402,10 @@ async def forward_responses(
                 headers=_source_headers(source, encryptor=encryptor),
                 json=source_request_payload(source, payload),
                 timeout=_source_client_timeout(source),
+                allow_redirects=False,
             ) as response:
+                if 300 <= response.status < 400:
+                    raise _responses_redirect_error(response.status)
                 if response.status >= 400:
                     if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                         raise _credentials_rejected_error(response, source)
@@ -769,6 +775,7 @@ async def _open_source_stream(
                         headers=_source_headers(source, encryptor=encryptor, stream=True),
                         json=source_request_payload(source, payload),
                         timeout=_source_client_timeout(source),
+                        allow_redirects=path != "/responses",
                     )
                 )
         except aiohttp.ConnectionTimeoutError as exc:
@@ -782,6 +789,8 @@ async def _open_source_stream(
                 # Only the source's total budget was armed: the pre-hardening verdict.
                 raise _unreachable_error(exc) from exc
             raise _timeout_error("header", source, elapsed=clock.monotonic() - opened_at) from exc
+        if path == "/responses" and 300 <= response.status < 400:
+            raise _responses_redirect_error(response.status)
         if response.status >= 400:
             if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                 raise _credentials_rejected_error(response, source)
@@ -981,6 +990,20 @@ def _withheld_cap_error(withheld_bytes: int) -> ModelSourceForwardingError:
     )
 
 
+def _responses_redirect_error(status: int) -> ModelSourceForwardingError:
+    return ModelSourceForwardingError(
+        status_code=502,
+        upstream_status_code=status,
+        payload={
+            "error": {
+                "code": "model_source_redirect",
+                "type": "upstream_error",
+                "message": "The Responses source redirected the request; configure its final endpoint URL",
+            }
+        },
+    )
+
+
 def _unreachable_error(exc: Exception, *, timeout_phase: TimeoutPhase | None = None) -> ModelSourceForwardingError:
     return ModelSourceForwardingError(
         status_code=502,
@@ -993,6 +1016,7 @@ def _unreachable_error(exc: Exception, *, timeout_phase: TimeoutPhase | None = N
         },
         upstream_status_code=None,
         timeout_phase=timeout_phase,
+        connection_failed=isinstance(exc, (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)),
     )
 
 

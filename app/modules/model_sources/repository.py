@@ -83,6 +83,24 @@ class ModelSourcesRepository:
         require_streaming: bool = False,
         only_disabled: bool = False,
     ) -> ModelSource | None:
+        sources = await self.list_responses_sources_for_model(
+            model,
+            allowed_source_ids=allowed_source_ids,
+            require_streaming=require_streaming,
+            only_disabled=only_disabled,
+            limit=1,
+        )
+        return sources[0] if sources else None
+
+    async def list_responses_sources_for_model(
+        self,
+        model: str,
+        *,
+        allowed_source_ids: set[str] | None = None,
+        require_streaming: bool = False,
+        only_disabled: bool = False,
+        limit: int | None = None,
+    ) -> list[ModelSource]:
         stmt = (
             select(ModelSource)
             .options(selectinload(ModelSource.models))
@@ -92,16 +110,17 @@ class ModelSourcesRepository:
             .where(ModelSourceModel.model == model)
             .where(_enablement_filter(only_disabled))
             .order_by(ModelSource.name, ModelSource.id)
-            .limit(1)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit)
         if require_streaming:
             stmt = stmt.where(ModelSourceModel.supports_streaming.is_(True))
         if allowed_source_ids is not None:
             if not allowed_source_ids:
-                return None
+                return []
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
         result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
 
     async def find_audio_transcriptions_source_for_model(
         self,

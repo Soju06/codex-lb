@@ -849,7 +849,9 @@ def _record_websocket_empty_prewarm_completion(
     response_id: str | None,
 ) -> None:
     """Record the context of an empty prewarm without treating it as turn progress."""
-    continuity_state.empty_prewarm_response_id = response_id
+    # A replayed prewarm keeps exposing its original id to the client, so the
+    # turn chained to it references that id, never the hidden upstream one.
+    continuity_state.empty_prewarm_response_id = request_state.replay_downstream_response_id or response_id
     if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
         continuity_state.empty_prewarm_input_count = request_state.input_item_count
         continuity_state.empty_prewarm_input_fingerprint = request_state.input_full_fingerprint

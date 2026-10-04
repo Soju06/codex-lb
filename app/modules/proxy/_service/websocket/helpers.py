@@ -978,6 +978,7 @@ def _websocket_precreated_retry_error_code(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     has_other_pending_requests: bool,
+    current_account_id: str | None = None,
 ) -> str | None:
     if request_state is None:
         return None
@@ -1010,8 +1011,6 @@ def _websocket_precreated_retry_error_code(
         return None
     if not request_state.request_text:
         return None
-    if request_state.replay_count >= 1:
-        return None
     if event_type not in {"error", "response.failed"}:
         return None
 
@@ -1021,6 +1020,22 @@ def _websocket_precreated_retry_error_code(
     )
     error_param = _websocket_event_error_param(event_type, payload)
     error_message = _websocket_event_error_message(event_type, payload)
+    is_model_rejection = error_code == "model_not_found" or _is_account_model_unsupported_error(
+        code=error_code,
+        message=error_message,
+        model=request_state.model,
+    )
+    if request_state.replay_count >= 1 and not (
+        is_model_rejection
+        and request_state.model_rejection_replay_count == 0
+        and request_state.replay_count == request_state.auth_replay_count
+        and request_state.completed_forced_refresh_account_id == current_account_id
+        and current_account_id is not None
+    ):
+        # A completed auth refresh uses the generic replay budget, but its
+        # temporary account preference does not consume the single model
+        # rejection move. All other second replays remain bounded as before.
+        return None
     if _facade()._is_previous_response_not_found_error(
         code=error_code,
         param=error_param,
@@ -1033,11 +1048,7 @@ def _websocket_precreated_retry_error_code(
         message=error_message,
     ):
         return None
-    if _is_account_model_unsupported_error(
-        code=error_code,
-        message=error_message,
-        model=request_state.model,
-    ):
+    if is_model_rejection and error_code != "model_not_found":
         # Any recognized response id means upstream has accepted this request,
         # even when response.created was not observed on this socket.  Do not
         # account-switch an error event that carries either response.id or a
@@ -1211,6 +1222,7 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
+    request_state.completed_forced_refresh_account_id = None
     request_state.replay_count += 1
     request_state.auth_replay_count += 1
     request_state.awaiting_response_created = True

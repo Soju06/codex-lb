@@ -18,7 +18,9 @@ replay may move. The legacy entitlement rejection
 (`account_model_unsupported`) and exact `model_not_found` MUST take the same
 replay path, so a continuation turn keeps the failover it has on a first turn.
 A temporary forced-refresh preference alone MUST NOT make a request
-owner-bound. A connect-phase
+owner-bound. A completed pre-created auth refresh on the rejecting account MUST NOT consume the one
+account/model rejection move, but a second account/model rejection MUST NOT
+trigger another move even if another auth refresh occurs. A connect-phase
 `model_not_found` from a required owner MUST surface the original upstream
 status and envelope, and MUST NOT exclude the owner or turn into
 `previous_response_owner_unavailable`. If bounded replacement selection for a
@@ -71,6 +73,14 @@ replay rules remain authoritative.
 - **WHEN** the account emits a pre-created `model_not_found`
 - **THEN** the request follows the bounded movable replay path rather than
   treating the temporary preference as an owner pin
+- **AND** another account/model rejection cannot trigger a further move
+
+#### Scenario: Reauthentication without refresh does not grant a model move
+
+- **GIVEN** account A fails authentication and the proxy moves a pre-created
+  request to B without completing a forced refresh
+- **WHEN** B rejects the requested model before acceptance
+- **THEN** the proxy does not select a third account
 
 #### Scenario: Exhausted movable rejection retains its envelope
 

@@ -3736,6 +3736,8 @@ class _WebSocketMixin:
                 if last_failover_exc is not None and not require_preferred_account:
                     break
                 return None, None
+            if request_state.completed_forced_refresh_account_id != account.id:
+                request_state.completed_forced_refresh_account_id = None
             if forced_refresh_account_id is not None and account.id != forced_refresh_account_id:
                 request_state.force_refresh_account_id = None
                 if request_state.preferred_account_id == forced_refresh_account_id:
@@ -4300,6 +4302,7 @@ class _WebSocketMixin:
             )
             if force_refresh and request_state.force_refresh_account_id == account.id:
                 request_state.force_refresh_account_id = None
+                request_state.completed_forced_refresh_account_id = account.id
 
             remaining_budget = proxy._remaining_budget_seconds(deadline)
             if remaining_budget <= 0:
@@ -5843,6 +5846,7 @@ class _WebSocketMixin:
             event_type=event_type,
             payload=payload,
             has_other_pending_requests=has_other_pending_requests,
+            current_account_id=account.id,
         )
         auth_error_code = _websocket_precreated_auth_error_code(
             request_state,
@@ -5888,6 +5892,7 @@ class _WebSocketMixin:
                 event_type=event_type,
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
+                current_account_id=account.id,
             )
         # An accepted lifecycle is classified only by the output-free capacity
         # rule and never takes the pre-created anchored branches below: its
@@ -5997,6 +6002,7 @@ class _WebSocketMixin:
                 )
                 request_state.request_text = retry_text
                 request_state.replay_count += 1
+                request_state.model_rejection_replay_count += 1
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 request_state.response_event_count = 0

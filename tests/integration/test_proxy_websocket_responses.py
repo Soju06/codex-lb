@@ -10404,35 +10404,77 @@ def test_backend_responses_websocket_retries_precreated_model_not_found_on_anoth
     assert excluded_snapshots == [set(), {account_ids[0]}]
 
 
+@pytest.mark.parametrize(
+    ("replacement_rejects", "auth_requires_reauth"),
+    [(False, False), (True, False), (False, True)],
+    ids=["recovers", "bounded_rejection", "reauth_without_refresh"],
+)
 def test_backend_responses_websocket_retries_model_not_found_after_temporary_preference(
     app_instance,
     monkeypatch,
+    replacement_rejects,
+    auth_requires_reauth,
 ):
-    """A completed forced refresh leaves a preference, not an owner pin."""
-    model_rejection = _FakeUpstreamWebSocket(
-        [
-            _FakeUpstreamMessage(
-                "text",
-                text=json.dumps(
-                    {
-                        "type": "error",
-                        "status": 404,
-                        "error": {
-                            "type": "invalid_request_error",
-                            "code": "model_not_found",
-                            "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+    """Only a completed auth refresh preserves the movable model-rejection budget."""
+    auth_rejection = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "error",
+                            "status": 401,
+                            "error": {
+                                "type": "authentication_error",
+                                "code": "invalid_api_key",
+                                "message": (
+                                    "Your session has ended. Please log in again."
+                                    if auth_requires_reauth
+                                    else "token invalidated"
+                                ),
+                            },
                         },
-                    },
-                    separators=(",", ":"),
-                ),
-            )
-        ]
+                        separators=(",", ":"),
+                    ),
+                )
+            ]
+        ],
     )
-    recovered = _FakeUpstreamWebSocket(_websocket_response_batch("resp_ws_model_not_found_after_refresh"))
-    upstreams = [model_rejection, recovered]
+    model_rejection_batch = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "error",
+                    "status": 404,
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                        "message": "The model `gpt-5.5` does not exist or you do not have access to it.",
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        )
+    ]
+    model_rejection = _SequencedUpstreamWebSocket([], deferred_message_batches=[model_rejection_batch])
+    recovered = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            model_rejection_batch
+            if replacement_rejects
+            else _websocket_response_batch("resp_ws_model_not_found_after_refresh")
+        ],
+    )
+    upstreams = [auth_rejection, model_rejection, recovered]
     account_ids = ["acct_ws_refresh_a", "acct_ws_refresh_b"]
-    selected_accounts: list[str] = []
-    excluded_snapshots: list[set[str]] = []
+    accounts = [SimpleNamespace(id=account_id, security_work_authorized=False) for account_id in account_ids]
+    selections: list[tuple[str, str | None, str | None, set[str], bool]] = []
+    refreshes: list[tuple[str, bool]] = []
+    opened_accounts: list[str] = []
+    permanent_failures: list[tuple[str, str]] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -10444,35 +10486,80 @@ def test_backend_responses_websocket_retries_model_not_found_after_temporary_pre
     async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
-    async def fake_connect_proxy_websocket(
-        self, headers, *, request_state, model, api_key, client_send_lock, websocket, **kwargs
+    async def select_account(
+        self, *args, request_state, preferred_account_id, require_preferred_account, exclude_account_ids, **kwargs
     ):
-        del self, headers, model, api_key, client_send_lock, websocket, kwargs
-        index = len(selected_accounts)
-        selected_accounts.append(account_ids[index])
-        excluded_snapshots.append(set(request_state.excluded_account_ids))
-        if index == 0:
-            request_state.preferred_account_id = account_ids[index]
-        else:
-            assert request_state.force_refresh_account_id is None
-            assert request_state.preferred_account_id == account_ids[0]
-        return SimpleNamespace(id=account_ids[index]), upstreams[index]
+        del self, args, kwargs
+        account = accounts[1] if account_ids[0] in exclude_account_ids else accounts[0]
+        selections.append(
+            (
+                account.id,
+                preferred_account_id,
+                request_state.force_refresh_account_id,
+                set(exclude_account_ids),
+                require_preferred_account,
+            )
+        )
+        return account
+
+    async def ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, timeout_seconds
+        refreshes.append((account.id, force))
+        return account
+
+    async def open_upstream(self, account, headers, *, timeout_seconds, request_state=None):
+        del self, headers, timeout_seconds, request_state
+        opened_accounts.append(account.id)
+        return upstreams[len(opened_accounts) - 1]
+
+    async def fake_handle_stream_error(self, account, error, code):
+        del self, account, error
+        assert code == "model_not_found"
+
+    async def mark_permanent_failure(self, account, error_code):
+        del self
+        permanent_failures.append((account.id, error_code))
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_open_upstream_websocket_with_budget", open_upstream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", fake_handle_stream_error)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "mark_permanent_failure", mark_permanent_failure)
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/backend-api/codex/responses") as websocket:
             websocket.send_text(json.dumps(_websocket_response_create("retry after refresh")))
-            created = json.loads(websocket.receive_text())
-            completed = json.loads(websocket.receive_text())
+            first_event = json.loads(websocket.receive_text())
+            if not replacement_rejects and not auth_requires_reauth:
+                completed = json.loads(websocket.receive_text())
 
-    assert created["type"] == "response.created"
-    assert completed["type"] == "response.completed"
-    assert selected_accounts == account_ids
-    assert excluded_snapshots == [set(), {account_ids[0]}]
+    if replacement_rejects or auth_requires_reauth:
+        assert first_event["type"] == "error"
+        assert first_event["status"] == 404
+        assert first_event["error"]["code"] == "model_not_found"
+    else:
+        assert first_event["type"] == "response.created"
+        assert completed["type"] == "response.completed"
+    if auth_requires_reauth:
+        assert opened_accounts == [account_ids[0], account_ids[1]]
+        assert refreshes == [(account_ids[0], False), (account_ids[1], False)]
+        assert selections == [
+            (account_ids[0], None, None, set(), False),
+            (account_ids[1], None, None, {account_ids[0]}, False),
+        ]
+        assert permanent_failures == [(account_ids[0], "account_session_expired")]
+    else:
+        assert opened_accounts == [account_ids[0], account_ids[0], account_ids[1]]
+        assert refreshes == [(account_ids[0], False), (account_ids[0], True), (account_ids[1], False)]
+        assert selections == [
+            (account_ids[0], None, None, set(), False),
+            (account_ids[0], account_ids[0], account_ids[0], set(), False),
+            (account_ids[1], account_ids[0], None, {account_ids[0]}, False),
+        ]
+        assert permanent_failures == []
 
 
 def test_backend_responses_websocket_exhausted_model_not_found_preserves_original_envelope(

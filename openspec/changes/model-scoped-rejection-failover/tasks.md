@@ -24,6 +24,8 @@
   of cross-account replay.
 - [x] 2.3 Preserve the original `model_not_found` envelope when bounded
   replacement selection exhausts before opening another account.
+- [x] 2.4 Keep the single model-rejection move available after a completed
+  WebSocket auth refresh without allowing a second model-rejection move.
 
 ## 3. Verification
 
@@ -37,3 +39,5 @@
 - [x] 3.4 Add route regressions for the anchored follow-up turn (legacy and
   `model_not_found`) replaying with the fresh body on another account, and the
   turn-state owner control that surfaces the original rejection.
+- [x] 3.5 Cover a second model rejection after successful refresh and a
+  reauthentication replay that never completed a forced refresh.

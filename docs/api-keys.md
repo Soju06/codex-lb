@@ -23,6 +23,8 @@ The protected proxy routes covered by this setting are:
 
 Dashboard → API Keys → Create. The full key is shown **only once** at creation. Keys support optional expiration, model restrictions, and rate limits (tokens / cost per day / week / month).
 
+The **Allowed models** picker includes the models supported by the Images adapter even when they are absent from the Responses catalog. Search for `gpt-image`, select the desired models, then save. The selection is retained when editing the key. Image-only entries do not appear in the Automations model selector.
+
 Keys can also be scoped to specific accounts, so a key draws quota only from the accounts assigned to it:
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)

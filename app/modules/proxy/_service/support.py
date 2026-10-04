@@ -965,6 +965,7 @@ class _DeferredKeyedStreamHealthPenalty:
 @dataclass(eq=False, slots=True)
 class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
+    operation_dispatch_generation: int | None = None
     disarmed: bool = False
     response_observed: bool = False
     # A non-terminal response event (a deferred-reasoning prelude, for
@@ -1195,6 +1196,8 @@ class _WebSocketRequestState:
     operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
+    operation_dispatch_generation: int | None = None
+    operation_dispatch_claim_pending: bool = False
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.

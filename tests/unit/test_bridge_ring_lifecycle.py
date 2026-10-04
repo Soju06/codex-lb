@@ -5,6 +5,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -56,10 +57,37 @@ from app.modules.proxy.durable_bridge_repository import (
     missing_durable_bridge_tables,
 )
 from app.modules.proxy.durable_bridge_transcript_codec import encode_durable_bridge_transcript_chunk
-from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
+
+
+async def _record_dispatched_operation(repository: DurableBridgeRepository, **kwargs):
+    """Existing spool tests model operations after their upstream send claim."""
+    operation = await repository.record_operation(**kwargs)
+    if operation is not None and operation.created:
+        claimed = await repository.claim_operation_dispatch(
+            operation_id=operation.operation_id,
+            session_id=kwargs["session_id"],
+            instance_id=kwargs["instance_id"],
+            owner_epoch=kwargs["owner_epoch"],
+            expected_dispatch_generation=0,
+        )
+        assert claimed is not None
+        operation = replace(operation, dispatch_generation=claimed.dispatch_generation)
+    return operation
+
+
+async def _operation_generation(repository: DurableBridgeRepository, operation_id: str) -> int | None:
+    operation = await repository.get_operation(operation_id=operation_id)
+    assert operation is not None
+    return operation.dispatch_generation
+
+
+async def _operation_response_id(repository: DurableBridgeRepository, operation_id: str) -> str | None:
+    operation = await repository.get_operation(operation_id=operation_id)
+    assert operation is not None
+    return operation.response_id
 
 
 @pytest.fixture(autouse=True)
@@ -1303,7 +1331,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         claim = await _claim(repository, instance_id="inst-operation-ledger", session_key_value="sid-operation")
         fingerprint = durable_bridge_hash("continuation-body")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        created = await repository.record_operation(
+        created = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-ledger",
@@ -1323,7 +1352,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         assert operation_row is not None
         assert operation_row.spool_format == HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1
 
-        existing = await repository.record_operation(
+        existing = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-ledger",
@@ -1344,6 +1374,7 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             owner_epoch=claim.owner_epoch,
             state="completed",
             response_id="resp-completed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         completed = await repository.get_latest_completed_operation(
             session_id=claim.id,
@@ -1367,6 +1398,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             owner_epoch=claim.owner_epoch,
             event_text='data: {"type":"response.completed"}\n\n',
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         # Repeated identical SSE blocks are distinct downstream occurrences,
         # so replay must preserve both copies rather than hash-deduplicating.
@@ -1377,6 +1410,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             owner_epoch=claim.owner_epoch,
             event_text='data: {"type":"response.completed"}\n\n',
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         assert await repository.get_operation_events(operation_id=operation_id) == [
             'data: {"type":"response.completed"}\n\n',
@@ -1399,7 +1434,8 @@ async def test_chunk_operation_replays_exact_events(
         claim = await _claim(repository, instance_id="inst-chunk-replay", session_key_value="sid-chunk-replay")
         fingerprint = durable_bridge_hash("chunk-replay")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-replay",
@@ -1495,7 +1531,8 @@ async def test_chunk_operation_rejects_malformed_persisted_metadata(
         claim = await _claim(repository, instance_id="inst-chunk-metadata", session_key_value="sid-chunk-metadata")
         fingerprint = durable_bridge_hash(f"chunk-metadata:{table_name}:{column_name}")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-metadata",
@@ -1567,7 +1604,8 @@ async def test_chunk_writer_persists_batch_and_terminal_atomically(
         claim = await _claim(repository, instance_id="inst-chunk-writer", session_key_value="sid-chunk-writer")
         fingerprint = durable_bridge_hash("chunk-writer")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-writer",
@@ -1587,6 +1625,8 @@ async def test_chunk_writer_persists_batch_and_terminal_atomically(
                     instance_id="inst-chunk-writer",
                     owner_epoch=claim.owner_epoch,
                     event_text=event,
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
                 for event in first_events
             ],
@@ -1601,6 +1641,7 @@ async def test_chunk_writer_persists_batch_and_terminal_atomically(
             max_bytes=1024,
             state="completed",
             response_id="resp-chunk-writer",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         row = await session.get(HttpBridgeOperationRecord, operation_id)
@@ -1647,7 +1688,8 @@ async def test_chunk_writer_refuses_mixed_legacy_material(
         claim = await _claim(repository, instance_id="inst-chunk-conflict", session_key_value="sid-chunk-conflict")
         fingerprint = durable_bridge_hash("chunk-conflict")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-conflict",
@@ -1664,6 +1706,8 @@ async def test_chunk_writer_refuses_mixed_legacy_material(
             owner_epoch=claim.owner_epoch,
             event_text="legacy",
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
 
         assert not await repository.append_operation_event_chunk(
@@ -1674,6 +1718,8 @@ async def test_chunk_writer_refuses_mixed_legacy_material(
                     instance_id="inst-chunk-conflict",
                     owner_epoch=claim.owner_epoch,
                     event_text="chunk",
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
             ],
             max_bytes=1024,
@@ -1687,6 +1733,7 @@ async def test_chunk_writer_refuses_mixed_legacy_material(
             max_bytes=1024,
             state="failed",
             response_id="resp-conflict",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         row = await session.get(HttpBridgeOperationRecord, operation_id)
         assert row is not None
@@ -1715,7 +1762,8 @@ async def test_oversized_terminal_chunk_settles_incomplete_operation(
         claim = await _claim(repository, instance_id="inst-chunk-oversize", session_key_value="sid-chunk-oversize")
         fingerprint = durable_bridge_hash("chunk-oversize")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-oversize",
@@ -1734,6 +1782,7 @@ async def test_oversized_terminal_chunk_settles_incomplete_operation(
             max_bytes=3,
             state="failed",
             response_id="resp-oversized",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         row = await session.get(HttpBridgeOperationRecord, operation_id)
@@ -1764,7 +1813,8 @@ async def test_chunk_writer_enforces_reader_event_count_limit(
         claim = await _claim(repository, instance_id="inst-chunk-count", session_key_value="sid-chunk-count")
         fingerprint = durable_bridge_hash("chunk-count")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-count",
@@ -1782,6 +1832,8 @@ async def test_chunk_writer_enforces_reader_event_count_limit(
                     instance_id="inst-chunk-count",
                     owner_epoch=claim.owner_epoch,
                     event_text=event,
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
                 for event in ("one", "two")
             ],
@@ -1796,6 +1848,7 @@ async def test_chunk_writer_enforces_reader_event_count_limit(
             max_bytes=1024,
             state="failed",
             response_id="resp-count-limit",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         row = await session.get(HttpBridgeOperationRecord, operation_id)
         assert row is not None
@@ -1816,7 +1869,8 @@ async def test_chunk_writer_rejects_before_compression(
         claim = await _claim(repository, instance_id="inst-precompress", session_key_value="sid-precompress")
         fingerprint = durable_bridge_hash("precompress")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-precompress",
@@ -1837,6 +1891,8 @@ async def test_chunk_writer_rejects_before_compression(
                     instance_id="inst-precompress",
                     owner_epoch=claim.owner_epoch,
                     event_text="oversized",
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
             ],
             max_bytes=1,
@@ -1846,9 +1902,11 @@ async def test_chunk_writer_rejects_before_compression(
                 DurableBridgeOperationEventInput(
                     operation_id=operation_id,
                     session_id=claim.id,
-                    instance_id="wrong-owner",
+                    instance_id="inst-precompress",
                     owner_epoch=claim.owner_epoch,
                     event_text="small",
+                    expected_dispatch_generation=0,
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
             ],
             max_bytes=1024,
@@ -1867,6 +1925,8 @@ async def test_chunk_writer_rejects_before_compression(
                     instance_id="inst-precompress",
                     owner_epoch=claim.owner_epoch,
                     event_text="small",
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
             ],
             max_bytes=1024,
@@ -1889,7 +1949,8 @@ async def test_chunk_operation_rejects_sequence_gap_or_corruption(
         claim = await _claim(repository, instance_id="inst-chunk-invalid", session_key_value="sid-chunk-invalid")
         fingerprint = durable_bridge_hash(f"chunk-invalid:{first_sequence_number}:{payload_sha256}")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-invalid",
@@ -1940,7 +2001,8 @@ async def test_chunk_spool_blocks_rollback_and_is_cleared_by_reset(
         claim = await _claim(repository, instance_id="inst-chunk-reset", session_key_value="sid-chunk-reset")
         fingerprint = durable_bridge_hash("chunk-reset")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-reset",
@@ -1964,6 +2026,8 @@ async def test_chunk_spool_blocks_rollback_and_is_cleared_by_reset(
             owner_epoch=claim.owner_epoch,
             event_text="must-not-mix-formats",
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         session.add(
             HttpBridgeOperationEventChunk(
@@ -1983,12 +2047,14 @@ async def test_chunk_spool_blocks_rollback_and_is_cleared_by_reset(
             session_id=claim.id,
             instance_id="inst-chunk-reset",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.reset_operation_event_spool(
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-reset",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert (
             await session.scalar(
@@ -2025,7 +2091,8 @@ async def test_chunk_format_resets_on_failed_rebind_and_unknown_claim(
         encoded = encode_durable_bridge_transcript_chunk(("event",))
 
         async def seed(operation_id: str, fingerprint: str, state: str) -> None:
-            assert await repository.record_operation(
+            assert await _record_dispatched_operation(
+                repository,
                 operation_id=operation_id,
                 session_id=claim.id,
                 instance_id="inst-format-reset",
@@ -2060,7 +2127,8 @@ async def test_chunk_format_resets_on_failed_rebind_and_unknown_claim(
         failed_fingerprint = durable_bridge_hash("failed-format-reset")
         failed_operation_id = durable_bridge_operation_id(claim.id, failed_fingerprint)
         await seed(failed_operation_id, failed_fingerprint, "failed")
-        rebound = await repository.record_operation(
+        rebound = await _record_dispatched_operation(
+            repository,
             operation_id=failed_operation_id,
             session_id=claim.id,
             instance_id="inst-format-reset",
@@ -2084,6 +2152,7 @@ async def test_chunk_format_resets_on_failed_rebind_and_unknown_claim(
             session_id=claim.id,
             instance_id="inst-format-reset",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, unknown_operation_id),
         )
         unknown_row = await session.get(HttpBridgeOperationRecord, unknown_operation_id)
         assert unknown_row is not None
@@ -2104,7 +2173,8 @@ async def test_operation_retry_reset_clears_partial_spool(
         claim = await _claim(repository, instance_id="inst-operation-reset", session_key_value="sid-operation-reset")
         fingerprint = durable_bridge_hash("continuation-reset")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-reset",
@@ -2122,12 +2192,15 @@ async def test_operation_retry_reset_clears_partial_spool(
             owner_epoch=claim.owner_epoch,
             event_text='data: {"type":"response.output_text.delta"}\n\n',
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         assert await repository.reset_operation_event_spool(
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-reset",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.get_operation_events(operation_id=operation_id) == []
         reset = await repository.get_operation(operation_id=operation_id)
@@ -2147,7 +2220,8 @@ async def test_terminal_operation_event_exposes_failure_after_spooling(
         claim = await _claim(repository, instance_id="inst-terminal-event", session_key_value="sid-terminal-event")
         fingerprint = durable_bridge_hash("terminal-event")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-terminal-event",
@@ -2168,6 +2242,7 @@ async def test_terminal_operation_event_exposes_failure_after_spooling(
             event_text=event_text,
             max_bytes=1024,
             state="failed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         failed = await repository.get_operation(operation_id=operation_id)
         assert failed is not None
@@ -2187,7 +2262,8 @@ async def test_failed_operation_rebind_rollback_restores_row_instead_of_deleting
         claim = await _claim(repository, instance_id="inst-rebind-rollback", session_key_value="sid-rebind-rollback")
         fingerprint = durable_bridge_hash("rebind-rollback")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-rebind-rollback",
@@ -2206,9 +2282,11 @@ async def test_failed_operation_rebind_rollback_restores_row_instead_of_deleting
             event_text='data: {"type":"response.failed"}\n\n',
             max_bytes=1024,
             state="failed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
-        rebound = await repository.record_operation(
+        rebound = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-rebind-rollback",
@@ -2227,6 +2305,7 @@ async def test_failed_operation_rebind_rollback_restores_row_instead_of_deleting
             instance_id="inst-rebind-rollback",
             owner_epoch=claim.owner_epoch,
             restore_rebound=True,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         restored = await repository.get_operation(operation_id=operation_id)
         assert restored is not None
@@ -2250,7 +2329,8 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
         )
         fingerprint = durable_bridge_hash("terminal-overflow")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-terminal-overflow",
@@ -2270,6 +2350,7 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
             event_text='data: {"type":"response.failed"}\n\n',
             max_bytes=1,
             state="failed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         assert persisted is False
@@ -2305,7 +2386,8 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
         async def _operation_with_consumed_claim(label: str, response_id: str) -> str:
             fingerprint = durable_bridge_hash(label)
             operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-            assert await repository.record_operation(
+            assert await _record_dispatched_operation(
+                repository,
                 operation_id=operation_id,
                 session_id=claim.id,
                 instance_id="inst-legacy-generation",
@@ -2315,18 +2397,19 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
                 model="gpt-5.6",
                 parent_response_id="resp-parent",
             )
-            assert await repository.update_operation(
+            assert await repository.mark_operation_unknown(
                 operation_id=operation_id,
                 session_id=claim.id,
                 instance_id="inst-legacy-generation",
                 owner_epoch=claim.owner_epoch,
-                state="unknown",
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             assert await repository.claim_unknown_operation_for_recovery(
                 operation_id=operation_id,
                 session_id=claim.id,
                 instance_id="inst-legacy-generation",
                 owner_epoch=claim.owner_epoch,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             assert await repository.update_operation(
                 operation_id=operation_id,
@@ -2335,6 +2418,7 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
                 owner_epoch=claim.owner_epoch,
                 state="acknowledged",
                 response_id=response_id,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             carried_over = await repository.get_operation(operation_id=operation_id)
             assert carried_over is not None
@@ -2351,6 +2435,7 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
             max_bytes=1024,
             state="failed",
             response_id="resp-legacy-append",
+            expected_dispatch_generation=await _operation_generation(repository, appended_operation_id),
         )
         appended = await repository.get_operation(operation_id=appended_operation_id)
         assert appended is not None
@@ -2367,6 +2452,7 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
             state="failed",
             expected_response_id="resp-legacy-settle",
             response_id="resp-legacy-settle",
+            expected_dispatch_generation=await _operation_generation(repository, settled_operation_id),
         )
         settled = await repository.get_operation(operation_id=settled_operation_id)
         assert settled is not None
@@ -2384,6 +2470,7 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
             state="failed",
             expected_recovery_dispatch_count=0,
             response_id="resp-legacy-fenced",
+            expected_dispatch_generation=await _operation_generation(repository, fenced_operation_id),
         )
         assert not await repository.settle_terminal_append_failure(
             operation_id=fenced_operation_id,
@@ -2394,6 +2481,7 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
             expected_response_id="resp-legacy-fenced",
             expected_recovery_dispatch_count=0,
             response_id="resp-legacy-fenced",
+            expected_dispatch_generation=await _operation_generation(repository, fenced_operation_id),
         )
         still_acknowledged = await repository.get_operation(operation_id=fenced_operation_id)
         assert still_acknowledged is not None
@@ -2405,283 +2493,94 @@ async def test_legacy_nonzero_recovery_dispatch_count_still_settles(
 @pytest.mark.asyncio
 async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     async_session_factory: Callable[[], AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = async_session_factory()
     try:
         repository = DurableBridgeRepository(session)
         claim = await _claim(
+            repository, instance_id="inst-terminal-recovery", session_key_value="sid-terminal-recovery"
+        )
+        authority: Any = dict(
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+        )
+        operation_id = "terminal-recovery-operation"
+        await _record_dispatched_operation(
             repository,
-            instance_id="inst-terminal-recovery",
-            session_key_value="sid-terminal-recovery",
-        )
-        fingerprint = durable_bridge_hash("terminal-recovery")
-        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
             operation_id=operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            request_fingerprint=fingerprint,
+            request_fingerprint="terminal-recovery",
             account_id="account-terminal-recovery",
             model="gpt-5.6",
             parent_response_id="resp-parent",
-        )
-        assert operation is not None
-        assert await repository.append_operation_event(
-            operation_id=operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            event_text='data: {"type":"response.created"}\n\n',
-            max_bytes=1024,
+            **authority,
         )
         assert await repository.update_operation(
             operation_id=operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=1,
             state="acknowledged",
-            response_id="resp-terminal-recovery",
-        )
-
-        replay_fingerprint = durable_bridge_hash("terminal-recovery-replay-alias")
-        replay_operation_id = durable_bridge_operation_id(claim.id, replay_fingerprint)
-        assert await repository.record_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            request_fingerprint=replay_fingerprint,
-            account_id="account-terminal-recovery",
-            model="gpt-5.6",
-            parent_response_id="resp-parent",
-        )
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="acknowledged",
-            response_id="resp-upstream-replay",
-        )
-        assert await repository.settle_terminal_append_failure(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="failed",
-            expected_response_id="resp-upstream-replay",
-            response_id="resp-client-visible-replay",
-        )
-        replay_operation = await repository.get_operation(operation_id=replay_operation_id)
-        assert replay_operation is not None
-        assert replay_operation.state == "failed"
-        assert replay_operation.response_id == "resp-client-visible-replay"
-        assert replay_operation.event_spool_complete is False
-
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="failed",
-            response_id="resp-upstream-replay",
-        )
-        assert await repository.settle_terminal_append_failure(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="failed",
-            expected_response_id="resp-upstream-replay",
-            response_id="resp-client-visible-replay",
-        )
-        pre_settled_replay = await repository.get_operation(operation_id=replay_operation_id)
-        assert pre_settled_replay is not None
-        assert pre_settled_replay.state == "failed"
-        assert pre_settled_replay.response_id == "resp-client-visible-replay"
-
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="acknowledged",
-            response_id="resp-persisted-before-replacement",
-        )
-        assert await repository.settle_terminal_append_failure(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="failed",
-            expected_response_id="resp-unpersisted-replacement",
-            alternate_expected_response_id="resp-persisted-before-replacement",
-            response_id="resp-client-visible-replay",
-        )
-        partially_persisted_replay = await repository.get_operation(operation_id=replay_operation_id)
-        assert partially_persisted_replay is not None
-        assert partially_persisted_replay.state == "failed"
-        assert partially_persisted_replay.response_id == "resp-client-visible-replay"
-
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="acknowledged",
-            response_id="resp-upstream-replay",
-        )
-        assert await repository.settle_terminal_append_failure(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="failed",
-            expected_response_id="resp-upstream-replay",
-            response_id=None,
-        )
-        null_alias_settlement = await repository.get_operation(operation_id=replay_operation_id)
-        assert null_alias_settlement is not None
-        assert null_alias_settlement.state == "failed"
-        assert null_alias_settlement.response_id == "resp-upstream-replay"
-
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="unknown",
-        )
-        assert await repository.claim_unknown_operation_for_recovery(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-        )
-        assert await repository.update_operation(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            state="acknowledged",
-            response_id="resp-upstream-replay",
-        )
-        assert not await repository.append_terminal_operation_event(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
-            event_text='data: {"type":"response.failed"}\n\n',
-            max_bytes=1024,
-            state="failed",
-            expected_recovery_dispatch_count=0,
-            response_id="resp-client-visible-replay",
+            response_id="resp-upstream",
+            **authority,
         )
         assert not await repository.settle_terminal_append_failure(
-            operation_id=replay_operation_id,
-            session_id=claim.id,
-            instance_id="inst-terminal-recovery",
-            owner_epoch=claim.owner_epoch,
+            operation_id=operation_id,
+            expected_dispatch_generation=1,
+            expected_recovery_dispatch_count=2,
             state="failed",
-            expected_response_id="resp-upstream-replay",
-            expected_recovery_dispatch_count=0,
-            response_id="resp-client-visible-replay",
+            expected_response_id="resp-upstream",
+            response_id="resp-client",
+            **authority,
         )
-        newer_attempt = await repository.get_operation(operation_id=replay_operation_id)
-        assert newer_attempt is not None
-        assert newer_attempt.state == "acknowledged"
-        assert newer_attempt.recovery_dispatch_count == 1
-        assert newer_attempt.event_spool_complete is False
+        assert await repository.settle_terminal_append_failure(
+            operation_id=operation_id,
+            expected_dispatch_generation=1,
+            state="failed",
+            expected_response_id="unpersisted-replacement",
+            alternate_expected_response_id="resp-upstream",
+            response_id="resp-client",
+            **authority,
+        )
+        settled = await repository.get_operation(operation_id=operation_id)
+        assert settled is not None and settled.state == "failed" and settled.response_id == "resp-client"
+        assert not settled.event_spool_complete
+        assert await repository.get_replayable_transcript(response_id="resp-client") is None
+        # This dispatch is final. A new attempt requires its own claim.
+        assert not await repository.update_operation(
+            operation_id=operation_id,
+            expected_dispatch_generation=1,
+            state="acknowledged",
+            response_id="resp-next",
+            **authority,
+        )
+        next_attempt = await repository.claim_operation_dispatch(
+            operation_id=operation_id,
+            expected_dispatch_generation=1,
+            expected_response_id="resp-client",
+            **authority,
+        )
+        assert next_attempt is not None and next_attempt.dispatch_generation == 2
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=operation_id,
+            expected_dispatch_generation=1,
+            state="failed",
+            expected_response_id=None,
+            response_id=None,
+            **authority,
+        )
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            expected_dispatch_generation=2,
+            **authority,
+        )
+        recovery = await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            expected_dispatch_generation=2,
+            max_recovery_dispatches=1,
+            **authority,
+        )
+        assert recovery is not None and recovery.dispatch_generation == 3 and recovery.recovery_dispatch_count == 1
     finally:
         await session.close()
-
-    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
-    append_terminal_operation_event = coordinator.append_terminal_operation_event
-    settle_terminal_append_failure = coordinator.settle_terminal_append_failure
-    settlement_finished = asyncio.Event()
-
-    async def fail_terminal_append(**kwargs: Any) -> bool:
-        assert await append_terminal_operation_event(**kwargs)
-        raise RuntimeError("injected post-commit terminal append failure")
-
-    async def track_terminal_settlement(**kwargs: Any) -> bool:
-        try:
-            return await settle_terminal_append_failure(**kwargs)
-        finally:
-            settlement_finished.set()
-
-    monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
-    monkeypatch.setattr(coordinator, "settle_terminal_append_failure", track_terminal_settlement)
-    batcher = HttpBridgeOperationEventBatcher(
-        coordinator,
-        max_bytes=1024,
-        flush_interval_seconds=60.0,
-    )
-
-    append_result = await batcher.append_terminal_event(
-        operation_id=operation_id,
-        session_id=claim.id,
-        instance_id="inst-terminal-recovery",
-        owner_epoch=claim.owner_epoch,
-        event_text='data: {"type":"response.failed"}\n\n',
-        max_bytes=1024,
-        state="failed",
-        response_id="resp-terminal-recovery",
-    )
-    assert append_result.persisted is False
-    assert append_result.settlement_required is True
-    await batcher.settle_terminal_event(
-        operation_id=operation_id,
-        session_id=claim.id,
-        instance_id="inst-terminal-recovery",
-        owner_epoch=claim.owner_epoch,
-        state="failed",
-        expected_response_id="resp-terminal-recovery",
-        response_id="resp-terminal-recovery",
-    )
-    await asyncio.wait_for(settlement_finished.wait(), timeout=1.0)
-
-    recovery = DurableBridgeSessionCoordinator(async_session_factory)
-    observed = await recovery.get_operation_by_fingerprint(request_fingerprint=fingerprint)
-    assert observed is not None
-    assert observed.operation_id == operation_id
-    assert observed.session_id == claim.id
-    assert observed.account_id == "account-terminal-recovery"
-    assert observed.state == "failed"
-    assert observed.event_spool_complete is False
-    assert await recovery.get_operation_events(operation_id=operation_id) == [
-        'data: {"type":"response.created"}\n\n',
-        'data: {"type":"response.failed"}\n\n',
-    ]
-
-    retry = await recovery.record_operation(
-        operation_id=operation_id,
-        session_id=claim.id,
-        instance_id="inst-terminal-recovery",
-        owner_epoch=claim.owner_epoch,
-        request_fingerprint=fingerprint,
-        account_id="account-terminal-recovery",
-        model="gpt-5.6",
-        parent_response_id="resp-parent",
-    )
-    assert retry is not None
-    assert retry.state == "submitted"
-    await batcher.settle_terminal_event(
-        operation_id=operation_id,
-        session_id=claim.id,
-        instance_id="inst-terminal-recovery",
-        owner_epoch=claim.owner_epoch,
-        state="failed",
-        expected_response_id="resp-terminal-recovery",
-        response_id="resp-terminal-recovery",
-    )
-    after_stale_settlement = await recovery.get_operation(operation_id=operation_id)
-    assert after_stale_settlement is not None
-    assert after_stale_settlement.state == "submitted"
-    assert after_stale_settlement.response_id is None
-    await batcher.close()
 
 
 @pytest.mark.asyncio
@@ -2700,7 +2599,8 @@ async def test_late_terminal_append_cannot_restore_replay_after_failure_settleme
         )
         fingerprint = durable_bridge_hash(f"late-terminal-{spool_format}")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-late-terminal",
@@ -2717,6 +2617,7 @@ async def test_late_terminal_append_cannot_restore_replay_after_failure_settleme
             owner_epoch=claim.owner_epoch,
             state="acknowledged",
             response_id="resp-late-terminal",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.settle_terminal_append_failure(
             operation_id=operation_id,
@@ -2726,6 +2627,7 @@ async def test_late_terminal_append_cannot_restore_replay_after_failure_settleme
             state="completed",
             expected_response_id="resp-late-terminal",
             response_id="resp-late-terminal",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         append_terminal = (
@@ -2742,6 +2644,7 @@ async def test_late_terminal_append_cannot_restore_replay_after_failure_settleme
             max_bytes=1024,
             state="completed",
             response_id="resp-late-terminal",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         operation = await repository.get_operation(operation_id=operation_id)
@@ -2769,7 +2672,8 @@ async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
         )
         fingerprint = durable_bridge_hash(f"deferred-finalize-{spool_format}")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-deferred-finalize",
@@ -2786,6 +2690,7 @@ async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
             owner_epoch=claim.owner_epoch,
             state="acknowledged",
             response_id="resp-deferred-finalize",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         append_terminal = (
@@ -2795,6 +2700,7 @@ async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
         )
         assert await append_terminal(
             operation_id=operation_id,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
             session_id=claim.id,
             instance_id="inst-deferred-finalize",
             owner_epoch=claim.owner_epoch,
@@ -2817,6 +2723,8 @@ async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
             instance_id="inst-deferred-finalize",
             owner_epoch=claim.owner_epoch,
             expected_state="incomplete",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         assert await repository.finalize_operation_event_spool(
             operation_id=operation_id,
@@ -2824,6 +2732,8 @@ async def test_terminal_append_stays_incomplete_until_attempt_is_finalized(
             instance_id="inst-deferred-finalize",
             owner_epoch=claim.owner_epoch,
             expected_state="completed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         completed = await repository.get_operation(operation_id=operation_id)
         assert completed is not None
@@ -2846,7 +2756,8 @@ async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
         )
         fingerprint = durable_bridge_hash("duplicate-terminal")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-duplicate-terminal",
@@ -2863,6 +2774,7 @@ async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
             owner_epoch=claim.owner_epoch,
             state="acknowledged",
             response_id="resp-duplicate-terminal",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.append_terminal_operation_chunk(
             operation_id=operation_id,
@@ -2874,6 +2786,7 @@ async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
             state="completed",
             response_id="resp-duplicate-terminal",
             complete_spool=False,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         assert not await repository.append_terminal_operation_chunk(
@@ -2886,6 +2799,7 @@ async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
             state="failed",
             response_id="resp-conflicting-terminal",
             complete_spool=False,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         preserved = await repository.get_operation(operation_id=operation_id)
         assert preserved is not None
@@ -2898,6 +2812,8 @@ async def test_duplicate_terminal_chunk_preserves_pending_terminal_outcome(
             instance_id="inst-duplicate-terminal",
             owner_epoch=claim.owner_epoch,
             expected_state="completed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
     finally:
         await session.close()
@@ -2922,7 +2838,8 @@ async def test_consumed_recovery_checkpoint_does_not_rebind_failed_operation(
         )
         fingerprint = durable_bridge_hash("consumed-failed-operation")
         operation_id = durable_bridge_operation_id(original.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=original.id,
             instance_id="inst-consumed-original",
@@ -2941,9 +2858,11 @@ async def test_consumed_recovery_checkpoint_does_not_rebind_failed_operation(
             event_text='data: {"type":"response.failed"}\n\n',
             max_bytes=1024,
             state="failed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
-        existing = await repository.record_operation(
+        existing = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=replacement.id,
             instance_id="inst-consumed-replacement",
@@ -2977,7 +2896,8 @@ async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
         claim = await _claim(repository, instance_id="inst-operation-claim", session_key_value="sid-operation-claim")
         fingerprint = durable_bridge_hash("continuation-claim")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-claim",
@@ -2995,12 +2915,15 @@ async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
             owner_epoch=claim.owner_epoch,
             event_text='data: {"type":"response.output_text.delta"}\n\n',
             max_bytes=1024,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_response_id=await _operation_response_id(repository, operation_id),
         )
         assert await repository.mark_operation_unknown(
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-claim",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         assert await repository.claim_unknown_operation_for_recovery(
@@ -3008,6 +2931,7 @@ async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
             session_id=claim.id,
             instance_id="inst-operation-claim",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         claimed = await repository.get_operation(operation_id=operation_id)
         assert claimed is not None
@@ -3023,6 +2947,7 @@ async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
             session_id=claim.id,
             instance_id="inst-operation-claim",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
     finally:
         await session.close()
@@ -3042,7 +2967,8 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
         )
         fingerprint = durable_bridge_hash("continuation-one-shot")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-one-shot",
@@ -3058,6 +2984,7 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
             session_id=claim.id,
             instance_id="inst-operation-one-shot",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         assert await repository.claim_unknown_operation_for_recovery(
@@ -3066,6 +2993,7 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
             instance_id="inst-operation-one-shot",
             owner_epoch=claim.owner_epoch,
             max_recovery_dispatches=1,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         # A failed or ambiguous dispatch may return the operation to UNKNOWN,
         # but that must not refund the durable one-shot recovery budget.
@@ -3074,6 +3002,7 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
             session_id=claim.id,
             instance_id="inst-operation-one-shot",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert not await repository.claim_unknown_operation_for_recovery(
             operation_id=operation_id,
@@ -3081,6 +3010,7 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
             instance_id="inst-operation-one-shot",
             owner_epoch=claim.owner_epoch,
             max_recovery_dispatches=1,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         persisted = await repository.get_operation(operation_id=operation_id)
         assert persisted is not None
@@ -3104,7 +3034,8 @@ async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
         )
         fingerprint = durable_bridge_hash("continuation-refund")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        operation = await repository.record_operation(
+        operation = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-refund",
@@ -3120,6 +3051,7 @@ async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
             session_id=claim.id,
             instance_id="inst-operation-refund",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.claim_unknown_operation_for_recovery(
             operation_id=operation_id,
@@ -3127,6 +3059,7 @@ async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
             instance_id="inst-operation-refund",
             owner_epoch=claim.owner_epoch,
             max_recovery_dispatches=1,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
 
         # A cancellation before send_text() is proven pre-dispatch and must
@@ -3137,6 +3070,8 @@ async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
             instance_id="inst-operation-refund",
             owner_epoch=claim.owner_epoch,
             restore_recovery_dispatch_claim=True,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
+            expected_recovery_dispatch_count=1,
         )
         assert await repository.claim_unknown_operation_for_recovery(
             operation_id=operation_id,
@@ -3144,6 +3079,7 @@ async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
             instance_id="inst-operation-refund",
             owner_epoch=claim.owner_epoch,
             max_recovery_dispatches=1,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         persisted = await repository.get_operation(operation_id=operation_id)
         assert persisted is not None
@@ -3182,6 +3118,7 @@ async def test_pre_dispatch_operation_rollback_removes_only_empty_new_row(
             session_id=claim.id,
             instance_id="inst-operation-rollback",
             owner_epoch=claim.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.get_operation(operation_id=operation_id) is None
     finally:
@@ -3198,7 +3135,8 @@ async def test_operation_spool_purge_expires_stale_nonterminal_rows(
         claim = await _claim(repository, instance_id="inst-stale-operation", session_key_value="sid-stale-operation")
         fingerprint = durable_bridge_hash("stale-operation")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-stale-operation",
@@ -3210,12 +3148,12 @@ async def test_operation_spool_purge_expires_stale_nonterminal_rows(
             request_text='{"input":"stale"}',
         )
         stale_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
-        assert await repository.update_operation(
+        assert await repository.mark_operation_unknown(
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-stale-operation",
             owner_epoch=claim.owner_epoch,
-            state="unknown",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         encoded = encode_durable_bridge_transcript_chunk(("stale-event",))
         session.add(
@@ -3281,7 +3219,8 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         )
         fingerprint = durable_bridge_hash("operation-abandonment")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-abandonment",
@@ -3318,7 +3257,8 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
             session_key_value="sid-operation-abandonment",
             allow_takeover=True,
         )
-        existing = await repository.record_operation(
+        existing = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=successor.id,
             instance_id="inst-operation-abandonment-successor",
@@ -3339,6 +3279,7 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 owner_epoch=successor.owner_epoch,
                 state="completed",
                 response_id="resp-should-not-write",
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             is False
         )
@@ -3350,6 +3291,8 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 owner_epoch=successor.owner_epoch,
                 event_text="data: late\n\n",
                 max_bytes=1024,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                expected_response_id=await _operation_response_id(repository, operation_id),
             )
             is False
         )
@@ -3362,6 +3305,8 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                         instance_id="inst-operation-abandonment-successor",
                         owner_epoch=successor.owner_epoch,
                         event_text="data: late-batch\n\n",
+                        expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                        expected_response_id=await _operation_response_id(repository, operation_id),
                     )
                 ],
                 max_bytes=1024,
@@ -3377,6 +3322,7 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 event_text="data: late-terminal\n\n",
                 max_bytes=1024,
                 state="failed",
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             is False
         )
@@ -3386,8 +3332,9 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 session_id=successor.id,
                 instance_id="inst-operation-abandonment-successor",
                 owner_epoch=successor.owner_epoch,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
-            is False
+            is None
         )
         assert (
             await repository.reset_operation_event_spool(
@@ -3395,8 +3342,9 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 session_id=successor.id,
                 instance_id="inst-operation-abandonment-successor",
                 owner_epoch=successor.owner_epoch,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
-            is False
+            is None
         )
         assert (
             await repository.settle_terminal_append_failure(
@@ -3406,6 +3354,7 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
                 owner_epoch=successor.owner_epoch,
                 state="failed",
                 expected_response_id=None,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             is False
         )
@@ -3442,7 +3391,8 @@ async def test_sweep_never_abandons_terminal_rows_awaiting_spool_finalization(
         )
         fingerprint = durable_bridge_hash(f"terminal-finalize-{terminal_state}")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-terminal-finalize",
@@ -3516,7 +3466,8 @@ async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
         )
         fingerprint = durable_bridge_hash("chunk-abandonment")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-chunk-abandonment",
@@ -3535,6 +3486,8 @@ async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
                     instance_id="inst-chunk-abandonment",
                     owner_epoch=claim.owner_epoch,
                     event_text="created",
+                    expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                    expected_response_id=await _operation_response_id(repository, operation_id),
                 )
             ],
             max_bytes=1024,
@@ -3568,6 +3521,8 @@ async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
                         instance_id="inst-chunk-abandonment",
                         owner_epoch=claim.owner_epoch,
                         event_text="late-delta",
+                        expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                        expected_response_id=await _operation_response_id(repository, operation_id),
                     )
                 ],
                 max_bytes=1024,
@@ -3584,6 +3539,7 @@ async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-should-not-write",
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             is False
         )
@@ -3597,6 +3553,7 @@ async def test_abandoned_chunk_operation_fences_late_owner_chunk_writers(
                 event_text="x" * 2048,
                 max_bytes=1024,
                 state="failed",
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
             )
             is False
         )
@@ -3643,7 +3600,8 @@ async def test_durable_event_progress_fences_abandonment_cas(
         )
         fingerprint = durable_bridge_hash("operation-event-race")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-event-race",
@@ -3681,6 +3639,8 @@ async def test_durable_event_progress_fences_abandonment_cas(
                         owner_epoch=claim.owner_epoch,
                         event_text="data: response.in_progress\n\n",
                         max_bytes=1024,
+                        expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                        expected_response_id=await _operation_response_id(repository, operation_id),
                     )
                 else:
                     persisted_event = await repository.append_operation_events(
@@ -3691,6 +3651,8 @@ async def test_durable_event_progress_fences_abandonment_cas(
                                 instance_id="inst-operation-event-race",
                                 owner_epoch=claim.owner_epoch,
                                 event_text="data: response.in_progress\n\n",
+                                expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                                expected_response_id=await _operation_response_id(repository, operation_id),
                             )
                         ],
                         max_bytes=1024,
@@ -3755,7 +3717,8 @@ async def test_sweep_abandons_rows_whose_inactivity_clock_was_stamped_by_onupdat
         )
         fingerprint = durable_bridge_hash("onupdate-clock")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-onupdate-clock",
@@ -3771,6 +3734,7 @@ async def test_sweep_abandons_rows_whose_inactivity_clock_was_stamped_by_onupdat
             instance_id="inst-onupdate-clock",
             owner_epoch=claim.owner_epoch,
             state="acknowledged",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         if append_mode == "single":
             appended = await repository.append_operation_event(
@@ -3780,6 +3744,8 @@ async def test_sweep_abandons_rows_whose_inactivity_clock_was_stamped_by_onupdat
                 owner_epoch=claim.owner_epoch,
                 event_text="data: response.in_progress\n\n",
                 max_bytes=1024,
+                expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                expected_response_id=await _operation_response_id(repository, operation_id),
             )
         else:
             appended = await repository.append_operation_events(
@@ -3790,6 +3756,8 @@ async def test_sweep_abandons_rows_whose_inactivity_clock_was_stamped_by_onupdat
                         instance_id="inst-onupdate-clock",
                         owner_epoch=claim.owner_epoch,
                         event_text="data: response.in_progress\n\n",
+                        expected_dispatch_generation=await _operation_generation(repository, operation_id),
+                        expected_response_id=await _operation_response_id(repository, operation_id),
                     )
                 ],
                 max_bytes=1024,
@@ -3882,7 +3850,8 @@ async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pe
             fingerprint = durable_bridge_hash(f"operation-{label}")
             operation_id = durable_bridge_operation_id(claim.id, fingerprint)
             operation_ids[label] = operation_id
-            assert await repository.record_operation(
+            assert await _record_dispatched_operation(
+                repository,
                 operation_id=operation_id,
                 session_id=claim.id,
                 instance_id=instance_id,
@@ -3959,7 +3928,8 @@ async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
         unprotected_fingerprint = durable_bridge_hash("operation-oversized-unprotected")
         unprotected_operation_id = durable_bridge_operation_id(claim.id, unprotected_fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-operation-oversized-protection",
@@ -3969,7 +3939,8 @@ async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
             model="gpt-5.6",
             parent_response_id="resp-parent",
         )
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=unprotected_operation_id,
             session_id=claim.id,
             instance_id="inst-operation-oversized-protection",
@@ -4115,7 +4086,8 @@ async def test_operation_spool_retains_abandoned_row_until_retention_cutoff(
         )
         fingerprint = durable_bridge_hash("abandoned-retention")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-abandoned-retention",
@@ -4158,7 +4130,8 @@ async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset
         )
         fingerprint = durable_bridge_hash("cross-session-operation")
         operation_id = durable_bridge_operation_id(original.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=original.id,
             instance_id="inst-original-operation",
@@ -4175,7 +4148,8 @@ async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset
             .values(owner_instance_id=None, lease_expires_at=None)
         )
         await session.commit()
-        rebound = await repository.record_operation(
+        rebound = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=replacement.id,
             instance_id="inst-replacement-operation",
@@ -4192,6 +4166,7 @@ async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset
             session_id=replacement.id,
             instance_id="inst-replacement-operation",
             owner_epoch=replacement.owner_epoch,
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
     finally:
         await session.close()
@@ -4216,7 +4191,8 @@ async def test_nonterminal_operation_does_not_rebind_from_live_prior_owner(
         )
         fingerprint = durable_bridge_hash("live-cross-session-operation")
         operation_id = durable_bridge_operation_id(original.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=original.id,
             instance_id="inst-live-original-operation",
@@ -4227,7 +4203,8 @@ async def test_nonterminal_operation_does_not_rebind_from_live_prior_owner(
             parent_response_id="resp-parent",
         )
 
-        existing = await repository.record_operation(
+        existing = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=replacement.id,
             instance_id="inst-live-replacement-operation",
@@ -4267,7 +4244,8 @@ async def test_recovery_handoff_rebinds_operation_while_origin_journal_stays_fen
         )
         operation_fingerprint = durable_bridge_hash("recovery-handoff-operation")
         operation_id = durable_bridge_operation_id(original.id, operation_fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=original.id,
             instance_id=instance_id,
@@ -4296,7 +4274,8 @@ async def test_recovery_handoff_rebinds_operation_while_origin_journal_stays_fen
             request_fingerprint=recovery_fingerprint,
         )
 
-        rebound = await repository.record_operation(
+        rebound = await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=replacement.id,
             instance_id=instance_id,
@@ -4334,7 +4313,8 @@ async def test_startup_retains_completed_operation_session(
         claim = await _claim(repository, instance_id="inst-completed-retain", session_key_value="sid-completed-retain")
         fingerprint = durable_bridge_hash("completed-retain")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-completed-retain",
@@ -4351,6 +4331,7 @@ async def test_startup_retains_completed_operation_session(
             owner_epoch=claim.owner_epoch,
             state="completed",
             response_id="resp-completed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert await repository.purge_owned_sessions_on_startup(instance_id="inst-completed-retain") == 0
         retained = await repository.get_operation(operation_id=operation_id)
@@ -4372,7 +4353,8 @@ async def test_startup_retains_completed_operation_session_across_process_epoch(
         claim = await _claim(repository, instance_id="inst-epoch-retain", session_key_value="sid-epoch-retain")
         fingerprint = durable_bridge_hash("epoch-retain")
         operation_id = durable_bridge_operation_id(claim.id, fingerprint)
-        assert await repository.record_operation(
+        assert await _record_dispatched_operation(
+            repository,
             operation_id=operation_id,
             session_id=claim.id,
             instance_id="inst-epoch-retain",
@@ -4389,6 +4371,7 @@ async def test_startup_retains_completed_operation_session_across_process_epoch(
             owner_epoch=claim.owner_epoch,
             state="completed",
             response_id="resp-completed",
+            expected_dispatch_generation=await _operation_generation(repository, operation_id),
         )
         assert (
             await repository.purge_owned_sessions_on_startup(

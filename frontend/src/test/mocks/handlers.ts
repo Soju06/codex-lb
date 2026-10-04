@@ -164,6 +164,7 @@ const OauthStartPayloadSchema = z.looseObject({
 
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
+  allowedModels: z.array(z.string()).optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
@@ -2860,6 +2861,7 @@ export const handlers = [
       ...createApiKey({
         id: `key_${sequence}`,
         name: payload?.name ?? `API Key ${sequence}`,
+        allowedModels: payload?.allowedModels ?? null,
         accountAssignmentScopeEnabled:
           (payload?.assignedAccountIds?.length ?? 0) > 0,
         sourceAssignmentScopeEnabled:

@@ -34,3 +34,9 @@ The Codex client-version fallback is also retained across restarts. Bundled pric
 ---
 
 *Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*
+
+## Sorting account quota
+
+On the Accounts page, use the sort selector to order accounts by status or by remaining 5-hour, weekly, or monthly quota, in either direction. Unknown quota values stay last; zero means a known exhausted quota. The choice lasts while the page is open and does not change request routing. The default remains **Most reset credits**.
+
+Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture).

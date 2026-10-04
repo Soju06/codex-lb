@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_ACCOUNT_SORT_MODE, sortAccountsForDisplay } from "@/features/accounts/sorting";
+import { DEFAULT_ACCOUNT_SORT_MODE, sortAccountsForDisplay, type AccountSortMode } from "@/features/accounts/sorting";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { createAccountSummary } from "@/test/mocks/factories";
 
@@ -99,5 +99,39 @@ describe("sortAccountsForDisplay — most_reset_credits", () => {
       "acc-high",
       "acc-low",
     ]);
+  });
+});
+
+
+describe("status and remaining quota sorting", () => {
+  it.each([
+    ["quota_5h", "primaryRemainingPercent"],
+    ["quota_7d", "secondaryRemainingPercent"],
+    ["quota_monthly", "monthlyRemainingPercent"],
+  ] as const)("sorts %s in both directions with zero known and unknown last", (mode, field) => {
+    const accounts = [
+      createAccountSummary({ accountId: "unknown", usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, [field]: null } }),
+      createAccountSummary({ accountId: "zero", usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, [field]: 0 } }),
+      createAccountSummary({ accountId: "high", usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, [field]: 80 } }),
+    ];
+    expect(sortAccountsForDisplay(accounts, BOTH, `${mode}_asc` as AccountSortMode).map(a => a.accountId)).toEqual(["zero", "high", "unknown"]);
+    expect(sortAccountsForDisplay(accounts, BOTH, `${mode}_desc` as AccountSortMode).map(a => a.accountId)).toEqual(["high", "zero", "unknown"]);
+    expect(accounts.map(a => a.accountId)).toEqual(["unknown", "zero", "high"]);
+  });
+
+  it("orders all statuses and reverses their priority", () => {
+    const statuses = ["active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"] as const;
+    const accounts = statuses.map(status => createAccountSummary({ accountId: status, status })).reverse();
+    expect(sortAccountsForDisplay(accounts, BOTH, "status_asc").map(a => a.status)).toEqual(statuses);
+    expect(sortAccountsForDisplay(accounts, BOTH, "status_desc").map(a => a.status)).toEqual([...statuses].reverse());
+  });
+
+  it("uses existing name and ID tie breakers for equal and missing quotas", () => {
+    const accounts = [
+      createAccountSummary({ accountId: "z", displayName: "Beta", resetAtPrimary: null, resetAtSecondary: null, usage: null }),
+      createAccountSummary({ accountId: "b", displayName: "Alpha", resetAtPrimary: null, resetAtSecondary: null, usage: null }),
+      createAccountSummary({ accountId: "a", displayName: "Alpha", resetAtPrimary: null, resetAtSecondary: null, usage: null }),
+    ];
+    expect(sortAccountsForDisplay(accounts, BOTH, "quota_monthly_desc").map(a => a.accountId)).toEqual(["a", "b", "z"]);
   });
 });

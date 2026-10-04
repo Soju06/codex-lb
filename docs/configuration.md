@@ -37,3 +37,9 @@ This is the placement rule for new and migrated settings. Environment-only value
 ---
 
 *Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations) · [configuration-tiers](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/configuration-tiers)*
+
+## Reset-credit expiry warning
+
+On the Accounts page, a red dot beside the available-credit count marks a credit expiring within the next three days. Its tooltip describes the warning. The dot updates as time passes and disappears after expiry or when no credits remain. It follows the existing reset-credit count and expiry badge visibility settings; it does not enable automatic redemption.
+
+Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture).

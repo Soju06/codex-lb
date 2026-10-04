@@ -187,6 +187,7 @@ export function AccountsPage() {
                 sortMode={accountSortMode}
                 onSortModeChange={setAccountSortMode}
                 showResetCreditBadges={showResetCreditBadges}
+                showResetCreditExpiryBadge={showResetCreditExpiryBadge}
                 onOpenImport={() => importDialog.show()}
                 onOpenOauth={() => {
                   setOauthAccountId(null);

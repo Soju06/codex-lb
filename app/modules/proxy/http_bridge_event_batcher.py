@@ -12,6 +12,7 @@ from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEv
 logger = logging.getLogger("app.modules.proxy.http_bridge_event_batcher")
 
 _TERMINAL_APPEND_TIMEOUT_SECONDS = 1.0
+_OperationKey = tuple[str, int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,8 @@ class _PendingOperationEvent:
     instance_id: str
     owner_epoch: int
     event_text: str
+    expected_dispatch_generation: int | None = None
+    expected_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,16 +98,16 @@ class HttpBridgeOperationEventBatcher:
         self._max_pending_bytes = max_pending_bytes
         self._spool_format = spool_format
         self._terminal_append_timeout_seconds = terminal_append_timeout_seconds
-        self._pending: dict[str, list[_PendingOperationEvent]] = {}
-        self._contexts: dict[str, _PendingOperationEvent] = {}
-        self._dropped_operations: set[str] = set()
-        self._closing_operations: set[str] = set()
+        self._pending: dict[_OperationKey, list[_PendingOperationEvent]] = {}
+        self._contexts: dict[_OperationKey, _PendingOperationEvent] = {}
+        self._dropped_operations: set[_OperationKey] = set()
+        self._closing_operations: set[_OperationKey] = set()
         # Attempt token per operation. A terminal append that outlived its
         # bound still runs its own cleanup when the durable layer finally
         # releases it; by then a later attempt may own the in-memory state for
         # the same operation id, so cleanup is fenced on the attempt that
         # registered it instead of clearing whatever is there now.
-        self._operation_attempts: dict[str, int] = {}
+        self._operation_attempts: dict[_OperationKey, int] = {}
         self._attempt_counter = 0
         self._pending_count = 0
         self._pending_bytes = 0
@@ -124,29 +127,34 @@ class HttpBridgeOperationEventBatcher:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
+        expected_response_id: str | None = None,
         event_text: str,
         terminal: bool = False,
     ) -> None:
+        operation_key = (operation_id, expected_dispatch_generation)
         self._ensure_task()
         pending = _PendingOperationEvent(
             operation_id=operation_id,
             session_id=session_id,
             instance_id=instance_id,
             owner_epoch=owner_epoch,
+            expected_dispatch_generation=expected_dispatch_generation,
+            expected_response_id=expected_response_id,
             event_text=event_text,
         )
         async with self._lock:
-            self._contexts.setdefault(operation_id, pending)
+            self._contexts.setdefault(operation_key, pending)
             if terminal:
-                self._closing_operations.add(operation_id)
-            if operation_id not in self._dropped_operations:
+                self._closing_operations.add(operation_key)
+            if operation_key not in self._dropped_operations:
                 event_bytes = len(event_text.encode("utf-8"))
                 if (
                     self._pending_count >= self._max_pending_events
                     or self._pending_bytes + event_bytes > self._max_pending_bytes
                 ):
-                    self._dropped_operations.add(operation_id)
-                    dropped = self._pending.pop(operation_id, [])
+                    self._dropped_operations.add(operation_key)
+                    dropped = self._pending.pop(operation_key, [])
                     self._pending_count -= len(dropped)
                     self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in dropped)
                     logger.info(
@@ -154,12 +162,14 @@ class HttpBridgeOperationEventBatcher:
                         operation_id,
                     )
                 else:
-                    self._pending.setdefault(operation_id, []).append(pending)
+                    self._pending.setdefault(operation_key, []).append(pending)
                     self._pending_count += 1
                     self._pending_bytes += event_bytes
         self._wake.set()
         if terminal:
-            await self.flush_operation(operation_id=operation_id)
+            await self.flush_operation(
+                operation_id=operation_id, expected_dispatch_generation=expected_dispatch_generation
+            )
 
     def _ensure_task(self) -> None:
         if self._task is None or self._task.done():
@@ -176,11 +186,11 @@ class HttpBridgeOperationEventBatcher:
             for operation_id in operation_ids:
                 await self._flush_one(operation_id)
 
-    async def _operation_ids_to_flush(self) -> list[str]:
+    async def _operation_ids_to_flush(self) -> list[_OperationKey]:
         async with self._lock:
             return [operation_id for operation_id in self._pending if operation_id not in self._closing_operations]
 
-    async def _take_batch(self, operation_id: str) -> list[_PendingOperationEvent]:
+    async def _take_batch(self, operation_id: _OperationKey) -> list[_PendingOperationEvent]:
         async with self._lock:
             pending = self._pending.get(operation_id, [])
             batch = pending[: self._batch_size]
@@ -192,7 +202,7 @@ class HttpBridgeOperationEventBatcher:
                 self._pending.pop(operation_id, None)
             return batch
 
-    async def _flush_one(self, operation_id: str) -> None:
+    async def _flush_one(self, operation_id: _OperationKey) -> None:
         async with self._flush_lock:
             batch = await self._take_batch(operation_id)
             if not batch:
@@ -207,6 +217,8 @@ class HttpBridgeOperationEventBatcher:
                         session_id=item.session_id,
                         instance_id=item.instance_id,
                         owner_epoch=item.owner_epoch,
+                        expected_dispatch_generation=item.expected_dispatch_generation,
+                        expected_response_id=item.expected_response_id,
                         event_text=item.event_text,
                     )
                     for item in batch
@@ -241,14 +253,15 @@ class HttpBridgeOperationEventBatcher:
                     exc_info=True,
                 )
 
-    async def flush_operation(self, *, operation_id: str) -> None:
-        await self.flush_pending_operation(operation_id=operation_id)
+    async def flush_operation(self, *, operation_id: str, expected_dispatch_generation: int | None = None) -> None:
+        operation_key = (operation_id, expected_dispatch_generation)
+        await self._flush_pending_operation_key(operation_key)
         async with self._lock:
-            dropped = operation_id in self._dropped_operations
-            context = self._contexts.get(operation_id)
-            self._closing_operations.discard(operation_id)
-            self._contexts.pop(operation_id, None)
-            self._dropped_operations.discard(operation_id)
+            dropped = operation_key in self._dropped_operations
+            context = self._contexts.get(operation_key)
+            self._closing_operations.discard(operation_key)
+            self._contexts.pop(operation_key, None)
+            self._dropped_operations.discard(operation_key)
         if dropped or context is None:
             return
         # A single final marker is the only synchronous database operation on
@@ -260,6 +273,8 @@ class HttpBridgeOperationEventBatcher:
                 session_id=context.session_id,
                 instance_id=context.instance_id,
                 owner_epoch=context.owner_epoch,
+                expected_dispatch_generation=context.expected_dispatch_generation,
+                expected_response_id=context.expected_response_id,
             )
             if not finalized:
                 logger.debug(
@@ -280,6 +295,7 @@ class HttpBridgeOperationEventBatcher:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         event_text: str,
         max_bytes: int,
         state: str,
@@ -287,24 +303,26 @@ class HttpBridgeOperationEventBatcher:
         response_id: str | None = None,
     ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
+        operation_key = (operation_id, expected_dispatch_generation)
         async with self._lock:
             self._contexts.setdefault(
-                operation_id,
+                operation_key,
                 _PendingOperationEvent(
                     operation_id=operation_id,
                     session_id=session_id,
                     instance_id=instance_id,
                     owner_epoch=owner_epoch,
+                    expected_dispatch_generation=expected_dispatch_generation,
                     event_text=event_text,
                 ),
             )
-            self._closing_operations.add(operation_id)
+            self._closing_operations.add(operation_key)
             self._attempt_counter += 1
             attempt = self._attempt_counter
-            self._operation_attempts[operation_id] = attempt
+            self._operation_attempts[operation_key] = attempt
         append_task = asyncio.create_task(
             self._append_terminal_event_unbounded(
-                operation_id=operation_id,
+                operation_id=operation_key,
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
@@ -323,11 +341,11 @@ class HttpBridgeOperationEventBatcher:
             )
         except asyncio.CancelledError:
             append_task.cancel()
-            await self._clear_operation(operation_id, attempt=attempt)
+            await self._clear_operation(operation_key, attempt=attempt)
             raise
         if append_task in done:
             if append_task.cancelled():
-                await self._clear_operation(operation_id, attempt=attempt)
+                await self._clear_operation(operation_key, attempt=attempt)
                 return TerminalOperationEventAppendResult(
                     persisted=False,
                     settlement_required=True,
@@ -339,12 +357,14 @@ class HttpBridgeOperationEventBatcher:
                     session_id=session_id,
                     instance_id=instance_id,
                     owner_epoch=owner_epoch,
+                    expected_dispatch_generation=expected_dispatch_generation,
                     expected_state=state,
+                    expected_response_id=response_id,
                 )
             return append_result
 
         append_task.cancel()
-        await self._clear_operation(operation_id, attempt=attempt)
+        await self._clear_operation(operation_key, attempt=attempt)
         logger.info(
             "Timed out persisting HTTP bridge terminal transcript operation_id=%s timeout_seconds=%.1f",
             operation_id,
@@ -358,7 +378,7 @@ class HttpBridgeOperationEventBatcher:
     async def _append_terminal_event_unbounded(
         self,
         *,
-        operation_id: str,
+        operation_id: _OperationKey,
         event_text: str,
         max_bytes: int,
         state: str,
@@ -367,7 +387,7 @@ class HttpBridgeOperationEventBatcher:
         attempt: int,
     ) -> TerminalOperationEventAppendResult:
         try:
-            await self.flush_pending_operation(operation_id=operation_id)
+            await self._flush_pending_operation_key(operation_id)
             async with self._lock:
                 context = self._contexts.get(operation_id)
                 dropped = operation_id in self._dropped_operations
@@ -377,10 +397,11 @@ class HttpBridgeOperationEventBatcher:
                 return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
             if self._spool_format == HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2:
                 persisted = await self._durable_bridge.append_terminal_operation_chunk(
-                    operation_id=operation_id,
+                    operation_id=context.operation_id,
                     session_id=context.session_id,
                     instance_id=context.instance_id,
                     owner_epoch=context.owner_epoch,
+                    expected_dispatch_generation=context.expected_dispatch_generation,
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,
@@ -390,10 +411,11 @@ class HttpBridgeOperationEventBatcher:
                 )
             else:
                 persisted = await self._durable_bridge.append_terminal_operation_event(
-                    operation_id=operation_id,
+                    operation_id=context.operation_id,
                     session_id=context.session_id,
                     instance_id=context.instance_id,
                     owner_epoch=context.owner_epoch,
+                    expected_dispatch_generation=context.expected_dispatch_generation,
                     event_text=event_text,
                     max_bytes=max_bytes,
                     state=state,
@@ -421,7 +443,7 @@ class HttpBridgeOperationEventBatcher:
         finally:
             await self._clear_operation(operation_id, attempt=attempt)
 
-    async def _clear_operation(self, operation_id: str, *, attempt: int) -> None:
+    async def _clear_operation(self, operation_id: _OperationKey, *, attempt: int) -> None:
         async with self._lock:
             if self._operation_attempts.get(operation_id) != attempt:
                 # A newer terminal attempt already owns this operation's
@@ -458,6 +480,8 @@ class HttpBridgeOperationEventBatcher:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
+        expected_response_id: str | None = None,
         expected_state: str,
     ) -> None:
         finalize_task = asyncio.create_task(
@@ -466,6 +490,8 @@ class HttpBridgeOperationEventBatcher:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
+                expected_response_id=expected_response_id,
                 expected_state=expected_state,
             ),
             name=f"http-bridge-terminal-spool-finalize-{operation_id}",
@@ -480,6 +506,8 @@ class HttpBridgeOperationEventBatcher:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
+        expected_response_id: str | None = None,
         expected_state: str,
     ) -> None:
         try:
@@ -488,6 +516,8 @@ class HttpBridgeOperationEventBatcher:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
+                expected_response_id=expected_response_id,
                 expected_state=expected_state,
             )
             if not finalized:
@@ -512,6 +542,7 @@ class HttpBridgeOperationEventBatcher:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         state: str,
         expected_response_id: str | None,
         expected_recovery_dispatch_count: int | None = None,
@@ -525,6 +556,7 @@ class HttpBridgeOperationEventBatcher:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 state=state,
                 expected_response_id=expected_response_id,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
@@ -543,7 +575,12 @@ class HttpBridgeOperationEventBatcher:
                 exc_info=True,
             )
 
-    async def flush_pending_operation(self, *, operation_id: str) -> bool:
+    async def flush_pending_operation(
+        self, *, operation_id: str, expected_dispatch_generation: int | None = None
+    ) -> bool:
+        return await self._flush_pending_operation_key((operation_id, expected_dispatch_generation))
+
+    async def _flush_pending_operation_key(self, operation_id: _OperationKey) -> bool:
         """Drain queued events while retaining the operation context."""
         while True:
             await self._flush_one(operation_id)
@@ -562,18 +599,24 @@ class HttpBridgeOperationEventBatcher:
         write is still in flight.
         """
         async with self._lock:
-            return set(self._pending) | set(self._contexts) | set(self._closing_operations)
+            return {key[0] for key in set(self._pending) | set(self._contexts) | set(self._closing_operations)}
 
-    async def discard_operation(self, *, operation_id: str) -> None:
-        """Drop an abandoned nonterminal context without finalizing its spool."""
+    async def discard_operation(self, *, operation_id: str, expected_dispatch_generation: int | None = None) -> None:
+        """Discard a dispatch buffer, or all generations abandoned by maintenance."""
         async with self._flush_lock:
             async with self._lock:
-                pending = self._pending.pop(operation_id, [])
-                self._pending_count -= len(pending)
-                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
-                self._contexts.pop(operation_id, None)
-                self._closing_operations.discard(operation_id)
-                self._dropped_operations.discard(operation_id)
+                keys = set(self._pending) | set(self._contexts) | set(self._closing_operations)
+                for key in keys:
+                    if key[0] != operation_id:
+                        continue
+                    if expected_dispatch_generation is not None and key[1] != expected_dispatch_generation:
+                        continue
+                    pending = self._pending.pop(key, [])
+                    self._pending_count -= len(pending)
+                    self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                    self._contexts.pop(key, None)
+                    self._closing_operations.discard(key)
+                    self._dropped_operations.discard(key)
 
     async def close(self) -> None:
         task = self._task

@@ -57,6 +57,7 @@
   "accounts.sort.name_desc": "Name (Z-A)",
   "accounts.sort.reset_latest": "Reset time (latest)",
   "accounts.sort.reset_soonest": "Reset time (soonest)",
+  "accounts.listItem.resetExpiringSoon": "Reset credit expires within 3 days",
   "accounts.listItem.noAttempts": "No attempts",
   "accounts.listItem.quotaRemainingAria": "{{label}} quota remaining",
   "accounts.listItem.resetAt": "Reset {{label}}",

@@ -28,6 +28,7 @@ export type AccountListItemProps = {
   selected: boolean;
   showAccountId?: boolean;
   showResetCreditBadge?: boolean;
+  resetCreditExpiresSoon?: boolean;
   onSelect: (accountId: string) => void;
 };
 
@@ -36,6 +37,7 @@ export function AccountListItem({
   selected,
   showAccountId = false,
   showResetCreditBadge = true,
+  resetCreditExpiresSoon = false,
   onSelect,
 }: AccountListItemProps) {
   const { t } = useTranslation();
@@ -103,7 +105,15 @@ export function AccountListItem({
       )}
     >
       {showResetCreditBadge && availableResetCredits > 0 ? (
-        <span className="absolute -top-1 -right-1 grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+        <span className="absolute -top-1 -right-1 flex h-5 min-w-[1.25rem] items-center justify-center gap-1 rounded-full bg-primary px-1 text-[10px] font-medium text-primary-foreground">
+          {resetCreditExpiresSoon ? (
+            <span
+              role="img"
+              aria-label={t("accounts.listItem.resetExpiringSoon")}
+              title={t("accounts.listItem.resetExpiringSoon")}
+              className="size-1.5 rounded-full bg-destructive ring-1 ring-card"
+            />
+          ) : null}
           {resetBadgeLabel}
         </span>
       ) : null}

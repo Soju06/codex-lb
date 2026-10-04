@@ -418,6 +418,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _prepare_websocket_request_state_for_auth_replay,
     _record_or_defer_websocket_accepted_replay_health,
     _record_websocket_continuity_completion,
+    _record_websocket_empty_prewarm_completion,
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
     _release_websocket_response_create_gate,
@@ -6086,12 +6087,19 @@ class _WebSocketMixin:
             and completed_usage is not None
             and completed_usage.output_tokens == 0
         )
-        if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
-            _record_websocket_continuity_completion(
-                continuity_state,
-                request_state=request_state,
-                response_id=response_id,
-            )
+        if event_type == "response.completed" and continuity_state is not None:
+            if completed_empty_prewarm:
+                _record_websocket_empty_prewarm_completion(
+                    continuity_state,
+                    request_state=request_state,
+                    response_id=response_id,
+                )
+            else:
+                _record_websocket_continuity_completion(
+                    continuity_state,
+                    request_state=request_state,
+                    response_id=response_id,
+                )
 
         if request_state is not None and event_type in {"response.failed", "error"}:
             if event_type == "error":

@@ -416,12 +416,21 @@ def _text_with_thread_cache_identity(text_data: str, identity: ThreadCacheIdenti
     return json.dumps(frame, ensure_ascii=True, separators=(",", ":"))
 
 
+def _new_http_bridge_operation_id(session_id: str, request_fingerprint: str) -> str:
+    # Fingerprints deduplicate retained operations. A fresh row needs a fresh
+    # identity so retention cannot recreate generation 1 under an old key.
+    return durable_bridge_operation_id(session_id, f"{request_fingerprint}:{uuid4().hex}")
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
     text_data: str,
     *,
     on_send_started: Callable[[], None] | None = None,
+    durable_bridge: Any | None = None,
+    allow_admitted_initial: bool = False,
+    allow_account_rebind: bool = False,
     clock: Clock = REAL_CLOCK,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
@@ -430,12 +439,43 @@ async def _send_http_bridge_request_text_with_archive_id(
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    if request_state.operation_id is not None:
+        if not request_state.operation_dispatch_claim_pending:
+            if durable_bridge is None or session.durable_session_id is None or session.durable_owner_epoch is None:
+                raise ProxyResponseError(
+                    502, openai_error("bridge_continuity_persistence_failed", "Operation dispatch fence unavailable.")
+                )
+            claim = await durable_bridge.claim_operation_dispatch(
+                operation_id=request_state.operation_id,
+                session_id=session.durable_session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=session.durable_owner_epoch,
+                expected_dispatch_generation=request_state.operation_dispatch_generation,
+                allow_admitted_initial=allow_admitted_initial,
+                dispatch_account_id=session.account.id,
+                allow_account_rebind=allow_account_rebind,
+                expected_response_id=request_state.operation_persisted_response_id,
+            )
+            if claim is None:
+                raise ProxyResponseError(
+                    502, openai_error("bridge_continuity_persistence_failed", "Operation dispatch claim rejected.")
+                )
+            request_state.operation_dispatch_generation = claim.dispatch_generation
+        if request_state.operation_dispatch_generation is None or request_state.operation_dispatch_generation <= 0:
+            raise ProxyResponseError(
+                502, openai_error("bridge_continuity_persistence_failed", "Legacy operation cannot be dispatched.")
+            )
+        request_state.operation_dispatch_claim_pending = False
+        request_state.operation_persisted_response_id = None
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
     try:
         request_state.response_create_attempt_count += 1
-        attempt = _HTTPBridgeResponseCreateAttempt(ordinal=request_state.response_create_attempt_count)
+        attempt = _HTTPBridgeResponseCreateAttempt(
+            ordinal=request_state.response_create_attempt_count,
+            operation_dispatch_generation=request_state.operation_dispatch_generation,
+        )
         request_state.response_create_attempt = attempt
         request_state.response_create_sent_at = clock.monotonic()
         session.upstream_reader_wakeup.set()
@@ -1312,7 +1352,7 @@ class _HTTPBridgeRequestSubmitMixin:
             operation_id = (
                 request_state.operation_id
                 if request_state.operation_rebind_required and request_state.operation_id is not None
-                else durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
+                else _new_http_bridge_operation_id(session.durable_session_id, operation_fingerprint)
             )
             operation_parent_response_id = (
                 request_state.operation_parent_response_id
@@ -1383,7 +1423,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             api_key_scope=api_key_scope,
                             request_text=_text_without_account_installation_id(text_data),
                         )
-                        operation_id = durable_bridge_operation_id(
+                        operation_id = _new_http_bridge_operation_id(
                             session.durable_session_id,
                             operation_fingerprint,
                         )
@@ -1438,7 +1478,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                     api_key_scope=api_key_scope,
                                     request_text=_text_without_account_installation_id(text_data),
                                 )
-                                operation_id = durable_bridge_operation_id(
+                                operation_id = _new_http_bridge_operation_id(
                                     session.durable_session_id,
                                     operation_fingerprint,
                                 )
@@ -1460,6 +1500,10 @@ class _HTTPBridgeRequestSubmitMixin:
                         if request_state.recovery_attempt_claimed
                         else None,
                         "recovery_attempt_consumed": recovery_attempt_consumed,
+                        "allow_admitted_initial": owned_unanchored_handoff,
+                        "expected_rebind_dispatch_generation": request_state.operation_dispatch_generation
+                        if request_state.operation_dispatch_claim_pending
+                        else None,
                     },
                     operation_id=operation_id,
                     session_id=session.durable_session_id,
@@ -1470,7 +1514,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     account_id=session.account.id,
                     model=request_state.model,
                     parent_response_id=operation_parent_response_id,
-                    request_text=text_data,
+                    request_text=operation_tagged_text,
                 )
             except Exception as exc:
                 session.closed = True
@@ -1585,6 +1629,8 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_parent_response_id = operation_parent_response_id
             request_state.operation_registered = True
             request_state.operation_rebind_required = False
+            request_state.operation_dispatch_generation = operation.dispatch_generation
+            request_state.operation_dispatch_claim_pending = bool(getattr(operation, "rebound", False))
             request_state.operation_created = operation.created
             request_state.operation_rebound = getattr(operation, "rebound", False)
             request_state.operation_rebound_from_session_id = getattr(operation, "rebound_from_session_id", None)
@@ -1594,6 +1640,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 operation, "rebound_from_parent_response_id", None
             )
             request_state.operation_persisted_response_id = getattr(operation, "response_id", None)
+            # Keep retry proofs on the request body. Dispatch-only operation
+            # and cache metadata are persisted above and added at the final
+            # send boundary, rather than becoming account-bound replay input.
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (
@@ -2205,6 +2254,8 @@ class _HTTPBridgeRequestSubmitMixin:
                             text_data,
                             on_send_started=mark_upstream_send_started,
                             clock=clock,
+                            durable_bridge=self._durable_bridge,
+                            allow_admitted_initial=owned_unanchored_handoff,
                         )
                     except BaseException as exc:
                         request_state.recovery_attempt_dispatched = upstream_send_started
@@ -2226,6 +2277,15 @@ class _HTTPBridgeRequestSubmitMixin:
                             # Keep it inside lifecycle_lock with the failing
                             # send so the reader cannot observe an ownership gap.
                             session.claim_liveness_settlement()
+                        else:
+                            # The submitter settles this failed send. Claim it
+                            # before UNKNOWN persistence can yield to reader
+                            # failure fan-out and log/finalize it a second time.
+                            # Cleanup retains responsibility for its queue count.
+                            async with session.pending_lock:
+                                if request_state in session.pending_requests:
+                                    session.pending_requests.remove(request_state)
+                                    request_enqueued = False
                         raise
                     request_state.recovery_attempt_dispatched = True
                     request_state.operation_dispatched = request_state.operation_id is not None
@@ -2354,6 +2414,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 session_id=session.durable_session_id,
                                 instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                                 owner_epoch=session.durable_owner_epoch,
+                                expected_dispatch_generation=request_state.operation_dispatch_generation,
                             )
                         except Exception:
                             logger.warning(
@@ -2556,7 +2617,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_enqueued = True
                     warmup_send_started = True
                     await _send_http_bridge_request_text_with_archive_id(
-                        session, warmup_state, warmup_text, clock=clock
+                        session, warmup_state, warmup_text, clock=clock, durable_bridge=self._durable_bridge
                     )
                 while True:
                     try:
@@ -2740,6 +2801,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         session_id=session.durable_session_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                         owner_epoch=session.durable_owner_epoch,
+                        expected_dispatch_generation=request_state.operation_dispatch_generation,
                     )
                 except Exception:
                     rolled_back = False
@@ -3688,7 +3750,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     request_state.request_text = retry_text_data
                 await _send_http_bridge_request_text_with_archive_id(
-                    session, request_state, retry_text_data, clock=clock
+                    session, request_state, retry_text_data, clock=clock, durable_bridge=self._durable_bridge
                 )
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = clock.monotonic()
@@ -4132,7 +4194,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text, clock=clock)
+            await _send_http_bridge_request_text_with_archive_id(
+                session,
+                request_state,
+                request_text,
+                clock=clock,
+                durable_bridge=self._durable_bridge,
+                allow_account_rebind=not account_bound_replay and request_state.previous_response_id is None,
+            )
             session.last_used_at = clock.monotonic()
             request_state.clean_close_retry_result = True
             return True
@@ -4246,7 +4315,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 require_preferred_account=bound_to_current_account,
             )
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
-            await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text, clock=clock)
+            await _send_http_bridge_request_text_with_archive_id(
+                session, request_state, request_text, clock=clock, durable_bridge=self._durable_bridge
+            )
             session.last_used_at = clock.monotonic()
             return "retried"
         except UpstreamWebSocketTransportError:
@@ -4436,6 +4507,8 @@ class _HTTPBridgeRequestSubmitMixin:
                             "Security-work recovery operation could not be re-fenced; retry the request.",
                         ),
                     )
+                request_state.operation_dispatch_generation = rebound_operation.dispatch_generation
+                request_state.operation_dispatch_claim_pending = bool(rebound_operation.rebound)
                 operation_rebound_for_retry = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(
@@ -4444,6 +4517,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 retry_text,
                 on_send_started=mark_security_retry_send_started,
                 clock=clock,
+                durable_bridge=self._durable_bridge,
             )
             session.last_used_at = clock.monotonic()
             return True
@@ -4466,6 +4540,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=session.durable_session_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                             owner_epoch=session.durable_owner_epoch,
+                            expected_dispatch_generation=request_state.operation_dispatch_generation,
                             state="failed",
                         )
                         if not restored:

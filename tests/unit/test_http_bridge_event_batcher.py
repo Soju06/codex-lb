@@ -234,6 +234,7 @@ async def _enqueue(
         owner_epoch=1,
         event_text=text,
         terminal=terminal,
+        expected_dispatch_generation=1,
     )
 
 
@@ -325,6 +326,7 @@ async def test_chunk_mode_routes_batch_and_terminal_without_legacy_writes() -> N
             max_bytes=1024,
             state="completed",
             response_id="resp-1",
+            expected_dispatch_generation=1,
         )
 
         assert result.persisted is True
@@ -383,6 +385,7 @@ async def test_dropped_batch_requires_fenced_terminal_settlement() -> None:
             event_text="terminal",
             max_bytes=1024,
             state="failed",
+            expected_dispatch_generation=1,
         )
         assert result.persisted is False
         assert result.settlement_required is True
@@ -412,6 +415,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
         max_bytes=1024,
         state="failed",
         response_id="resp-1",
+        expected_dispatch_generation=1,
     )
 
     assert result.persisted is False
@@ -424,6 +428,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
         state="failed",
         expected_response_id="resp-upstream-1",
         response_id="resp-1",
+        expected_dispatch_generation=1,
     )
     await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
     assert durable.updated == [
@@ -433,6 +438,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
             "instance_id": "instance-1",
             "owner_epoch": 7,
             "state": "failed",
+            "expected_dispatch_generation": 1,
             "expected_response_id": "resp-upstream-1",
             "expected_recovery_dispatch_count": None,
             "alternate_expected_response_id": None,
@@ -460,6 +466,7 @@ async def test_terminal_append_false_requires_fallback_settlement() -> None:
         max_bytes=1024,
         state="failed",
         response_id="resp-1",
+        expected_dispatch_generation=1,
     )
 
     assert result.persisted is False
@@ -488,6 +495,7 @@ async def test_stalled_terminal_append_is_bounded_and_requires_settlement(spool_
             max_bytes=1024,
             state="completed",
             response_id="resp-1",
+            expected_dispatch_generation=1,
         ),
         timeout=1.0,
     )
@@ -522,6 +530,7 @@ async def test_cancellation_resistant_terminal_append_does_not_extend_delivery_b
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-1",
+                expected_dispatch_generation=1,
             ),
             timeout=0.1,
         )
@@ -564,6 +573,7 @@ async def test_late_success_cannot_finalize_terminal_spool(spool_format: str) ->
             max_bytes=1024,
             state="completed",
             response_id="resp-1",
+            expected_dispatch_generation=1,
         )
 
         assert result.persisted is False
@@ -591,11 +601,11 @@ async def test_context_discarded_during_terminal_drain_requires_settlement(
         flush_interval_seconds=60.0,
     )
 
-    async def discard_during_drain(*, operation_id: str) -> bool:
-        await batcher.discard_operation(operation_id=operation_id)
+    async def discard_during_drain(operation_key: tuple[str, int | None]) -> bool:
+        await batcher.discard_operation(operation_id=operation_key[0])
         return True
 
-    monkeypatch.setattr(batcher, "flush_pending_operation", discard_during_drain)
+    monkeypatch.setattr(batcher, "_flush_pending_operation_key", discard_during_drain)
     result = await batcher.append_terminal_event(
         operation_id="op-1",
         session_id="session-1",
@@ -605,6 +615,7 @@ async def test_context_discarded_during_terminal_drain_requires_settlement(
         max_bytes=1024,
         state="failed",
         response_id="resp-1",
+        expected_dispatch_generation=1,
     )
 
     assert result.persisted is False
@@ -631,6 +642,7 @@ async def test_close_turns_cancelled_terminal_append_into_settlement_required() 
             max_bytes=1024,
             state="completed",
             response_id="resp-1",
+            expected_dispatch_generation=1,
         )
     )
 
@@ -669,6 +681,7 @@ async def test_stalled_pending_drain_is_bounded_and_requires_settlement(spool_fo
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-1",
+                expected_dispatch_generation=1,
             ),
             timeout=1.0,
         )
@@ -707,6 +720,7 @@ async def test_late_background_failure_after_terminal_timeout_does_not_leak_drop
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-1",
+                expected_dispatch_generation=1,
             ),
             timeout=1.0,
         )
@@ -741,6 +755,7 @@ async def test_terminal_append_failure_reports_fenced_settlement(
         event_text="terminal",
         max_bytes=1024,
         state="failed",
+        expected_dispatch_generation=1,
     )
 
     assert result.persisted is False
@@ -752,6 +767,7 @@ async def test_terminal_append_failure_reports_fenced_settlement(
         owner_epoch=6,
         state="failed",
         expected_response_id=None,
+        expected_dispatch_generation=1,
     )
     await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
     assert durable.updated[0]["owner_epoch"] == 6
@@ -812,6 +828,7 @@ async def test_close_owns_terminal_append_pending_past_bound(caplog: pytest.LogC
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-1",
+                expected_dispatch_generation=1,
             ),
             timeout=1.0,
         )
@@ -867,6 +884,7 @@ async def test_close_owns_terminal_finalize_pending_past_bound(caplog: pytest.Lo
                 max_bytes=1024,
                 state="completed",
                 response_id="resp-1",
+                expected_dispatch_generation=1,
             ),
             timeout=1.0,
         )

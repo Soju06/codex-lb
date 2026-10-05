@@ -60,6 +60,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository
 from app.modules.proxy.load_balancer import (
+    CONTINUITY_OWNER_POLICY_CONFLICT,
     CONTINUITY_OWNER_UNAVAILABLE,
     AccountSelection,
     CatalogOmissionQuotaAdmission,
@@ -8959,6 +8960,255 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
     assert any(row.account_id == healthy_account.id for row in rows)
     assert all(row.continuity_abandoned_at is None for row in rows)
     assert all(row.continuity_abandonment_scope is None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_rebinds_when_a_policy_excluded_owner_cannot_return(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A rate-limited owner the routing policy excludes must not strand its thread.
+
+    A ``burn_first`` owner that exhausts its window leaves the eligible pool, so
+    selection reports ``continuity_owner_policy_conflict`` rather than
+    ``continuity_owner_unavailable``. The owner still cannot return before the
+    request budget expires, so the same in-request retirement must apply.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_policy_return",
+        "http-bridge-policy-return@example.com",
+    )
+    healthy_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_policy_repl_return",
+        "http-bridge-policy-repl-return@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    healthy_account = await _get_account(healthy_account_id)
+    upstream = _ClosingBridgeUpstreamWebSocket()
+    served_account_ids: list[str] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        if preferred_account_id == owner_account.id:
+            return AccountSelection(
+                account=None,
+                error_message="Required continuity owner is outside the eligible account policy",
+                error_code=CONTINUITY_OWNER_POLICY_CONFLICT,
+            )
+        account = owner_account if not served_account_ids else healthy_account
+        served_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    thread_headers = {"session_id": "session-policy-return", "thread-id": "thread-policy-return"}
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-policy-return",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    owned: list[HttpBridgeSessionRecord] = []
+    while time.monotonic() < deadline:
+        async with SessionLocal() as session:
+            owned = list(
+                (
+                    await session.execute(
+                        select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.account_id == owner_account.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if owned:
+            break
+        await asyncio.sleep(0.05)
+    assert owned, "the first turn did not persist a durable bridge row"
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions.clear()
+
+    # The owner is rate limited far beyond this request's budget.
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account)
+            .where(Account.id == owner_account.id)
+            .values(status=AccountStatus.RATE_LIMITED, reset_at=int(time.time()) + 6 * 3600)
+        )
+        await session.commit()
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-policy-return",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert second.status_code == 200
+    assert served_account_ids[-1] == healthy_account.id
+    retired = [record.getMessage() for record in caplog.records if "owner_retired_on_request" in record.getMessage()]
+    assert len(retired) == 1
+    assert "outcome=rebind_without_anchor" in retired[0]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_keeps_policy_conflict_for_an_available_owner(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A policy conflict on a healthy owner stays fail-closed.
+
+    Only an owner that is itself unavailable is retired; an active owner that a
+    policy excludes still owns upstream state the thread may need.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_policy__owner",
+        "http-bridge-policy--owner@example.com",
+    )
+    healthy_account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_policy_repl__owner",
+        "http-bridge-policy-repl--owner@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    healthy_account = await _get_account(healthy_account_id)
+    upstream = _ClosingBridgeUpstreamWebSocket()
+    served_account_ids: list[str] = []
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        if preferred_account_id == owner_account.id:
+            return AccountSelection(
+                account=None,
+                error_message="Required continuity owner is outside the eligible account policy",
+                error_code=CONTINUITY_OWNER_POLICY_CONFLICT,
+            )
+        account = owner_account if not served_account_ids else healthy_account
+        served_account_ids.append(account.id)
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    thread_headers = {"session_id": "session-policy--owner", "thread-id": "thread-policy--owner"}
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "hello",
+                "prompt_cache_key": "http-bridge-policy--owner",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    owned: list[HttpBridgeSessionRecord] = []
+    while time.monotonic() < deadline:
+        async with SessionLocal() as session:
+            owned = list(
+                (
+                    await session.execute(
+                        select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.account_id == owner_account.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        if owned:
+            break
+        await asyncio.sleep(0.05)
+    assert owned, "the first turn did not persist a durable bridge row"
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions.clear()
+
+    # The owner stays active: the conflict is purely a policy exclusion.
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=thread_headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": "http-bridge-policy--owner",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "continuity_owner_policy_conflict"
+    assert not [record for record in caplog.records if "owner_retired_on_request" in record.getMessage()]
 
 
 @pytest.mark.asyncio

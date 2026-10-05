@@ -3533,6 +3533,22 @@ def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError)
     return error.get("code") == "previous_response_owner_unavailable"
 
 
+def _http_bridge_is_continuity_owner_policy_conflict(exc: ProxyResponseError) -> bool:
+    """Whether selection refused the turn because policy excludes its owner.
+
+    A ``burn_first`` owner that exhausts its window leaves the eligible pool,
+    so selection reports this instead of ``continuity_owner_unavailable`` even
+    though the owner is just as unable to serve the thread.
+    """
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    return error.get("code") == "continuity_owner_policy_conflict"
+
+
 def _http_bridge_should_attempt_soft_affinity_reroute(
     exc: ProxyResponseError,
     *,

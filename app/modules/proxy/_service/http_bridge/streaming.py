@@ -91,6 +91,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_max_keepalive_count,
     _http_bridge_eventless_timeout_message,
     _http_bridge_is_context_overflow_error,
+    _http_bridge_is_continuity_owner_policy_conflict,
     _http_bridge_is_explicit_previous_response_rejection,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
@@ -2269,7 +2270,13 @@ class _HTTPBridgeStreamingMixin:
 
             if owner_retirement_attempted:
                 return False
-            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+            # A policy-excluded owner is retired on the same terms: the
+            # repository only writes when the owner itself is unavailable and
+            # cannot return in time, so a healthy excluded owner stays put.
+            if not (
+                _http_bridge_is_previous_response_owner_unavailable(exc)
+                or _http_bridge_is_continuity_owner_policy_conflict(exc)
+            ):
                 return False
             if payload.previous_response_id is not None or rewritten_file_account_id is not None:
                 return False

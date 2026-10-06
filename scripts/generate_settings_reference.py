@@ -336,6 +336,31 @@ def render_settings_reference() -> str:
         "inside one instance would silently multiply them. Scale horizontally via",
         "replicas instead.",
         "",
+        "## Server log flags (not settings)",
+        "",
+        "Log verbosity and log files are properties of the process launch, so they are",
+        "`codex-lb` command flags rather than `CODEX_LB_*` settings. There is no",
+        "`CODEX_LB_LOG_LEVEL` setting; setting that variable has no effect.",
+        "",
+        "| Flag | Default | Effect |",
+        "| --- | --- | --- |",
+        (
+            "| `--log-level {critical,error,warning,info,debug}` | `info` | Level for codex-lb's own (`app.*`) "
+            "loggers. uvicorn and third-party libraries stay at `info` (or stricter), so `debug` covers "
+            "codex-lb's own records rather than protocol-level WebSocket and driver tracing. |"
+        ),
+        (
+            "| `--log-file PATH` | none | Also write every log record (application, uvicorn and access), as"
+            " rendered on stderr/stdout, to `PATH` (output that bypasses `logging` is not captured), rotated"
+            " at 50 MiB with 10 backups. The directory is created if missing; startup fails if"
+            " the file cannot be opened. |"
+        ),
+        "",
+        "The file uses the same redaction as stderr. URL userinfo is redacted at",
+        "every level, but bearer tokens and `key=value` secrets only at `warning` and",
+        "above, so keep log files on operator-only storage. See",
+        "[proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability).",
+        "",
         "## Process-level environment variables (not settings)",
         "",
         "These are third-party or POSIX conventions codex-lb honors without",

@@ -13,6 +13,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.
 - **No truncation support:** Requests that include `truncation` are rejected because upstream does not support it.
 - **Compact as a separate contract:** Standalone compact is treated as a canonical opaque context-window contract, not as a variant of buffered normal `/responses`.
+- **CCodex fingerprint allowlist:** The stock Codex app server can arrive through CCodex with `ccodex-internal` or `ccodex-handoff-worker` identities. Preserve those exact originators and their versioned User-Agent prefixes in upstream fingerprint handling so the non-native fallback does not replace the client version. This fingerprint recognition is separate from the originator allowlist used for transport selection. For example, `ccodex-internal/0.159.3` remains intact upstream, while `ccodex-unlisted/1.0` continues through non-native normalization.
 
 ## Constraints
 

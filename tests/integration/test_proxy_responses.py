@@ -3104,6 +3104,52 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     assert seen_headers["x-request-id"] == native_headers["x-request-id"]
 
 
+@pytest.mark.parametrize(
+    ("originator", "user_agent"),
+    (
+        ("ccodex-internal", "ccodex-internal/0.159.3 (Ubuntu 24.4.0; x86_64)"),
+        ("ccodex-handoff-worker", "ccodex-handoff-worker/0.159.3 (Ubuntu 24.4.0; x86_64)"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_proxy_responses_forwards_ccodex_fingerprints(async_client, monkeypatch, originator, user_agent):
+    email = f"{originator}@example.com"
+    raw_account_id = f"acc_{originator.replace('-', '_')}"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_headers: dict[str, str] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del payload, access_token, account_id, base_url, raise_for_status
+        seen_headers.update(headers)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_ccodex"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True}
+    native_headers = {
+        "originator": originator,
+        "User-Agent": user_agent,
+        "version": "0.159.3",
+    }
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json=payload,
+        headers=native_headers,
+    ) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    lowered_headers = {key.lower(): value for key, value in seen_headers.items()}
+    assert lowered_headers["originator"] == originator
+    assert lowered_headers["user-agent"] == user_agent
+    assert lowered_headers["version"] == "0.159.3"
+
+
 @pytest.mark.asyncio
 async def test_v1_responses_stream_preserves_done_text_events(async_client, monkeypatch):
     email = "done-filter@example.com"

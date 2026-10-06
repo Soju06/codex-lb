@@ -382,3 +382,63 @@ def test_upstream_log_account_id_lookup_is_case_insensitive():
     assert _account_id_for_upstream_log({"chatgpt-account-id": "acct-9"}) == "acct-9"
     assert _account_id_for_upstream_log({"CHATGPT-ACCOUNT-ID": "acct-9"}) == "acct-9"
     assert _account_id_for_upstream_log({"User-Agent": "x"}) is None
+
+
+def test_ccodex_fingerprints_are_native_for_http_and_websocket():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    builders = (_build_upstream_headers, _build_upstream_websocket_headers)
+    ccodex_fingerprints = (
+        {"User-Agent": "OpenAI/Python 2.24.0", "originator": "ccodex-internal", "version": "0.159.3"},
+        {
+            "User-Agent": "OpenAI/Python 2.24.0",
+            "originator": "ccodex-handoff-worker",
+            "version": "0.159.3",
+        },
+        {
+            "User-Agent": "ccodex-internal/0.5.1 (Ubuntu; x86_64)",
+            "originator": "sdk",
+            "version": "0.159.3",
+        },
+        {
+            "User-Agent": "ccodex-handoff-worker/0.4.2 (Ubuntu; x86_64)",
+            "originator": "sdk",
+            "version": "0.159.3",
+        },
+        {
+            "User-Agent": "CCODEX-INTERNAL/0.5.1 (Ubuntu; x86_64)",
+            "originator": "sdk",
+            "version": "0.159.3",
+        },
+    )
+    for build_headers in builders:
+        for inbound in ccodex_fingerprints:
+            headers = build_headers(inbound, "tok", "acct-1")
+
+            assert headers["User-Agent"] == inbound["User-Agent"]
+            assert headers["originator"] == inbound["originator"]
+            assert headers["version"] == "0.159.3"
+
+
+def test_unlisted_ccodex_fingerprints_are_normalized_for_http_and_websocket():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
+
+    builders = (_build_upstream_headers, _build_upstream_websocket_headers)
+    unlisted_fingerprints = (
+        {"User-Agent": "OpenAI/Python 2.24.0", "originator": "ccodex-unlisted"},
+        {"User-Agent": "ccodex-unlisted/1.0", "originator": "sdk"},
+        {"User-Agent": "ccodex/1.0", "originator": "sdk"},
+    )
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        for build_headers in builders:
+            for inbound in unlisted_fingerprints:
+                headers = build_headers(inbound, "tok", "acct-1")
+
+                assert headers["User-Agent"].startswith("codex_cli_rs/0.142.0")
+                assert headers["originator"] == "codex_cli_rs"
+                assert headers["version"] == "0.142.0"
+
+
+def test_ccodex_fingerprint_originators_do_not_change_transport_selection():
+    for originator in ("ccodex-internal", "ccodex-handoff-worker"):
+        assert proxy_module._has_native_codex_transport_headers({"originator": originator}) is False

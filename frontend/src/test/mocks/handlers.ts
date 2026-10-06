@@ -1,6 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import { AccountUsageLimitUpdateRequestSchema } from "@/features/accounts/schemas";
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
 import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
@@ -479,9 +480,9 @@ type MockState = {
   }>;
 };
 
-function createInitialState(): MockState {
+function createInitialState(accounts: AccountSummary[] = createDefaultAccounts()): MockState {
   return {
-    accounts: createDefaultAccounts(),
+    accounts,
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -526,8 +527,8 @@ function createInitialState(): MockState {
 
 let state: MockState = createInitialState();
 
-export function resetMockState(): void {
-  state = createInitialState();
+export function resetMockState(accounts?: AccountSummary[]): void {
+  state = createInitialState(accounts);
 }
 
 function parseDateValue(value: string | null): number | null {
@@ -696,6 +697,50 @@ function requestLogOptionsFromEntries(
 
 function findAccount(accountId: string): AccountSummary | undefined {
   return state.accounts.find((account) => account.accountId === accountId);
+}
+
+function effectiveMockUsageLimit(account: AccountSummary, windowMinutes: number | null | undefined): number | null {
+  if (!account.usageLimitEnabled) return null;
+  if (windowMinutes === 300) return account.usageLimit5HPercent ?? account.usageLimitPercent ?? null;
+  if (windowMinutes === 10_080) return account.usageLimitWeeklyPercent ?? account.usageLimitPercent ?? null;
+  return account.usageLimitPercent ?? null;
+}
+
+function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
+  account.effectiveLimitPrimary = effectiveMockUsageLimit(account, account.windowMinutesPrimary);
+  account.effectiveLimitSecondary = effectiveMockUsageLimit(account, account.windowMinutesSecondary);
+  account.effectiveLimitMonthly = effectiveMockUsageLimit(account, account.windowMinutesMonthly);
+  if (!account.usageLimitEnabled) {
+    account.usageLimitState = "disabled";
+    return;
+  }
+
+  const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
+  const windows = hasMonthly
+    ? [{ minutes: account.windowMinutesMonthly, remaining: account.usage?.monthlyRemainingPercent,
+      limit: account.effectiveLimitMonthly }]
+    : [
+      { minutes: account.windowMinutesPrimary, remaining: account.usage?.primaryRemainingPercent,
+        limit: account.effectiveLimitPrimary },
+      { minutes: account.windowMinutesSecondary, remaining: account.usage?.secondaryRemainingPercent,
+        limit: account.effectiveLimitSecondary },
+    ];
+  const missingOverrideWindow = !hasMonthly && [
+    { limit: account.usageLimit5HPercent, capacity: account.capacityCreditsPrimary, minutes: 300 },
+    { limit: account.usageLimitWeeklyPercent, capacity: account.capacityCreditsSecondary, minutes: 10_080 },
+  ].some(({ limit, capacity, minutes }) => limit != null && (capacity == null || capacity > 0) &&
+    !windows.some((window) => window.minutes === minutes));
+  const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
+  const limited = observed.filter(({ limit }) => limit != null);
+  const missingLimitedMeasurement = limited.some(({ remaining }) =>
+    remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
+  if (observed.length === 0 || missingOverrideWindow || missingLimitedMeasurement) {
+    account.usageLimitState = "data_unavailable";
+  } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
+    account.usageLimitState = "reached";
+  } else {
+    account.usageLimitState = "available";
+  }
 }
 
 function findApiKey(keyId: string): ApiKey | undefined {
@@ -1132,6 +1177,57 @@ export const handlers = [
       return HttpResponse.json({
         accountId,
         routingPolicy: account.routingPolicy,
+      });
+    },
+  ),
+
+  http.put(
+    "/api/accounts/:accountId/usage-limit",
+    async ({ params, request }) => {
+      const accountId = String(params.accountId);
+      const account = findAccount(accountId);
+      if (!account) {
+        return HttpResponse.json(
+          {
+            error: { code: "account_not_found", message: "Account not found" },
+          },
+          { status: 404 },
+        );
+      }
+      const payload = await parseJsonBody(request, AccountUsageLimitUpdateRequestSchema);
+      const percentages = payload && [
+        payload.percent === undefined ? account.usageLimitPercent : payload.percent,
+        payload.percent5H === undefined ? account.usageLimit5HPercent : payload.percent5H,
+        payload.percentWeekly === undefined ? account.usageLimitWeeklyPercent : payload.percentWeekly,
+      ];
+      if (!payload || (payload.enabled && !percentages?.some((value) => value != null))) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "validation_error",
+              message: "Invalid account usage limit payload",
+            },
+          },
+          { status: 422 },
+        );
+      }
+      account.usageLimitEnabled = payload.enabled;
+      if (payload.percent !== undefined) {
+        account.usageLimitPercent = payload.percent;
+      }
+      if (payload.percent5H !== undefined) {
+        account.usageLimit5HPercent = payload.percent5H;
+      }
+      if (payload.percentWeekly !== undefined) {
+        account.usageLimitWeeklyPercent = payload.percentWeekly;
+      }
+      refreshMockUsageLimitSnapshot(account);
+      return HttpResponse.json({
+        accountId,
+        enabled: account.usageLimitEnabled,
+        percent: account.usageLimitPercent ?? null,
+        percent5H: account.usageLimit5HPercent ?? null,
+        percentWeekly: account.usageLimitWeeklyPercent ?? null,
       });
     },
   ),

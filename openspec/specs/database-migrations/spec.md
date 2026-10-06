@@ -511,3 +511,33 @@ remain for operator recovery.
 - **THEN** recovery MUST fail before deleting sidecars, writing output, or
   moving the source
 
+### Requirement: Migration authoring accepts converged parallel history
+
+Migration topology validation MUST reject a new revision branching from an upstream ancestor that already has descendants unless the checkout contains a revision joining that new lineage with every upstream head. A converged checkout MUST retain one canonical migration head and MUST NOT require rewriting the identifiers or parentage of previously applied revisions. A merge omitting an upstream head MUST NOT suppress the fork finding.
+
+#### Scenario: Published parallel history is joined explicitly
+- **GIVEN** a branch-local revision and an upstream revision descend from the same earlier revision
+- **AND** a merge revision joins the local lineage with all upstream heads
+- **WHEN** migration topology is checked against upstream
+- **THEN** the converged lineage is accepted
+- **AND** the existing revision identifiers and parentage are retained
+
+#### Scenario: A merge omits the current upstream head
+- **GIVEN** a new revision branches from an upstream ancestor
+- **AND** its merge does not descend from every current upstream head
+- **WHEN** migration topology is checked against upstream
+- **THEN** the branch-fork finding remains an error
+
+### Requirement: Usage-policy history convergence preserves both published schemas
+
+The canonical migration head MUST accept databases from the local scalar lineage, the upstream-integrated scalar lineage, and the published override lineage. Upgrades MUST retain saved scalar and override values and apply all required upstream schema. Previously applied revision identifiers MUST remain recognized.
+
+#### Scenario: A local scalar database adds published overrides
+- **WHEN** a database from the reviewed local lineage upgrades to the canonical head
+- **THEN** upstream schema and override columns are present
+- **AND** existing saved scalar policies retain their values
+
+#### Scenario: A published override database joins the reviewed lineage
+- **WHEN** a database that already applied upstream schema and published override policies upgrades to the canonical head
+- **THEN** it reaches one head without duplicate-schema failures
+- **AND** enabled and saved default and override values are preserved

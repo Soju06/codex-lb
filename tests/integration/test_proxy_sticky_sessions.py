@@ -909,7 +909,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_c1"]
+    assert stream_seen == ["acc_c1"], response.text
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)

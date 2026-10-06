@@ -564,10 +564,55 @@ describe("AccountList", () => {
     );
 
     await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
-    await user.click(screen.getByRole("option", { name: "Reauth required" }));
+    await user.click(screen.getByRole("option", { name: "Re-auth required" }));
 
     expect(screen.queryByText("active@example.com")).not.toBeInTheDocument();
     expect(screen.getByText("reauth@example.com")).toBeInTheDocument();
+  });
+
+  it("filters active accounts by their usage-limit display status", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "Active",
+            planType: "plus",
+            status: "active",
+            usageLimitEnabled: false,
+            usageLimitPercent: null,
+            usageLimitState: "disabled",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-limit-reached",
+            email: "limit-reached@example.com",
+            displayName: "Limit Reached",
+            planType: "plus",
+            status: "active",
+            usageLimitEnabled: true,
+            usageLimitPercent: 10,
+            usageLimitState: "reached",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
+    await user.click(screen.getByRole("option", { name: "Limit reached" }));
+
+    expect(screen.queryByText("active@example.com")).not.toBeInTheDocument();
+    expect(screen.getByText("limit-reached@example.com")).toBeInTheDocument();
   });
 
   it("uses the backend duplicate indicator instead of recomputing by email", () => {

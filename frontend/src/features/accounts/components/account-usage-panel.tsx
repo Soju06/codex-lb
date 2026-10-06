@@ -1,3 +1,4 @@
+import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { lazy, Suspense } from "react";
 import { Clock, Flame, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -12,7 +13,6 @@ import type {
 } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
-import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
@@ -23,6 +23,7 @@ import {
   formatSingleUnitRemaining,
   formatWindowLabel,
 } from "@/utils/formatters";
+import { quotaBreakdown } from "@/utils/quota";
 
 const AccountTrendChart = lazy(() =>
   import("@/features/accounts/components/account-trend-chart").then((module) => ({
@@ -43,14 +44,17 @@ export type AccountUsagePanelProps = {
 function QuotaRow({
   label,
   percent,
+  cap,
   resetAt,
 }: {
   label: string;
   percent: number | null;
+  cap?: number | null;
   resetAt: string | null | undefined;
 }) {
   const { t } = useTranslation();
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
+  const usable = quotaBreakdown(clamped, cap).usable;
   const hasPercent = percent !== null;
   return (
     <div className="space-y-1.5">
@@ -61,9 +65,9 @@ function QuotaRow({
             "tabular-nums font-medium",
             !hasPercent
               ? "text-muted-foreground"
-              : clamped >= 70
+              : usable >= 70
                 ? "text-emerald-600 dark:text-emerald-400"
-                : clamped >= 30
+                : usable >= 30
                   ? "text-amber-600 dark:text-amber-400"
                   : "text-red-600 dark:text-red-400",
           )}
@@ -71,16 +75,12 @@ function QuotaRow({
           {formatPercentNullable(percent, 1)}
         </span>
       </div>
-      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
-        <div
-          className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
-          style={{ width: `${clamped}%` }}
-        />
-      </div>
+      <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
         <span>{t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt ?? null) })}</span>
       </div>
+      <UsageQuotaSummary percent={percent} cap={cap} />
     </div>
   );
 }
@@ -264,11 +264,11 @@ function AccountUsagePanelContent({
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.title")}</h3>
       <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaRow label={t("common.quota.monthly")} percent={monthly} resetAt={account.resetAtMonthly} />
+          <QuotaRow label={t("common.quota.monthly")} percent={monthly} cap={account.effectiveLimitMonthly} resetAt={account.resetAtMonthly} />
         ) : (
           <>
-            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} />
+            {!weeklyOnly && <QuotaRow label="5h" percent={primary} cap={account.effectiveLimitPrimary} resetAt={account.resetAtPrimary} />}
+            <QuotaRow label={t("common.quota.weekly")} percent={secondary} cap={account.effectiveLimitSecondary} resetAt={account.resetAtSecondary} />
           </>
         )}
       </div>

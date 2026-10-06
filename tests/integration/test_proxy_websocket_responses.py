@@ -265,6 +265,7 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
     app_instance,
     monkeypatch,
 ):
+    """Preserve settlement ownership while denying late upgrades with retryable errors."""
     terminal_release = threading.Event()
     terminal_waiting = threading.Event()
     settlement_started = threading.Event()
@@ -505,10 +506,14 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
                 terminal_release.set()
                 assert settlement_started.wait(timeout=1)
 
-                with pytest.raises(WebSocketDisconnect) as late_disconnect:
+                with pytest.raises(WebSocketDenialResponse) as late_denial:
                     with client.websocket_connect("/backend-api/codex/responses"):
                         pytest.fail("late websocket admission unexpectedly succeeded")
-                assert late_disconnect.value.code == 1013
+                # The upgrade is denied with a retryable 503, not a pre-handshake
+                # close that ASGI servers would surface as an opaque 403.
+                assert late_denial.value.status_code == 503
+                assert late_denial.value.headers["retry-after"] == "5"
+                assert late_denial.value.json()["error"]["code"] == "proxy_unavailable"
                 assert shutdown_state.get_in_flight() == 1
 
                 settlement_release.set()

@@ -35,6 +35,7 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 import app.core.clients.proxy as proxy_module
+import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.core.openai.requests as openai_requests_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
@@ -24451,6 +24452,83 @@ async def test_create_http_bridge_session_fails_over_after_repeated_401_refresh_
     record_error.assert_awaited_once_with(account_a)
 
 
+@pytest.mark.parametrize("owner_bound", [True, False], ids=["required-owner", "movable"])
+@pytest.mark.parametrize("retryable", [True, False], ids=["retryable-envelope", "plain-forbidden"])
+@pytest.mark.asyncio
+async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkeypatch, caplog, owner_bound, retryable):
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner = _make_account("acc_ws_403_owner")
+    other = _make_account("acc_ws_403_other")
+    body = (
+        b'{"error":{"type":"server_error","code":"upstream_error","message":"Invalid response status"}}'
+        if retryable
+        else None
+    )
+    payload = proxy_websocket_module._handshake_error_payload(403, "Invalid response status", body=body)
+    handshake_error = proxy_module.ProxyResponseError(403, payload, failure_phase="connect")
+    upstream = SimpleNamespace()
+    pool_select = AsyncMock(
+        side_effect=[
+            AccountSelection(account=owner, error_message=None),
+            AccountSelection(account=other, error_message=None),
+        ]
+    )
+    open_upstream = AsyncMock(side_effect=[handshake_error, upstream])
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", pool_select)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **_kw: account))
+    monkeypatch.setattr(service, "_open_upstream_websocket", open_upstream)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_403_owner",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=service._clock.monotonic(),
+        replay_required_account_id=owner.id if owner_bound else None,
+    )
+    websocket_send = AsyncMock()
+    result = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        model=request_state.model,
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+    )
+
+    if retryable and not owner_bound:
+        assert result == (other, upstream)
+        assert pool_select.await_count == 2
+        assert pool_select.await_args.kwargs["exclude_account_ids"] == {owner.id}
+        assert [call.args[0].id for call in open_upstream.await_args_list] == [owner.id, other.id]
+        websocket_send.assert_not_awaited()
+        return
+    assert result == (None, None)
+    pool_select.assert_awaited_once()
+    open_upstream.assert_awaited_once()
+    assert open_upstream.await_args.args[0].id == owner.id
+    websocket_send.assert_awaited_once()
+    sent = json.loads(websocket_send.await_args.args[0])
+    assert sent["status"] == 403
+    assert sent["error"] == payload["error"]
+    assert request_logs.calls[0]["error_code"] == ("upstream_error" if retryable else "forbidden")
+    assert request_logs.calls[0]["account_id"] == owner.id
+    assert request_state.replay_required_account_id == (owner.id if owner_bound else None)
+    assert "action=surface" in caplog.text
+    assert "action=failover_next" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -24508,7 +24586,7 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
 
     assert selected_account is None
     assert selected_upstream is None
-    assert seen_excluded_account_ids == [set(), {account_owner.id}]
+    assert seen_excluded_account_ids == [set()]
     mark_rate_limit.assert_awaited_once()
     mark_call = mark_rate_limit.await_args
     assert mark_call is not None
@@ -24517,11 +24595,10 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
     await_args = websocket_send.await_args
     assert await_args is not None
     sent_payload = json.loads(await_args.args[0])
-    assert sent_payload["status"] == 502
-    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
-    assert sent_payload["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"] == first_handshake_error.payload["error"]
     assert request_logs.calls[0]["request_id"] == "ws_req_prev_owner_handshake_429"
-    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert request_logs.calls[0]["error_code"] == "usage_limit_reached"
     assert request_logs.calls[0]["account_id"] == account_owner.id
 
 
@@ -24578,13 +24655,13 @@ async def test_connect_proxy_websocket_account_bound_replay_stays_on_owner(monke
 
     assert selected_account is None
     assert selected_upstream is None
-    assert select_account.await_count == 2
-    assert select_account.await_args_list[1].kwargs["preferred_account_id"] == account_owner.id
+    select_account.assert_awaited_once()
     open_upstream.assert_awaited_once()
     websocket_send_args = websocket_send.await_args
     assert websocket_send_args is not None
     sent_payload = json.loads(websocket_send_args.args[0])
-    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert sent_payload["status"] == 429
+    assert sent_payload["error"] == handshake_error.payload["error"]
 
 
 @pytest.mark.asyncio

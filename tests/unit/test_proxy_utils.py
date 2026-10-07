@@ -24533,8 +24533,15 @@ async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkey
     assert "action=failover_next" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("error_code", "error_message"),
+    [("usage_limit_reached", "usage limit reached"), ("insufficient_quota", "You exceeded your current quota")],
+    ids=["rate-limit", "quota"],
+)
 @pytest.mark.asyncio
-async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(monkeypatch):
+async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails_closed(
+    monkeypatch, error_code, error_message
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_owner = _make_account("acc_ws_prev_owner")
@@ -24550,13 +24557,15 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
         return AccountSelection(account=account_other, error_message=None)
 
     mark_rate_limit = AsyncMock()
+    mark_quota_exceeded = AsyncMock()
     first_handshake_error = proxy_module.ProxyResponseError(
         429,
-        openai_error("usage_limit_reached", "usage limit reached"),
+        openai_error(error_code, error_message),
     )
 
     monkeypatch.setattr(service, "_select_account_with_budget", select_account)
     monkeypatch.setattr(service._load_balancer, "mark_rate_limit", mark_rate_limit)
+    monkeypatch.setattr(service._load_balancer, "mark_quota_exceeded", mark_quota_exceeded)
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account_owner))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_handshake_error]))
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -24591,18 +24600,24 @@ async def test_connect_proxy_websocket_previous_response_owner_usage_limit_fails
     assert selected_account is None
     assert selected_upstream is None
     assert seen_excluded_account_ids == [set()]
-    mark_rate_limit.assert_awaited_once()
-    mark_call = mark_rate_limit.await_args
+    if error_code == "usage_limit_reached":
+        mark_rate_limit.assert_awaited_once()
+        mark_quota_exceeded.assert_not_awaited()
+        mark_call = mark_rate_limit.await_args
+    else:
+        mark_quota_exceeded.assert_awaited_once()
+        mark_rate_limit.assert_not_awaited()
+        mark_call = mark_quota_exceeded.await_args
     assert mark_call is not None
     assert mark_call.args[0] == account_owner
-    assert mark_call.args[1]["message"] == "usage limit reached"
+    assert mark_call.args[1]["message"] == error_message
     await_args = websocket_send.await_args
     assert await_args is not None
     sent_payload = json.loads(await_args.args[0])
     assert sent_payload["status"] == 429
     assert sent_payload["error"] == first_handshake_error.payload["error"]
     assert request_logs.calls[0]["request_id"] == "ws_req_prev_owner_handshake_429"
-    assert request_logs.calls[0]["error_code"] == "usage_limit_reached"
+    assert request_logs.calls[0]["error_code"] == error_code
     assert request_logs.calls[0]["account_id"] == account_owner.id
 
 

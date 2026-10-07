@@ -4639,6 +4639,7 @@ class _WebSocketMixin:
                 failure_class=failure_class,
                 downstream_visible=False,
                 candidates_remaining=candidates_remaining,
+                owner_bound=require_preferred_account or request_state.replay_required_account_id is not None,
             )
         else:
             action = "surface"

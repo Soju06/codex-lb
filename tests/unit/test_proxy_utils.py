@@ -24507,6 +24507,10 @@ async def test_connect_proxy_websocket_403_preserves_required_owner_error(monkey
         websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
     )
 
+    first_selection = pool_select.await_args_list[0]
+    assert first_selection.kwargs.get("required_account_is_ownership_constraint", False) is owner_bound
+    assert first_selection.kwargs.get("required_account_id") == (owner.id if owner_bound else None)
+
     if retryable and not owner_bound:
         assert result == (other, upstream)
         assert pool_select.await_count == 2

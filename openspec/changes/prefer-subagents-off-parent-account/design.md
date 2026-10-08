@@ -30,7 +30,7 @@ Alternatives considered: querying request logs would couple correctness to optio
 
 ### Apply exclusion as a preference with one normal fallback
 
-Before a fresh child selection, resolve the parent owner according to the configured mode and temporarily exclude it. If selection finds no account, repeat once without that preference. The child's normal exact-thread mapping is then persisted by existing selection logic. The preference is never added when the child mapping already exists or the request contains account-owned state.
+Before a fresh child selection, resolve the parent owner according to the configured mode and temporarily exclude it. The parent's response-binding marker is checked first because it records the exact route the parent's continuations take; `always` falls back to the parent's soft prompt-cache mapping only when no marker exists, since a hard continuation can bypass and leave stale the soft row. If selection finds no account, repeat once without that preference. The child's normal exact-thread mapping is then persisted by existing selection logic. The preference is never added when the child mapping already exists or the request contains account-owned state.
 
 Alternatives considered: modifying strategy weights could still choose the parent and would complicate deterministic strategies; a permanent exclusion would violate the required fallback.
 

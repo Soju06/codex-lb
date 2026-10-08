@@ -212,3 +212,40 @@ async def test_off_mode_neither_diversifies_nor_records_response_binding(monkeyp
         preferred_account_is_continuity_owner=True,
     )
     assert sticky.rows == rows_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rows", "expected_excluded"),
+    [
+        pytest.param({"soft": "account-soft", "marker": "account-bound"}, {"account-bound"}, id="marker-wins"),
+        pytest.param({"soft": "account-soft"}, {"account-soft"}, id="soft-fallback"),
+    ],
+)
+async def test_always_mode_avoids_the_response_bound_parent_owner_first(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: dict[str, str],
+    expected_excluded: set[str],
+) -> None:
+    child = _policy({"model": "gpt-5.6-sol", "input": "work"})
+    assert child.subagent_parent_selection_key is not None
+    assert child.subagent_parent_response_marker_key is not None
+    keyed = {
+        "soft": (child.subagent_parent_selection_key, StickySessionKind.PROMPT_CACHE),
+        "marker": (child.subagent_parent_response_marker_key, StickySessionKind.CODEX_SESSION),
+    }
+    sticky = _StickyRepository({keyed[name]: account_id for name, account_id in rows.items()})
+    calls: list[set[str]] = []
+
+    async def selector(_deadline: float, **kwargs: object) -> AccountSelection:
+        calls.append(set(cast(set[str], kwargs.get("exclude_account_ids") or set())))
+        return AccountSelection(account=cast(Any, SimpleNamespace(id="account-child")), error_message=None)
+
+    monkeypatch.setattr(subagent_preference, "get_settings_cache", lambda: _SettingsCache("always"))
+    await proxy_service.ProxyService._select_account_with_budget_compatible(
+        _service(sticky, selector),
+        10.0,
+        affinity_policy=child,
+        request_stage="first_turn",
+    )
+    assert calls == [expected_excluded]

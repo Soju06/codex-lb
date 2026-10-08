@@ -95,16 +95,17 @@ async def _parent_owner_to_avoid(repo_factory: ProxyRepoFactory, policy: _Affini
         # An established child mapping always wins over the placement preference.
         if child_owner_id is not None:
             return None
-        if mode == "always":
-            parent_owner_id = await sticky_sessions.get_account_id(
-                parent_selection_key,
-                kind=StickySessionKind.PROMPT_CACHE,
-                max_age_seconds=policy.max_age_seconds,
-            )
-            if parent_owner_id is not None:
-                return parent_owner_id
-        return await sticky_sessions.get_account_id(
+        # The response-bound marker records the exact route the parent's
+        # continuations take, so it outranks a possibly stale soft mapping.
+        response_bound_owner_id = await sticky_sessions.get_account_id(
             parent_marker_key,
             kind=StickySessionKind.CODEX_SESSION,
+            max_age_seconds=policy.max_age_seconds,
+        )
+        if response_bound_owner_id is not None or mode != "always":
+            return response_bound_owner_id
+        return await sticky_sessions.get_account_id(
+            parent_selection_key,
+            kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=policy.max_age_seconds,
         )

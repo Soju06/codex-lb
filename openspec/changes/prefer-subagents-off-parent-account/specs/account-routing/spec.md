@@ -7,6 +7,13 @@ The preference MUST NOT override `previous_response_id`, conversation, explicit 
 
 Parent response-binding evidence MUST be recorded only while the preference is enabled; with the preference `off`, routing MUST NOT write any subagent-lineage state. Recorded evidence MUST be one-way derived, MUST NOT appear in the dashboard sticky-session list or be treated as a hard `codex_session` mapping by stale-owner cleanup, and MUST expire after the prompt-cache affinity TTL.
 
+When resolving the parent owner, recorded parent response-binding evidence MUST take precedence over the parent's soft prompt-cache mapping; `always` MUST fall back to the soft mapping only when no response-binding evidence exists.
+
+#### Scenario: Response-bound parent owner outranks a stale soft mapping
+- **GIVEN** `always` is enabled, the parent's soft prompt-cache mapping names account A, and its response-binding evidence names account B
+- **WHEN** a fresh account-neutral child identifies that parent
+- **THEN** the preferred selection attempt excludes account B rather than account A
+
 #### Scenario: Disabled preference writes no lineage evidence
 - **GIVEN** subagent account preference is `off`
 - **WHEN** a request with an exact thread and `previous_response_id` resolves an account

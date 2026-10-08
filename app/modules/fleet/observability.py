@@ -23,6 +23,7 @@ from app.modules.fleet.schemas import (
     FleetStickyKindBreakdown,
     FleetStickyObservability,
 )
+from app.modules.proxy.sticky_repository import is_not_subagent_lineage_key
 
 _PRESSURE_WINDOWS = (("30m", "30m", 30 * 60), ("2h", "2h", 2 * 60 * 60))
 _BREAKDOWN_LIMIT = 10
@@ -289,7 +290,7 @@ async def _build_sticky_observability(
         StickySession.kind == StickySessionKind.PROMPT_CACHE,
         StickySession.updated_at <= stale_cutoff,
     )
-    conditions: list[ColumnElement[bool]] = []
+    conditions: list[ColumnElement[bool]] = [is_not_subagent_lineage_key()]
     if visible_account_ids is not None:
         conditions.append(StickySession.account_id.in_(visible_account_ids))
 

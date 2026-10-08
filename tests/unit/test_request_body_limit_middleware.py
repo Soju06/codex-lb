@@ -101,6 +101,28 @@ async def _run_direct(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_fork_responses_ingress_accepts_129_mib_and_rejects_above_256_mib(path: str) -> None:
+    inner = _BodyConsumer()
+    sent = await _run_direct(
+        RequestBodyLimitMiddleware(inner),
+        _http_scope(path, headers=[(b"content-length", str(129 * 1024 * 1024).encode())]),
+        _request_messages(*(b"x" * 1024 * 1024 for _ in range(129))),
+    )
+    assert sent[0]["status"] == 204
+    assert sum(len(chunk) for chunk in inner.chunks) == 129 * 1024 * 1024
+
+    inner = _BodyConsumer()
+    sent = await _run_direct(
+        RequestBodyLimitMiddleware(inner),
+        _http_scope(path, headers=[(b"content-length", str(256 * 1024 * 1024 + 1).encode())]),
+        [],
+    )
+    assert sent[0]["status"] == 413
+    assert inner.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_declared_oversize_is_rejected_without_receive_or_downstream(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_limits(monkeypatch, general=5)
     inner = _BodyConsumer()

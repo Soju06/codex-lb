@@ -14,4 +14,4 @@ MAX_DECOMPRESSED_BODY_BYTES: Final[int] = 32 * 1024 * 1024
 # Responses ingress (``/v1/responses``, ``/backend-api/codex/responses``): Codex
 # clients resend the whole conversation history (inline screenshots included) in
 # one request after a reconnect, so this budget is deliberately larger.
-MAX_DECOMPRESSED_RESPONSES_BODY_BYTES: Final[int] = 128 * 1024 * 1024
+MAX_DECOMPRESSED_RESPONSES_BODY_BYTES: Final[int] = 256 * 1024 * 1024

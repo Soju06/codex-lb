@@ -23,7 +23,7 @@ services:
       - --port
       - "2455"
       - --ws-max-size
-      - "134217728"
+      - "268435456"
     volumes:
       - codex-lb-data:/var/lib/codex-lb
     develop:

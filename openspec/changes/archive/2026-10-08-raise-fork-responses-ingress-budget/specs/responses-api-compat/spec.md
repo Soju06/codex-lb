@@ -52,4 +52,3 @@ This transport-ingress 413 applies before parsing and is distinct from the exist
 - **WHEN** a Responses HTTP request fits the raw and decompressed transport-ingress budget
 - **AND** its serialized `response.create` still exceeds the upstream websocket budget after historical slimming
 - **THEN** the existing application-level guard returns HTTP 400 with `error.code = payload_too_large`, `error.type = invalid_request_error`, and `error.param = input`
-

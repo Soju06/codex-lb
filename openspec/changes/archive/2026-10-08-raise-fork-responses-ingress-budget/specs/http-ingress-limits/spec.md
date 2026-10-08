@@ -43,4 +43,3 @@ The generic guard MUST apply to requests solely because they declare `multipart/
 - **WHEN** the request scope path includes that prefix and targets `/v1/responses` relative to the application
 - **THEN** the service applies the Responses-specific ingress budget
 - **AND** any ingress failure uses the OpenAI-compatible error envelope
-

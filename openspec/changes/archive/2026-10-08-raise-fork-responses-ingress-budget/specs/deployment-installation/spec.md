@@ -284,4 +284,3 @@ warning list in the next minor release.
   a restart, and the settings API reports `source: "dashboard"`
 - **AND** clearing the dashboard value returns to the environment alias
   (`source: "env"`) until that alias is removed in the next minor release
-

@@ -402,7 +402,7 @@ Behaviour is unchanged; each env name gets the one-release WARN.
   `quota_planner_settings.mode = "off"`, which already stopped every tick;
   no new column).
 - Ingress / images / models: `CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES` (32 MiB)
-  and `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` (128 MiB) in
+  and `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` (256 MiB) in
   `app/core/ingress_limits.py`, the same constant that seeds `--ws-max-size`;
   `CODEX_LB_IMAGE_INLINE_FETCH_ENABLED` (always on) and
   `CODEX_LB_IMAGE_INLINE_ALLOWED_HOSTS` (the allowlist was never populated;

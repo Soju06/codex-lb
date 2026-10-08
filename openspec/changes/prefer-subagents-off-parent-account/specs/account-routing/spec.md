@@ -5,6 +5,19 @@ The system MUST support a persisted subagent account preference with `off`, `par
 
 The preference MUST NOT override `previous_response_id`, conversation, explicit turn-state, account-scoped file, live or durable bridge, source-pin, model, API-key scope, security, quota, health, concurrency, or single-account-routing constraints.
 
+Parent response-binding evidence MUST be recorded only while the preference is enabled; with the preference `off`, routing MUST NOT write any subagent-lineage state. Recorded evidence MUST be one-way derived, MUST NOT appear in the dashboard sticky-session list or be treated as a hard `codex_session` mapping by stale-owner cleanup, and MUST expire after the prompt-cache affinity TTL.
+
+#### Scenario: Disabled preference writes no lineage evidence
+- **GIVEN** subagent account preference is `off`
+- **WHEN** a request with an exact thread and `previous_response_id` resolves an account
+- **THEN** no subagent-lineage evidence is persisted
+
+#### Scenario: Lineage evidence is internal and expires
+- **GIVEN** subagent account preference is enabled and parent response-binding evidence was recorded
+- **WHEN** an operator lists sticky sessions or the stale hard-mapping cleanup runs
+- **THEN** the evidence is neither listed nor tombstoned as a hard session
+- **AND** periodic cleanup deletes it once it is older than the prompt-cache affinity TTL
+
 #### Scenario: Parent-bound child uses another eligible account
 - **GIVEN** `parent_bound_only` is enabled, a parent is positively bound by previous-response continuity to account A, and a fresh account-neutral child identifies that parent
 - **WHEN** account B is otherwise eligible

@@ -28,6 +28,7 @@ from app.core.openai.requests import (
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.sticky_repository import SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX
 from app.modules.proxy.thread_anchors import (
     build_thread_window,
     get_thread_anchor_index,
@@ -202,7 +203,7 @@ def _codex_session_selection_key(key: str) -> str:
 
 def _response_bound_thread_marker_key(thread_selection_key: str) -> str:
     digest = sha256(thread_selection_key.encode()).hexdigest()
-    return f"{_CODEX_SELECTION_KEY_PREFIX}:response_bound_thread:{digest}"
+    return f"{SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX}response_bound_thread:{digest}"
 
 
 @dataclass(frozen=True, slots=True)

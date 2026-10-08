@@ -13,6 +13,7 @@ from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy import subagent_preference
 from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
+from app.modules.proxy.sticky_repository import is_reserved_sticky_session_key
 
 
 def _policy(body: dict[str, Any], *, thread_id: str = "child") -> proxy_affinity._AffinityPolicy:
@@ -74,6 +75,8 @@ def test_affinity_derives_lineage_without_raw_ids_and_rejects_hard_child() -> No
     assert hard.subagent_parent_selection_key is None
     assert hard.response_bound_thread_marker_key is not None
     assert "resp_secret" not in hard.response_bound_thread_marker_key
+    assert is_reserved_sticky_session_key(hard.response_bound_thread_marker_key)
+    assert is_reserved_sticky_session_key(fresh.subagent_parent_response_marker_key)
 
     explicit_turn = proxy_affinity._sticky_key_for_responses_request(
         ResponsesRequest.model_validate({"model": "gpt-5.6-sol", "instructions": "test", "input": "work"}),
@@ -170,3 +173,42 @@ async def test_preference_falls_back_to_parent_and_records_response_binding(
         preferred_account_is_continuity_owner=True,
     )
     assert sticky.rows[(parent.response_bound_thread_marker_key, StickySessionKind.CODEX_SESSION)] == "account-parent"
+
+
+@pytest.mark.asyncio
+async def test_off_mode_neither_diversifies_nor_records_response_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    child = _policy({"model": "gpt-5.6-sol", "input": "work"})
+    assert child.subagent_parent_response_marker_key is not None
+    sticky = _StickyRepository(
+        {(child.subagent_parent_response_marker_key, StickySessionKind.CODEX_SESSION): "account-parent"}
+    )
+    calls: list[set[str]] = []
+
+    async def selector(_deadline: float, **kwargs: object) -> AccountSelection:
+        calls.append(set(cast(set[str], kwargs.get("exclude_account_ids") or set())))
+        return AccountSelection(account=cast(Any, SimpleNamespace(id="account-parent")), error_message=None)
+
+    monkeypatch.setattr(subagent_preference, "get_settings_cache", lambda: _SettingsCache("off"))
+    await proxy_service.ProxyService._select_account_with_budget_compatible(
+        _service(sticky, selector),
+        10.0,
+        affinity_policy=child,
+        request_stage="first_turn",
+    )
+    assert calls == [set()]
+
+    parent = _policy(
+        {"model": "gpt-5.6-sol", "input": "continue", "previous_response_id": "resp_owner"},
+        thread_id="parent",
+    )
+    assert parent.response_bound_thread_marker_key is not None
+    rows_before = dict(sticky.rows)
+    await proxy_service.ProxyService._select_account_with_budget_compatible(
+        _service(sticky, selector),
+        10.0,
+        affinity_policy=parent,
+        request_stage="follow_up",
+        preferred_account_id="account-parent",
+        preferred_account_is_continuity_owner=True,
+    )
+    assert sticky.rows == rows_before

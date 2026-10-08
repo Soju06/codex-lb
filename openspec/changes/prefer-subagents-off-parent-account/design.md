@@ -18,9 +18,13 @@ See `proposal.md` for motivation. Current Codex requests provide exact `thread-i
 
 ## Decisions
 
-### Store a derived parent response-binding marker in existing sticky storage
+### Store a derived parent response-binding marker in a reserved sticky namespace
 
-When a request with an exact thread and nonblank `previous_response_id` resolves an account, persist an internal, one-way-derived marker mapped to that account. The marker uses the existing sticky lifecycle and never contains raw thread or response IDs. This provides cross-replica evidence without adding a second ownership database. A soft exact-thread mapping alone is deliberately insufficient.
+When the preference is enabled and a request with an exact thread and nonblank `previous_response_id` resolves an account, persist an internal, one-way-derived marker mapped to that account. With the preference `off`, no marker is written, so the default adds no write to any request. The marker never contains raw thread or response IDs. This provides cross-replica evidence without adding a second ownership database. A soft exact-thread mapping alone is deliberately insufficient.
+
+Markers live under the reserved `"\ncodex_subagent_lineage:"` key prefix, next to the existing reserved Live-call namespace. They are routing hints rather than session ownership, so they stay out of the dashboard sticky-session list and filtered deletes, the stale-hard `codex_session` tombstone purge, the hard-owner outage grace refresh, and fleet sticky counts. The periodic sticky cleanup deletes them in bounded batches once they are older than the prompt-cache affinity TTL, and lookups ignore markers older than that TTL.
+
+Alternatives considered: a new `sticky_session_kind` enum value would need a PostgreSQL enum migration and a dashboard kind filter for an internal row type; storing markers as ordinary `codex_session` rows made them appear as hard sessions and enter the tombstone purge.
 
 Alternatives considered: querying request logs would couple correctness to optional retention and logged metadata; inspecting only live bridge sessions would fail across restarts and replicas; treating the parent header as proof would activate the conditional mode without response continuity.
 
@@ -39,7 +43,7 @@ The database and settings API store `off`, `parent_bound_only`, or `always`, wit
 - [A failed upstream continuation can still leave positive routing evidence] → Record only after an owner was resolved and selected; the marker is a diversification condition, not ownership used to route continuations.
 - [Two concurrent first child turns can race] → Existing sticky insert/update authority remains the final child-affinity arbiter; the feature never bypasses that persistence.
 - [The preferred attempt may have no alternate] → Retry exactly once through ordinary selection with no parent exclusion.
-- [Old markers can outlive active work] → Reuse the established sticky-session lifecycle and derived key namespace, with no raw identifiers.
+- [Old markers can outlive active work] → Markers expire on the prompt-cache affinity TTL through their own bounded cleanup sweep, and stale markers are ignored at lookup time.
 
 ## Migration Plan
 

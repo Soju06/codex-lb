@@ -30,13 +30,15 @@ async def select_account_with_subagent_preference(
     if kwargs.get("require_security_work_authorized") is True:
         required_capability_kwargs["require_security_work_authorized"] = kwargs.pop("require_security_work_authorized")
     original_excluded = set(cast(Collection[str], kwargs.get("exclude_account_ids") or ()))
+    mode = await _enabled_preference_mode(affinity_policy)
     parent_owner_id = None
     if (
-        affinity_policy is not None
+        mode is not None
+        and affinity_policy is not None
         and kwargs.get("request_stage", "first_turn") == "first_turn"
         and kwargs.get("preferred_account_id") is None
     ):
-        parent_owner_id = await _parent_owner_to_avoid(repo_factory, affinity_policy)
+        parent_owner_id = await _parent_owner_to_avoid(repo_factory, affinity_policy, mode)
     if parent_owner_id is not None and parent_owner_id not in original_excluded:
         kwargs["exclude_account_ids"] = {*original_excluded, parent_owner_id}
     else:
@@ -56,9 +58,11 @@ async def select_account_with_subagent_preference(
                 select, deadline, optional_kwargs=kwargs, **required_capability_kwargs
             ),
         )
+    # With the preference off, no request pays for a marker write.
     marker_key = affinity_policy.response_bound_thread_marker_key if affinity_policy is not None else None
     if (
-        selection.account is not None
+        mode is not None
+        and selection.account is not None
         and marker_key is not None
         and kwargs.get("preferred_account_is_continuity_owner") is True
     ):
@@ -67,13 +71,19 @@ async def select_account_with_subagent_preference(
     return selection
 
 
-async def _parent_owner_to_avoid(repo_factory: ProxyRepoFactory, policy: _AffinityPolicy) -> str | None:
+async def _enabled_preference_mode(policy: _AffinityPolicy | None) -> str | None:
+    if policy is None or (
+        policy.subagent_parent_selection_key is None and policy.response_bound_thread_marker_key is None
+    ):
+        return None
+    mode = (await get_settings_cache().get()).subagent_account_preference
+    return mode if mode in _PREFERENCE_MODES else None
+
+
+async def _parent_owner_to_avoid(repo_factory: ProxyRepoFactory, policy: _AffinityPolicy, mode: str) -> str | None:
     parent_selection_key = policy.subagent_parent_selection_key
     parent_marker_key = policy.subagent_parent_response_marker_key
     if parent_selection_key is None or parent_marker_key is None or policy.selection_key is None or policy.kind is None:
-        return None
-    mode = (await get_settings_cache().get()).subagent_account_preference
-    if mode not in _PREFERENCE_MODES:
         return None
     async with repo_factory() as repos:
         sticky_sessions = repos.sticky_sessions
@@ -93,4 +103,8 @@ async def _parent_owner_to_avoid(repo_factory: ProxyRepoFactory, policy: _Affini
             )
             if parent_owner_id is not None:
                 return parent_owner_id
-        return await sticky_sessions.get_account_id(parent_marker_key, kind=StickySessionKind.CODEX_SESSION)
+        return await sticky_sessions.get_account_id(
+            parent_marker_key,
+            kind=StickySessionKind.CODEX_SESSION,
+            max_age_seconds=policy.max_age_seconds,
+        )

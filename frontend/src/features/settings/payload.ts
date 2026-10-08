@@ -28,6 +28,7 @@ export function buildSettingsUpdateRequest(
     autoRedeemResetCreditsBeforeExpiry: settings.autoRedeemResetCreditsBeforeExpiry,
     showResetCreditExpiryBadge: settings.showResetCreditExpiryBadge,
     routingStrategy: settings.routingStrategy,
+    subagentAccountPreference: settings.subagentAccountPreference,
     relativeAvailabilityPower: settings.relativeAvailabilityPower,
     relativeAvailabilityTopK: settings.relativeAvailabilityTopK,
     singleAccountId: settings.singleAccountId,

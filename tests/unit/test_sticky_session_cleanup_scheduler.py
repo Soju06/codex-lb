@@ -714,7 +714,9 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     STICKY_THREAD is never purged here, by any predicate: see
     TestNoStickyThreadKeyPrefixSweep. CODEX_SESSION is only ever purged
     via the separate, account-status-gated purge_stale_hard_codex_session_mappings
-    call (see test_sticky_repository.py), never by this TTL-based path."""
+    call (see test_sticky_repository.py), never by this TTL-based path; the
+    one exception is the reserved subagent-lineage marker namespace, which
+    shares the prompt-cache TTL."""
     dashboard_settings = SimpleNamespace(
         openai_cache_affinity_max_age_seconds=600,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=600,
@@ -733,6 +735,7 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+    sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
     sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     sticky_repo.purge_before = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
@@ -768,6 +771,9 @@ async def test_cleanup_once_purges_prompt_cache_only(monkeypatch) -> None:
         await scheduler._cleanup_once()
 
     sticky_repo.purge_prompt_cache_before.assert_called_once()
+    sticky_repo.purge_subagent_lineage_markers_before.assert_awaited_once_with(
+        sticky_repo.purge_prompt_cache_before.call_args.args[0]
+    )
     sticky_repo.purge_before.assert_not_called()
     bridge_repo.purge_closed_before.assert_called_once()
     bridge_repo.purge_abandoned_before.assert_called_once()
@@ -813,6 +819,7 @@ async def test_cleanup_once_skips_bridge_purge_when_schema_is_not_ready(monkeypa
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
     sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.retire_stale_unavailable_bridge_owners = AsyncMock(return_value=0)
@@ -878,6 +885,7 @@ async def test_cleanup_once_purges_bridge_when_schema_exists_after_startup_flag_
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
     sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.retire_stale_unavailable_bridge_owners = AsyncMock(return_value=0)
@@ -959,6 +967,7 @@ async def test_cleanup_once_gates_abandoned_purge_on_prompt_cache_reuse_ttl(monk
     sticky_repo = AsyncMock()
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
     sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.retire_stale_unavailable_bridge_owners = AsyncMock(return_value=0)
@@ -1053,6 +1062,7 @@ async def test_cleanup_once_sweeps_expired_rate_limit_attempts(monkeypatch, stic
     settings_repo = _spool_retention_settings_repo()
     sticky_repo = AsyncMock()
     sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=0)
+    sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
     sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
     bridge_repo = AsyncMock()
     bridge_repo.purge_operation_spool_batch = AsyncMock(return_value=_purge_batch(0))
@@ -1155,6 +1165,7 @@ class TestNoStickyThreadKeyPrefixSweep:
         sticky_repo = AsyncMock()
         sticky_repo.purge_stale_hard_codex_session_mappings = AsyncMock(return_value=0)
         sticky_repo.purge_prompt_cache_before = AsyncMock(return_value=5)
+        sticky_repo.purge_subagent_lineage_markers_before = AsyncMock(return_value=0)
         sticky_repo.purge_before_for_key_prefix = AsyncMock(return_value=7)
         sticky_repo.purge_before = AsyncMock(return_value=0)
         bridge_repo = AsyncMock()

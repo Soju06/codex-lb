@@ -9,7 +9,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import Insert
+from sqlalchemy.sql import ColumnElement, Insert
 
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
@@ -40,14 +40,27 @@ _SESSION_HEADER_ABANDONMENT_SCOPE = "session_header"
 _REFRESH_SKIP_TTL_FRACTION = 0.01
 _REFRESH_SKIP_MAX_SECONDS = 15.0
 
-# Only the Live-call ownership namespace is reserved. Other LF-prefixed keys
-# (e.g. the pre-existing "\ncodex-lb-affinity-v1" selection affinities) remain
-# ordinary operator-manageable sessions.
+# Only the Live-call ownership and subagent-lineage marker namespaces are
+# reserved. Other LF-prefixed keys (e.g. the pre-existing
+# "\ncodex-lb-affinity-v1" selection affinities) remain ordinary
+# operator-manageable sessions.
 RESERVED_STICKY_SESSION_KEY_PREFIX = "\ncodex_live_call:"
+# Subagent-lineage markers are routing hints, not session ownership: they stay
+# out of operator listings, hard-mapping outage handling, and fleet counts, and
+# expire on their own TTL sweep.
+SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX = "\ncodex_subagent_lineage:"
+_RESERVED_STICKY_SESSION_KEY_PREFIXES = (
+    RESERVED_STICKY_SESSION_KEY_PREFIX,
+    SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX,
+)
 
 
 def is_reserved_sticky_session_key(key: str) -> bool:
-    return key.startswith(RESERVED_STICKY_SESSION_KEY_PREFIX)
+    return key.startswith(_RESERVED_STICKY_SESSION_KEY_PREFIXES)
+
+
+def is_not_subagent_lineage_key() -> ColumnElement[bool]:
+    return ~StickySession.key.startswith(SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX, autoescape=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -649,6 +662,13 @@ class StickySessionsRepository:
             await self._session.commit()
         return deleted
 
+    async def purge_subagent_lineage_markers_before(self, cutoff: datetime) -> int:
+        return await self.purge_before_for_key_prefix(
+            cutoff,
+            kind=StickySessionKind.CODEX_SESSION,
+            key_prefix=SUBAGENT_LINEAGE_STICKY_SESSION_KEY_PREFIX,
+        )
+
     async def purge_stale_hard_codex_session_mappings(self, cutoff: datetime, *, now: datetime) -> int:
         """Retire CODEX_SESSION mappings pinned to a durably unusable owner.
 
@@ -709,6 +729,7 @@ class StickySessionsRepository:
             update(StickySession)
             .where(
                 StickySession.kind == StickySessionKind.CODEX_SESSION,
+                is_not_subagent_lineage_key(),
                 or_(
                     StickySession.continuity_abandoned_at.is_(None),
                     StickySession.continuity_abandonment_scope.is_not(None),
@@ -726,6 +747,7 @@ class StickySessionsRepository:
         )
         delete_stmt = delete(StickySession).where(
             StickySession.kind == StickySessionKind.CODEX_SESSION,
+            is_not_subagent_lineage_key(),
             StickySession.continuity_abandoned_at.is_not(None),
             StickySession.continuity_abandonment_scope.is_(None),
             StickySession.continuity_abandoned_at < cutoff_naive,
@@ -781,7 +803,8 @@ class StickySessionsRepository:
         account_query: str | None,
         key_query: str | None,
     ):
-        statement = statement.where(~StickySession.key.startswith(RESERVED_STICKY_SESSION_KEY_PREFIX, autoescape=True))
+        for prefix in _RESERVED_STICKY_SESSION_KEY_PREFIXES:
+            statement = statement.where(~StickySession.key.startswith(prefix, autoescape=True))
         if kind is not None:
             statement = statement.where(StickySession.kind == kind)
         if updated_before is not None:

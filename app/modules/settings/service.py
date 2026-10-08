@@ -68,6 +68,7 @@ class DashboardSettingsData:
     auto_redeem_reset_credits_before_expiry: bool
     show_reset_credit_expiry_badge: bool
     routing_strategy: str
+    subagent_account_preference: str
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
@@ -187,6 +188,7 @@ class DashboardSettingsUpdateData:
     auto_redeem_reset_credits_before_expiry: bool
     show_reset_credit_expiry_badge: bool
     routing_strategy: str
+    subagent_account_preference: str
     relative_availability_power: float
     relative_availability_top_k: int
     single_account_id: str | None
@@ -394,6 +396,7 @@ class SettingsService:
             auto_redeem_reset_credits_before_expiry=payload.auto_redeem_reset_credits_before_expiry,
             show_reset_credit_expiry_badge=payload.show_reset_credit_expiry_badge,
             routing_strategy=payload.routing_strategy,
+            subagent_account_preference=payload.subagent_account_preference,
             relative_availability_power=payload.relative_availability_power,
             relative_availability_top_k=payload.relative_availability_top_k,
             single_account_id=payload.single_account_id,
@@ -649,6 +652,7 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
         auto_redeem_reset_credits_before_expiry=row.auto_redeem_reset_credits_before_expiry,
         show_reset_credit_expiry_badge=row.show_reset_credit_expiry_badge,
         routing_strategy=row.routing_strategy,
+        subagent_account_preference=row.subagent_account_preference,
         relative_availability_power=row.relative_availability_power,
         relative_availability_top_k=row.relative_availability_top_k,
         single_account_id=row.single_account_id,

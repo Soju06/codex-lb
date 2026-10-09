@@ -216,15 +216,28 @@ class TestValidateImageRequestParameters:
 
     @pytest.mark.parametrize(
         "background,expect_ok",
-        [("auto", True), ("opaque", True), ("transparent", False), ("plaid", False)],
+        [("auto", True), ("opaque", True), ("transparent", True), ("plaid", False)],
     )
-    def test_gpt_image_2_rejects_transparent_background(self, background: str, expect_ok: bool) -> None:
+    def test_gpt_image_2_background_validation(self, background: str, expect_ok: bool) -> None:
         if expect_ok:
             _validate_default(background=background)
         else:
             with pytest.raises(ClientPayloadError) as excinfo:
                 _validate_default(background=background)
             assert excinfo.value.param == "background"
+
+    @pytest.mark.parametrize("is_edit", [False, True])
+    @pytest.mark.parametrize("output_format", ["png", "webp"])
+    def test_gpt_image_2_transparent_formats(self, is_edit: bool, output_format: str) -> None:
+        _validate_default(background="transparent", output_format=output_format, is_edit=is_edit)
+
+    @pytest.mark.parametrize("model", ["gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"])
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_transparent_jpeg_rejected(self, model: str, is_edit: bool) -> None:
+        with pytest.raises(ClientPayloadError) as excinfo:
+            _validate_default(model=model, background="transparent", output_format="jpeg", is_edit=is_edit)
+        assert excinfo.value.param == "output_format"
+        assert "png or webp" in str(excinfo.value)
 
     def test_gpt_image_2_rejects_input_fidelity(self) -> None:
         with pytest.raises(ClientPayloadError) as excinfo:

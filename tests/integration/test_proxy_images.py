@@ -252,18 +252,19 @@ async def test_images_generations_trailing_slash_parity_between_v1_and_codex_ali
 
 
 @pytest.mark.asyncio
-async def test_images_generations_rejects_transparent_background(async_client):
+async def test_images_generations_rejects_transparent_jpeg(async_client):
     response = await async_client.post(
         "/v1/images/generations",
         json={
             "model": "gpt-image-2",
             "prompt": "a red circle",
             "background": "transparent",
+            "output_format": "jpeg",
         },
     )
     assert response.status_code == 400
     body = response.json()
-    assert body["error"]["param"] == "background"
+    assert body["error"]["param"] == "output_format"
 
 
 @pytest.mark.asyncio
@@ -2100,3 +2101,215 @@ async def test_image_routes_handoff_captured_usage_exactly_once(
     assert handoff["input_tokens"] == 3
     assert handoff["output_tokens"] == 4
     assert handoff["cached_input_tokens"] is None
+
+
+@pytest.fixture
+def transparent_upstream(monkeypatch):
+    captured: list[Any] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        captured.append(payload)
+        tool = cast(dict[str, Any], payload.tools[0])
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": "ig_transparent",
+                    "status": "completed",
+                    "result": base64.b64encode(b"unaltered-upstream-image-bytes").decode(),
+                    "size": tool["size"],
+                    "quality": tool["quality"],
+                    "background": tool["background"],
+                    "output_format": tool["output_format"],
+                },
+            }
+        )
+        yield _sse({"type": "response.completed", "response": {"id": "resp_transparent"}})
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    return captured
+
+
+def assert_transparency_forwarding(payload, *, output_format: str, background: str, is_edit: bool) -> None:
+    assert payload.model == "gpt-5.6-luna"
+    tool = cast(dict[str, Any], payload.tools[0])
+    assert tool["model"] == "gpt-image-2"
+    assert tool["quality"] == "high"
+    assert tool["size"] == "1536x1024"
+    assert tool["background"] == background
+    assert tool["output_format"] == output_format
+    assert "input_fidelity" not in tool
+    if is_edit:
+        assert tool["action"] == "edit"
+        content = cast(list[dict[str, Any]], payload.input[0]["content"])
+        assert content[1]["image_url"] == "data:image/png;base64,aW5wdXQtaW1hZ2U="
+
+
+def assert_unaltered_image_response(response, *, stream: bool, is_edit: bool, output_format: str, background: str):
+    assert response.status_code == 200, response.text
+    if stream:
+        event_type = "image_edit.completed" if is_edit else "image_generation.completed"
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+        completed = [event for event in events if event.get("type") == event_type]
+        assert len(completed) == 1
+        assert completed[0]["background"] == background
+        assert completed[0]["output_format"] == output_format
+        assert completed[0]["quality"] == "high"
+        assert completed[0]["size"] == "1536x1024"
+        result = completed[0]["b64_json"]
+    else:
+        result = response.json()["data"][0]["b64_json"]
+    assert base64.b64decode(result) == b"unaltered-upstream-image-bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/images/generations", "/backend-api/codex/images/generations"])
+@pytest.mark.parametrize("output_format", ["png", "webp"])
+@pytest.mark.parametrize("background", ["transparent", "opaque"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_images_background_settings_round_trip(
+    async_client, transparent_upstream, route, output_format, background, stream
+):
+    await _import_account(async_client, "acc_transparency", "transparency@example.com")
+    response = await async_client.post(
+        route,
+        json={
+            "model": "gpt-image-2",
+            "prompt": "silver ring",
+            "background": background,
+            "output_format": output_format,
+            "quality": "high",
+            "size": "1536x1024",
+            "stream": stream,
+        },
+    )
+    assert_unaltered_image_response(
+        response, stream=stream, is_edit=False, output_format=output_format, background=background
+    )
+    assert len(transparent_upstream) == 1
+    assert_transparency_forwarding(
+        transparent_upstream[0], output_format=output_format, background=background, is_edit=False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/images/edits", "/backend-api/codex/images/edits"])
+@pytest.mark.parametrize("output_format", ["png", "webp"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_images_transparent_edits_round_trip(async_client, transparent_upstream, route, output_format, stream):
+    await _import_account(async_client, "acc_transparency_edit", "transparency-edit@example.com")
+    fields = {
+        "model": "gpt-image-2",
+        "prompt": "engrave the silver ring, preserve transparency",
+        "background": "transparent",
+        "output_format": output_format,
+        "quality": "high",
+        "size": "1536x1024",
+        "stream": stream,
+    }
+    if route.startswith("/backend-api"):
+        response = await async_client.post(
+            route, json={**fields, "images": [{"image_url": "data:image/png;base64,aW5wdXQtaW1hZ2U="}]}
+        )
+    else:
+        response = await async_client.post(
+            route,
+            data={**fields, "stream": str(stream).lower()},
+            files={"image": ("source.png", b"input-image", "image/png")},
+        )
+    assert_unaltered_image_response(
+        response, stream=stream, is_edit=True, output_format=output_format, background="transparent"
+    )
+    assert len(transparent_upstream) == 1
+    assert_transparency_forwarding(
+        transparent_upstream[0], output_format=output_format, background="transparent", is_edit=True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/v1/images/generations",
+        "/backend-api/codex/images/generations",
+        "/v1/images/edits",
+        "/backend-api/codex/images/edits",
+    ],
+)
+async def test_transparent_jpeg_never_reaches_upstream(async_client, transparent_upstream, route):
+    await _import_account(async_client, "acc_jpeg", "jpeg@example.com")
+    fields = {"model": "gpt-image-2", "prompt": "ring", "background": "transparent", "output_format": "jpeg"}
+    if route == "/v1/images/edits":
+        response = await async_client.post(route, data=fields, files={"image": ("ring.png", b"input", "image/png")})
+    elif route.endswith("/edits"):
+        response = await async_client.post(
+            route, json={**fields, "images": [{"image_url": "data:image/png;base64,aW5wdXQ="}]}
+        )
+    else:
+        response = await async_client.post(route, json=fields)
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert response.json()["error"]["param"] == "output_format"
+    assert transparent_upstream == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["/v1/images/generations", "/backend-api/codex/images/generations"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_transparent_images_propagate_upstream_rejection(async_client, monkeypatch, route, stream):
+    from app.core.clients.proxy import ProxyResponseError
+
+    await _import_account(async_client, "acc_transparency_error", "transparency-error@example.com")
+    calls = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        calls.append(payload)
+        if False:  # pragma: no cover - generator marker
+            yield ""
+        raise ProxyResponseError(
+            status_code=400,
+            payload={
+                "error": {
+                    "message": "Transparent background unavailable on this upstream route",
+                    "type": "invalid_request_error",
+                    "code": "unsupported_background",
+                    "param": "background",
+                }
+            },
+        )
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    response = await async_client.post(
+        route,
+        json={
+            "model": "gpt-image-2",
+            "prompt": "ring",
+            "background": "transparent",
+            "output_format": "png",
+            "stream": stream,
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": "Transparent background unavailable on this upstream route",
+        "type": "invalid_request_error",
+        "code": "unsupported_background",
+        "param": "background",
+    }
+    assert len(calls) == 1
+    assert cast(dict[str, Any], calls[0].tools[0])["model"] == "gpt-image-2"
+    assert cast(dict[str, Any], calls[0].tools[0])["background"] == "transparent"

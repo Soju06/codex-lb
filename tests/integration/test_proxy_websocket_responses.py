@@ -14807,12 +14807,14 @@ _PRECREATED_MODEL_REJECTIONS = [
 ]
 
 
+@pytest.mark.parametrize("production_connector", [False, True], ids=["fake_connector", "production_connector"])
 @pytest.mark.parametrize(("status", "error"), _PRECREATED_MODEL_REJECTIONS)
 def test_backend_responses_websocket_retries_anchored_precreated_model_rejection_with_the_fresh_body(
     app_instance,
     monkeypatch,
     status,
     error,
+    production_connector,
 ):
     """A follow-up turn goes upstream anchored on the proxy-injected
     ``previous_response_id`` and is therefore pinned to the anchor's owner at
@@ -14832,7 +14834,41 @@ def test_backend_responses_websocket_retries_anchored_precreated_model_rejection
     )
     recovered_upstream = _recovered_upstream("resp_ws_anchored_model_recovered")
     failover = _TwoAccountWebSocketFailover(first_upstream, recovered_upstream)
+    real_connector = proxy_module.ProxyService._connect_proxy_websocket
     failover.install(monkeypatch)
+
+    if production_connector:
+        # Keep both the connector and its account-selection policy real; only
+        # replace the load-balancer boundary and credential/network I/O.
+        async def select_account(self, deadline, **kwargs):
+            del self, deadline
+            excluded = set(kwargs["exclude_account_ids"])
+            preferred = kwargs["preferred_account_id"]
+            required = preferred if not kwargs["fallback_on_preferred_account_unavailable"] else None
+            failover.excluded_at_connect.append(excluded)
+            failover.required_at_connect.append(required)
+            candidates = [
+                account_id
+                for account_id in failover.upstreams_by_account
+                if account_id not in excluded and (required is None or account_id == required)
+            ]
+            assert candidates, "fresh-body replay must release the rejected anchor owner"
+            account = Account(id=candidates[0], security_work_authorized=False)
+            return proxy_module.AccountSelection(account=account, error_message=None)
+
+        async def ensure_fresh(self, account, **kwargs):
+            del self, kwargs
+            return account
+
+        async def open_upstream(self, account, headers, **kwargs):
+            del self, headers, kwargs
+            failover.connect_accounts.append(account.id)
+            return failover.upstreams_by_account[account.id].popleft()
+
+        monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", real_connector)
+        monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", select_account)
+        monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+        monkeypatch.setattr(proxy_module.ProxyService, "_open_upstream_websocket_with_budget", open_upstream)
 
     events, disconnect = failover.run_anchored_follow_up(app_instance)
 

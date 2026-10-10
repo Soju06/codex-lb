@@ -3059,6 +3059,27 @@ async def test_select_account_uses_bootstrap_plan_filter_before_registry_refresh
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["promax", "ent26"])
+@pytest.mark.parametrize("service_tier", [None, "priority"])
+async def test_select_account_keeps_astra_bootstrap_plans(monkeypatch, plan_type, service_tier) -> None:
+    account = _make_account("acc-astra-bootstrap", "astra-bootstrap@example.com")
+    account.plan_type = plan_type
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    registry = ModelRegistry(ttl_seconds=60.0)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.get_model_registry", lambda: registry)
+
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    selection = await balancer.select_account(model="gpt-6-astra", service_tier=service_tier)
+
+    assert registry.get_snapshot() is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_uses_bootstrap_plan_filter_during_partial_first_refresh(monkeypatch) -> None:
     account = _make_account("acc-bootstrap-partial-plan-filtered", "bootstrap-partial-plan-filtered@example.com")
     account.plan_type = "free"

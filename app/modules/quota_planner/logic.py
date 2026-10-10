@@ -642,7 +642,7 @@ def _to_planner_tz(value: datetime, timezone_name: str) -> datetime:
         value = value.replace(tzinfo=timezone.utc)
     try:
         tz = ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         tz = timezone.utc
     return value.astimezone(tz)
 

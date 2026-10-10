@@ -47,7 +47,7 @@ backend still serves them.
 ### Requirement: GPT-6 Astra bootstrap metadata matches the captured upstream catalog
 
 The `gpt-6-astra` bootstrap catalog entry MUST mirror the upstream catalog
-entry bundled in OpenAI Codex release `rust-v0.153.4` for metadata fields codex-lb serves before account catalogs
+entry bundled in OpenAI Codex release `rust-v0.158.0` for metadata fields codex-lb serves before account catalogs
 are authoritative. It MUST carry: `priority` `1`; `visibility` `"list"`;
 `context_window` `272000`;
 `max_context_window` `872000`; `minimal_client_version` `"0.153.0"`;
@@ -55,14 +55,17 @@ are authoritative. It MUST carry: `priority` `1`; `visibility` `"list"`;
 `multi_agent_version` `"v2"`; `use_responses_lite` `true`;
 `apply_patch_tool_type` `"freeform"`; `web_search_tool_type`
 `"text_and_image"`; `supports_image_detail_original` `true`;
-`default_service_tier` `null`; `shell_type` `"unified_exec"`; the `priority` service tier named
+`default_service_tier` `null`; `shell_type` `"shell_command"`; the `priority` service tier named
 `"Fast"` with description `"2x speed, increased usage"`; and
-`additional_speed_tiers` containing `"fast"`.
+`additional_speed_tiers` containing `"fast"`. It MUST advertise the description
+`"Frontier intelligence for the most demanding work."`,
+`supports_reasoning_effort_updates: true`, `supports_experimental_context: false`,
+and `guardian: null`.
 
 The `gpt-6-astra` entry MUST advertise reasoning levels `low`, `medium`,
 `high`, `xhigh`, `max`, and `ultra`, with default reasoning level `low`.
 It MUST advertise every plan from the captured upstream entry, including
-`free`, `free_workspace`, `plus`, `pro`, `team`, `business`, and `enterprise`.
+`free`, `free_workspace`, `plus`, `pro`, `promax`, `ent26`, `team`, `business`, and `enterprise`.
 
 #### Scenario: GPT-6 Astra appears in bootstrap catalog before refresh
 
@@ -81,7 +84,7 @@ It MUST advertise every plan from the captured upstream entry, including
 - **THEN** `gpt-6-astra` advertises `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`
 - **AND** its default reasoning level is `low`
 - **AND** its default service tier is null
-- **AND** its shell type is `unified_exec`
+- **AND** its shell type is `shell_command`
 - **AND** its `priority` service tier is named `Fast` with description `2x speed, increased usage`
 
 #### Scenario: GPT-6 Astra bootstrap websocket preference is honored
@@ -89,3 +92,17 @@ It MUST advertise every plan from the captured upstream entry, including
 - **GIVEN** the model registry has no refreshed upstream snapshot
 - **WHEN** websocket preference is checked for `gpt-6-astra` or a `gpt-6-*` model slug
 - **THEN** the lookup returns true
+
+#### Scenario: GPT-6 Astra keeps new upstream plans eligible during bootstrap
+
+- **GIVEN** the model registry has no refreshed or persisted snapshot
+- **AND** an otherwise eligible account has plan `promax` or `ent26`
+- **WHEN** an Astra request is routed with the default or priority service tier
+- **THEN** the bootstrap plan filter retains that account
+
+#### Scenario: GPT-6 Astra exposes refreshed upstream capability flags
+
+- **GIVEN** the model registry has no refreshed or persisted snapshot
+- **WHEN** a client calls `GET /backend-api/codex/models`
+- **THEN** `gpt-6-astra` advertises `supports_reasoning_effort_updates: true`
+- **AND** it advertises `supports_experimental_context: false` and `guardian: null`

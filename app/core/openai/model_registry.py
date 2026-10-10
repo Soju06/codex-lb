@@ -161,6 +161,7 @@ _BOOTSTRAP_GPT6_ASTRA_AVAILABLE_IN_PLANS = frozenset(
         "edu_plus",
         "edu_pro",
         "education",
+        "ent26",
         "enterprise",
         "enterprise_cbp_automation",
         "enterprise_cbp_trial",
@@ -174,6 +175,7 @@ _BOOTSTRAP_GPT6_ASTRA_AVAILABLE_IN_PLANS = frozenset(
         "plus",
         "pro",
         "prolite",
+        "promax",
         "quorum",
         "sci",
         "self_serve_business_prolite",
@@ -295,7 +297,7 @@ def _gpt56_raw(
 
 
 def _gpt6_astra_raw() -> dict[str, JsonValue]:
-    """Raw fields from OpenAI Codex rust-v0.153.4 models-manager/models.json.
+    """Raw fields from OpenAI Codex rust-v0.158.0 models-manager/models.json.
 
     The large instruction payload is intentionally not bundled; live upstream
     registry refresh remains authoritative when available.
@@ -310,9 +312,11 @@ def _gpt6_astra_raw() -> dict[str, JsonValue]:
         "multi_agent_version": "v2",
         "multi_agent_reasoning_effort": "xhigh",
         "use_responses_lite": True,
+        "supports_reasoning_effort_updates": True,
         "include_skills_usage_instructions": False,
         "include_apps_usage_instructions": False,
         "include_plugin_usage_instructions": False,
+        "guardian": None,
         "node_repl_auto_review_required": True,
         "node_repl_disabled": False,
         "requires_sandboxed_review": False,
@@ -325,6 +329,7 @@ def _gpt6_astra_raw() -> dict[str, JsonValue]:
         "availability_nux": None,
         "upgrade": None,
         "supports_search_tool": True,
+        "supports_experimental_context": False,
         "default_service_tier": None,
         "service_tiers": [
             {
@@ -351,13 +356,13 @@ _BOOTSTRAP_STATIC_MODELS: tuple[UpstreamModel, ...] = (
     _bootstrap_model(
         "gpt-6-astra",
         "GPT-6-Astra",
-        description="Our most capable model for complex, demanding work.",
+        description="Frontier intelligence for the most demanding work.",
         prefer_websockets=True,
         minimal_client_version="0.153.0",
         reasoning_levels=_REASONING_LEVELS_ULTRA,
         context_window=272_000,
         default_reasoning_level="low",
-        shell_type="unified_exec",
+        shell_type="shell_command",
         priority=1,
         available_in_plans=_BOOTSTRAP_GPT6_ASTRA_AVAILABLE_IN_PLANS,
         raw=_gpt6_astra_raw(),

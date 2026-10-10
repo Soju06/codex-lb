@@ -294,13 +294,18 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert entries[slug]["minimal_client_version"] == expected_version
-        assert entries[slug]["shell_type"] == ("unified_exec" if slug == "gpt-6-astra" else "shell_command")
+        assert entries[slug]["shell_type"] == "shell_command"
         assert isinstance(entries[slug]["experimental_supported_tools"], list)
         assert entries[slug]["truncation_policy"]["mode"] in {"bytes", "tokens"}
         assert isinstance(entries[slug]["truncation_policy"]["limit"], int)
 
     astra = entries["gpt-6-astra"]
     assert astra["display_name"] == "GPT-6-Astra"
+    assert astra["description"] == "Frontier intelligence for the most demanding work."
+    assert astra["supports_reasoning_effort_updates"] is True
+    assert astra["supports_experimental_context"] is False
+    assert astra["guardian"] is None
+    assert {"promax", "ent26"} <= set(astra["available_in_plans"])
     assert astra["context_window"] == 272_000
     assert astra["max_context_window"] == 872_000
     assert astra["default_reasoning_level"] == "low"

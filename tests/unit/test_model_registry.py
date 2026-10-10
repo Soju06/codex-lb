@@ -58,6 +58,7 @@ EXPECTED_GPT6_ASTRA_MODEL_PLANS = {
     "edu_plus",
     "edu_pro",
     "education",
+    "ent26",
     "enterprise",
     "enterprise_cbp_automation",
     "enterprise_cbp_trial",
@@ -71,6 +72,7 @@ EXPECTED_GPT6_ASTRA_MODEL_PLANS = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "quorum",
     "sci",
     "self_serve_business_prolite",
@@ -271,7 +273,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
 
     astra = models["gpt-6-astra"]
     assert astra.display_name == "GPT-6-Astra"
-    assert astra.description == "Our most capable model for complex, demanding work."
+    assert astra.description == "Frontier intelligence for the most demanding work."
     assert astra.context_window == 272_000
     assert astra.raw["max_context_window"] == 872_000
     assert astra.priority == 1
@@ -305,7 +307,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert astra.raw["auto_compact_token_limit"] is None
     assert astra.raw["comp_hash"] == "3000"
     assert astra.raw["default_reasoning_summary"] == "none"
-    assert astra.raw["shell_type"] == "unified_exec"
+    assert astra.raw["shell_type"] == "shell_command"
     assert astra.raw["availability_nux"] is None
     assert astra.raw["upgrade"] is None
     assert astra.raw["supports_search_tool"] is True
@@ -315,6 +317,10 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     ]
     assert astra.raw["additional_speed_tiers"] == ["fast"]
     assert astra.raw["supports_reasoning_summary_parameter"] is True
+    assert astra.raw["supports_reasoning_effort_updates"] is True
+    assert astra.raw["supports_experimental_context"] is False
+    assert astra.raw["guardian"] is None
+    assert registry.plan_types_for_model("gpt-6-astra") == EXPECTED_GPT6_ASTRA_MODEL_PLANS
     assert astra.available_in_plans == EXPECTED_GPT6_ASTRA_MODEL_PLANS
 
     sol = models["gpt-5.6-sol"]

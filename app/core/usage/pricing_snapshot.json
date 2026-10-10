@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-01T06:52:13.400265+00:00",
+  "updated_at": "2026-10-10T12:44:55.219419+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -713,6 +713,11 @@
       "input_per_1m": 12.5,
       "output_per_1m": 75.0,
       "cached_input_per_1m": 1.25
+    },
+    "gpt-rosalind-discovery": {
+      "input_per_1m": 5.0,
+      "output_per_1m": 25.0,
+      "cached_input_per_1m": 0.5
     },
     "gpt-rosalind-research": {
       "input_per_1m": 5.0,

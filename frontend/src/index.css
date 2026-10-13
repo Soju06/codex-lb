@@ -167,6 +167,15 @@
   }
 }
 
+/* A modal Radix dialog sets `pointer-events: none` inline on <body>. Its own
+   overlay and content opt back in, so the lock only reaches what the page does
+   not own: the suggestion lists password managers draw into the document (Apple
+   Passwords in Chrome), which then show but cannot be clicked. The overlay
+   already covers the page, so it is the dialog's only needed click barrier. */
+body:has([data-slot="dialog-overlay"][data-state="open"]) {
+  pointer-events: auto !important;
+}
+
 /* Shimmer animation for skeletons */
 @keyframes shimmer {
   0% { background-position: -200% 0; }

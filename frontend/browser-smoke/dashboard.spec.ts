@@ -411,6 +411,44 @@ test("the API key create dialog stays inside supported viewports", async ({ page
 });
 
 
+test("an open dialog leaves password-manager suggestions drawn into the page clickable", async ({ page }) => {
+  await page.goto("/apis", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "APIs", exact: true })).toBeVisible();
+  await acceptTelemetryConsentIfShown(page);
+
+  const openDialogButton = page.getByRole("button", { name: "Create API Key" });
+  const dialog = page.getByRole("dialog", { name: "Create API key" });
+  await openDialogButton.click();
+  await expect(dialog).toBeVisible();
+
+  // Stand-in for the suggestion list a password manager extension (Apple
+  // Passwords in Chrome) appends to <body> next to a focused field: outside the
+  // dialog content, on top of everything, with no pointer-events of its own.
+  await page.evaluate(() => {
+    const suggestion = document.createElement("button");
+    suggestion.type = "button";
+    suggestion.textContent = "Use suggested code";
+    suggestion.style.cssText = "position:fixed;top:12px;left:12px;z-index:2147483647";
+    suggestion.addEventListener("click", () => {
+      suggestion.dataset.chosen = "true";
+    });
+    document.body.append(suggestion);
+  });
+  const suggestion = page.getByRole("button", { name: "Use suggested code" });
+
+  // Playwright's actionability check fails here if the click would pass through
+  // the suggestion (inheriting `pointer-events: none`) to the overlay below it.
+  await suggestion.click();
+  await expect(suggestion).toHaveAttribute("data-chosen", "true");
+  await expect(dialog).toBeVisible();
+
+  // The overlay still blocks the page and still dismisses the dialog.
+  const pressTarget = await page.evaluate(() => document.elementFromPoint(1400, 450)?.getAttribute("data-slot"));
+  expect(pressTarget).toBe("dialog-overlay");
+  await page.mouse.click(1400, 450);
+  await expect(dialog).toBeHidden();
+});
+
 test("deactivated account actions stay inside list cells and responsive cards", async ({ page }) => {
   const accounts = [
     createAccountSummary({ accountId: "acc_recover", displayName: "Recovery account", status: "deactivated", availableResetCredits: 1 }),

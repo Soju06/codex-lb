@@ -114,8 +114,8 @@ def test_hour_rollover_schedules_one_background_seal(tmp_path: Path, monkeypatch
     calls: list[tuple[Path, str]] = []
     monkeypatch.setattr(
         conversation_archive,
-        "seal_closed_archive_hours",
-        lambda directory, *, active_stem: calls.append((directory, active_stem)),
+        "_seal_pass",
+        lambda directory, *, active_stem, quiet_seconds: calls.append((directory, active_stem)) or (0, None),
     )
     monkeypatch.setattr(conversation_archive, "_SEALED_UP_TO", {})
 
@@ -173,3 +173,97 @@ def test_reader_skips_truncated_zstd_file(tmp_path: Path, monkeypatch: pytest.Mo
     page = conversation_archive_service.read_archive_records(filename=None, limit=10, offset=0)
 
     assert page.records == []
+
+
+def test_seal_keeps_gzip_appended_while_sealing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "2026-04-29T10.jsonl.gz"
+    _write_gzip_members(source, ["req_1"])
+    original_digest = conversation_archive._zstd_content_digest
+
+    def append_during_seal(path: Path) -> str:
+        # A queued append lands after the sealer read the source, before the swap.
+        _write_gzip_members(source, ["req_late"])
+        return original_digest(path)
+
+    monkeypatch.setattr(conversation_archive, "_zstd_content_digest", append_during_seal)
+
+    assert conversation_archive.seal_gzip_archive(source) is False
+
+    assert source.exists()
+    with gzip.open(source, "rb") as fh:
+        assert b"req_late" in fh.read()
+    assert not (tmp_path / "2026-04-29T10.jsonl.zst").exists()
+    assert list(tmp_path.glob(".*partial")) == []
+
+    monkeypatch.setattr(conversation_archive, "_zstd_content_digest", original_digest)
+    assert conversation_archive.seal_gzip_archive(source) is True
+    assert b"req_late" in _zstd_bytes(tmp_path / "2026-04-29T10.jsonl.zst")
+
+
+def test_interrupted_switch_reader_reads_one_and_recovery_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: SimpleNamespace(conversation_archive_dir=tmp_path),
+    )
+    source = tmp_path / "2026-04-29T10.jsonl.gz"
+    content = _write_gzip_members(source, ["req_1", "req_2"])
+    # Crash between replace(target) and unlink(source): both formats hold the same records.
+    (tmp_path / "2026-04-29T10.jsonl.zst").write_bytes(zstandard.ZstdCompressor().compress(content))
+    _age(source, 3600)
+
+    page = conversation_archive_service.read_archive_records(filename=None, limit=10, offset=0)
+    assert [r["request_id"] for r in page.records] == ["req_1", "req_2"]
+
+    assert conversation_archive.seal_closed_archive_hours(tmp_path, active_stem="2026-04-29T11") == 1
+
+    assert not source.exists()
+    assert _zstd_bytes(tmp_path / "2026-04-29T10.jsonl.zst") == content
+    page = conversation_archive_service.read_archive_records(filename=None, limit=10, offset=0)
+    assert [r["request_id"] for r in page.records] == ["req_1", "req_2"]
+
+
+def test_late_gzip_after_seal_is_read_and_merged_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        conversation_archive_service,
+        "get_settings",
+        lambda: SimpleNamespace(conversation_archive_dir=tmp_path),
+    )
+    source = tmp_path / "2026-04-29T10.jsonl.gz"
+    sealed = _write_gzip_members(source, ["req_1"])
+    assert conversation_archive.seal_gzip_archive(source)
+    late = _write_gzip_members(source, ["req_late"])
+
+    page = conversation_archive_service.read_archive_records(filename=None, limit=10, offset=0)
+    assert sorted(r["request_id"] for r in page.records) == ["req_1", "req_late"]
+
+    assert conversation_archive.seal_gzip_archive(source) is True
+    assert not source.exists()
+    assert _zstd_bytes(tmp_path / "2026-04-29T10.jsonl.zst") == sealed + late
+
+
+def test_quiet_period_file_is_sealed_on_a_later_pass_without_new_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "2026-04-29T10.jsonl.gz"
+    content = _write_gzip_members(source, ["req_1"])
+    monkeypatch.setattr(conversation_archive, "_SEALED_UP_TO", {})
+    monkeypatch.setattr(conversation_archive, "_SEAL_QUIET_SECONDS", 0.4)
+    monkeypatch.setattr(conversation_archive, "_SEAL_RETRY_SLACK_SECONDS", 0.1)
+
+    conversation_archive._schedule_seal_of_closed_hours(tmp_path / "2026-04-29T11.jsonl.gz")
+    time.sleep(0.1)
+    assert source.exists()  # first pass: still inside the quiet period
+
+    target = tmp_path / "2026-04-29T10.jsonl.zst"
+    deadline = time.monotonic() + 10
+    while not target.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert target.exists()
+    deadline = time.monotonic() + 5
+    while source.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not source.exists()
+    assert _zstd_bytes(target) == content

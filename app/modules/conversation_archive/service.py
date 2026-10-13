@@ -13,6 +13,7 @@ from typing import IO, Any
 import zstandard
 
 from app.core.config.settings import get_settings
+from app.core.conversation_archive import zstd_is_prefix_of_gzip
 
 _JSONL_SUFFIX = ".jsonl"
 _GZIP_JSONL_SUFFIX = ".jsonl.gz"
@@ -82,10 +83,12 @@ def _archive_paths_for_lookup(
         return [_resolve_archive_file(filename)]
     directory = _archive_dir()
     if requested_at is None:
-        return list(_iter_archive_paths(directory))
+        return _one_archive_per_hour(list(_iter_archive_paths(directory)))
 
     if request_id is not None:
-        return sorted(path for path in _iter_archive_paths(directory) if path.exists() and path.is_file())
+        return _one_archive_per_hour(
+            sorted(path for path in _iter_archive_paths(directory) if path.exists() and path.is_file())
+        )
 
     requested_at_utc = requested_at.astimezone(UTC)
     hourly_stems = [(requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)]
@@ -99,7 +102,33 @@ def _archive_paths_for_lookup(
         candidates.extend(directory / f"{stem}{suffix}" for suffix in _ARCHIVE_SUFFIXES)
     for stem in daily_stems:
         candidates.extend(directory / f"{stem}{suffix}" for suffix in _ARCHIVE_SUFFIXES)
-    return [path for path in candidates if path.exists() and path.is_file()]
+    return _one_archive_per_hour([path for path in candidates if path.exists() and path.is_file()])
+
+
+def _one_archive_per_hour(paths: list[Path]) -> list[Path]:
+    """Never serve one hour's records twice while a gzip -> zstd switch is pending.
+
+    Both ``X.jsonl.gz`` and ``X.jsonl.zst`` exist after an interrupted seal (the
+    gzip still holds everything the zstd holds): read the gzip only. If the zstd
+    is not a prefix of the gzip (late appends recreated the gzip after sealing),
+    the files hold different records and both are read. Unreadable files keep
+    both listed, so nothing is ever hidden. The sealer removes the redundant
+    file on its next pass.
+    """
+    present = set(paths)
+    superseded: set[Path] = set()
+    for path in paths:
+        if not path.name.endswith(_ZSTD_JSONL_SUFFIX):
+            continue
+        gzip_path = path.with_name(path.name.removesuffix(_ZSTD_JSONL_SUFFIX) + _GZIP_JSONL_SUFFIX)
+        if gzip_path not in present:
+            continue
+        try:
+            if zstd_is_prefix_of_gzip(gzip_path, path):
+                superseded.add(path)
+        except (OSError, EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
+            continue
+    return [path for path in paths if path not in superseded]
 
 
 def _archive_dir() -> Path:

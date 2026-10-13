@@ -58,3 +58,16 @@ original client prefix instead of counting the proxy's injected update.
 The ordering of stored historical updates and existing request cache prefix
 is preserved. See the
 [configuration-update policy requirement](spec.md#requirement-configuration-updates-obey-api-key-reasoning-controls).
+
+The proposed policy deliberately retains this reset only for enforced-effort
+keys: it makes the configured fixed effort apply even when the inherited
+upstream state is not visible in the new request. Allowlist-only keys preserve
+the client's choice of effort and never synthesize a default.
+
+Automatic truncation is compatible with the reset because subscription
+serialization removes that field before dispatch. For example, the same Low
+continuation with `truncation: "auto"` still forwards the Low update and user
+input, without `truncation`. Automatic `context_management` compaction remains
+incompatible with configuration updates and returns `invalid_request_error`
+for `context_management` before upstream work. These are separate controls;
+rejecting one does not imply rejecting the other.

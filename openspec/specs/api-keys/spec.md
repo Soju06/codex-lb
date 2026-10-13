@@ -2014,12 +2014,19 @@ anchors; repeated preparation SHALL be idempotent.
 - **THEN** live and durable completion bookkeeping SHALL retain the client input count and fingerprint without the reset
 - **AND** a later client full resend SHALL still match that prefix and reuse the completed response
 
-#### Scenario: An enforced reset rejects automatic truncation or compaction continuations
+#### Scenario: An enforced reset accepts automatic truncation
 
 - **GIVEN** an API key with an enforced reasoning effort
-- **WHEN** a client-anchored or proxy-anchored Astra continuation carries automatic truncation or automatic compaction
-- **THEN** the proxy SHALL fail that continuation closed with the existing invalid_request_error naming the offending parameter, because the injected reset is a configuration update
-- **AND** an allowed-list key without an enforced effort SHALL complete the same continuation without a reset
+- **WHEN** a client-anchored or proxy-anchored Astra continuation carries `truncation: "auto"` without automatic compaction
+- **THEN** the proxy SHALL preserve the enforced configuration update and accept the continuation
+- **AND** subscription serialization SHALL omit `truncation` from the upstream payload
+
+#### Scenario: An enforced reset rejects automatic compaction
+
+- **GIVEN** an API key with an enforced reasoning effort
+- **WHEN** a client-anchored or proxy-anchored Astra continuation carries automatic `context_management` compaction
+- **THEN** the proxy SHALL fail that continuation closed with the existing invalid_request_error naming `context_management`, because the injected reset is a configuration update
+- **AND** an allowed-list key without an enforced effort SHALL complete the same continuation without a reset when it contains no explicit configuration update
 
 #### Scenario: An enforced key keeps minimal distinct from low
 

@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, UpstreamModel
 
 pytestmark = pytest.mark.unit
@@ -259,6 +260,18 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.4-mini") is True
     assert registry.prefers_websockets("gpt-5.2") is True
     assert registry.prefers_websockets("gpt-5.1") is False
+
+
+def test_fallback_client_version_covers_every_bootstrap_minimal_client_version():
+    """Degraded-startup refresh must still request Astra (spec: Fallback client version requirement)."""
+    from app.core.clients.codex_version_snapshot import CODEX_VERSION
+
+    def as_tuple(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("."))
+
+    highest = max(as_tuple(v) for v in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.values() if v)
+    assert as_tuple(CODEX_VERSION) >= highest
+    assert as_tuple(Settings().model_registry_client_version) >= highest
 
 
 def test_bootstrap_models_include_representative_upstream_metadata():

@@ -92,6 +92,10 @@ def test_seal_keeps_corrupt_gzip_untouched(tmp_path: Path) -> None:
     assert source.read_bytes() == original
     assert list(tmp_path.glob("*.zst")) == []
     assert list(tmp_path.glob(".*partial")) == []
+    assert source in conversation_archive._UNSEALABLE
+    _age(source, 3600)
+    assert conversation_archive.seal_closed_archive_hours(tmp_path, active_stem="2026-04-29T11") == 0
+    conversation_archive._UNSEALABLE.discard(source)
 
 
 def test_seal_does_not_overwrite_existing_zstd_file(tmp_path: Path) -> None:

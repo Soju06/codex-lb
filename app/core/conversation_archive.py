@@ -76,6 +76,8 @@ _ZSTD_CHUNK_BYTES = 1024 * 1024
 _SEAL_QUIET_SECONDS = 300.0
 _SEAL_LOCK = threading.Lock()
 _SEALED_UP_TO: dict[Path, str] = {}
+# Unreadable gzip files stay as they are; remember them so each process warns once.
+_UNSEALABLE: set[Path] = set()
 
 
 # M5 conversation archive: ``dashboard_settings`` column, ``Settings`` field and
@@ -594,7 +596,7 @@ def seal_closed_archive_hours(directory: Path, *, active_stem: str, quiet_second
     now = time.time()
     for path in sorted(directory.glob(f"*{_GZIP_SUFFIX}")):
         stem = path.name.removesuffix(_GZIP_SUFFIX)
-        if stem >= active_stem:
+        if stem >= active_stem or path in _UNSEALABLE:
             continue
         try:
             if now - path.stat().st_mtime < quiet_seconds:
@@ -642,9 +644,8 @@ def seal_gzip_archive(path: Path) -> bool:
         path.unlink()
         return True
     except (EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
-        logger.warning(
-            "Cannot seal unreadable conversation archive file", extra={"archive_file": str(path)}, exc_info=True
-        )
+        _UNSEALABLE.add(path)
+        logger.warning("Cannot seal unreadable conversation archive file", extra={"archive_file": str(path)})
     except FileNotFoundError:
         pass
     except Exception:

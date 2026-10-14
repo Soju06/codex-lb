@@ -340,6 +340,54 @@ async def test_decision_without_usage_fails_closed_for_limited_key(
 
 
 @pytest.mark.asyncio
+async def test_systemone_settles_vllm_usage_without_total_tokens(async_client, source_upstream) -> None:
+    """vLLM's ``/systemone`` reports only input/output tokens; that still settles a limited key."""
+
+    await _enable_api_key_auth(async_client)
+    model = "clef-flash"
+    # Shape captured from a vLLM ``/v1/systemone`` response.
+    vllm_payload = {
+        "id": "decision-80bf47ab7bd2a4b0",
+        "object": "structured_decision",
+        "created": 1791964989,
+        "model": model,
+        "answers": {
+            "sentiment": {
+                "type": "choice",
+                "choice": "negative",
+                "probabilities": {"negative": 0.93, "neutral": 0.06, "positive": 0.01},
+                "confidence": 0.93,
+            },
+        },
+        "usage": {"input_tokens": 245, "output_tokens": 0},
+        "diagnostics": {"sentiment": {"label_mass": 1.0, "argmax_is_label": True}},
+    }
+
+    async def decide(_request: web.Request) -> web.Response:
+        return web.json_response(vllm_payload)
+
+    base_url = await source_upstream(decide)
+    _, key, key_id = await _source_with_key(
+        async_client, _SYSTEMONE, name="vllm-systemone", model=model, base_url=base_url, limited=True
+    )
+
+    response = await async_client.post(
+        "/v1/systemone", headers={"Authorization": f"Bearer {key}"}, json=_SYSTEMONE.build_body(model)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == vllm_payload
+    async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert limits[0].current_value == 245
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.status == "success"
+        assert log.input_tokens == 245
+        assert log.output_tokens == 0
+
+
+@pytest.mark.asyncio
 async def test_systemone_requires_model_as_routing_key(async_client, source_upstream) -> None:
     """vLLM treats ``model`` as optional; the proxy cannot route without it, so it rejects before dispatch."""
 

@@ -148,3 +148,20 @@ remain absent, and a non-null field MUST be forwarded unchanged.
 - **WHEN** a client omits an optional field from a source-routed decision
   request
 - **THEN** the compatible source payload does not contain that key
+
+### Requirement: Source-only routes reject metadata-only capability intent
+
+`POST /v1/embeddings`, `POST /v1/decisions`, and `POST /v1/systemone` MUST
+reject a required capability carried only in the request body's
+`client_metadata` with the same transport-unsupported error returned for the
+required-capability header, before source selection, so the signal is never
+forwarded to a model source.
+
+#### Scenario: metadata-only capability signal is denied
+
+- **GIVEN** a request to a source-only route carrying a required capability
+  only in `client_metadata`
+- **WHEN** the request is admitted
+- **THEN** the proxy returns 400 with code
+  `required_capability_transport_unsupported`
+- **AND** no model source is selected or contacted

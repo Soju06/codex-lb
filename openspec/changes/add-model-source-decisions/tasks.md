@@ -17,6 +17,8 @@
   subscription-account fallback.
 - [x] 2.4 Reject `/v1/systemone` requests without `model` before dispatch.
 - [x] 2.5 Add both paths to the pre-body capability deny list.
+- [x] 2.6 Pass the parsed payload to the HTTP capability check so a
+  metadata-only capability signal is denied on all source-only routes.
 
 ## 3. Accounting
 

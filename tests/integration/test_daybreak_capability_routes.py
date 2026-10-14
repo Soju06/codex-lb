@@ -895,6 +895,41 @@ async def test_metadata_only_capability_signal_is_rejected_on_every_responses_ro
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        pytest.param("/v1/embeddings", {"model": "embed", "input": "hello"}, id="embeddings"),
+        pytest.param(
+            "/v1/decisions",
+            {"model": "decider", "input": "hello", "questions": [{"type": "predicate", "instructions": "?"}]},
+            id="decisions",
+        ),
+        pytest.param(
+            "/v1/systemone",
+            {"model": "decider", "state": "hello", "questions": {"q": {"type": "choice"}}},
+            id="systemone",
+        ),
+    ],
+)
+async def test_metadata_only_capability_signal_is_rejected_on_source_only_routes(
+    async_client: AsyncClient, path: str, body: dict[str, Any]
+) -> None:
+    # Source-only request models allow extra fields too, so a metadata-only
+    # capability signal must be denied before source selection rather than
+    # forwarded to a model source.
+    key = await _create_api_key(f"Metadata-only capability signal {path}")
+
+    response = await async_client.post(
+        path,
+        headers={"Authorization": f"Bearer {key}"},
+        json={**body, "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL
+
+
+@pytest.mark.asyncio
 async def test_metadata_only_capability_signal_is_rejected_on_signed_internal_bridge(
     async_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

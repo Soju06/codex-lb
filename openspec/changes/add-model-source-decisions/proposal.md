@@ -30,6 +30,8 @@ source.
   explicit nulls and omissions.
 - Deny both paths before body parsing on transports that disallow JSON bodies,
   matching the existing embeddings handling.
+- Deny a required capability carried only in `client_metadata` on all three
+  source-only routes (embeddings included), matching the Responses HTTP paths.
 
 ## Capabilities
 

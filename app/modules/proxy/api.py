@@ -2823,7 +2823,7 @@ async def _source_endpoint_request(
     fallback: a model no enabled capable source serves is ``model_not_found``.
     """
 
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)

@@ -41,6 +41,8 @@ async def _create_model_source(
     supports_streaming: bool = True,
     supports_audio_transcriptions: bool = False,
     supports_embeddings: bool = False,
+    supports_decisions: bool = False,
+    supports_systemone: bool = False,
 ) -> str:
     model_entry: dict[str, object] = {
         "model": model,
@@ -70,6 +72,8 @@ async def _create_model_source(
             "supportsResponses": supports_responses,
             "supportsAudioTranscriptions": supports_audio_transcriptions,
             "supportsEmbeddings": supports_embeddings,
+            "supportsDecisions": supports_decisions,
+            "supportsSystemone": supports_systemone,
             "models": [model_entry],
         },
     )

@@ -940,6 +940,8 @@
   "modelSources.empty": "无项目",
   "modelSources.capabilities.audioTranscriptions": "Audio transcriptions",
   "modelSources.capabilities.embeddings": "Embeddings",
+  "modelSources.capabilities.decisions": "Decisions",
+  "modelSources.capabilities.systemone": "SystemOne (vLLM)",
   "modelSources.capabilities.chatCompletions": "Chat completions",
   "modelSources.capabilities.reasoning": "Reasoning",
   "modelSources.capabilities.responses": "Responses",

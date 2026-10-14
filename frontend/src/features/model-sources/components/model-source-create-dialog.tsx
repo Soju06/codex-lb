@@ -57,6 +57,8 @@ export function ModelSourceCreateDialog({
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
+      supportsDecisions: draft.supportsDecisions,
+      supportsSystemone: draft.supportsSystemone,
       models: modelInputsFromForm(values, draft),
     };
     await onSubmit(payload);

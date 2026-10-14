@@ -264,6 +264,8 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
   supportsResponses: z.boolean().optional(),
   supportsAudioTranscriptions: z.boolean().optional(),
   supportsEmbeddings: z.boolean().optional(),
+  supportsDecisions: z.boolean().optional(),
+  supportsSystemone: z.boolean().optional(),
   models: z
     .array(
       z.looseObject({
@@ -282,6 +284,8 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
 const ModelSourceUpdatePayloadSchema = z.looseObject({
   isEnabled: z.boolean().optional(),
   supportsEmbeddings: z.boolean().optional(),
+  supportsDecisions: z.boolean().optional(),
+  supportsSystemone: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -2778,6 +2782,8 @@ export const handlers = [
       supportsResponses: payload?.supportsResponses ?? false,
       supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
       supportsEmbeddings: payload?.supportsEmbeddings ?? false,
+      supportsDecisions: payload?.supportsDecisions ?? false,
+      supportsSystemone: payload?.supportsSystemone ?? false,
       models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
         (model, index) => ({
           id: index + 1,
@@ -2819,6 +2825,12 @@ export const handlers = [
       ...(payload?.isEnabled !== undefined ? { isEnabled: payload.isEnabled } : {}),
       ...(payload?.supportsEmbeddings !== undefined
         ? { supportsEmbeddings: payload.supportsEmbeddings }
+        : {}),
+      ...(payload?.supportsDecisions !== undefined
+        ? { supportsDecisions: payload.supportsDecisions }
+        : {}),
+      ...(payload?.supportsSystemone !== undefined
+        ? { supportsSystemone: payload.supportsSystemone }
         : {}),
       updatedAt: new Date().toISOString(),
     });

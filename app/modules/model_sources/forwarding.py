@@ -129,7 +129,9 @@ class SourceAudioTranscription:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceEmbeddings:
+class SourceJsonResult:
+    """A non-streaming JSON source response: embeddings, decisions or structured decisions."""
+
     payload: dict[str, JsonValue]
     usage: SourceUsage | None
     upstream_status_code: int
@@ -472,11 +474,64 @@ async def forward_embeddings(
     payload: dict[str, JsonValue],
     *,
     encryptor: TokenEncryptor | None = None,
-) -> SourceEmbeddings:
+) -> SourceJsonResult:
+    return await _forward_source_json(
+        source,
+        "/embeddings",
+        payload,
+        usage_from_payload=_usage_from_embeddings_payload,
+        encryptor=encryptor,
+    )
+
+
+async def forward_decisions(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None = None,
+) -> SourceJsonResult:
+    """OpenAI Decisions API (``POST /decisions``); usage follows the Responses shape."""
+
+    return await _forward_source_json(
+        source,
+        "/decisions",
+        payload,
+        usage_from_payload=_usage_from_responses_payload,
+        encryptor=encryptor,
+    )
+
+
+async def forward_systemone(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None = None,
+) -> SourceJsonResult:
+    """vLLM structured-decision extension (``POST /systemone``); same usage shape as Decisions."""
+
+    return await _forward_source_json(
+        source,
+        "/systemone",
+        payload,
+        usage_from_payload=_usage_from_responses_payload,
+        encryptor=encryptor,
+    )
+
+
+async def _forward_source_json(
+    source: ModelSource,
+    path: str,
+    payload: dict[str, JsonValue],
+    *,
+    usage_from_payload: Callable[[Mapping[str, JsonValue]], SourceUsage | None],
+    encryptor: TokenEncryptor | None,
+) -> SourceJsonResult:
+    """POST one JSON body to a source and return its JSON response, bounded by the source's total budget."""
+
     try:
         async with lease_model_source_session() as session:
             async with session.post(
-                _source_url(source, "/embeddings"),
+                _source_url(source, path),
                 headers=_source_headers(source, encryptor=encryptor),
                 json=payload,
                 timeout=_source_client_timeout(source),
@@ -488,9 +543,9 @@ async def forward_embeddings(
                     )
                 if data is None:
                     raise _invalid_upstream_response_error(response.status)
-                return SourceEmbeddings(
+                return SourceJsonResult(
                     payload=data,
-                    usage=_usage_from_embeddings_payload(data),
+                    usage=usage_from_payload(data),
                     upstream_status_code=response.status,
                 )
     except (aiohttp.ClientError, TimeoutError) as exc:

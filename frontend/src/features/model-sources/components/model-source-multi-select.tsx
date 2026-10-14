@@ -27,6 +27,8 @@ function sourceSubtitle(source: ModelSource, t: ReturnType<typeof useTranslation
     source.supportsResponses ? "responses" : null,
     source.supportsAudioTranscriptions ? "audio" : null,
     source.supportsEmbeddings ? "embeddings" : null,
+    source.supportsDecisions ? "decisions" : null,
+    source.supportsSystemone ? "systemone" : null,
   ].filter(Boolean);
   const count = t("modelSources.selector.modelCount", { count: source.models.length });
   return `${count} · ${protocols.join(", ") || t("common.states.disabled")}`;

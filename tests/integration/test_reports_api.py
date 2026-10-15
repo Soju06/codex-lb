@@ -85,9 +85,10 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "inputTokens": 15,
             "outputTokens": 5,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         }
     ]
     assert payload["byAccount"] == [
@@ -496,9 +497,10 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "inputTokens": 13,
             "outputTokens": 7,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         }
     ]
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
@@ -641,9 +643,10 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "inputTokens": 5,
             "outputTokens": 2,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         }
     ]
 
@@ -893,9 +896,10 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "inputTokens": 5,
             "outputTokens": 1,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         },
         {
             "activeAccounts": 1,
@@ -909,9 +913,10 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "inputTokens": 5,
             "outputTokens": 1,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         },
     ]
 
@@ -1000,9 +1005,10 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "inputTokens": 5,
             "outputTokens": 2,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         }
     ]
 
@@ -1773,9 +1779,10 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "inputTokens": 1,
             "outputTokens": 1,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         },
         {
             "activeAccounts": 1,
@@ -1789,9 +1796,10 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "inputTokens": 1,
             "outputTokens": 1,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         },
         {
             "activeAccounts": 1,
@@ -1805,9 +1813,10 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "inputTokens": 1,
             "outputTokens": 1,
             "reasoningTokens": None,
-            "medianTtftMs": 0.0,
-            "medianTps": 0.0,
-            "medianQueueMs": 0.0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "medianQueueMs": None,
+            "tpsSampleCount": 0,
         },
     ]
 
@@ -1889,3 +1898,58 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     payload3 = response3.json()
     assert payload3["summary"]["totalRequests"] == 0
     assert payload3["summary"]["totalCostUsd"] == 0.0
+
+
+async def test_reports_api_excludes_unqualified_tps_and_exposes_sample_count(async_client, db_setup):
+    async with SessionLocal() as session:
+        for suffix, first_output, chunks, total in [
+            ("qualified", 200, 2, 1000),
+            ("legacy", None, None, 1000),
+            ("short", 200, 2, 204),
+            ("single", 200, 1, 1000),
+        ]:
+            session.add(
+                RequestLog(
+                    request_id=f"report-quality-{suffix}",
+                    requested_at=datetime(2026, 9, 15, 12),
+                    model="gpt-test",
+                    request_kind="normal",
+                    status="success",
+                    output_tokens=200,
+                    reasoning_tokens=40,
+                    latency_first_token_ms=100,
+                    latency_first_output_ms=first_output,
+                    latency_upstream_terminal_ms=total if suffix != "legacy" else None,
+                    output_delta_count=chunks,
+                    latency_ms=total + 2000,
+                )
+            )
+        session.add(
+            RequestLog(
+                request_id="report-quality-empty-day",
+                requested_at=datetime(2026, 9, 16, 12),
+                model="gpt-test",
+                status="success",
+                output_tokens=100,
+                reasoning_tokens=0,
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-09-15",
+            "end_date": "2026-09-16",
+            "timezone": "UTC",
+        },
+    )
+    assert response.status_code == 200
+    days = response.json()["daily"]
+    assert days[0]["requests"] == 4
+    assert days[0]["medianTps"] == 200.0
+    assert days[0]["tpsSampleCount"] == 1
+    assert days[1]["medianTps"] is None
+    assert days[1]["medianTtftMs"] is None
+    assert days[1]["medianQueueMs"] is None
+    assert days[1]["tpsSampleCount"] == 0

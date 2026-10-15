@@ -96,9 +96,10 @@ class ReportsService:
                 conversations=row.conversation_count,
                 error_count=row.error_count,
                 cancelled_count=row.cancelled_count,
-                median_ttft_ms=round(row.median_ttft_ms, 2),
-                median_tps=round(row.median_tps, 2),
-                median_queue_ms=round(row.median_queue_ms, 2),
+                median_ttft_ms=round(row.median_ttft_ms, 2) if row.median_ttft_ms is not None else None,
+                median_tps=round(row.median_tps, 2) if row.median_tps is not None else None,
+                median_queue_ms=round(row.median_queue_ms, 2) if row.median_queue_ms is not None else None,
+                tps_sample_count=row.tps_sample_count,
             )
             for row in daily_rows
         ]

@@ -236,6 +236,7 @@ async def test_websocket_throughput_sample_stops_at_the_upstream_terminal_not_se
     # diluted figure).
     (row,) = service.request_logs.rows
     assert row["latency_ms"] == 22_000
+    assert row["latency_upstream_terminal_ms"] == (12_000 if stamped_at_parse else None)
     ((recorded_at, tokens_per_second),) = service.runtime["acc-ws"].tps_samples["gpt-5.6-sol"]
     assert tokens_per_second == pytest.approx(40.0)
     assert recorded_at == _NOW + 22.0

@@ -7,21 +7,24 @@ import { EmptyState } from "@/components/empty-state";
 export type ReportChartCardProps = {
   title: string;
   empty: boolean;
+  description?: string;
+  emptyDescription?: string;
   children: ReactNode;
 };
 
-export function ReportChartCard({ title, empty, children }: ReportChartCardProps) {
+export function ReportChartCard({ title, empty, description, emptyDescription, children }: ReportChartCardProps) {
   const { t } = useTranslation();
 
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="text-sm font-semibold text-foreground">{title}</div>
+      {description ? <p className="mt-1 text-xs text-muted-foreground">{description}</p> : null}
       {empty ? (
         <div className="mt-4">
           <EmptyState
             icon={BarChart3}
             title={t("reports.charts.emptyTitle")}
-            description={t("reports.charts.emptyDescription")}
+            description={emptyDescription ?? t("reports.charts.emptyDescription")}
           />
         </div>
       ) : (

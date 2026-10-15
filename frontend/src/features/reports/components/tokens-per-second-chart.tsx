@@ -28,11 +28,11 @@ export function TokensPerSecondChart({ startDate, endDate, data }: TokensPerSeco
   const { t } = useTranslation();
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    tps: d.medianTps ?? 0,
+    tps: d.medianTps ?? null,
   }));
 
   return (
-    <ReportChartCard title={t("reports.charts.tokensPerSecond")} empty={data.length === 0}>
+    <ReportChartCard title={t("reports.charts.tokensPerSecond")} empty={!chartData.some((d) => d.tps != null)} description={t("reports.charts.tpsSamples", { count: data.reduce((sum, d) => sum + (d.tpsSampleCount ?? 0), 0) })} emptyDescription={t("reports.charts.noQualifiedSpeedSamples")}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>

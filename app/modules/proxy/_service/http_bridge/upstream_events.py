@@ -171,6 +171,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _mark_response_create_attempt_observed,
+    _observe_response_output_timing,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
     _signal_propagated_capacity_startup_ready,
@@ -2053,7 +2054,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         clock = clock_for(self)
         runtime_settings = _service_get_settings()
         relay_upstream = session.upstream
-        receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
+
+        async def receive_observed() -> tuple[UpstreamWebSocketMessage, float]:
+            message = await session.upstream.receive()
+            return message, clock.monotonic()
+
+        receive_task: asyncio.Task[tuple[UpstreamWebSocketMessage, float]] | None = None
         wakeup_task: asyncio.Task[bool] | None = None
         reader_failure_retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None
         try:
@@ -2088,12 +2094,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                 )
                 if receive_task is None:
-                    receive_task = scheduler.create_task(session.upstream.receive())
+                    receive_task = scheduler.create_task(receive_observed())
 
                 message: UpstreamWebSocketMessage | None = None
                 timed_out = False
                 if receive_task.done():
-                    message = receive_task.result()
+                    message, observed_at = receive_task.result()
                     receive_task = None
                 elif receive_timeout is not None and receive_timeout.timeout_seconds <= 0:
                     timed_out = True
@@ -2113,7 +2119,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
-                        message = receive_task.result()
+                        message, observed_at = receive_task.result()
                         receive_task = None
                     elif wakeup_task in done:
                         wakeup_task.result()
@@ -2311,6 +2317,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         message=message,
                         scheduler=scheduler,
                         clock=clock,
+                        observed_at=observed_at,
                     )
                     if await self._retire_http_bridge_after_drain_if_ready(session):
                         break
@@ -2487,6 +2494,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         message: UpstreamWebSocketMessage | None = None,
         scheduler: Scheduler | None = None,
         clock: Clock | None = None,
+        observed_at: float | None = None,
     ) -> None:
         # The relay loop resolves the collaborators once per session and passes
         # them down; the fallback only serves direct callers (tests).
@@ -2494,6 +2502,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             scheduler = scheduler_for(self)
         if clock is None:
             clock = clock_for(self)
+        if observed_at is None:
+            observed_at = clock.monotonic()
         # One JSON document per websocket text frame: parse it directly instead
         # of framing it as SSE and running the line parser over it. The
         # data-only block is what unmatched events relay.
@@ -2531,6 +2541,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 claimed_terminal_request_states=claimed_terminal_request_states,
                 scheduler=scheduler,
                 clock=clock,
+                observed_at=observed_at,
             )
         except BaseException:
             # Includes CancelledError. A terminal request popped from
@@ -2647,6 +2658,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         claimed_terminal_request_states: list[_WebSocketRequestState],
         scheduler: Scheduler,
         clock: Clock,
+        observed_at: float,
     ) -> None:
         original_text = text
         error_message = _websocket_event_error_message(event_type, payload)
@@ -2725,7 +2737,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # classify the send as eventless.
                 _mark_response_create_attempt_observed(matched_request_state, event_type)
                 session.last_upstream_event_generation += 1
-                now = clock.monotonic()
+                now = observed_at
                 if matched_request_state.latency_first_upstream_event_ms is None:
                     matched_request_state.latency_first_upstream_event_ms = int(
                         max(0.0, now - matched_request_state.started_at) * 1000
@@ -2734,6 +2746,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.latency_response_created_ms = int(
                         max(0.0, now - matched_request_state.started_at) * 1000
                     )
+                if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    _observe_response_output_timing(matched_request_state, event_type, payload, now=observed_at)
                 actual_service_tier = _service_tier_from_event_payload(payload)
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
@@ -2829,13 +2843,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
-                if terminal_request_state is not None:
-                    # Upstream generation ends here; the durable alias, operation,
-                    # recovery and circuit-settlement writes below and the
-                    # finalizer's settlement are local and must not stretch the
-                    # throughput sample's span. A later terminal for the same turn
-                    # (capacity retry) replaces it; those rows are not sampled.
-                    terminal_request_state.upstream_terminal_at = clock.monotonic()
                 if (
                     matched_request_state is None
                     and terminal_request_state is not None
@@ -2947,6 +2954,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             grouped_terminal_events = []
             for grouped_request_state in grouped_previous_response_request_states:
+                grouped_request_state.upstream_terminal_at = observed_at
                 grouped_request_state.error_http_status_override = 502
                 (
                     _grouped_downstream_text,
@@ -4240,6 +4248,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
                     if retried:
                         return
+
+        if terminal_request_state is not None:
+            terminal_request_state.upstream_terminal_at = observed_at
+            _observe_response_output_timing(terminal_request_state, event_type, payload, now=observed_at)
 
         terminal_strike_failures: int | None = None
         terminal_poison_detail: str | None = None

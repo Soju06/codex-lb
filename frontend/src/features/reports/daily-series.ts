@@ -47,8 +47,9 @@ function createZeroRow(date: string): DailyReportRow {
     activeAccounts: 0,
     cancelledCount: 0,
     errorCount: 0,
-    medianTtftMs: 0,
-    medianTps: 0,
-    medianQueueMs: 0,
+    medianTtftMs: null,
+    medianTps: null,
+    medianQueueMs: null,
+    tpsSampleCount: 0,
   };
 }

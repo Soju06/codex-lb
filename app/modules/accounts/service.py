@@ -799,10 +799,7 @@ class AccountsService:
             )
             else self._bundle_nonreactivating_validation_usage_updater
         )
-        refresh_result = await updater.force_refresh_result(
-            account,
-            ignore_refresh_disabled=True,
-        )
+        refresh_result = await updater.force_refresh_result(account)
         return account, refresh_result.fetch_succeeded, False
     def _bundle_accounts_for_destination(self, payload: AccountBundlePayload) -> list[Account]:
         accounts: list[Account] = []

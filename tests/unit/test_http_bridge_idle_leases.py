@@ -1321,3 +1321,201 @@ async def test_retire_without_timeout_still_waits_for_pending_lock() -> None:
     await holder
     assert await asyncio.wait_for(retire_task, timeout=1) is True
     close_bounded.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bounded_sweep_preserves_and_retries_retained_replacement_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = _RecordingVirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    lease = proxy_service.AccountLease(
+        lease_id="retained-replacement-sweep",
+        account_id="replacement-account",
+        kind="stream",
+        acquired_at=100.0,
+    )
+    session.pending_account_lease_releases.append(lease)
+    service._http_bridge_detached_sessions[id(session)] = session
+    retry_started = asyncio.Event()
+    allow_retry = asyncio.Event()
+    release_holder = asyncio.Event()
+    release_calls = 0
+
+    async def release_account_lease(account_lease: proxy_service.AccountLease | None) -> None:
+        nonlocal release_calls
+        assert account_lease is lease
+        release_calls += 1
+        if release_calls == 1:
+            raise RuntimeError("retain the replacement lease for retry")
+        retry_started.set()
+        await allow_retry.wait()
+
+    async def hold_pending_lock() -> None:
+        async with session.pending_lock:
+            await release_holder.wait()
+
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    try:
+        await service._close_http_bridge_session(session)
+        original_close_task = session.resource_close_task
+        original_close_attempted = session.upstream_close_attempted
+        assert session.closed
+        assert session.pending_account_lease_releases == [lease]
+        cast(AsyncMock, session.upstream.close).assert_awaited_once()
+
+        holder = scheduler.create_task(hold_pending_lock())
+        await scheduler.drain()
+        sweep = scheduler.create_task(
+            http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+                service, request_scope_id="bounded-retained-sweep"
+            )
+        )
+        await scheduler.drain()
+        assert session.pending_lock.statistics().tasks_waiting == 1
+        await scheduler.advance(4.9)
+        assert not sweep.done()
+        await scheduler.advance(0.1)
+        assert sweep.done()
+        await sweep
+
+        assert session.pending_lock.locked()
+        assert session.pending_lock.statistics().tasks_waiting == 0
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        assert session.pending_account_lease_releases == [lease]
+        assert session.resource_close_task is original_close_task
+        assert session.upstream_close_attempted is original_close_attempted
+        assert release_calls == 1
+        cast(AsyncMock, session.upstream.close).assert_awaited_once()
+
+        release_holder.set()
+        await holder
+        later_sweep = scheduler.create_task(
+            http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+                service, request_scope_id="later-retained-sweep"
+            )
+        )
+        await asyncio.wait_for(retry_started.wait(), timeout=1.0)
+        account_cleanup = scheduler.create_task(service.close_http_bridge_sessions_for_account(lease.account_id))
+        await scheduler.drain()
+        assert release_calls == 2
+        allow_retry.set()
+        await asyncio.gather(later_sweep, account_cleanup)
+        await scheduler.drain()
+
+        assert release_calls == 2
+        assert session.pending_account_lease_releases == []
+        assert service._http_bridge_detached_sessions == {}
+        cast(AsyncMock, session.upstream.close).assert_awaited_once()
+        assert scheduler.task_coroutines.count("_release_http_bridge_session_account_leases") == 1
+        assert scheduler.pending_timers == 0
+        assert not scheduler.owned_tasks
+    finally:
+        release_holder.set()
+        allow_retry.set()
+        await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_kind", ["admission", "handoff"])
+async def test_bounded_sweep_preserves_live_turn_owner_and_account_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_kind: str,
+) -> None:
+    from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers
+
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = _RecordingVirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    lease = proxy_service.AccountLease(
+        lease_id="live-owner-sweep",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=100.0,
+    )
+    session.account_lease = lease
+    if owner_kind == "admission":
+        session.admission_waiter_count = 1
+    else:
+        session.unanchored_reservation_id = "foreign-handoff-owner"
+    service._http_bridge_detached_sessions[id(session)] = session
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+
+    try:
+        await http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+            service, request_scope_id="unrelated-sweep"
+        )
+        assert not session.closed
+        assert not session.upstream_close_attempted
+        assert session.account_lease is lease
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        release_account_lease.assert_not_awaited()
+        cast(AsyncMock, session.upstream.close).assert_not_awaited()
+
+        session.admission_waiter_count = 0
+        session.unanchored_reservation_id = None
+        await http_bridge_helpers._release_http_bridge_unanchored_handoffs_for_request(
+            service, request_scope_id="after-owner-release"
+        )
+        await scheduler.drain()
+        assert session.closed
+        assert session.account_lease is None
+        assert service._http_bridge_detached_sessions == {}
+        release_account_lease.assert_awaited_once_with(lease)
+        cast(AsyncMock, session.upstream.close).assert_awaited_once()
+        assert scheduler.pending_timers == 0
+        assert not scheduler.owned_tasks
+    finally:
+        await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_retirement_waits_beyond_the_sweep_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = VirtualClock(monotonic_value=100.0)
+    scheduler = _RecordingVirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, nullcontext()), clock=clock, scheduler=scheduler)
+    session = _make_bridge_session()
+    session.upstream_control.reconnect_requested = True
+    session.upstream_control.retire_after_drain = True
+    service._http_bridge_detached_sessions[id(session)] = session
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    release_holder = asyncio.Event()
+
+    async def hold_pending_lock() -> None:
+        async with session.pending_lock:
+            await release_holder.wait()
+
+    try:
+        holder = scheduler.create_task(hold_pending_lock())
+        await scheduler.drain()
+        retirement = scheduler.create_task(service._retire_http_bridge_after_drain_if_ready(session))
+        await scheduler.drain()
+        assert session.pending_lock.statistics().tasks_waiting == 1
+        await scheduler.advance(6.0)
+        assert not retirement.done()
+        assert scheduler.pending_timers == 0
+        cast(AsyncMock, session.upstream.close).assert_not_awaited()
+
+        release_holder.set()
+        await holder
+        assert await retirement
+        await scheduler.drain()
+        cast(AsyncMock, session.upstream.close).assert_awaited_once()
+        assert service._http_bridge_detached_sessions == {}
+        assert scheduler.pending_timers == 0
+        assert not scheduler.owned_tasks
+    finally:
+        release_holder.set()
+        await scheduler.cancel_owned_tasks()

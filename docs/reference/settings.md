@@ -269,9 +269,10 @@ anything else belongs in `app/core/config/settings.py`.
 
 ## Removed
 
-Images and default account probes choose `gpt-5.6-luna`, then `gpt-5.5`,
-using registry plan visibility and suppression. If neither qualifies, they
-use `gpt-5.6-luna`. Catalog visibility does not guarantee account access.
+Images choose `gpt-5.6-sol`, then `gpt-6-astra`, then `gpt-5.5`, using
+registry plan visibility and suppression. Default account probes choose
+`gpt-5.6-luna`, then `gpt-5.5`. If no candidate qualifies, each falls back to
+its first candidate. Catalog visibility does not guarantee account access.
 There is no host-model setting. See the
 [Images spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/images-api-compat)
 and [probe spec](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy).

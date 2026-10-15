@@ -3,7 +3,7 @@
 from app.core.openai.model_registry import get_model_registry
 
 _HOST_MODEL_CANDIDATES = ("gpt-5.6-luna", "gpt-5.5")
-_IMAGE_HOST_MODEL_CANDIDATES = ("gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-luna", "gpt-5.5")
+_IMAGE_HOST_MODEL_CANDIDATES = ("gpt-5.6-sol", "gpt-6-astra", "gpt-5.5")
 
 
 def resolve_default_host_model() -> str:

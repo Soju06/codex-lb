@@ -23,3 +23,13 @@ def test_image_host_falls_back_when_preferred_model_is_unavailable(monkeypatch) 
     monkeypatch.setattr(host_models, "get_model_registry", lambda: registry)
 
     assert host_models.resolve_image_host_model() == "gpt-6-astra"
+
+
+def test_image_host_skips_luna_which_rejects_forced_image_tool(monkeypatch) -> None:
+    registry = SimpleNamespace(
+        plan_types_for_model=lambda model: {"available"} if model in {"gpt-5.6-luna", "gpt-5.5"} else set(),
+        is_suppressed_model=lambda model: False,
+    )
+    monkeypatch.setattr(host_models, "get_model_registry", lambda: registry)
+
+    assert host_models.resolve_image_host_model() == "gpt-5.5"

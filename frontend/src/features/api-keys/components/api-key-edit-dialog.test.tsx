@@ -1,10 +1,11 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { LimitRuleCreate } from "@/features/api-keys/schemas";
+import i18n from "@/i18n";
 import { createAccountSummary, createApiKey } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
@@ -171,6 +172,101 @@ describe("ApiKeyEditDialog", () => {
         modelFilter: null,
       },
     ]);
+  });
+
+  it("localizes current-usage labels while preserving model IDs and amounts", async () => {
+    const previousLanguage = i18n.language;
+    const resetAt = "2026-01-08T00:00:00Z";
+    const apiKey = createApiKey({
+      limits: [
+        {
+          id: 1,
+          limitType: "total_tokens",
+          limitWindow: "weekly",
+          maxValue: 1_500_000,
+          currentValue: 10_200,
+          modelFilter: "gpt-5.1",
+          resetAt,
+        },
+        {
+          id: 2,
+          limitType: "cost_usd",
+          limitWindow: "monthly",
+          maxValue: 12_000_000,
+          currentValue: 1_500_000,
+          modelFilter: null,
+          resetAt,
+        },
+        {
+          id: 3,
+          limitType: "input_tokens",
+          limitWindow: "5h",
+          maxValue: 1_500_000_000,
+          currentValue: 10_200,
+          modelFilter: "gpt-5.4",
+          resetAt,
+        },
+        {
+          id: 4,
+          limitType: "output_tokens",
+          limitWindow: "7d",
+          maxValue: 1_500_000,
+          currentValue: 1_500_000,
+          modelFilter: "gpt-5.5",
+          resetAt,
+        },
+        {
+          id: 5,
+          limitType: "credits",
+          limitWindow: "daily",
+          maxValue: 1_500_000_000,
+          currentValue: 1_500_000,
+          modelFilter: null,
+          resetAt,
+        },
+      ],
+    });
+
+    try {
+      await act(async () => {
+        await i18n.changeLanguage("en");
+      });
+      renderWithProviders(
+        <ApiKeyEditDialog
+          open
+          busy={false}
+          apiKey={apiKey}
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+        />,
+      );
+
+      const currentUsage = screen.getByText("Current usage").parentElement;
+      if (!currentUsage) throw new Error("Current usage section not found");
+      const usageBars = within(currentUsage);
+      expect(usageBars.getByText("Tokens (Weekly, gpt-5.1)")).toBeInTheDocument();
+      expect(usageBars.getByText("10.2K / 1.5M")).toBeInTheDocument();
+
+      await act(async () => {
+        await i18n.changeLanguage("ja");
+      });
+
+      expect(usageBars.getByText("トークン (週次, gpt-5.1)")).toBeInTheDocument();
+      expect(usageBars.getByText("10.2K / 1.5M")).toBeInTheDocument();
+      expect(usageBars.getByText("コスト (月次, すべてのモデル)")).toBeInTheDocument();
+      expect(usageBars.getByText("$1.50 / $12.00")).toBeInTheDocument();
+      expect(usageBars.getByText("入力トークン (5h, gpt-5.4)")).toBeInTheDocument();
+      expect(usageBars.getByText("10.2K / 1.5B")).toBeInTheDocument();
+      expect(usageBars.getByText("出力トークン (7d, gpt-5.5)")).toBeInTheDocument();
+      expect(usageBars.getByText("1.5M / 1.5M")).toBeInTheDocument();
+      expect(usageBars.getByText("クレジット (日次, すべてのモデル)")).toBeInTheDocument();
+      expect(usageBars.getByText("1.5M / 1.5B")).toBeInTheDocument();
+    } finally {
+      cleanup();
+      await act(async () => {
+        await i18n.changeLanguage(previousLanguage);
+      });
+    }
   });
 
   it("keeps the dialog open when submit fails", async () => {

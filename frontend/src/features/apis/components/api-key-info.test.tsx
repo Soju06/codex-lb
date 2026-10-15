@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { createApiKey } from "@/test/mocks/factories";
+import i18n from "@/i18n";
 
 import { ApiKeyInfo } from "./api-key-info";
 
@@ -143,9 +144,24 @@ describe("ApiKeyInfo", () => {
 		);
 
 		expect(screen.getByText("2 configured")).toBeInTheDocument();
-		expect(screen.getByText(/Total Tokens \(weekly, gpt-5.1\)/)).toBeInTheDocument();
+		expect(screen.getByText(/Total Tokens \(Weekly, gpt-5.1\)/)).toBeInTheDocument();
 		expect(screen.getByText(/750K \/ 1M/)).toBeInTheDocument();
-		expect(screen.getByText(/Cost \(USD\) \(monthly, all\)/)).toBeInTheDocument();
+		expect(screen.getByText(/Cost \(USD\) \(Monthly, all\)/)).toBeInTheDocument();
 		expect(screen.getByText(/\$1.50 \/ \$5.00/)).toBeInTheDocument();
+	});
+
+	it("localizes limit details in Japanese while retaining model identifiers and quantities", async () => {
+		await i18n.changeLanguage("ja");
+		try {
+			const key = createApiKey();
+			const limit = { ...key.limits[0], modelFilter: "gpt-5.1" };
+			render(<ApiKeyInfo apiKey={createApiKey({ limits: [limit] })} />);
+
+			expect(screen.getByText("合計トークン (週次, gpt-5.1)")).toBeInTheDocument();
+			expect(screen.getByText("125K / 1M")).toBeInTheDocument();
+		} finally {
+			cleanup();
+			await i18n.changeLanguage("en");
+		}
 	});
 });

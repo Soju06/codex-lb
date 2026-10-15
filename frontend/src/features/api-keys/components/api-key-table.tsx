@@ -45,14 +45,13 @@ function formatLimitSummary(limits: LimitRule[], t: ReturnType<typeof useTransla
     .map((l) => {
       const type = t(`apiKeys.limitTypes.${l.limitType}`, { defaultValue: LIMIT_TYPE_SHORT[l.limitType] });
       const isCost = l.limitType === "cost_usd";
-      const isCredits = l.limitType === "credits";
       const current = isCost
         ? `$${(l.currentValue / 1_000_000).toFixed(2)}`
         : formatCompactNumber(l.currentValue);
       const max = isCost
         ? `$${(l.maxValue / 1_000_000).toFixed(2)}`
         : formatCompactNumber(l.maxValue);
-      const suffix = isCost ? l.limitWindow : isCredits ? `${l.limitWindow}` : l.limitWindow;
+      const suffix = t(`apiKeys.limitWindows.${l.limitWindow}`);
       return `${type}: ${current}/${max} ${suffix}`;
     })
     .join(" | ");

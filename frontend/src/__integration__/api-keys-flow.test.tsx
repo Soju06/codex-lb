@@ -110,7 +110,7 @@ describe("api keys flow integration", () => {
     const defaultKeyRow = getParentRow(screen.getByText("Default key"));
     expect(within(defaultKeyRow).getByText("sk-test")).toBeInTheDocument();
     expect(within(defaultKeyRow).getByText("gpt-5.1")).toBeInTheDocument();
-    expect(within(defaultKeyRow).getByText("Tokens: 125K/1M weekly")).toBeInTheDocument();
+    expect(within(defaultKeyRow).getByText("Tokens: 125K/1M Weekly")).toBeInTheDocument();
     expect(within(defaultKeyRow).getByText("Active")).toBeInTheDocument();
 
     const readOnlyRow = getParentRow(screen.getByText("Read only key"));

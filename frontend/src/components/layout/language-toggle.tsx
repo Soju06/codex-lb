@@ -14,6 +14,7 @@ const LANGUAGE_LABEL_KEY: Record<SupportedLanguage, string> = {
   en: "common.english",
   "zh-CN": "common.chinese",
   ko: "common.korean",
+  ja: "common.japanese",
 };
 
 export function LanguageToggle() {

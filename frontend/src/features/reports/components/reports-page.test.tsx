@@ -3,6 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
+import i18n from "@/i18n";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useTimeFormatStore } from "@/hooks/use-time-format";
 import { renderWithProviders } from "@/test/utils";
 import type {
   ReportsResponse,
@@ -152,6 +155,53 @@ describe("ReportsPage", () => {
   afterEach(() => {
     vi.useRealTimers();
     window.localStorage.clear();
+  });
+
+  it.each([
+    { timeFormat: "12h", time: "午後02:30:45" },
+    { timeFormat: "24h", time: "14:30:45" },
+  ] as const)("formats the generation timestamp in Japanese with $timeFormat and reacts to ISO selection", async ({ timeFormat, time }) => {
+    const previousLanguage = i18n.language;
+    const previousDateFormat = useDateDisplayFormatStore.getState().dateDisplayFormat;
+    const previousTimeFormat = useTimeFormatStore.getState().timeFormat;
+    await i18n.changeLanguage("ja");
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    useTimeFormatStore.setState({ timeFormat });
+
+    try {
+      useReportsMock.mockReturnValue(
+        asUseReportsResult({
+          data: { ...EMPTY_REPORT, generatedAt: new Date(2026, 8, 6, 14, 30, 45).toISOString() },
+          isLoading: false,
+          refetch: vi.fn(),
+        }),
+      );
+      renderWithProviders(<ReportsPage />);
+
+      expect(screen.getByText(`${time} 2026/09/06 時点`)).toBeInTheDocument();
+
+      act(() => {
+        useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+      });
+
+      expect(screen.getByText("2026-09-06 14:30:45 時点")).toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        useDateDisplayFormatStore.setState({ dateDisplayFormat: previousDateFormat });
+        useTimeFormatStore.setState({ timeFormat: previousTimeFormat });
+        await i18n.changeLanguage(previousLanguage);
+      });
+    }
+  });
+
+  it("omits the as-of label when the report has no generation timestamp", () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({ data: EMPTY_REPORT, isLoading: false, refetch: vi.fn() }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(screen.queryByText(/^As of /)).not.toBeInTheDocument();
   });
 
   it("initializes default dates when the reports page mounts", () => {

@@ -10136,6 +10136,74 @@ async def test_native_codex_stream_error_events_default_retry_delay_when_unknown
 
 
 @pytest.mark.asyncio
+async def test_native_giveup_terminal_releases_the_account_lease_through_the_real_chain(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_native_giveup_lease")
+    lease = AccountLease(
+        lease_id="lease-native-giveup",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=0.0,
+    )
+    settings = _make_proxy_settings()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=lease)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    async def failing_stream(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "timed out; try again in 99s"),
+            retry_after_seconds=7,
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", failing_stream)
+
+    events = [
+        event
+        async for event in proxy_api._normalize_public_responses_stream(
+            proxy_api._stream_response_error_events(
+                service._stream_with_retry(
+                    _make_transport_policy_payload(),
+                    {"user-agent": "codex_exec/0.150.1 (Ubuntu; x86_64)", "originator": "codex_exec"},
+                    codex_session_affinity=False,
+                    propagate_http_errors=False,
+                    openai_cache_affinity=False,
+                    api_key=None,
+                    api_key_reservation=None,
+                    suppress_text_done_events=False,
+                    request_transport="http",
+                    upstream_stream_transport_override=None,
+                ),
+                owns_reservation=False,
+                reservation=None,
+                preserve_native_failure_lifecycle=True,
+            ),
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+
+    terminal = [e for e in events if (parse_sse_data_json(e) or {}).get("type") == "response.failed"]
+    assert terminal, events
+    # The give-up terminal must not leak the account lease: consuming the
+    # wrapped stream to completion closes the inner retry generator, whose
+    # cleanup releases every tracked stream lease.
+    release_lease.assert_any_await(lease)
+
+
+@pytest.mark.asyncio
 async def test_native_codex_stream_error_events_unaffected_for_non_giveup_codes() -> None:
     """Errors outside the overload/transport-failure set are untouched by
     this patch: they keep going through the pre-existing terminal-event path

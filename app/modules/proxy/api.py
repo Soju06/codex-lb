@@ -8277,10 +8277,10 @@ async def _stream_response_error_events(
             # the open stream — a bare re-raise here used to close the
             # stream with zero bytes, which the client reported as "Stream
             # disconnected before completion" and retried blind. Emit a
-            # named, retryable error instead: Codex's own reconnect logic
-            # only retries on ``rate_limit_exceeded`` (overload codes are
-            # terminal to it) and only that code's message is scanned for a
-            # "try again in Ns" delay.
+            # named, retryable error instead. In codex-rs any unrecognized
+            # ``response.failed`` code maps to a retryable stream error and is
+            # retried; only ``server_is_overloaded``/``slow_down`` are terminal
+            # to it. The code only affects the "try again in Ns" delay parse.
             retryable_message = native_giveup_retryable_message(
                 exc.upstream_error_code or error_code,
                 error.message if error and error.message else None,

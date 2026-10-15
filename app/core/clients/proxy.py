@@ -31,7 +31,7 @@ from typing import (
     TypeAlias,
     cast,
 )
-from urllib.parse import ParseResult, urlparse, urlunparse
+from urllib.parse import ParseResult, unquote, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import hdrs
@@ -5591,6 +5591,26 @@ async def thread_goal_request(
                 await lease.close()
 
 
+def _reject_control_path_dot_segments(path: str) -> None:
+    """Reject ``.``/``..`` segments instead of normalising them away.
+
+    The plugin-catalog route forwards a path-converter value into the
+    credentialed upstream URL; normalising dot segments would let a caller
+    escape the intended namespace when the URL is resolved. Percent-encoded
+    forms (``%2e``) decode to the same segments, so each segment is decoded
+    before comparison. Raises ``ClientPayloadError`` (surfaced as 400).
+    """
+    for segment in path.strip("/").split("/"):
+        decoded = unquote(segment)
+        # Repeatedly decode to catch double-encoded forms like ``%252e``.
+        previous = segment
+        while decoded != previous:
+            previous = decoded
+            decoded = unquote(decoded)
+        if decoded in {".", ".."}:
+            raise ClientPayloadError(f"Invalid control path: {path!r}", param="path", code="invalid_request_error")
+
+
 async def codex_control_request(
     path: str,
     *,
@@ -5609,6 +5629,7 @@ async def codex_control_request(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
+    _reject_control_path_dot_segments(path)
     settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")

@@ -1011,6 +1011,10 @@ async def _codex_control_proxy(
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             return _realtime_call_error_response(request, status_code=exc.status_code)
         return _logged_error_json_response(request, exc.status_code, exc.payload)
+    except ClientPayloadError as exc:
+        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
+            return _realtime_call_error_response(request, status_code=400)
+        return _logged_error_json_response(request, 400, openai_client_payload_error(exc))
     except Exception:
         if adapter.privacy_policy is not CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             raise

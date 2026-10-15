@@ -6051,24 +6051,16 @@ class _WebSocketMixin:
                     request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state
-                if accepted_lifecycle_replay or (
-                    retry_safe_owner_replay and request_state.api_key_reservation is not None
-                ):
-                    # Replays keep their reservation open until finalization.
-                    # Health writes must wait for settlement, even before created.
-                    await _record_or_defer_websocket_accepted_replay_health(
-                        proxy,
-                        request_state,
-                        account=account,
-                        error_message=_websocket_event_error_message(event_type, payload),
-                        error_code=retry_error_code,
-                    )
-                else:
-                    await proxy._handle_stream_error(
-                        account,
-                        {"message": _websocket_event_error_message(event_type, payload) or "Upstream error"},
-                        retry_error_code,
-                    )
+                # Replays keep their reservation open until finalization.
+                # Health writes must wait for settlement, even before created;
+                # the helper writes immediately when the request is unkeyed.
+                await _record_or_defer_websocket_accepted_replay_health(
+                    proxy,
+                    request_state,
+                    account=account,
+                    error_message=_websocket_event_error_message(event_type, payload),
+                    error_code=retry_error_code,
+                )
             if retry_error_code is not None:
                 return downstream_text
 

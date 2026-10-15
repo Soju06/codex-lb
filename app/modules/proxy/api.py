@@ -6061,10 +6061,10 @@ async def _iter_source_sse_event_blocks(
     finally:
         try:
             if iterator is not None:
-                await _aclose_stream(iterator)
+                await _aclose_stream_when_suspended(iterator)
         finally:
             if iterator is not stream:
-                await _aclose_stream(stream)
+                await _aclose_stream_when_suspended(stream)
 
 
 async def _wrap_source_responses_public_stream(
@@ -6137,7 +6137,7 @@ async def _wrap_source_responses_public_stream(
                             # teardown happens before iteration starts (e.g. a
                             # native client disconnecting right after the
                             # initial heartbeat).
-                            await _aclose_stream(stream)
+                            await _aclose_stream_when_suspended(stream)
             else:
                 try:
                     await _aclose_stream(normalized)
@@ -6145,7 +6145,7 @@ async def _wrap_source_responses_public_stream(
                     try:
                         await _aclose_stream(event_blocks)
                     finally:
-                        await _aclose_stream(stream)
+                        await _aclose_stream_when_suspended(stream)
 
 
 async def _source_chat_stream_with_settlement(
@@ -8855,9 +8855,35 @@ async def _log_source_chat_completion(
 
 
 async def _aclose_stream(stream: object) -> None:
+    if getattr(stream, "ag_running", False):
+        # A pull or an earlier ``aclose()`` is still executing inside this
+        # generator (its ``finally`` awaits the transport close, which runs as
+        # its own deferred task). A second ``aclose()`` would raise
+        # ``aclose(): asynchronous generator is already running``; the
+        # operation in flight owns the teardown and its ``finally`` releases
+        # the transport and lease, so close only once the generator is
+        # suspended again.
+        return
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
         await aclose()
+
+
+async def _aclose_stream_when_suspended(stream: object) -> None:
+    """Close ``stream`` only while nothing is executing inside it.
+
+    The eagerly opened source body is closed both by its own layer's teardown
+    and by the outer consumer's cascade, and an earlier ``aclose()`` can still
+    be unwinding (its ``finally`` awaits the transport close, which runs as its
+    own deferred task) when the next close arrives; a second ``aclose()`` then
+    raises ``aclose(): asynchronous generator is already running``. The
+    operation already in flight owns the teardown and its ``finally`` releases
+    the transport and lease, so a close here is only issued once the generator
+    is suspended again.
+    """
+    if getattr(stream, "ag_running", False):
+        return
+    await _aclose_stream(stream)
 
 
 def _reservation_requires_usage(reservation: ApiKeyUsageReservationData | None) -> bool:

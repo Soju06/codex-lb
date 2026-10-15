@@ -10,6 +10,7 @@ from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
     require_dashboard_permission,
+    require_dashboard_write_access,
     set_dashboard_error_format,
     validate_dashboard_session,
 )

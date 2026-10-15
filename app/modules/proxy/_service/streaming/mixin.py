@@ -285,6 +285,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _select_account_with_budget_for_stream as _select_account_with_budget_for_stream_helper,
 )
 from app.modules.proxy._service.streaming.helpers import _settle_background_ack as _settle_bg_ack
+from app.modules.proxy._service.streaming.helpers import _stream_responses as _stream_responses_helper
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
@@ -427,45 +428,12 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
-_REQUEST_TRANSPORT_HTTP = "http"
-
-
 class _StreamingMixin(_StreamingRetryMixin):
     _handle_stream_error = _handle_stream_error_helper
     _resolve_upstream_route_for_account = _resolve_upstream_route_for_account_helper
     _select_account_with_budget_for_stream = _select_account_with_budget_for_stream_helper
 
-    def stream_responses(
-        self,
-        payload: ResponsesRequest,
-        headers: Mapping[str, str],
-        *,
-        codex_session_affinity: bool = False,
-        propagate_http_errors: bool = False,
-        openai_cache_affinity: bool = False,
-        api_key: ApiKeyData | None = None,
-        api_key_reservation: ApiKeyUsageReservationData | None = None,
-        suppress_text_done_events: bool = False,
-        request_transport: str = _REQUEST_TRANSPORT_HTTP,
-        client_ip: str | None = None,
-        enforce_openai_sdk_contract: bool = True,
-    ) -> AsyncIterator[str]:
-        proxy = cast(_StreamingServiceProtocol, self)
-        _maybe_log_proxy_request_payload("stream", payload, headers)
-        filtered = _facade().filter_inbound_headers(headers)
-        return proxy._stream_with_retry(
-            payload,
-            filtered,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=propagate_http_errors,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=api_key_reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            request_transport=request_transport,
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-        )
+    stream_responses = _stream_responses_helper
 
     async def _stream_once(
         self,

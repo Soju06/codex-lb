@@ -12,7 +12,7 @@ from app.db.models import Account
 from app.db.session import SessionLocal
 from app.modules.accounts import api as accounts_api_module
 
-from .test_account_opencode_auth_export import _make_auth_json
+from .test_account_auth_export import _make_auth_json
 
 pytestmark = pytest.mark.integration
 

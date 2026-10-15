@@ -29,6 +29,7 @@ from app.modules.dashboard_auth.service import (
     get_dashboard_session_store,
 )
 from app.modules.dashboard_roles.repository import DashboardRolesRepository
+from app.modules.dashboard_users.identity_resolver import IdentityResolver
 from app.modules.dashboard_users.repository import DashboardUsersRepository
 from app.modules.dashboard_users.service import DashboardUsersService
 from app.modules.firewall.repository import FirewallRepository
@@ -49,6 +50,8 @@ from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.service import RequestLogsService
 from app.modules.role_mappings.repository import RoleMappingsRepository
 from app.modules.role_mappings.service import RoleMappingsService
+from app.modules.scim.repository import ScimTokensRepository, ScimUsersRepository
+from app.modules.scim.service import ScimUsersService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
@@ -94,6 +97,19 @@ class DashboardUsersContext:
     session: AsyncSession
     repository: DashboardUsersRepository
     service: DashboardUsersService
+
+
+@dataclass(slots=True)
+class ScimContext:
+    session: AsyncSession
+    repository: ScimUsersRepository
+    service: ScimUsersService
+
+
+@dataclass(slots=True)
+class ScimTokensContext:
+    session: AsyncSession
+    repository: ScimTokensRepository
 
 
 @dataclass(slots=True)
@@ -282,6 +298,30 @@ def get_dashboard_users_context(
     repository = DashboardUsersRepository(session)
     service = DashboardUsersService(repository, DashboardRolesRepository(session), DashboardAuthRepository(session))
     return DashboardUsersContext(session=session, repository=repository, service=service)
+
+
+def get_scim_context(session: AsyncSession = Depends(get_session)) -> ScimContext:
+    """Everything a SCIM push touches, on one session.
+
+    The lifecycle half is the dashboard's own service, unchanged and
+    unwrapped: an ``active: false`` push has to be the same event, with the
+    same cascade and the same refusals, as the disable an administrator would
+    have performed by hand.
+    """
+
+    users_repository = DashboardUsersRepository(session)
+    roles = DashboardRolesRepository(session)
+    resolver = IdentityResolver(users_repository, roles, RoleMappingsRepository(session))
+    users_service = DashboardUsersService(users_repository, roles, DashboardAuthRepository(session))
+    return ScimContext(
+        session=session,
+        repository=ScimUsersRepository(session),
+        service=ScimUsersService(ScimUsersRepository(session), users_repository, roles, resolver, users_service),
+    )
+
+
+def get_scim_tokens_context(session: AsyncSession = Depends(get_session)) -> ScimTokensContext:
+    return ScimTokensContext(session=session, repository=ScimTokensRepository(session))
 
 
 def get_auth_providers_context(

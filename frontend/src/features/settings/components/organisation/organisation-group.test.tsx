@@ -13,7 +13,11 @@ import {
 } from "@/features/auth/oidc-window";
 import { LoginHintSchema } from "@/features/auth/schemas";
 import { maskEmail, OIDC_KIND } from "@/features/organisation/rules";
-import { ORGANISATION_LOGIN_POLICY_ID } from "@/features/settings/advanced-settings-deeplink";
+import {
+  ORGANISATION_LOGIN_POLICY_ID,
+  ORGANISATION_SCIM_HASH,
+  ORGANISATION_SCIM_ID,
+} from "@/features/settings/advanced-settings-deeplink";
 import { OrganisationSettingsGroup } from "@/features/settings/components/organisation/organisation-group";
 import { renderAt, signInAsTeamAdmin } from "@/test/access-test-utils";
 import {
@@ -25,7 +29,9 @@ import {
   createDefaultDashboardRoles,
   createOidcAuthProvider,
   createRoleMapping,
+  createScimToken,
   OIDC_PROVIDER_ID,
+  PASSWORD_PROVIDER_ID,
   OPERATOR_PERMISSIONS,
   LOCAL_SIGN_IN_PROVIDER,
   PRESET_ROLE_IDS,
@@ -1261,4 +1267,248 @@ describe("OrganisationSettingsGroup", () => {
       expect(facts).not.toHaveTextContent("Ready: it has two-factor");
     });
   });
+
+  describe("automatic account management", () => {
+    /** Only the local sign-in: the install that cannot use this yet. */
+    function passwordOnly() {
+      server.use(
+        http.get("/api/auth-providers", () =>
+          HttpResponse.json([createAuthProvider({ id: PASSWORD_PROVIDER_ID, kind: "password", label: "Password" })]),
+        ),
+      );
+    }
+
+    function useTokens(...tokens: ReturnType<typeof createScimToken>[]) {
+      server.use(http.get("/api/scim-tokens", () => HttpResponse.json({ tokens, basePath: "/scim/v2" })));
+    }
+
+    it("is drawn on an install that cannot use it yet, disabled, with the reason", async () => {
+      const user = userEvent.setup();
+      passwordOnly();
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(await screen.findByRole("heading", { name: "Automatic account management" })).toBeInTheDocument();
+      expect(screen.getByTestId("automatic-accounts-blocked")).toHaveTextContent(
+        "Connect company sign-in first to turn this on.",
+      );
+      expect(screen.getByRole("button", { name: "Create credential" })).toBeDisabled();
+      expect(screen.getByLabelText("Name this credential")).toBeDisabled();
+      // Disabled is not silent: the address is still there to prepare with.
+      expect(await screen.findByTestId("scim-base-url")).toHaveTextContent("/scim/v2");
+    });
+
+    it("mounts last, after the login-policy card", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get("/api/auth-providers", () =>
+          HttpResponse.json([
+            createAuthProvider({ id: PASSWORD_PROVIDER_ID, kind: "password", label: "Password" }),
+            createAuthProvider(),
+            createOidcAuthProvider({ enabled: true }),
+          ]),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await screen.findByRole("heading", { name: "Automatic account management" });
+      expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+        "Company sign-in",
+        "Reverse-proxy sign-in",
+        "Sign-in rules",
+        "Password sign-in",
+        "Automatic account management",
+      ]);
+    });
+
+    it("shows a new credential once, keeps it through the tier flip, and only then refreshes", async () => {
+      const user = userEvent.setup();
+      // Nothing configured yet, so issuing the first credential is exactly the
+      // write that flips the disclosure tier under the open dialog.
+      const refreshSession = vi.fn(async () => {
+        useAuthStore.setState({ accessSummary: createAccessSummary({ scimTokens: 1 }) });
+        return useAuthStore.getState() as never;
+      });
+      signInAsTeamAdmin({ refreshSession });
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.type(await screen.findByLabelText("Name this credential"), "Directory");
+      await user.click(screen.getByRole("button", { name: "Create credential" }));
+
+      const secret = await screen.findByTestId("scim-token-secret");
+      const plaintext = secret.textContent ?? "";
+      expect(plaintext).not.toBe("");
+      expect(refreshSession).not.toHaveBeenCalled();
+      // The tier flips under the dialog; the dialog and its value survive it.
+      expect(screen.getByTestId("scim-token-secret")).toHaveTextContent(plaintext);
+
+      await user.click(screen.getByRole("button", { name: "Done" }));
+
+      await waitFor(() => expect(refreshSession).toHaveBeenCalled());
+      expect(screen.queryByTestId("scim-token-secret")).not.toBeInTheDocument();
+      const list = await screen.findByTestId("scim-token-list");
+      expect(list).toHaveTextContent("Directory");
+      expect(list).not.toHaveTextContent(plaintext);
+      expect(list).toHaveTextContent("Nothing received yet");
+    });
+
+    it("holds the plaintext in component state alone while it is on screen", async () => {
+      const user = userEvent.setup();
+      const { queryClient } = renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.type(await screen.findByLabelText("Name this credential"), "Directory");
+      await user.click(screen.getByRole("button", { name: "Create credential" }));
+
+      const plaintext = (await screen.findByTestId("scim-token-secret")).textContent ?? "";
+      expect(plaintext).not.toBe("");
+      // The dialog is still open, which is exactly when a mutation that settled
+      // successfully would be holding the answer: `gcTime` disposes only of a
+      // mutation nothing observes any more, and the group observes this one.
+      const cached = JSON.stringify([
+        queryClient
+          .getMutationCache()
+          .getAll()
+          .map((mutation) => [mutation.state.data ?? null, mutation.state.variables ?? null]),
+        queryClient
+          .getQueryCache()
+          .getAll()
+          .map((query) => query.state.data ?? null),
+      ]);
+      expect(cached).not.toContain(plaintext);
+    });
+
+    it("shows a replacement once and keeps the row's label and last sync", async () => {
+      const user = userEvent.setup();
+      const existing = createScimToken({ label: "Directory", lastUsedAt: "2026-02-02T10:00:00Z" });
+      // Assembled here rather than written out, and returned by the rotate
+      // alone, so the assertion below proves the value came from that response.
+      const replacement = [["clb", "scim"].join("-"), "replacement", "1".repeat(8)].join("_");
+      useTokens(existing);
+      server.use(
+        http.post("/api/scim-tokens/:tokenId/rotate", () =>
+          HttpResponse.json({ token: { ...existing, rotatedAt: "2026-02-03T00:00:00Z" }, secret: replacement }),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.click(await screen.findByRole("button", { name: "Replace" }));
+
+      expect(await screen.findByTestId("scim-token-secret")).toHaveTextContent(replacement);
+      await user.click(screen.getByRole("button", { name: "Done" }));
+
+      const list = await screen.findByTestId("scim-token-list");
+      expect(list).toHaveTextContent("Directory");
+      expect(list).toHaveTextContent("Last received");
+      expect(list).not.toHaveTextContent(replacement);
+    });
+
+    it("explains a refused issue in this product's words and opens no dialog", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.post("/api/scim-tokens", () =>
+          HttpResponse.json(
+            {
+              error: {
+                code: "insufficient_delegation",
+                message: "Issuing an automatic-account-management credential needs the permissions it could hand out",
+              },
+            },
+            { status: 403 },
+          ),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      await user.type(await screen.findByLabelText("Name this credential"), "Directory");
+      await user.click(screen.getByRole("button", { name: "Create credential" }));
+
+      expect(await screen.findByText("You can only hand out permissions you hold yourself.")).toBeInTheDocument();
+      expect(screen.queryByText(/needs the permissions it could hand out/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId("scim-token-secret")).not.toBeInTheDocument();
+    });
+
+    it("warns that a person will arrive twice while the company sign-in does not match by e-mail", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get("/api/auth-providers", () =>
+          HttpResponse.json([
+            createAuthProvider({ id: PASSWORD_PROVIDER_ID, kind: "password", label: "Password" }),
+            createOidcAuthProvider({ enabled: true, linkByEmail: false, label: "Okta" }),
+          ]),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(await screen.findByText(/Okta does not match people by e-mail/)).toBeInTheDocument();
+      expect(screen.queryByTestId("automatic-accounts-blocked")).not.toBeInTheDocument();
+    });
+
+    it("does not turn an unreadable credential list into 'no credential exists'", async () => {
+      const user = userEvent.setup();
+      server.use(
+        http.get("/api/scim-tokens", () =>
+          HttpResponse.json({ error: { code: "internal_error", message: "boom" } }, { status: 500 }),
+        ),
+      );
+      renderAt(<OrganisationSettingsGroup />);
+      await expand(user);
+
+      expect(await screen.findByText("The list of credentials could not be loaded.")).toBeInTheDocument();
+      expect(screen.queryByTestId("scim-token-list")).not.toBeInTheDocument();
+      // And never offers the site origin as the endpoint: a copyable address
+      // that the answer did not supply is a wrong address.
+      expect(screen.queryByTestId("scim-base-url")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Copy address" })).not.toBeInTheDocument();
+    });
+
+    it("says accounts are managed automatically once one credential exists, without the banned words", () => {
+      signInAsTeamAdmin({ accessSummary: createAccessSummary({ scimTokens: 1 }) });
+      renderAt(<OrganisationSettingsGroup />);
+
+      const line = screen.getByTestId("organisation-group-line");
+      expect(line).toHaveTextContent("Accounts are added and disabled automatically.");
+      expect(line.textContent ?? "").not.toMatch(ENTERPRISE_JARGON);
+    });
+
+    it("issues no credential request while the group is collapsed", async () => {
+      const seen: string[] = [];
+      server.events.on("request:start", ({ request }) => {
+        if (new URL(request.url).pathname.startsWith("/api/scim-tokens")) {
+          seen.push(request.method);
+        }
+      });
+      renderAt(<OrganisationSettingsGroup />);
+
+      await waitFor(() => expect(screen.getByTestId("organisation-group-line")).toBeInTheDocument());
+      expect(seen).toEqual([]);
+    });
+
+    it("is not drawn at all without security:write", () => {
+      signInAsTeamAdmin({ permissions: OPERATOR_PERMISSIONS });
+      renderAt(<OrganisationSettingsGroup />);
+
+      expect(screen.queryByRole("heading", { name: "Automatic account management" })).not.toBeInTheDocument();
+    });
+
+    it("expands and scrolls from its own deep link", async () => {
+      const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+      renderAt(<OrganisationSettingsGroup />, `/settings${ORGANISATION_SCIM_HASH}`);
+
+      expect(await screen.findByRole("heading", { name: "Automatic account management" })).toBeInTheDocument();
+      await waitFor(() => {
+        const card = document.getElementById(ORGANISATION_SCIM_ID);
+        expect(card).not.toBeNull();
+        expect(scrollIntoView.mock.contexts).toContain(card);
+      });
+
+      scrollIntoView.mockRestore();
+    });
+  });
+
 });

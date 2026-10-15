@@ -42,6 +42,9 @@ export const ORGANISATION_LOGIN_POLICY_HASH = `#${ORGANISATION_LOGIN_POLICY_ID}`
  */
 export const ORGANISATION_OIDC_ID = "oidc";
 export const ORGANISATION_OIDC_HASH = `#${ORGANISATION_OIDC_ID}`;
+/** The automatic account management card's own anchor, for pointing somebody at it. */
+export const ORGANISATION_SCIM_ID = "organisation-automatic-accounts";
+export const ORGANISATION_SCIM_HASH = `#${ORGANISATION_SCIM_ID}`;
 const ORGANISATION_QUERY_FLAG = "org";
 export const ORGANISATION_SETTINGS_RETURN_URL = `/settings?${ORGANISATION_QUERY_FLAG}=1${ORGANISATION_OIDC_HASH}`;
 
@@ -50,6 +53,7 @@ const ORGANISATION_HASHES = new Set([
   ORGANISATION_REFUSED_HASH,
   ORGANISATION_LOGIN_POLICY_HASH,
   ORGANISATION_OIDC_HASH,
+  ORGANISATION_SCIM_HASH,
 ]);
 
 export function shouldExpandOrganisationSettings(search: string, hash: string): boolean {

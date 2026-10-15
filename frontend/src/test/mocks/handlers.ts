@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
-import type { AuditEntry, AuthProvider, RoleMapping } from "@/features/organisation/api";
+import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
 
 import {
   LIMIT_TYPES,
@@ -53,6 +53,8 @@ import {
   createModelContextWindowOverrides,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
+  createScimToken,
+  SCIM_BASE_PATH,
   type DashboardAuthSession,
   type DashboardSettings,
   type ModelContextWindowOverrides,
@@ -355,6 +357,16 @@ function renumberMappings(ordered: readonly RoleMapping[]): RoleMapping[] {
 }
 
 /**
+ * The plaintext an issue or a rotate answers with — the only place one ever
+ * appears. Assembled from parts, and derived from the row id rather than
+ * written out, so no line here reads as a credential to a secret scanner and
+ * no two rows hand back the same value.
+ */
+function scimSecretFor(seed: string): string {
+  return [["clb", "scim"].join("-"), seed, "0".repeat(8)].join("_");
+}
+
+/**
  * `admin` is reserved for the local break-glass account, whether or not a row
  * currently holds the name.
  *
@@ -453,6 +465,7 @@ type MockState = {
   modelSources: ModelSource[];
   authProviders: AuthProvider[];
   roleMappings: RoleMapping[];
+  scimTokens: ScimToken[];
   refusedSignIns: AuditEntry[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
@@ -503,6 +516,8 @@ function createInitialState(): MockState {
     authProviders: createDefaultAuthProviders(),
     // Zero rules is the shipped default: the empty state is the common case.
     roleMappings: [],
+    // Same for credentials: nothing is provisioning accounts until somebody connects it.
+    scimTokens: [],
     refusedSignIns: createDefaultRefusedSignIns(),
     firewallEntries: [],
     stickySessions: [],
@@ -2669,6 +2684,49 @@ export const handlers = [
     state.roleMappings = renumberMappings(
       state.roleMappings.filter((mapping) => mapping.id !== params.mappingId),
     );
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ── Organisation: automatic account management credentials ──
+
+  http.get("/api/scim-tokens", () => {
+    return HttpResponse.json({ tokens: state.scimTokens, basePath: SCIM_BASE_PATH });
+  }),
+
+  http.post("/api/scim-tokens", async ({ request }) => {
+    const payload = (await request.json().catch(() => null)) as { label?: string } | null;
+    const label = (payload?.label ?? "").trim();
+    if (label === "") {
+      return HttpResponse.json({ error: { code: "validation_error", message: "Invalid payload" } }, { status: 422 });
+    }
+    const issued = createScimToken({ id: `scim_token_${state.scimTokens.length + 1}`, label });
+    state.scimTokens = [...state.scimTokens, issued];
+    return HttpResponse.json({ token: issued, secret: scimSecretFor(issued.id) }, { status: 201 });
+  }),
+
+  http.post("/api/scim-tokens/:tokenId/rotate", ({ params }) => {
+    const row = state.scimTokens.find((token) => token.id === params.tokenId);
+    if (!row) {
+      return HttpResponse.json(
+        { error: { code: "scim_token_not_found", message: "No such token" } },
+        { status: 404 },
+      );
+    }
+    // In place, exactly as the server rotates it: same id, same label, same
+    // history — only the verifier behind it changes.
+    const rotated = { ...row, rotatedAt: "2026-02-01T00:00:00Z" };
+    state.scimTokens = state.scimTokens.map((token) => (token.id === row.id ? rotated : token));
+    return HttpResponse.json({ token: rotated, secret: scimSecretFor(`${row.id}-again`) });
+  }),
+
+  http.delete("/api/scim-tokens/:tokenId", ({ params }) => {
+    if (!state.scimTokens.some((token) => token.id === params.tokenId)) {
+      return HttpResponse.json(
+        { error: { code: "scim_token_not_found", message: "No such token" } },
+        { status: 404 },
+      );
+    }
+    state.scimTokens = state.scimTokens.filter((token) => token.id !== params.tokenId);
     return new HttpResponse(null, { status: 204 });
   }),
 

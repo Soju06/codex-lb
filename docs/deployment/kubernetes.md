@@ -48,6 +48,30 @@ reads the account rows) and the release before that reads as the credential. If 
 was deleted there is nothing to re-fill from, and a build older than the previous release would read
 the empty columns as "never set up": an implicit local admin and a fresh bootstrap token.
 
+## Upgrading to the release that drops the withdrawn overflow columns
+
+**Stop the old replicas first — again.** This release removes
+`dashboard_settings.subscription_overflow_source_id` and
+`subscription_overflow_drain_until` (and the `model_source_pins` table) left behind by the withdrawn
+subscription-exhaustion overflow feature. Every earlier release — including v1.25.0-beta.9 and
+beta.10, which already took the credential drop above — maps those two columns and loads the settings
+row as one entity, so the rule and the remedies from the previous section apply unchanged: the
+migration Job is the same `pre-upgrade` hook, and a pod of an earlier release that is still serving
+when this drop commits fails on every settings read. There is no supported window in which a pod of
+an earlier release runs against the post-drop schema. If a single upgrade crosses both drops, one
+stop covers both; an install already on beta.9 or later needs its own.
+
+**This drop stays silent.** The pre-DDL drain warning described above is specific to the credential
+revision, so this one logs nothing of its own — this page is the only warning. The columns were
+always NULL in practice (the feature never fired; production measured 0 pinned rows and 0 non-NULL
+values before the drop), so there is no data to lose, only the read path to protect.
+
+**Rollback re-creates both columns** as nullable, and the previous release reads them as "overflow
+never configured", which is what they always were. Do not start a rolled-back replica while the drop
+is in flight; roll back the schema first, then the image.
+
+Contract: [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations).
+
 ## Multi-replica behavior
 
 The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica installs using a headless-service DNS name per pod. The default cluster domain is `cluster.local`; set Helm `clusterDomain` if your cluster uses a different suffix. Override `config.sessionBridgeAdvertiseBaseUrl` only if pods must be reached through a different internal address.

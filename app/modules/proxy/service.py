@@ -392,12 +392,8 @@ from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
 from app.modules.proxy._service.realtime_live import LiveWebSocketConnector, _RealtimeLiveMixin
-from app.modules.proxy._service.refresh import (
-    ensure_fresh_with_auth_error,
-)
-from app.modules.proxy._service.refresh import (
-    ensure_fresh_with_budget as _recover_fresh_account,
-)
+from app.modules.proxy._service.refresh import ensure_fresh_with_auth_error
+from app.modules.proxy._service.refresh import ensure_fresh_with_budget as _recover_fresh_account
 from app.modules.proxy._service.request_log import (
     _normalize_session_id as _normalize_session_id,
 )

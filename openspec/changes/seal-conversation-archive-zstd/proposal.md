@@ -4,8 +4,8 @@ The archive writer appends each batch to the hourly file as its own gzip member,
 
 ## What changes
 
-- Once an hourly `.jsonl.gz` file is closed (older hour, untouched for 5 minutes), a background thread re-encodes it to `.jsonl.zst` (zstd level 9, 128 MiB window), verifies the decompressed SHA-256 against the gzip original, and only then removes the gzip file.
-- Corrupt gzip files, an existing `.jsonl.zst` for the same hour, and verification mismatches leave the gzip file untouched.
+- Once an hourly `.jsonl.gz` file is closed (older hour, untouched for 5 minutes), a background thread re-encodes it to `.jsonl.zst` (zstd level 9, 128 MiB window), verifies the decompressed SHA-256 against the expected content, and only then removes the gzip file. The expected content is the gzip content, or the existing `.jsonl.zst` content followed by the gzip content when an existing `.jsonl.zst` for that hour is not a prefix of the gzip (late appends after sealing).
+- Corrupt gzip files, a gzip file that changes while it is re-encoded, and verification mismatches leave the gzip file untouched.
 - The conversation archive reader serves `.jsonl.zst` next to `.jsonl.gz` and legacy `.jsonl`.
 
 ## Scope

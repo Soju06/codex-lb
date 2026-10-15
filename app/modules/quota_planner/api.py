@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -136,6 +138,17 @@ def _validate_working_days(days: list[int] | None, current: tuple[int, ...]) -> 
     return normalized
 
 
+def _validate_timezone(value: str | None, current: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return current
+    try:
+        ZoneInfo(normalized)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise DashboardBadRequestError("timezone must be a valid timezone name", code="invalid_quota_planner") from exc
+    return normalized
+
+
 @router.get("/settings", response_model=QuotaPlannerSettingsResponse)
 async def get_quota_planner_settings(
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
@@ -148,12 +161,12 @@ async def update_quota_planner_settings(
     request: Request,
     payload: QuotaPlannerSettingsUpdateRequest = Body(...),
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
 ) -> QuotaPlannerSettingsResponse:
     current = await context.repository.get_settings()
     updated = PlannerSettings(
         mode=payload.mode or current.mode,
-        timezone=(payload.timezone or current.timezone).strip() or current.timezone,
+        timezone=_validate_timezone(payload.timezone, current.timezone),
         working_days=_validate_working_days(payload.working_days, current.working_days),
         working_hours_start=payload.working_hours_start or current.working_hours_start,
         working_hours_end=payload.working_hours_end or current.working_hours_end,
@@ -190,6 +203,8 @@ async def update_quota_planner_settings(
     AuditService.log_async(
         "quota_planner_settings_changed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("settings", "quota_planner"),
         details={"mode": saved.mode},
     )
     return _settings_response(saved)

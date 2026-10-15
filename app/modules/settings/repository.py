@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Callable, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -14,7 +13,8 @@ from sqlalchemy.orm.exc import StaleDataError
 from app.core.auth.dashboard_session_ttl import DEFAULT_DASHBOARD_SESSION_TTL_SECONDS
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import DashboardSettings, ModelContextWindowOverride
+from app.db.models import DashboardSettings, DashboardUser, LocalLoginPolicy, ModelContextWindowOverride
+from app.modules.dashboard_users.repository import DashboardUsersRepository
 
 _SETTINGS_ID = 1
 
@@ -22,6 +22,32 @@ _SETTINGS_ID = 1
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_active_password_users(self) -> Sequence[DashboardUser]:
+        """Accounts the TOTP requirements bind (roles loaded for the admin-level check)."""
+
+        return await DashboardUsersRepository(self._session).list_active_local_password_users()
+
+    async def acquire_account_write_intent(self) -> None:
+        """Serialise this settings write against the account mutations it depends on.
+
+        The tightening gate counts qualifying emergency accounts and then
+        writes the policy; without the accounts lock a concurrent TOTP reset,
+        password removal or deactivation can take the last one away in between
+        and leave a restricted policy with no way back in.
+        """
+
+        await DashboardUsersRepository(self._session).acquire_write_intent()
+
+    async def count_qualifying_break_glass(self) -> int:
+        """Accounts that can still open the door once local sign-in is restricted."""
+
+        return await DashboardUsersRepository(self._session).count_qualifying_break_glass()
+
+    async def list_break_glass_designations(self) -> Sequence[DashboardUser]:
+        """Designated accounts, so a refusal can name the one an operator should enrol."""
+
+        return await DashboardUsersRepository(self._session).list_break_glass_designations()
 
     async def get_or_create(self) -> DashboardSettings:
         existing = await self._session.get(DashboardSettings, _SETTINGS_ID)
@@ -42,6 +68,9 @@ class SettingsRepository:
             proxy_account_stream_limit=None,
             proxy_account_stream_recovery_reserve=None,
             proxy_api_key_fair_share_congestion_threshold_pct=None,
+            # Thread cache identity: same tri-state rule, seeded NULL.
+            # NULL inherits the environment value and then ``shared``.
+            thread_cache_identity_mode=None,
             # C2-2 routing/overload: same tri-state rule, seeded NULL.
             proxy_overload_isolation_seconds=None,
             proxy_account_error_rate_weighting_enabled=None,
@@ -59,20 +88,17 @@ class SettingsRepository:
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             single_account_id=None,
-            subscription_overflow_source_id=None,
-            subscription_overflow_drain_until=None,
             dashboard_session_ttl_seconds=DEFAULT_DASHBOARD_SESSION_TTL_SECONDS,
             import_without_overwrite=True,
             totp_required_on_login=False,
-            password_hash=None,
+            totp_required_for_admin_role=False,
+            local_login_policy=LocalLoginPolicy.ENABLED.value,
             guest_access_enabled=False,
             guest_password_hash=None,
             bootstrap_token_encrypted=None,
             bootstrap_token_hash=None,
             api_key_auth_enabled=False,
             hide_upstream_quota_from_api_keys=False,
-            totp_secret_encrypted=None,
-            totp_last_verified_step=None,
             sticky_reallocation_primary_budget_threshold_pct=95.0,
             sticky_reallocation_secondary_budget_threshold_pct=100.0,
             additional_quota_routing_policies_json="{}",
@@ -101,6 +127,8 @@ class SettingsRepository:
             rate_limit_reset_credits_refresh_enabled=None,
             # M5 conversation archive: NULL = inherit the env alias / default.
             conversation_archive_enabled=None,
+            # R2 spool retention: NULL = inherit the env alias / default (7d).
+            http_responses_session_bridge_operation_spool_retention_seconds=None,
         )
         self._session.add(row)
         try:
@@ -121,6 +149,8 @@ class SettingsRepository:
         upstream_stream_transport: str | None = None,
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
+        thread_cache_identity_mode: str | None = None,
+        clear_thread_cache_identity_mode: bool = False,
         proxy_account_response_create_limit: int | None = None,
         clear_proxy_account_response_create_limit: bool = False,
         proxy_account_stream_limit: int | None = None,
@@ -152,10 +182,6 @@ class SettingsRepository:
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         single_account_id: str | None = None,
-        subscription_overflow_source_id: str | None = None,
-        clear_subscription_overflow_source: bool = False,
-        subscription_overflow_drain_until: datetime | None = None,
-        set_subscription_overflow_drain_until: bool = False,
         openai_cache_affinity_max_age_seconds: int | None = None,
         dashboard_session_ttl_seconds: int | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
@@ -167,6 +193,8 @@ class SettingsRepository:
         warmup_model: str | None = None,
         import_without_overwrite: bool | None = None,
         totp_required_on_login: bool | None = None,
+        totp_required_for_admin_role: bool | None = None,
+        local_login_policy: str | None = None,
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
@@ -203,6 +231,10 @@ class SettingsRepository:
         conversation_archive_enabled: bool | None = None,
         clear_conversation_archive_enabled: bool = False,
         # end M5 conversation archive
+        # R2 spool retention (tri-state like the C2-1 timeouts)
+        http_responses_session_bridge_operation_spool_retention_seconds: float | None = None,
+        clear_http_responses_session_bridge_operation_spool_retention_seconds: bool = False,
+        # end R2 spool retention
         # C2-1 timeouts (tri-state: value = store, clear flag = back to NULL /
         # inherit, neither = untouched).
         upstream_connect_timeout_seconds: float | None = None,
@@ -271,6 +303,10 @@ class SettingsRepository:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )
+        if clear_thread_cache_identity_mode:
+            settings.thread_cache_identity_mode = None
+        elif thread_cache_identity_mode is not None:
+            settings.thread_cache_identity_mode = thread_cache_identity_mode
         # C2-2 routing/overload
         if clear_proxy_overload_isolation_seconds:
             settings.proxy_overload_isolation_seconds = None
@@ -314,15 +350,6 @@ class SettingsRepository:
             settings.relative_availability_top_k = relative_availability_top_k
         if single_account_id is not None or routing_strategy == "single_account":
             settings.single_account_id = single_account_id
-        # Independent of ``single_account_id``: its NULL write is coupled to the
-        # routing strategy, whereas the overflow designation clears through an
-        # explicit flag and never touches (or is touched by) routing_strategy.
-        if clear_subscription_overflow_source:
-            settings.subscription_overflow_source_id = None
-        elif subscription_overflow_source_id is not None:
-            settings.subscription_overflow_source_id = subscription_overflow_source_id
-        if set_subscription_overflow_drain_until:
-            settings.subscription_overflow_drain_until = subscription_overflow_drain_until
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
         if dashboard_session_ttl_seconds is not None:
@@ -358,6 +385,10 @@ class SettingsRepository:
             settings.import_without_overwrite = import_without_overwrite
         if totp_required_on_login is not None:
             settings.totp_required_on_login = totp_required_on_login
+        if totp_required_for_admin_role is not None:
+            settings.totp_required_for_admin_role = totp_required_for_admin_role
+        if local_login_policy is not None:
+            settings.local_login_policy = local_login_policy
         if api_key_auth_enabled is not None:
             settings.api_key_auth_enabled = api_key_auth_enabled
         if hide_upstream_quota_from_api_keys is not None:
@@ -383,6 +414,10 @@ class SettingsRepository:
         if weekly_pace_smoothing_minutes is not None:
             settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
         if guest_access_enabled is not None:
+            if settings.guest_access_enabled and not guest_access_enabled:
+                # Disabling guest access must not leave already-issued guest
+                # cookies valid for when it is re-enabled later.
+                settings.guest_session_generation += 1
             settings.guest_access_enabled = guest_access_enabled
         if limit_warmup_staggered_idle_enabled is not None:
             settings.limit_warmup_staggered_idle_enabled = limit_warmup_staggered_idle_enabled
@@ -434,6 +469,15 @@ class SettingsRepository:
         elif conversation_archive_enabled is not None:
             settings.conversation_archive_enabled = conversation_archive_enabled
         # end M5 conversation archive
+        # R2 spool retention: clear flag resets to NULL (inherit the env alias
+        # / code default); a non-None value is dashboard-owned.
+        if clear_http_responses_session_bridge_operation_spool_retention_seconds:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = None
+        elif http_responses_session_bridge_operation_spool_retention_seconds is not None:
+            settings.http_responses_session_bridge_operation_spool_retention_seconds = (
+                http_responses_session_bridge_operation_spool_retention_seconds
+            )
+        # end R2 spool retention
         # C2-1 timeouts
         for column_name, value, clear in (
             (
@@ -492,22 +536,6 @@ class SettingsRepository:
             on_committed=get_upstream_route_cache().clear if upstream_route_inputs_changed else None,
         )
         return settings
-
-    async def clear_subscription_overflow_source_if_matches(self, source_id: str, *, drain_until: datetime) -> bool:
-        """Turn overflow off and arm the drain deadline when ``source_id`` is designated.
-
-        No commit: the caller (the model-source delete route) commits the clear
-        together with the source delete so a designated-but-deleted source can
-        never persist. ``DashboardSettings.version`` is the version_id_col, so a
-        concurrent settings writer still surfaces as ``StaleDataError`` at that
-        commit.
-        """
-        settings = await self.get_or_create()
-        if settings.subscription_overflow_source_id != source_id:
-            return False
-        settings.subscription_overflow_source_id = None
-        settings.subscription_overflow_drain_until = drain_until
-        return True
 
     async def commit_refresh(
         self, settings: DashboardSettings, *, on_committed: Callable[[], None] | None = None

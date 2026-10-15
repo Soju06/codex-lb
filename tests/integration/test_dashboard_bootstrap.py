@@ -133,8 +133,10 @@ async def test_no_token_generated_when_password_exists(async_client, monkeypatch
     assert setup.status_code == 200
     assert await has_active_bootstrap_token() is False
 
+    # The credential lives on the account row; the settings row only has to
+    # have given up the token that was meant to create it.
     settings = await get_settings_cache().get()
-    assert settings.password_hash is not None
+    assert settings.bootstrap_token_hash is None and settings.bootstrap_token_encrypted is None
     assert await ensure_auto_bootstrap_token() is None
 
     _force_remote(monkeypatch)

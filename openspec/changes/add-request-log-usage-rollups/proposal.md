@@ -9,7 +9,7 @@ Dashboard time-series and statistics reads (`overview` buckets/activity/top-erro
 - Fold slices are DELETE-then-INSERT over half-open hour-aligned windows in one transaction with the watermark advance, making folding idempotent and crash-safe, and making a watermark reset a complete self-healing rebuild.
 - Switch six read paths (dashboard bucket aggregation, activity aggregates, top error, earliest activity, planner demand bins, API-key trends) to serve folded history from the rollups merged with a raw live tail above the watermark. Return shapes, services, API schemas, and the frontend are unchanged. With an epoch watermark the reads degrade to exactly the legacy raw queries, so no kill switch or setting is added.
 - Mirror the request-log lifecycle mutations that rewrite folded history (account soft delete re-attribution, hard history delete, duplicate-account consolidation) into the rollup tables in the same transaction, serialized on the fold-state row lock.
-- Gate request-log retention pruning on the minimum of the lifetime and hourly watermarks so raw rows are never pruned before the hourly rollup has folded them.
+- Add the hourly watermark to the request-log retention gate, which prunes only below the minimum of every rollup watermark, so raw rows are never pruned before the hourly rollup has folded them.
 - One guarded, DDL-only migration (three tables plus one state column); the historical backfill is performed entirely by the paced fold job after deploy.
 
 ## Capabilities
@@ -21,7 +21,7 @@ None.
 ### Modified Capabilities
 
 - `query-caching`: add the hourly time-axis rollup tables, the incremental hourly fold pass and its watermark contract, the rollup-plus-live-tail read switch for the six time-series read paths, lifecycle mirroring, and the reset escape hatch. This capability already owns the lifetime rollup + live-tail pattern and the dashboard hot-path query shapes.
-- `data-retention`: request-log pruning gates on the minimum of the lifetime and hourly fold watermarks (and both currency checks), so time-series statistics survive raw pruning permanently.
+- `data-retention`: the hourly fold watermark joins the set request-log pruning gates on (the minimum across every rollup watermark, and its currency check), so time-series statistics survive raw pruning permanently. The delta carries the other watermarks main has since added -- the conversation satellite's and the report history's -- unchanged.
 
 ## Impact
 

@@ -22,6 +22,7 @@ describe("PasswordSettings", () => {
     vi.clearAllMocks();
     useAuthStore.setState({
       passwordRequired: false,
+      localPasswordConfigured: false,
       bootstrapRequired: false,
       bootstrapTokenConfigured: false,
       authMode: "standard",
@@ -37,7 +38,7 @@ describe("PasswordSettings", () => {
   });
 
   it("shows change/remove buttons when password is configured", () => {
-    useAuthStore.setState({ passwordRequired: true, passwordSessionActive: true });
+    useAuthStore.setState({ passwordRequired: true, localPasswordConfigured: true, passwordSessionActive: true });
     render(<PasswordSettings />);
     expect(screen.getByRole("button", { name: "Change" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
@@ -104,7 +105,7 @@ describe("PasswordSettings", () => {
 
   it("handles change flow via dialog", async () => {
     const user = userEvent.setup();
-    useAuthStore.setState({ passwordRequired: true, passwordSessionActive: true });
+    useAuthStore.setState({ passwordRequired: true, localPasswordConfigured: true, passwordSessionActive: true });
     vi.mocked(changePassword).mockResolvedValue({} as never);
 
     render(<PasswordSettings />);
@@ -123,7 +124,7 @@ describe("PasswordSettings", () => {
 
   it("handles remove flow via dialog", async () => {
     const user = userEvent.setup();
-    useAuthStore.setState({ passwordRequired: true, passwordSessionActive: true });
+    useAuthStore.setState({ passwordRequired: true, localPasswordConfigured: true, passwordSessionActive: true });
     vi.mocked(removePassword).mockResolvedValue({} as never);
 
     render(<PasswordSettings />);
@@ -173,7 +174,7 @@ describe("PasswordSettings", () => {
     const user = userEvent.setup();
     await i18n.changeLanguage("zh-CN");
     try {
-      useAuthStore.setState({ passwordRequired: true, passwordSessionActive: true });
+      useAuthStore.setState({ passwordRequired: true, localPasswordConfigured: true, passwordSessionActive: true });
       render(<PasswordSettings />);
 
       await user.click(screen.getByRole("button", { name: "移除" }));
@@ -190,7 +191,7 @@ describe("PasswordSettings", () => {
     const user = userEvent.setup();
     await i18n.changeLanguage("zh-CN");
     try {
-      useAuthStore.setState({ passwordRequired: true, authenticated: true, passwordSessionActive: false });
+      useAuthStore.setState({ passwordRequired: true, localPasswordConfigured: true, authenticated: true, passwordSessionActive: false });
       render(<PasswordSettings />);
 
       await user.click(screen.getByRole("button", { name: "登录以管理" }));
@@ -204,7 +205,7 @@ describe("PasswordSettings", () => {
   });
 
   it("describes password as fallback in trusted header mode", () => {
-    useAuthStore.setState({ authMode: "trusted_header", passwordRequired: false });
+    useAuthStore.setState({ authMode: "trusted_header", passwordRequired: false, localPasswordConfigured: false });
 
     render(<PasswordSettings />);
 
@@ -212,10 +213,26 @@ describe("PasswordSettings", () => {
     expect(screen.getByRole("button", { name: "Set password" })).toBeInTheDocument();
   });
 
+  it("offers Set password while only proxy accounts exist (sign-in required, no local password)", () => {
+    useAuthStore.setState({
+      authMode: "trusted_header",
+      authenticated: true,
+      passwordRequired: true,
+      localPasswordConfigured: false,
+      passwordSessionActive: false,
+    });
+
+    render(<PasswordSettings />);
+
+    expect(screen.getByText("No fallback password set.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set password" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Login to manage" })).not.toBeInTheDocument();
+  });
+
   it("hides change/remove when proxy-authenticated without password session", () => {
     useAuthStore.setState({
       authMode: "trusted_header",
-      passwordRequired: true,
+      passwordRequired: true, localPasswordConfigured: true,
       passwordManagementEnabled: true,
       passwordSessionActive: false,
     });

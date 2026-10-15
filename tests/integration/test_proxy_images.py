@@ -317,6 +317,21 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
         captured["instructions"] = payload.instructions
         captured["input"] = payload.input
         captured["account_id"] = account_id
+        if payload.model == "gpt-5.5":
+            yield _sse(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "status": "failed",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                            "message": "The model gpt-5.5 does not exist or you do not have access to it.",
+                        },
+                    },
+                }
+            )
+            return
         yield _sse(
             {
                 "type": "response.output_item.done",
@@ -372,7 +387,7 @@ async def test_images_generations_returns_envelope_on_success(async_client, monk
     assert body["usage"] == {"input_tokens": 7, "output_tokens": 13, "total_tokens": 20}
 
     # The host model is hidden from clients but appears in the upstream call.
-    assert captured["model"] == "gpt-5.5"
+    assert captured["model"] == "gpt-5.6-luna"
     tools = cast(list[Any], captured["tools"])
     image_tool = cast(dict[str, Any], tools[0])
     assert image_tool["type"] == "image_generation"
@@ -1031,6 +1046,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
         del headers, access_token, base_url, raise_for_status, kwargs
+        captured["model"] = payload.model
         captured["input"] = payload.input
         captured["tools"] = list(payload.tools)
         captured["account_id"] = account_id
@@ -1073,6 +1089,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
         },
     )
 
+    assert captured["model"] == "gpt-5.6-luna"
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "EDITED_B64", "revised_prompt": "edited"}]

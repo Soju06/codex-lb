@@ -24,7 +24,6 @@ claimant can never block refresh for longer than the TTL.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 import uuid
@@ -39,6 +38,7 @@ from sqlalchemy.sql.elements import TextClause
 from app.core.config.settings import get_settings
 from app.db.models import AccountRefreshClaim
 from app.db.session import get_background_session, sqlite_writer_section
+from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
@@ -263,9 +263,14 @@ class RefreshClaimCoordinator:
                         await session.commit()
                         return claimed
                 except OperationalError as exc:
-                    if not _is_sqlite_database_locked(exc) or attempt == _SQLITE_BUSY_RETRY_ATTEMPTS - 1:
+                    if not await should_retry_after_sqlite_lock(
+                        exc,
+                        what="refresh_claim_upsert",
+                        attempt=attempt,
+                        max_attempts=_SQLITE_BUSY_RETRY_ATTEMPTS,
+                        base_delay_seconds=_SQLITE_BUSY_RETRY_BASE_SECONDS,
+                    ):
                         raise
-                    await asyncio.sleep(_SQLITE_BUSY_RETRY_BASE_SECONDS * (2**attempt))
             raise AssertionError("unreachable")
 
     async def release(self, account_id: str, *, owner: str) -> None:
@@ -316,10 +321,6 @@ def build_refresh_claim_upsert(*, dialect_name: str) -> TextClause:
     if dialect_name == "sqlite":
         return _SQLITE_CLAIM_UPSERT_SQL
     raise RuntimeError(f"Refresh claims unsupported for dialect={dialect_name!r}")
-
-
-def _is_sqlite_database_locked(exc: OperationalError) -> bool:
-    return "database is locked" in str(exc).lower()
 
 
 # Process-wide default coordinator. ``_default_initialized`` distinguishes

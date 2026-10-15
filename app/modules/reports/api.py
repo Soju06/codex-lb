@@ -13,7 +13,7 @@ from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import ReportsContext, get_reports_caches, get_reports_context
 from app.modules.reports.cache import ReportCacheKey, ReportsCaches
 from app.modules.reports.repository import DailyReportRangeTooLargeError
-from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse
+from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse, ThreadIdentityResponse
 from app.modules.reports.service import InvalidReportDateRangeError, resolve_report_range
 
 router = APIRouter(
@@ -47,6 +47,36 @@ async def get_reports(
                 api_key_ids=list(key.api_keys) or None,
                 model=key.model or None,
                 useragent_group=key.useragent or None,
+            ),
+        )
+    except InvalidReportDateRangeError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
+    except DailyReportRangeTooLargeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/thread-identity", response_model=ThreadIdentityResponse)
+async def get_thread_identity(
+    context: ReportsContext = Depends(get_reports_context),
+    caches: ReportsCaches = Depends(get_reports_caches),
+    start_date: Annotated[date | None, Query()] = None,
+    end_date: Annotated[date | None, Query()] = None,
+    report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
+) -> ThreadIdentityResponse:
+    """Thread identity and cache locality over the selected range, pool-wide.
+
+    The Reports filters are intentionally not accepted here: filtering by
+    account would pin every conversation to one account and make the
+    accounts-per-conversation factor meaningless.
+    """
+    try:
+        key = _cache_key(start_date, end_date, report_timezone, None, None)
+        return await caches.thread_identity.get(
+            key,
+            lambda: context.service.get_thread_identity(
+                start_date=key.start,
+                end_date=key.end,
+                report_timezone=key.timezone,
             ),
         )
     except InvalidReportDateRangeError as exc:

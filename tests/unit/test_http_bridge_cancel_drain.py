@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections import deque
 from types import SimpleNamespace
@@ -1236,7 +1237,11 @@ def test_anonymous_event_prefers_unresolved_draining_owner_before_visible_retry(
 
 
 def test_anonymous_event_prefers_unresolved_visible_request_before_active_response() -> None:
-    """A normal pipelined request awaiting response.created owns pre-created anonymous events."""
+    """A pipelined request awaiting response.created owns anonymous error/terminal events.
+
+    Anonymous ``response.*`` output events take the opposite branch; see the
+    ``test_anonymous_output_event_*`` cases below.
+    """
     active_request = _make_request_state(
         "req-active-created",
         response_id="resp-active-created",
@@ -1254,6 +1259,7 @@ def test_anonymous_event_prefers_unresolved_visible_request_before_active_respon
         deque([active_request, waiting_request]),
         prefer_previous_response_not_found=False,
         prefer_draining_requests=True,
+        event_type="error",
     )
 
     assert matched_request is waiting_request
@@ -1279,6 +1285,278 @@ def test_anonymous_terminal_errors_can_target_visible_retry_when_drain_exists() 
     )
 
     assert matched_request is retry_request
+
+
+def test_anonymous_output_event_targets_created_response_before_pipelined_sibling() -> None:
+    """Issue #2350: a pipelined sibling awaiting response.created must not receive the
+    created response's output frames."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is active_request
+
+
+def test_anonymous_output_event_targets_created_response_over_unresolved_drain() -> None:
+    """The sibling that gave up (downstream closed, still draining) must not keep
+    swallowing the created response's output."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    detached_request = _make_request_state(
+        "req-detached-before-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=None,
+    )
+    detached_request.draining_until_terminal = True
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, detached_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is active_request
+
+
+def test_anonymous_output_event_targets_draining_created_response_before_visible_sibling() -> None:
+    """A cancelled request whose response upstream already created still owns its
+    output while draining; the visible sibling awaiting response.created stays clean."""
+    draining_request = _make_request_state(
+        "req-cancelled-after-created",
+        response_id="resp-cancelled-after-created",
+        awaiting_response_created=False,
+        event_queue=None,
+    )
+    draining_request.draining_until_terminal = True
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([draining_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is draining_request
+
+
+def test_anonymous_output_event_with_two_created_responses_stays_unmatched() -> None:
+    """Two created responses on one socket cannot be told apart by an anonymous
+    frame; it stays unmatched (liveness only) instead of being guessed."""
+    first_request = _make_request_state(
+        "req-first-created",
+        response_id="resp-first-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    second_request = _make_request_state(
+        "req-second-created",
+        response_id="resp-second-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([first_request, second_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="response.output_text.delta",
+    )
+
+    assert matched_request is None
+
+
+def test_anonymous_telemetry_event_keeps_pre_created_ownership_beside_created_response() -> None:
+    """Vendor telemetry (``codex.rate_limits``) is not response output: it still
+    reaches the request whose response.create is unacknowledged."""
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+
+    matched_request = proxy_service._match_websocket_request_state_for_anonymous_event(
+        deque([active_request, waiting_request]),
+        prefer_previous_response_not_found=False,
+        prefer_draining_requests=True,
+        event_type="codex.rate_limits",
+    )
+
+    assert matched_request is waiting_request
+
+
+_PIPELINED_OUTPUT_ITEM_ADDED = json.dumps(
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 2,
+        "output_index": 0,
+        "item": {"id": "msg_pipelined", "type": "message", "role": "assistant", "status": "in_progress", "content": []},
+    }
+)
+_PIPELINED_TEXT_DELTA = json.dumps(
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 3,
+        "item_id": "msg_pipelined",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "Hello",
+    }
+)
+_PIPELINED_ANONYMOUS_ERROR = json.dumps({"type": "error", "error": {"code": "server_error", "message": "rejected"}})
+
+
+def _queued_event_types(queue: asyncio.Queue[str | None] | None) -> list[str]:
+    assert queue is not None
+    event_types: list[str] = []
+    while not queue.empty():
+        block = queue.get_nowait()
+        assert block is not None
+        event_types.append(json.loads(block.split("data: ", 1)[1])["type"])
+    return event_types
+
+
+def _make_pipelined_bridge_session(
+    active_request: proxy_service._WebSocketRequestState,
+    waiting_request: proxy_service._WebSocketRequestState,
+) -> proxy_service._HTTPBridgeSession:
+    # Two unanchored requests sharing one soft prompt-cache lane: the first is
+    # streaming, the second sent its response.create once the gate released.
+    return _make_http_bridge_session(
+        deque([active_request, waiting_request]),
+        queued_request_count=2,
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "shared-prompt-cache-key", None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_does_not_receive_created_response_output() -> None:
+    """Issue #2350 at the bridge reader: output frames of the created response reach
+    its own downstream queue, not the pipelined sibling's."""
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_OUTPUT_ITEM_ADDED)
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_TEXT_DELTA)
+
+    assert _queued_event_types(active_request.event_queue) == [
+        "response.output_item.added",
+        "response.output_text.delta",
+    ]
+    assert _queued_event_types(waiting_request.event_queue) == []
+    assert list(session.pending_requests) == [active_request, waiting_request]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_still_owns_anonymous_error() -> None:
+    """An anonymous error frame keeps targeting the request whose response.create is
+    still unacknowledged; the created response is untouched."""
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    service._load_balancer = cast(
+        Any,
+        SimpleNamespace(record_error=AsyncMock(), record_errors=AsyncMock(), release_account_lease=AsyncMock()),
+    )
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+
+    await service._process_http_bridge_upstream_text(session, _PIPELINED_ANONYMOUS_ERROR)
+
+    assert list(session.pending_requests) == [active_request]
+    assert _queued_event_types(active_request.event_queue) == []
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_pipelined_sibling_still_owns_anonymous_completion(monkeypatch) -> None:
+    service = proxy_service.ProxyService(cast(Any, contextlib.nullcontext()))
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    active_request = _make_request_state(
+        "req-active-created",
+        response_id="resp-active-created",
+        awaiting_response_created=False,
+        event_queue=asyncio.Queue(),
+    )
+    waiting_request = _make_request_state(
+        "req-waiting-created",
+        response_id=None,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    session = _make_pipelined_bridge_session(active_request, waiting_request)
+    text = json.dumps({"type": "response.completed", "response": {"status": "completed", "output": []}})
+
+    await service._process_http_bridge_upstream_text(session, text)
+
+    assert list(session.pending_requests) == [active_request]
+    assert _queued_event_types(active_request.event_queue) == []
+    assert active_request.response_event_count == 0
+    assert waiting_request.response_event_count == 1
+    assert waiting_request.event_queue is not None
+    block = waiting_request.event_queue.get_nowait()
+    assert block is not None
+    assert json.loads(block.split("data: ", 1)[1]) == json.loads(text)
+    assert waiting_request.event_queue.get_nowait() is None
+    assert waiting_request.event_queue.empty()
+    finalize.assert_awaited_once()
+    assert finalize.await_args is not None
+    assert finalize.await_args.args[0] is waiting_request
 
 
 @pytest.mark.asyncio

@@ -100,20 +100,20 @@
     }
   ],
   "tool_choice": "auto",
-  "parallel_tool_calls": false,
+  "parallel_tool_calls": true,
   "reasoning": {"effort": "medium", "summary": "auto"},
   "store": false,
   "stream": true,
   "include": ["reasoning.encrypted_content"],
-  "prompt_cache_key": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
+  "prompt_cache_key": "00000000-0000-4000-8000-000000000000",
   "text": {"verbosity": "medium"},
   "client_metadata": {
-    "x-codex-installation-id": "5d0e4c1a-8b6f-4d2e-9a3c-1f2e3d4c5b6a",
-    "session_id": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
-    "thread_id": "019a6a1c-4c2e-7d3a-9b1f-3f6e8c2d1a55",
-    "x-codex-window-id": "019a6a1c-5a10-7e2b-8c4d-2e3f4a5b6c7d",
-    "turn_id": "019a6a1c-6b21-7f3c-9d5e-3f4a5b6c7d8e",
-    "x-codex-turn-metadata": "{\"turn_id\":\"019a6a1c-6b21-7f3c-9d5e-3f4a5b6c7d8e\"}"
+    "x-codex-installation-id": "00000000-0000-4000-8000-000000000010",
+    "session_id": "00000000-0000-4000-8000-000000000000",
+    "thread_id": "00000000-0000-4000-8000-000000000000",
+    "x-codex-window-id": "00000000-0000-4000-8000-000000000011",
+    "turn_id": "00000000-0000-4000-8000-000000000012",
+    "x-codex-turn-metadata": "{\"turn_id\":\"00000000-0000-4000-8000-000000000012\"}"
   },
-  "stream_options": {"reasoning_summary_delivery": "interleaved"}
+  "stream_options": {"reasoning_summary_delivery": "sequential_cutoff"}
 }

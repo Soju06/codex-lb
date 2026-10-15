@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { LocalLoginPolicySchema, StrictLocalLoginPolicySchema } from "@/features/auth/schemas";
+
 const RoutingStrategySchema = z.enum([
   "usage_weighted",
   "round_robin",
@@ -86,11 +88,6 @@ export const DashboardSettingsSchema = z
       .optional()
       .default(5),
     singleAccountId: z.string().nullable().optional().default(null),
-    subscriptionOverflowSourceId: z.string().nullable().optional().default(null),
-    subscriptionOverflowDrainUntil: z.iso.datetime({ offset: true }).nullable().optional().default(null),
-    // Derived by the backend from the deadline: the date every conversation
-    // pinned to the cleared source has expired by (clear time + 7 days).
-    subscriptionOverflowPinsExpireBy: z.iso.datetime({ offset: true }).nullable().optional().default(null),
     proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitEnvironmentValue: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitOverride: z.number().int().min(0).nullable().optional().default(null),
@@ -147,7 +144,12 @@ export const DashboardSettingsSchema = z
     warmupModel: z.string().trim().min(1).optional().default("gpt-5.4-mini"),
     importWithoutOverwrite: z.boolean(),
     totpRequiredOnLogin: z.boolean(),
-    totpConfigured: z.boolean(),
+    // Defaults cover a mixed-version rollout against an older backend.
+    totpRequiredForAdminRole: z.boolean().optional().default(false),
+    // Who may still sign in with a local password; database only, never an env var.
+    localLoginPolicy: LocalLoginPolicySchema.optional().default("enabled"),
+    usersWithoutTotpCount: z.number().int().min(0).optional().default(0),
+    adminsWithoutTotpCount: z.number().int().min(0).optional().default(0),
     apiKeyAuthEnabled: z.boolean(),
     hideUpstreamQuotaFromApiKeys: z.boolean().optional().default(false),
     limitWarmupEnabled: z.boolean().optional().default(false),
@@ -221,6 +223,14 @@ export const DashboardSettingsSchema = z
     conversationArchiveEnabled: z.boolean().optional().default(false),
     conversationArchiveDir: z.string().nullable().optional().default(null),
     // end M5 conversation archive
+    // R2 spool retention: effective retention of the durable HTTP bridge
+    // operation spool (raw request payloads + response events) and the floor
+    // the API enforces, so the card can mirror the check before saving.
+    // `provenance.http_responses_session_bridge_operation_spool_retention_seconds`
+    // says which layer owns the value.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z.number().optional().default(604800),
+    httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds: z.number().optional().default(0),
+    // end R2 spool retention
     version: z.number().int().min(1).optional(),
   })
   .transform((settings) => {
@@ -264,9 +274,6 @@ export const SettingsUpdateRequestSchema = z
     relativeAvailabilityPower: z.number().positive().optional(),
     relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
     singleAccountId: z.string().nullable().optional(),
-    // Tri-state: absent = unchanged, null = off (arms the drain deadline),
-    // value = designate. The drain deadline itself is read-only.
-    subscriptionOverflowSourceId: z.string().nullable().optional(),
     proxyAccountResponseCreateLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamLimit: z.number().int().min(0).nullable().optional(),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).nullable().optional(),
@@ -289,6 +296,11 @@ export const SettingsUpdateRequestSchema = z
     warmupModel: z.string().trim().min(1).optional(),
     importWithoutOverwrite: z.boolean().optional(),
     totpRequiredOnLogin: z.boolean().optional(),
+    totpRequiredForAdminRole: z.boolean().optional(),
+    // Strict, unlike the response field: `updateSettings` parses an `unknown`
+    // payload, so a fallback here would turn a typo into a policy relaxation
+    // the backend would happily accept.
+    localLoginPolicy: StrictLocalLoginPolicySchema.optional(),
     apiKeyAuthEnabled: z.boolean().optional(),
     hideUpstreamQuotaFromApiKeys: z.boolean().optional(),
     limitWarmupEnabled: z.boolean().optional(),
@@ -324,6 +336,16 @@ export const SettingsUpdateRequestSchema = z
     // the confirmation dialog.
     conversationArchiveEnabled: z.boolean().nullable().optional(),
     // end M5 conversation archive
+    // R2 spool retention: tri-state (omitted = unchanged, null = reset to
+    // inherited, value = dashboard value in seconds). The replay floor is
+    // enforced by the backend against the effective values.
+    httpResponsesSessionBridgeOperationSpoolRetentionSeconds: z
+      .number()
+      .positive()
+      .max(315360000)
+      .nullable()
+      .optional(),
+    // end R2 spool retention
     // C2-1 timeouts, tri-state like the caps: absent = unchanged, null = clear
     // (inherit environment / default), value = store. Cross-field invariants
     // are enforced by the backend against the effective values.
@@ -620,41 +642,6 @@ export const TelemetryConsentUpdateRequestSchema = z.object({
   enabled: z.boolean(),
 });
 
-export const SubscriptionOverflowPreflightModelSchema = z.object({
-  slug: z.string(),
-  enabled: z.boolean(),
-  neverOverflows: z.boolean(),
-  neverOverflowsReason: z.string().nullable().optional().default(null),
-  undeclaredToolTypes: z.array(z.string()).default([]),
-  supportsVision: z.boolean(),
-  supportsStreaming: z.boolean(),
-  priced: z.boolean(),
-  contextWindowMismatch: z
-    .object({
-      registry: z.number().int(),
-      source: z.number().int().nullable().optional().default(null),
-      maxOutputTokens: z.number().int().nullable().optional().default(null),
-    })
-    .nullable()
-    .optional()
-    .default(null),
-  warnings: z.array(z.string()).default([]),
-});
-
-export const SubscriptionOverflowPreflightSchema = z.object({
-  sourceId: z.string(),
-  sourceName: z.string(),
-  sourceEnabled: z.boolean(),
-  eligible: z.boolean(),
-  blockers: z.array(z.string()).default([]),
-  drainUntil: z.iso.datetime({ offset: true }).nullable().optional().default(null),
-  servedModels: z.array(SubscriptionOverflowPreflightModelSchema).default([]),
-  missingModels: z.array(z.string()).default([]),
-  scopedApiKeyCount: z.number().int().min(0),
-  livePinCount: z.number().int().min(0),
-  tombstoneCount: z.number().int().min(0),
-});
-
 export type UpstreamProxyEndpoint = z.infer<typeof UpstreamProxyEndpointSchema>;
 export type UpstreamProxyEndpointCreateRequest = z.infer<typeof UpstreamProxyEndpointCreateRequestSchema>;
 export type UpstreamProxyEndpointTestResponse = z.infer<typeof UpstreamProxyEndpointTestResponseSchema>;
@@ -671,5 +658,3 @@ export type TelemetrySnapshot = z.infer<typeof TelemetrySnapshotSchema>;
 export type TelemetrySnapshotEnvelope = z.infer<typeof TelemetrySnapshotEnvelopeSchema>;
 export type TelemetryConsent = z.infer<typeof TelemetryConsentSchema>;
 export type TelemetryConsentUpdateRequest = z.infer<typeof TelemetryConsentUpdateRequestSchema>;
-export type SubscriptionOverflowPreflight = z.infer<typeof SubscriptionOverflowPreflightSchema>;
-export type SubscriptionOverflowPreflightModel = z.infer<typeof SubscriptionOverflowPreflightModelSchema>;

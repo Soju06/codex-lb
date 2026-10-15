@@ -91,7 +91,6 @@ from app.core.errors import (
     SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorEnvelope,
     OpenAIErrorParam,
-    is_previous_response_not_found_error,
     is_previous_response_not_found_public_shape,
     normalize_public_error_param,
     openai_error,
@@ -135,6 +134,7 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.host_models import resolve_default_host_model
 from app.core.openai.images import (
     DEFAULT_PUBLIC_IMAGE_MODEL,
     V1ImageResponse,
@@ -278,22 +278,15 @@ from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
-from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
+from app.modules.proxy.http_bridge_forwarding import (
+    HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
+    parse_forwarded_request,
+)
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
     IMAGE_ROUTE_STARTED_AT_STATE,
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
-)
-from app.modules.proxy.overflow import (
-    ROUTE_CODEX_RESPONSES,
-    ROUTE_V1_RESPONSES,
-    OverflowDispatch,
-    apply_usage_limit_hint,
-    compact_pin_denial,
-    handshake_denial,
-    resolve_subscription_overflow,
-    restore_client_store,
 )
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
@@ -672,10 +665,6 @@ _CAPACITY_WAIT_MARKER_GRACE_SECONDS = 0.05
 # Keep bridge startup probing above tiny event-loop scheduling jitter:
 # PostgreSQL-backed failures may need a DB round trip before the first item.
 _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS = 2.0
-# Cap on server-owned recovery attempts while the client stream is held open
-# after an eligible eventless terminal (`server_indefinite_recovery` mode).
-# Once exhausted, the bridge emits one terminal `response.failed`.
-HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS: Final = 6
 _CAPACITY_STARTUP_SIGNAL_DISCOVERY_SECONDS = _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
 _CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 2.0
 _CURSOR_CHAT_COMPLETIONS_STARTUP_ERROR_PROBE_SECONDS = 15.0
@@ -707,14 +696,6 @@ class _CapacityStartupReadyEvent(asyncio.Event):
 
 
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
-
-# Internal Responses host model used to invoke the built-in
-# ``image_generation`` tool on the /v1/images/* routes. It is never echoed
-# to clients (only the requested ``gpt-image-*`` value appears in public
-# responses) and is fixed (issue #1340 / PRINCIPLES.md P2): it tracks the
-# registry bootstrap catalog's stable ``gpt-5.5`` slug and changes only in
-# lockstep with catalog maintenance.
-_IMAGES_HOST_MODEL = "gpt-5.5"
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -1238,38 +1219,6 @@ async def responses(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
-    # Subscription-exhaustion overflow is decided once here (design v3 §4.1):
-    # probe inputs equal selection inputs, and nothing is reserved, leased or
-    # written yet. The decision precedes a direct source dispatch as well: a
-    # conversation pinned or anchored to an overflow source stays there even
-    # when another source serves the requested model directly (I7), while a
-    # directly owned model without pin evidence never overflows fresh.
-    # ``None`` is the unchanged direct-routing or subscription path.
-    overflow = await resolve_subscription_overflow(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        raw_model=raw_source_model,
-        require_streaming=not backend_non_streaming_requested,
-        source_route_excluded=source_route_excluded,
-        route=ROUTE_CODEX_RESPONSES,
-        direct_source=source,
-    )
-    if isinstance(overflow, Response):
-        return overflow
-    if overflow is not None:
-        return await _overflow_source_response(
-            request,
-            responses_payload,
-            context,
-            api_key,
-            overflow,
-            pre_normalization_effort=pre_normalization_effort,
-            enforce_openai_sdk_contract=openai_sdk_request,
-            native_codex_heartbeat=native_codex_heartbeat,
-            non_streaming=backend_non_streaming_requested,
-        )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1361,10 +1310,6 @@ async def responses_websocket(
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
-            return
-        overflow_denial = await handshake_denial(websocket.headers, context=context)
-        if overflow_denial is not None:
-            await websocket.send_denial_response(overflow_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -1482,32 +1427,6 @@ async def v1_responses(
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
-        )
-    # Decided before a direct source dispatch for the same reason as on the
-    # Codex route: a pin or anchor owns the conversation whichever source
-    # serves the model directly (I7).
-    overflow = await resolve_subscription_overflow(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        raw_model=raw_source_model,
-        require_streaming=responses_payload.stream is True,
-        source_route_excluded=source_route_excluded,
-        route=ROUTE_V1_RESPONSES,
-        direct_source=source,
-    )
-    if isinstance(overflow, Response):
-        return overflow
-    if overflow is not None:
-        return await _overflow_source_response(
-            request,
-            responses_payload,
-            context,
-            api_key,
-            overflow,
-            pre_normalization_effort=pre_normalization_effort,
-            non_streaming=not responses_payload.stream,
         )
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
@@ -1763,10 +1682,6 @@ async def v1_responses_websocket(
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
-            return
-        overflow_denial = await handshake_denial(websocket.headers, context=context)
-        if overflow_denial is not None:
-            await websocket.send_denial_response(overflow_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -3387,7 +3302,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = _IMAGES_HOST_MODEL
+    host_model = resolve_default_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -3692,7 +3607,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = _IMAGES_HOST_MODEL
+    host_model = resolve_default_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -4692,7 +4607,7 @@ async def v1_chat_completions(
         stream_options = payload.stream_options
         include_usage = cursor_compat_client or bool(stream_options and stream_options.include_usage)
         chat_stream = stream_chat_chunks(
-            _stream_proxy_errors_as_response_failed(stream, scheduler=turn_scheduler),
+            _stream_proxy_errors_as_response_failed(stream),
             model=responses_payload.model,
             include_usage=include_usage,
         )
@@ -5199,50 +5114,6 @@ async def _source_audio_transcription_response(
     return Response(content=result.body, status_code=200, headers=headers)
 
 
-async def _overflow_source_response(
-    request: Request,
-    payload: ResponsesRequest,
-    context: ProxyContext,
-    api_key: ApiKeyData | None,
-    overflow: OverflowDispatch,
-    *,
-    pre_normalization_effort: str | None,
-    enforce_openai_sdk_contract: bool = True,
-    native_codex_heartbeat: bool = False,
-    non_streaming: bool = False,
-) -> Response:
-    """Serve an admitted subscription-overflow decision through the hardened source route.
-
-    Route-helper latch (design v3 I13): the decision claimed the bulkhead slot
-    (and any breaker trial) as its last await-free step; until a
-    ``SourceDispatch`` takes the claims over inside ``_source_responses_response``
-    this ``finally`` is their only releaser, so a key raising in the reservation
-    step, a shutdown or any other exception never leaks them. Nothing else is
-    owned here: the reservation is taken, and the owner built, by the source
-    route itself.
-    """
-
-    payload.model = overflow.model
-    if not non_streaming:
-        payload.stream = True
-    try:
-        rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
-        return await _source_responses_response(
-            request,
-            payload,
-            source=overflow.source,
-            api_key=api_key,
-            rate_limit_headers=rate_limit_headers,
-            pre_normalization_effort=pre_normalization_effort,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            native_codex_heartbeat=native_codex_heartbeat,
-            context=context,
-            overflow=overflow,
-        )
-    finally:
-        overflow.claims.release_if_unowned()
-
-
 async def _source_responses_response(
     request: Request,
     payload: ResponsesRequest,
@@ -5254,22 +5125,15 @@ async def _source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
-    overflow: OverflowDispatch | None = None,
 ) -> Response:
     """Serve a Responses request from an OpenAI-compatible model source.
 
-    Every dispatched attempt is owned by one ``SourceDispatch`` (design v3 §6):
-    the bulkhead claim is taken before the API-key reservation so a saturated
-    source answers ``503 model_source_busy`` with nothing owned, the source open
-    is raced against the client disconnecting, and the settlement generator is
-    the outermost body layer for limited and unlimited keys alike (live
-    streaming; limited keys settle at an estimate when usage is missing).
-
-    With ``overflow`` (a subscription-exhaustion decision) the admission claims
-    were taken by the decision and are handed to the owner here; the owner
-    carries the decision's attribution (``request_log_source``,
-    ``dispatch_kind``), pin intent and error codes, and the source body is
-    shaped with ``service_tier`` stripped (source pricing has no tier).
+    Every dispatched attempt is owned by one ``SourceDispatch``: the bulkhead
+    claim is taken before the API-key reservation so a saturated source answers
+    ``503 model_source_busy`` with nothing owned, the source open is raced
+    against the client disconnecting, and the settlement generator is the
+    outermost body layer for limited and unlimited keys alike (live streaming;
+    limited keys settle at an estimate when usage is missing).
     """
 
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
@@ -5281,7 +5145,7 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
-    claims = overflow.claims if overflow is not None else try_claim_source_admission(source)
+    claims = try_claim_source_admission(source)
     if claims is None:
         return _logged_error_json_response(
             request,
@@ -5290,7 +5154,7 @@ async def _source_responses_response(
             headers={**rate_limit_headers, "Retry-After": "1"},
         )
     try:
-        # Inside the route-helper latch (I13): the budget serializer can raise
+        # Inside the route-helper latch: the budget serializer can raise
         # (a lone surrogate in the body) and a claimed slot must never outlive
         # the request that claimed it.
         admission_budget = estimate_api_key_request_usage(payload)
@@ -5314,25 +5178,13 @@ async def _source_responses_response(
             clock=clock_for(context.service) if context is not None else REAL_CLOCK,
             settle_reservation=_settle_source_reservation,
             release_reservation=_release_reservation,
-            **(overflow.owner_kwargs() if overflow is not None else {}),
         )
         claims.transfer_to(owner)
     except BaseException:
         claims.release_if_unowned()
         raise
     try:
-        source_payload = _shape_source_responses_payload(
-            payload,
-            source,
-            api_key=api_key,
-            strip_service_tier=overflow is not None,
-        )
-        if overflow is not None:
-            # The source keeps the client's storage intent (an SDK
-            # ``previous_response_id`` chain resolves only at a source that
-            # stored the previous response); the ChatGPT-forced ``store: false``
-            # stays on direct routing.
-            source_payload = restore_client_store(source_payload, payload)
+        source_payload = _shape_source_responses_payload(payload, source, api_key=api_key)
         if payload.stream:
             await open_with_disconnect_watch(request, owner, _open_owned_source_stream(owner, source_payload))
             stream = owner.stream
@@ -5380,7 +5232,6 @@ async def _open_owned_source_stream(owner: SourceDispatch, source_payload: dict[
     stream = await stream_source_responses(
         owner.source,
         source_payload,
-        on_first_content=owner.on_first_content if owner.pin_intent is not None else None,
         scheduler=owner.scheduler,
         clock=owner.clock,
     )
@@ -5392,19 +5243,10 @@ def _shape_source_responses_payload(
     source: ModelSource,
     *,
     api_key: ApiKeyData | None,
-    strip_service_tier: bool = False,
 ) -> dict[str, JsonValue]:
-    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved).
+    """Project the client body onto what the source may see (telemetry stripped, reasoning aliases resolved)."""
 
-    ``strip_service_tier`` (overflow dispatch only, design §4.6 P9) also drops
-    ``service_tier``: source pricing has no tier dimension and the row records
-    ``requested_service_tier`` instead; direct routing keeps forwarding it.
-    """
-
-    source_payload = strip_source_telemetry(
-        payload.model_dump_for_forwarding(),
-        strip_service_tier=strip_service_tier,
-    )
+    source_payload = strip_source_telemetry(payload.model_dump_for_forwarding())
     preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
     )
@@ -5478,45 +5320,11 @@ async def _finish_non_stream_source_dispatch(
             upstream_status_code=result.upstream_status_code,
         )
         return Response()
-    if owner.pin_intent is not None and owner.pin_executor is not None and result.payload.get("output"):
-        # Pin/anchor rows are committed only for a delivered answer and only
-        # before the JSON leaves (I11): the anchor row for an SDK
-        # ``previous_response_id`` chain is resolved from the source's
-        # response id and written in the same transaction as the thread pin.
-        # A verified non-write fails closed -- never "proceed unpinned".
-        pin_outcome = await owner.pin_executor.commit(
-            owner.pin_intent.resolve(owner.source_response_id),
-            drain_until=owner.drain_until,
-            scheduler=owner.scheduler,
-            clock=owner.clock,
-        )
-        owner.pin_outcome = pin_outcome
-        if pin_outcome != "written":
-            await owner.finish(
-                status="error",
-                error_code=owner.pin_failure_row_code,
-                error_message="model-source pin write did not verify as durable",
-                usage=result.usage,
-                timings=result.timings,
-                upstream_status_code=result.upstream_status_code,
-            )
-            error = openai_error(
-                owner.pin_failure_error_code,
-                "The model source could not record continuity for this conversation; retry the request",
-                error_type="server_error",
-            )
-            return _logged_error_json_response(
-                request,
-                503,
-                error,
-                headers={**rate_limit_headers, "Retry-After": "2"},
-            )
     await owner.finish(
         status="success",
         usage=result.usage,
         timings=result.timings,
         upstream_status_code=result.upstream_status_code,
-        trial_result="success",
     )
     if owner.settlement_failed:
         return _logged_error_json_response(
@@ -6618,11 +6426,6 @@ async def _stream_responses(
         preferred=prefer_http_bridge,
         policy_already_applied=forwarded_request,
     )
-    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
-        payload,
-        bridge_active=bridge_active,
-        headers=effective_headers,
-    )
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
@@ -6774,52 +6577,6 @@ async def _stream_responses(
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
 
-    def build_recovery_response_stream() -> AsyncIterator[str]:
-        """Build a server-owned retry with a fresh API-key reservation.
-
-        The first bridge generator owns and settles the admission reservation
-        when it terminates.  Indefinite recovery must not reuse that object:
-        each retry gets a new reservation and therefore remains accounted and
-        bounded even when the client connection stays open for a long time.
-        """
-
-        async def _retry() -> AsyncIterator[str]:
-            retry_reservation = reservation
-            if bridge_active and api_key is not None and reservation is not None:
-                retry_service_tier = dict(payload.to_payload()).get("service_tier")
-                retry_reservation = await _enforce_request_limits(
-                    api_key,
-                    request_model=payload.model,
-                    request_service_tier=(retry_service_tier if isinstance(retry_service_tier, str) else None),
-                    request_usage_budget=estimate_api_key_request_usage(payload),
-                )
-            retry_stream = context.service.stream_http_responses(
-                payload,
-                effective_headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=True,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=retry_reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                downstream_turn_state=downstream_turn_state,
-                forwarded_request=forwarded_request,
-                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                forwarded_legacy_signature=forwarded_legacy_signature,
-                forwarded_affinity_kind=forwarded_affinity_kind,
-                forwarded_affinity_key=forwarded_affinity_key,
-                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
-                client_ip=client_ip,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                http_bridge_active=bridge_active,
-                capacity_startup_wait_event=capacity_wait_event,
-                capacity_startup_ready_event=capacity_ready_event,
-            )
-            async for line in retry_stream:
-                yield line
-
-        return _retry()
-
     stream = build_response_stream()
     startup_handoff_tasks: list[asyncio.Task[str]] = []
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
@@ -6870,40 +6627,23 @@ async def _stream_responses(
         startup_error_code = (
             _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
         )
-        startup_recovery_allowed = (
-            isinstance(startup_error, ProxyResponseError)
-            and bridge_recovery_eligible
-            and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
-            == "server_indefinite_recovery"
-            and getattr(startup_error, "http_bridge_durable_recovery_eligible", False)
-            and startup_error_code
-            in {
-                HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
-                "stream_incomplete",
-                "stream_idle_timeout",
-                "upstream_request_timeout",
-                "upstream_unavailable",
-            }
-            and _responses_origin_may_release_reservation(
-                service_cleanup_ready_event=responses_service_cleanup_ready_event,
-                owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
-                owner_forward_rejected_event=responses_owner_forward_rejected_event,
-            )
-        )
         native_transport_startup_failure = (
             preserve_native_failure_lifecycle
             and isinstance(startup_error, ProxyResponseError)
             and startup_error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+            # A refusal the proxy raised itself before any upstream frame left
+            # the process is not a transport failure, so it keeps the ordinary
+            # error response instead of being replayed into the committed body
+            # as a terminated stream (issue #2364).
+            and not startup_error.local_pre_dispatch_refusal
         )
-        if startup_recovery_allowed or native_transport_startup_failure:
+        if native_transport_startup_failure:
             assert isinstance(startup_error, ProxyResponseError)
 
-            # A durable bridge can fail before the startup probe observes the
-            # first response.created event. Feed that error through the same
-            # server-owned recovery loop used for failures after the probe;
-            # returning JSON here would hand a recoverable disconnect back to
-            # the client before recovery is even installed.
+            # Native Codex clients own the transport failure lifecycle: replay
+            # the startup error inside the stream so the terminal event shape
+            # matches a failure observed after the probe.
             async def _raise_startup_error() -> AsyncIterator[str]:
                 raise startup_error
                 yield ""  # pragma: no cover
@@ -6919,22 +6659,11 @@ async def _stream_responses(
             return _stream_startup_error_response(
                 request,
                 startup_error,
-                headers=rate_limit_headers,
-                allow_client_full_history_once=bridge_recovery_eligible,
+                headers={
+                    **rate_limit_headers,
+                    **_owner_forward_local_refusal_headers(startup_error, forwarded_request=forwarded_request),
+                },
             )
-    # Server-indefinite recovery is only safe for an explicitly anchored
-    # continuation. Fresh first-turn requests have no durable parent
-    # operation to fence, so do not install the recovery loop for them.
-    recovery_stream_factory = (
-        build_recovery_response_stream
-        if bridge_recovery_eligible
-        and _responses_origin_may_release_reservation(
-            service_cleanup_ready_event=responses_service_cleanup_ready_event,
-            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
-            owner_forward_rejected_event=responses_owner_forward_rejected_event,
-        )
-        else None
-    )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
@@ -6944,11 +6673,7 @@ async def _stream_responses(
             responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
             responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
             responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
-            recovery_stream_factory=recovery_stream_factory,
-            allow_client_full_history_once=bridge_recovery_eligible,
-            require_durable_recovery_fence=bridge_recovery_eligible,
             preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
-            scheduler=turn_scheduler,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
@@ -6996,6 +6721,29 @@ async def _stream_responses(
 
 def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not key.lower().startswith("x-codex-bridge-")}
+
+
+def _owner_forward_local_refusal_headers(
+    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
+    *,
+    forwarded_request: bool,
+) -> dict[str, str]:
+    """Mark an owner instance's error response as a local pre-dispatch refusal.
+
+    The origin instance rebuilds the error from the status and the body, and
+    the body cannot express the difference between a refusal the owner raised
+    before any upstream frame was sent and a transport failure it observed —
+    both are `stream_incomplete`. Without this marker the origin's own native
+    Codex transport-failure lifecycle aborts the committed body, which is
+    issue #2364 one hop further out. Only forwarded requests carry it: the
+    header belongs to the internal bridge contract, not to the public API.
+    """
+
+    if not forwarded_request or not isinstance(error, ProxyResponseError):
+        return {}
+    if not error.local_pre_dispatch_refusal:
+        return {}
+    return {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
 
 
 async def _http_bridge_active_for_request(
@@ -7083,11 +6831,6 @@ async def _collect_responses(
         api_key,
         preferred=prefer_http_bridge,
     )
-    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
-        payload,
-        bridge_active=bridge_active,
-        headers=request.headers,
-    )
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
@@ -7161,9 +6904,6 @@ async def _collect_responses(
         status_code, error = _mask_previous_response_not_found_error(
             error,
             default_status=exc.status_code,
-            allow_client_full_history_once=(
-                bridge_recovery_eligible and getattr(exc, "http_bridge_durable_recovery_eligible", False)
-            ),
         )
         return _logged_error_json_response(
             request,
@@ -7186,10 +6926,7 @@ async def _collect_responses(
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code, error_payload = _mask_previous_response_not_found_error(
-                error_payload,
-                allow_client_full_history_once=False,
-            )
+            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -7200,10 +6937,7 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
         )
-    status_code, response_payload = _mask_previous_response_not_found_error(
-        response_payload,
-        allow_client_full_history_once=False,
-    )
+    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
@@ -7293,9 +7027,6 @@ async def _compact_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     validate_model_access(api_key, payload.model)
-    pin_denial = await compact_pin_denial(request, payload, context=context)
-    if pin_denial is not None:
-        return pin_denial
     try:
         request_usage_budget = estimate_api_key_request_usage(payload)
     except ClientPayloadError as exc:
@@ -8464,14 +8195,11 @@ async def _close_responses_stream_best_effort(
 
 async def _stream_proxy_errors_as_response_failed(
     stream: AsyncIterator[str],
-    *,
-    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> AsyncIterator[str]:
     async for line in _stream_response_error_events(
         stream,
         owns_reservation=False,
         reservation=None,
-        scheduler=scheduler,
     ):
         yield line
 
@@ -8485,15 +8213,10 @@ async def _stream_response_error_events(
     responses_service_cleanup_ready_event: asyncio.Event | None = None,
     responses_owner_forward_dispatched_event: asyncio.Event | None = None,
     responses_owner_forward_rejected_event: asyncio.Event | None = None,
-    recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
-    allow_client_full_history_once: bool = False,
-    require_durable_recovery_fence: bool = False,
     preserve_native_failure_lifecycle: bool = False,
-    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> AsyncIterator[str]:
     # ``_ResponsesReservationCleanup.scheduler`` is the cancel-safe cleanup
-    # owner (none here); the timing ``scheduler`` seam above owns the recovery
-    # sleep below.
+    # owner (none here).
     cleanup = reservation_cleanup or _ResponsesReservationCleanup(
         owns_reservation=owns_reservation,
         reservation=reservation,
@@ -8510,117 +8233,28 @@ async def _stream_response_error_events(
             return
         await cleanup.release(action="responses stream cleanup")
 
-    saw_downstream_event = False
     try:
         async for line in stream:
-            if line.startswith("data:") or line.startswith("event:"):
-                saw_downstream_event = True
             yield line
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
-        settings = get_settings()
-        indefinite_recovery = (
-            settings.http_responses_session_bridge_ambiguous_continuation_recovery_mode == "server_indefinite_recovery"
-        )
+        # A refusal the proxy raised before any upstream frame was sent shares
+        # its public code with the upstream transport failures below, but it is
+        # not one: it keeps the terminal event so a native Codex client is not
+        # left with a committed body that ends without one (issue #2364).
+        local_refusal = exc.local_pre_dispatch_refusal
+        await release_owned_reservation()
         if (
-            recovery_stream_factory is not None
-            and indefinite_recovery
-            and (not require_durable_recovery_fence or getattr(exc, "http_bridge_durable_recovery_eligible", False))
-            and not saw_downstream_event
+            preserve_native_failure_lifecycle
+            and not local_refusal
             and error_code
             in {
-                HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
                 "stream_incomplete",
                 "stream_idle_timeout",
                 "upstream_request_timeout",
                 "upstream_unavailable",
             }
         ):
-            # Keep the client stream alive while the server owns recovery.
-            # The operation remains serialized by the durable operation
-            # fingerprint; each new upstream attempt is still at-least-once.
-            retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
-            recovery_attempts = 0
-            server_recovery_max_attempts = HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS
-            while recovery_attempts < server_recovery_max_attempts:
-                yield ": codex-lb recovery in progress\n\n"
-                await scheduler.sleep(retry_delay)
-                recovery_attempts += 1
-                try:
-                    retry_stream = recovery_stream_factory()
-                    retry_saw_downstream_event = False
-                    async for line in retry_stream:
-                        if line.startswith("data:") or line.startswith("event:"):
-                            retry_saw_downstream_event = True
-                            saw_downstream_event = True
-                        yield line
-                    return
-                except ProxyResponseError as retry_exc:
-                    exc = retry_exc
-                    retry_code = (
-                        retry_exc.payload.get("error", {}).get("code") if isinstance(retry_exc.payload, dict) else None
-                    )
-                    if (
-                        retry_code
-                        not in {
-                            HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
-                            "stream_incomplete",
-                            "stream_idle_timeout",
-                            "upstream_request_timeout",
-                            "upstream_unavailable",
-                        }
-                        or retry_saw_downstream_event
-                        or (
-                            require_durable_recovery_fence
-                            and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
-                        )
-                    ):
-                        break
-                    retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
-                except (ProxyRateLimitError, ProxyAuthError) as retry_limit_exc:
-                    # A quota revocation or limit can happen between recovery
-                    # attempts. Convert it into the same terminal SSE shape
-                    # as other proxy failures instead of aborting an already
-                    # started response stream without a response.failed event.
-                    exc = ProxyResponseError(
-                        retry_limit_exc.status_code,
-                        openai_error(
-                            retry_limit_exc.code,
-                            retry_limit_exc.message,
-                            error_type=getattr(retry_limit_exc, "error_type", "server_error"),
-                        ),
-                    )
-                    break
-                except Exception:
-                    # Recovery admission can also fail before a replacement
-                    # stream is created (for example, a transient database
-                    # failure while reserving usage). Do not let that
-                    # unexpected exception truncate an already-started SSE
-                    # response; the outer cleanup still settles the original
-                    # reservation and emits one terminal response.failed event.
-                    logger.warning("HTTP bridge recovery admission failed", exc_info=True)
-                    exc = ProxyResponseError(
-                        503,
-                        openai_error(
-                            "bridge_recovery_admission_failed",
-                            "Recovery admission failed; retry shortly.",
-                            error_type="server_error",
-                        ),
-                        retry_after_seconds=5,
-                    )
-                    break
-            else:
-                logger.warning(
-                    "HTTP bridge server recovery exhausted before downstream event after %s attempts",
-                    server_recovery_max_attempts,
-                )
-        await release_owned_reservation()
-        if preserve_native_failure_lifecycle and error_code in {
-            "stream_incomplete",
-            "stream_idle_timeout",
-            "upstream_request_timeout",
-            "upstream_unavailable",
-        }:
             raise
         response_id = None
         if isinstance(exc.payload, dict):
@@ -8631,9 +8265,6 @@ async def _stream_response_error_events(
         _, envelope = _mask_previous_response_not_found_error(
             envelope,
             default_status=exc.status_code,
-            allow_client_full_history_once=(
-                allow_client_full_history_once and getattr(exc, "http_bridge_durable_recovery_eligible", False)
-            ),
         )
         error = envelope.error
         retry_hint = ""
@@ -8651,12 +8282,15 @@ async def _stream_response_error_events(
             response_id=response_id,
             error_param=error.param_state if error else None,
         )
-        if error_code in {
+        if not local_refusal and error_code in {
             "stream_incomplete",
             "stream_idle_timeout",
             "upstream_request_timeout",
             "upstream_unavailable",
         }:
+            # Marking a local refusal as a synthetic transport failure would
+            # only move the abort one layer out: the native normalizer converts
+            # a marked terminal straight back into a terminated stream.
             failed_event = synthetic_transport_failure_event(failed_event)
         yield retry_hint + format_sse_event(failed_event)
 
@@ -8666,16 +8300,12 @@ def _stream_startup_error_response(
     error: ProxyResponseError | OpenAIErrorEnvelopeModel,
     *,
     headers: Mapping[str, str],
-    allow_client_full_history_once: bool = False,
 ) -> JSONResponse:
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
         status_code, envelope = _mask_previous_response_not_found_error(
             envelope,
             default_status=error.status_code,
-            allow_client_full_history_once=(
-                allow_client_full_history_once and getattr(error, "http_bridge_durable_recovery_eligible", False)
-            ),
         )
         startup_headers = dict(headers)
         retry_after_header = _safe_retry_after_header(
@@ -8691,10 +8321,7 @@ def _stream_startup_error_response(
             envelope.model_dump(mode="json", exclude_none=True),
             headers=startup_headers,
         )
-    status_code, envelope = _mask_previous_response_not_found_error(
-        error,
-        allow_client_full_history_once=False,
-    )
+    status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(
         request,
         status_code,
@@ -8743,15 +8370,6 @@ def _logged_error_json_response(
         public_content = content
     code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
-    if status_code == 429 and code == USAGE_LIMIT_REACHED:
-        # The envelope TypedDict is a plain JSON object at runtime; the hint
-        # helper reads ``request.state`` once and returns both unchanged
-        # unless the overflow decision declined with ``not_portable_history``.
-        public_content, effective_headers = apply_usage_limit_hint(
-            request,
-            cast("Mapping[str, JsonValue]", public_content),
-            effective_headers,
-        )
     if status_code == 429 and is_local_overload_error_code(code):
         effective_headers = merge_retry_after_headers(effective_headers)
     log_error_response(
@@ -10558,60 +10176,14 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     )
 
 
-def _is_previous_response_not_found_recoverable_error(error_value: OpenAIError | None) -> bool:
-    if error_value is None:
-        return False
-    return is_previous_response_not_found_error(
-        code=error_value.code,
-        param=_openai_error_param(error_value),
-        message=error_value.message,
-    )
-
-
-def _http_bridge_recovery_request_eligible(
-    payload: ResponsesRequest,
-    *,
-    bridge_active: bool,
-    headers: Mapping[str, str] | None = None,
-) -> bool:
-    turn_state_anchor = proxy_affinity_module._sticky_key_from_turn_state_header(headers or {})
-    if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
-        return False
-    # Turn-state-only requests are admitted to the recovery-capable stream so
-    # the submit path can first prove a durable predecessor by advancing its
-    # operation anchor. The streaming layer marks an exception recovery-safe
-    # only after that proof; fresh first turns remain fail-closed there.
-    if proxy_service_module._responses_request_contains_input_image(
-        payload
-    ) or proxy_service_module._responses_request_uses_image_generation(payload):
-        return False
-    payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes()
-
-
 def _mask_previous_response_not_found_error(
     envelope: OpenAIErrorEnvelopeModel,
     *,
     default_status: int | None = None,
-    allow_client_full_history_once: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
         return (
             default_status if default_status is not None else _status_for_error(envelope.error),
-            _sanitize_public_error_envelope(envelope),
-        )
-    # In recovery-first mode, preserve the upstream-shaped 400 so Codex can
-    # drop the ambiguous previous_response_id anchor and resend full local
-    # history. This is intentionally opt-in because the resend is at-least-once
-    # and may duplicate an upstream response that was accepted but not observed.
-    if (
-        allow_client_full_history_once
-        and _is_previous_response_not_found_recoverable_error(envelope.error)
-        and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
-        == "client_full_history_once"
-    ):
-        return (
-            default_status if default_status is not None else 400,
             _sanitize_public_error_envelope(envelope),
         )
     return (

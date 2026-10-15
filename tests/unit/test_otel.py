@@ -23,6 +23,7 @@ from yarl import URL
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
 from app.core.audit import service as audit_service_module
+from app.core.auth.dashboard_access import DashboardAuthMode, DashboardPrincipal, admin_principal
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
@@ -634,14 +635,8 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     def _init_background_db() -> None:
         call_order.append("init_background_db")
 
-    async def _blocked_audit_write(
-        action: str,
-        actor_ip: str | None,
-        details: audit_service_module.AuditDetails | None,
-        request_id: str | None,
-    ) -> None:
-        _ = (action, actor_ip, details, request_id)
-        audit_write_actions.append(action)
+    async def _blocked_audit_write(event: audit_service_module.AuditEvent) -> None:
+        audit_write_actions.append(event.action)
         audit_write_started.set()
         await allow_audit_write.wait()
 
@@ -697,8 +692,8 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         last_used_at=None,
     )
 
-    async def _allow_dashboard_access() -> None:
-        return None
+    async def _allow_dashboard_access() -> DashboardPrincipal:
+        return admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method="local_bootstrap")
 
     async def _accounts_context_override() -> SimpleNamespace:
         return SimpleNamespace(service=_BlockedAccountsService())

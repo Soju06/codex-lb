@@ -42,6 +42,7 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     SYNTHETIC_TRANSPORT_FAILURE_CODES,
+    SYNTHETIC_TRANSPORT_FAILURE_MARKER,
     OpenAIErrorParam,
     openai_error,
     response_failed_event,
@@ -65,14 +66,16 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
     AccountStatus,  # noqa: F401
 )
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._load_balancer.overload_backoff import (
     UPSTREAM_OVERLOAD_CODES,
+    UPSTREAM_SOFT_OVERLOAD_CODES,
     record_upstream_burst_rejection,
     record_upstream_overload,
 )
@@ -295,6 +298,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
@@ -410,8 +414,10 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     classify_upstream_failure,
+    is_account_neutral_safety_policy_rejection,
     is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
+    is_upstream_usage_limit_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -420,7 +426,6 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
-from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.usage.updater import UsageUpdater
 
 
@@ -473,6 +478,29 @@ def _is_background_json_ack(
     return stream is False and _canonical_background_ack_response_id(event_payload, event_type) is not None
 
 
+def _publish_http_response_owner(
+    proxy: _StreamingServiceProtocol,
+    event: OpenAIEvent | None,
+    event_payload: dict[str, JsonValue] | None,
+    block: str,
+    account_id: str,
+    api_key: ApiKeyData | None,
+    session_id: str | None,
+) -> None:
+    if event is None or event.response is None or not event.response.id or event_payload is None:
+        return
+    if isinstance(block, ParsedSseBlock) and (block.is_local or block.response_id_is_local):
+        return
+    if event_payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER):
+        return
+    proxy._remember_websocket_previous_response_owner(
+        previous_response_id=event.response.id,
+        api_key_id=api_key.id if api_key is not None else None,
+        account_id=account_id,
+        session_id=session_id,
+    )
+
+
 def _settle_background_ack(
     settlement: _StreamSettlement,
     payload: ResponsesRequest,
@@ -503,10 +531,41 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-def _should_penalize_stream_error(code: str | None) -> bool:
+def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
+    """Whether this stream failure owes the account a health write.
+
+    ``message`` is the sentence the failure carried, and every caller that
+    reads an upstream-authored one passes it: the code table cannot answer for
+    the serialized usage-limit rejection, which upstream sends with no error
+    code at all. That frame normalizes to ``upstream_error``, which is in
+    neither code set, so an account that just said its subscription window is
+    spent would be left ACTIVE and handed the next request -- while the
+    identical coded frame benches it.
+
+    Callers whose message is proxy-authored rather than upstream's own (the
+    WebSocket terminal-cleanup path, whose codes and sentences are this
+    proxy's: ``client_disconnected``, ``stream_incomplete``, an idle timeout)
+    pass no message and keep the pure code answer, because there is nothing of
+    upstream's there to read.
+    """
     if code is None:
         return False
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or code in _facade()._TRANSIENT_RETRY_CODES
+    should_penalize = (
+        code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+        or code in _facade()._TRANSIENT_RETRY_CODES
+        or is_upstream_usage_limit_rejection(error_code=code, message=message)
+    )
+    if not should_penalize and _is_account_neutral_request_rejection(
+        code=code,
+        http_status=None,
+        message=message,
+    ):
+        _facade().logger.info(
+            "Skipped account error penalty for account-neutral request rejection code=%s request_id=%s",
+            code,
+            get_request_id(),
+        )
+    return should_penalize
 
 
 _MODEL_CAPACITY_LIMIT_CODES = {
@@ -1020,23 +1079,23 @@ def _is_account_neutral_request_rejection(
 ) -> bool:
     """Return whether upstream rejected the request payload, not the account.
 
-    A payload-shape rejection reproduces identically on every account, so it
-    must never mutate one account's health: otherwise a single client looping
-    on a self-inconsistent conversation drives its serving accounts into
+    An account-neutral request rejection reproduces identically on every
+    account, so it must never mutate one account's health: otherwise a single
+    client looping on a rejected conversation drives its serving accounts into
     ``error_count`` backoff and starves unrelated tenants.
 
     Keep this set narrow: membership is decided by the specific classified
-    message, never by the ``invalid_request_error`` code alone. The
-    model-entitlement rejection is deliberately not a member -- it is handled
-    by ``_is_model_scoped_rejection`` below, which likewise keeps the account's
+    code and message, never by a broad HTTP status alone. The model-entitlement
+    rejection is deliberately not a member -- it is handled by
+    ``_is_model_scoped_rejection`` below, which likewise keeps the account's
     health untouched but still lets failover try accounts whose entitlements
     may differ.
     """
-    if code != "invalid_request_error":
-        return False
     if http_status is not None and http_status != 400:
         return False
-    return bool(_facade()._is_missing_tool_output_message(message))
+    if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
+        return True
+    return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
 
 def _is_model_scoped_rejection(
@@ -1096,6 +1155,7 @@ async def _handle_stream_error(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
+    upstream_http_status: int | None = None,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1103,6 +1163,14 @@ async def _handle_stream_error(
     deferred until after usage settlement: the replica-local burst cooldown
     was already engaged at rejection time, so the deferred write must not
     re-engage it (that would bench an account that has since succeeded).
+
+    ``upstream_http_status`` is evidence-only: it lets a caller that knows the
+    upstream HTTP status of this failure say so WITHOUT taking any of the
+    ``http_status`` side effects. It is read by the soft-overload gate below
+    and by nothing else -- never by ``classify_upstream_failure``, the
+    reasoning-replay metric, the account-neutral / model-scoped rejection
+    predicates, or the HTTP 429 burst-cooldown branch. Callers that want those
+    behaviours must pass the positional ``http_status`` instead.
     """
     classified = classify_upstream_failure(
         error_code=code,
@@ -1144,7 +1212,13 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
-        if code == USAGE_LIMIT_REACHED:
+        # The refresh is owed to the account whose window is spent, and the
+        # literal code is the one piece of that evidence upstream omits at will:
+        # the serialized terminal frame asserts the same limit in its message
+        # alone. Reading only the code leaves the pool's usage picture stale for
+        # exactly the accounts it most needs to be current about. Plain
+        # throttling still asks for nothing.
+        if is_upstream_usage_limit_rejection(error_code=code, message=error.get("message")):
             _request_usage_refresh(proxy, account.id)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
@@ -1158,14 +1232,36 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
-        if code in UPSTREAM_OVERLOAD_CODES:
+        hard_overload = code in UPSTREAM_OVERLOAD_CODES
+        # A bare ``server_error`` *stream terminal* is the same observable
+        # condition as an explicit overload: upstream admitted the turn and then
+        # refused to run it. The terminal shape is what makes it an admission
+        # rejection, so it is keyed on the absence of an HTTP status. A coded
+        # HTTP failure carrying the same string is an ordinary transient error
+        # (and an HTTP 429 is a burst rejection with its own cooldown branch
+        # below); neither may deprioritize an otherwise healthy account.
+        #
+        # Two status keywords are checked because several callers KNOW the
+        # upstream status yet deliberately do not forward it as ``http_status``:
+        # doing so would also flip the account-neutral / model-scoped predicates
+        # above from "skip the penalty" to "record it", arm the 429 branch below,
+        # and double-count the reasoning-replay metric for a frame already
+        # counted at ``_observe_terminal_stream_error_frame``. They pass
+        # ``upstream_http_status`` instead, which gates this window only. A
+        # status from EITHER keyword means the failure was not a status-less
+        # terminal and so must stay out of the soft window.
+        soft_overload = code in UPSTREAM_SOFT_OVERLOAD_CODES and http_status is None and upstream_http_status is None
+        if hard_overload or soft_overload:
             # Overload is an admission rejection that successes on the same
             # account's warm sessions keep masking from ``error_count``; feed
             # the dedicated sliding window so fresh selection can deprioritize.
+            # Soft observations count at a fractional weight, so a sustained
+            # refusal still trips the window while a lone fault never does.
             await record_upstream_overload(
                 proxy._load_balancer,
                 account,
                 redact_account_id=privacy_policy.redacts_sensitive_details,
+                soft=not hard_overload,
             )
         elif http_status == 429 and not burst_cooldown_recorded:
             # A code-less HTTP 429 (rate_limit / quota classes returned above)
@@ -1192,8 +1288,20 @@ def _push_stream_attempt_timeout_overrides(
     )
 
 
-def _should_retry_stream_error(code: str) -> bool:
-    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES
+def _should_retry_stream_error(code: str, message: str | None = None) -> bool:
+    """Whether a pre-visible terminal frame may be retried on a sibling account.
+
+    The code allowlist cannot answer this for the serialized form of the
+    usage-limit rejection: upstream sends that frame with no error code, which
+    normalizes to ``upstream_error`` and is in no transport retry list -- so a
+    frame saying the account is spent gets surfaced on the first account while
+    the identical HTTP body walks the pool. The frame's sentence is put through
+    the same predicate the health write beside it uses, because that sentence
+    is the only evidence a status-less, code-less frame carries.
+    """
+    return code in _facade()._ACCOUNT_RECOVERY_RETRY_CODES or is_upstream_usage_limit_rejection(
+        error_code=code, message=message
+    )
 
 
 def _upstream_turn_state_from_socket(upstream: UpstreamWebSocket | None) -> str | None:

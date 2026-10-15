@@ -28,7 +28,6 @@ from tests.conftest import BACKGROUND_LOOP_BUILDERS, _NoopScheduler
 LIVE_MAINTENANCE_LOOP_BUILDERS: tuple[str, ...] = (
     "build_api_key_limit_reset_scheduler",
     "build_api_key_last_used_flush_scheduler",
-    "build_account_deletion_scheduler",
 )
 
 # ``CODEX_LB_*_ENABLED`` toggles the harness used to export as ``false``. They
@@ -68,6 +67,7 @@ def test_background_loop_seam_is_explicit_and_complete() -> None:
         "build_account_usage_rollup_scheduler",
         "build_data_retention_scheduler",
         "build_telemetry_scheduler",
+        "build_account_deletion_scheduler",
     )
     patched = set(BACKGROUND_LOOP_BUILDERS)
     live = set(LIVE_MAINTENANCE_LOOP_BUILDERS)
@@ -76,6 +76,14 @@ def test_background_loop_seam_is_explicit_and_complete() -> None:
         "app.main imports a build_*_scheduler that tests/conftest.py neither patches nor "
         "classifies as an always-on maintenance loop"
     )
+
+
+@pytest.mark.asyncio
+async def test_ambient_account_deletion_scheduler_is_noop() -> None:
+    scheduler = main_module.build_account_deletion_scheduler()
+    assert isinstance(scheduler, _NoopScheduler)
+    assert await scheduler.start() is None
+    assert await scheduler.stop() is None
 
 
 def test_every_patched_builder_is_started_by_the_lifespan() -> None:

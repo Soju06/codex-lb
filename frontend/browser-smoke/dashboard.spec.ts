@@ -93,6 +93,36 @@ async function openLongSettingsPage(page: Page, scrollTop: number): Promise<void
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTop);
 }
 
+// `page.setViewportSize` resolves when the resize is dispatched, not when the
+// browser has finished reflowing for it. Reading geometry immediately after
+// has caught the 1440x900 case mid-reflow, reporting a 1488px document
+// scrollWidth that settles back to 1440 a frame later. Hold until the document
+// width stops moving, with a frame cap so a page that never settles fails on
+// its assertion instead of hanging.
+async function resizeViewportAndSettle(page: Page, size: { width: number; height: number }): Promise<void> {
+  await page.setViewportSize(size);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let lastWidth = -1;
+        let stableFrames = 0;
+        let observedFrames = 0;
+        const measure = () => {
+          const width = document.documentElement.scrollWidth;
+          stableFrames = width === lastWidth ? stableFrames + 1 : 0;
+          lastWidth = width;
+          observedFrames += 1;
+          if (stableFrames >= 3 || observedFrames >= 120) {
+            resolve();
+            return;
+          }
+          requestAnimationFrame(measure);
+        };
+        requestAnimationFrame(measure);
+      }),
+  );
+}
+
 test("the built dashboard accepts real backend responses", async ({ page }) => {
   const apiFailures: string[] = [];
   const consoleErrors: string[] = [];
@@ -187,7 +217,7 @@ test("dashboard usage donuts stay within supported viewports", async ({ page }) 
   await expect(requestTable).toBeVisible();
 
   for (const viewportCase of viewportCases) {
-    await page.setViewportSize(viewportCase.size);
+    await resizeViewportAndSettle(page, viewportCase.size);
 
     const usageMetrics = await usageHeadings.evaluateAll((headings) =>
       headings.map((heading) => {

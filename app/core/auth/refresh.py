@@ -27,7 +27,7 @@ from app.core.clients.codex import (
 )
 from app.core.clients.http import _safe_json, lease_http_session
 from app.core.clients.oauth import _extract_error_code, _extract_error_message
-from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
+from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     is_pre_dispatch_connection_failure,
@@ -39,7 +39,12 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import to_utc_naive, utcnow
 
-TOKEN_REFRESH_INTERVAL_DAYS = 8
+# Maximum age of an account's last successful refresh before the next request
+# proactively exchanges its refresh token (fixed; issue #1340 / PRINCIPLES.md
+# P2). This module attribute is the single source of the window: tests
+# monkeypatch it, and the traffic-parity canary suppresses proactive refresh by
+# stamping its isolated credential inside the window rather than widening it.
+TOKEN_REFRESH_INTERVAL_DAYS: Final[int] = 8
 # Total timeout of one refresh-token exchange (fixed; issue #1340 / PRINCIPLES.md
 # P2). Per-request budgets may only clamp it lower through the override below.
 TOKEN_REFRESH_TIMEOUT_SECONDS: Final[float] = 8.0
@@ -197,8 +202,7 @@ def refresh_contention_kind(exc: RefreshError) -> str | None:
 def should_refresh(last_refresh: datetime, now: datetime | None = None) -> bool:
     current = to_utc_naive(now) if now is not None else utcnow()
     last = to_utc_naive(last_refresh)
-    interval_days = get_settings().token_refresh_interval_days or TOKEN_REFRESH_INTERVAL_DAYS
-    return current - last > timedelta(days=interval_days)
+    return current - last > timedelta(days=TOKEN_REFRESH_INTERVAL_DAYS)
 
 
 def classify_refresh_error(code: str | None) -> bool:

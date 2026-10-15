@@ -83,8 +83,10 @@ not add the daily values to reproduce the summary total.
 
 ## API
 
-Both endpoints require an authenticated dashboard **admin** principal. Guest
-requests receive HTTP `403` with error code `admin_access_required`.
+Both endpoints require the `conversations:read` dashboard permission, which the
+built-in **admin** role holds and the guest role does not. Requests without it
+receive HTTP `403` with error code `permission_required` and `param` set to
+`conversations:read`.
 
 ### List conversations
 

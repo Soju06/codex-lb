@@ -2276,7 +2276,11 @@ async def test_subscription_overflow_settings_columns_migration_upgrade_and_down
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
-            assert set(await conn.run_sync(_overflow_columns)) == column_names
+            # The feature was withdrawn: walking on to head runs
+            # 20260914_000000_drop_subscription_overflow_schema, which takes both
+            # columns away again. This revision still has to add them on the way
+            # through, because an old install upgrades through it.
+            assert await conn.run_sync(_overflow_columns) == {}
     finally:
         await engine.dispose()
 
@@ -2385,7 +2389,11 @@ async def test_model_source_pins_migration_upgrade_and_downgrade(tmp_path):
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert result.current_revision == _HEAD_REVISION
         async with engine.connect() as conn:
-            assert await conn.run_sync(_schema_state) == expected_state
+            # The feature was withdrawn: walking on to head runs
+            # 20260914_000000_drop_subscription_overflow_schema, which drops the
+            # table and its indexes. This revision still has to build it on the
+            # way through, because an old install upgrades through it.
+            assert await conn.run_sync(_schema_state) is None
     finally:
         await engine.dispose()
 
@@ -2454,6 +2462,85 @@ async def test_model_source_pins_index_migration_replaces_valid_decoy_index(tmp_
 
 
 @pytest.mark.asyncio
+async def test_drop_overflow_downgrade_repairs_pin_indexes_on_pre_existing_table(tmp_path):
+    """Downgrading the withdrawal onto a database that already carries the table builds both indexes.
+
+    The table guard skips ``CREATE TABLE`` for a pre-existing
+    ``model_source_pins`` -- an earlier downgrade interrupted between the table
+    and its indexes, or a partial restore that carries the table alone. Riding
+    the two ``CREATE INDEX`` calls along with the table would leave such a
+    database stamped at the parent with neither index and nothing later to
+    build them, so each index is reflected on its own.
+    """
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'drop-overflow-downgrade.sqlite'}"
+    drop_revision = "20260914_000000_drop_subscription_overflow_schema"
+    parent_revision = "20260913_000000_add_oidc_provider_flow"
+
+    def _indexes(sync_conn) -> dict[str, tuple[tuple[str, ...], bool]]:
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("model_source_pins"):
+            return {}
+        return {
+            str(index["name"]): (tuple(index["column_names"]), bool(index["unique"]))
+            for index in inspector.get_indexes("model_source_pins")
+        }
+
+    def _settings_columns(sync_conn) -> set[str]:
+        return {
+            str(column["name"])
+            for column in sa_inspect(sync_conn).get_columns("dashboard_settings")
+            if str(column["name"]).startswith("subscription_overflow_")
+        }
+
+    result = await to_thread.run_sync(lambda: run_upgrade(db_url, drop_revision, bootstrap_legacy=False))
+    assert result.current_revision == drop_revision
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_indexes) == {}
+            assert await conn.run_sync(_settings_columns) == set()
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE model_source_pins (
+                        pin_key VARCHAR NOT NULL PRIMARY KEY,
+                        kind VARCHAR NOT NULL,
+                        source_id VARCHAR NOT NULL,
+                        api_key_id VARCHAR,
+                        created_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        expires_at DATETIME NOT NULL,
+                        purge_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            # Both indexes present, and the settings columns are back: the
+            # restored schema matches the revision this downgrades to, whatever
+            # state the table was found in.
+            assert await conn.run_sync(_indexes) == {
+                "ix_model_source_pins_purge_at": (("purge_at",), False),
+                "ix_model_source_pins_kind_expires_at": (("kind", "expires_at"), False),
+            }
+            assert await conn.run_sync(_settings_columns) == {
+                "subscription_overflow_source_id",
+                "subscription_overflow_drain_until",
+            }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(
     not _is_postgresql_database_url(_DATABASE_URL),
     reason="PostgreSQL-only invalid pin-index repair test",
@@ -2505,8 +2592,12 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
             )
         await session.commit()
 
-    result = await run_startup_migrations(_DATABASE_URL)
-    assert result.current_revision == _HEAD_REVISION
+    # Stop at the revision under test rather than at head: the feature was
+    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # table (and with it this index) away again. The repair still has to happen
+    # on the way through, because an install stranded below it upgrades here.
+    overflow_revision = "20260908_000000_add_subscription_overflow"
+    await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(_DATABASE_URL), overflow_revision))
 
     async with SessionLocal() as session:
         indisvalid = (
@@ -2528,6 +2619,97 @@ async def test_model_source_pins_index_migration_repairs_invalid_leftover_postgr
     assert indisvalid is True
     assert indexdef.endswith("(purge_at)")  # rebuilt on purge_at, not the accepted decoy on kind
     assert indexdef.startswith("CREATE INDEX ")  # non-unique, as the ORM declares it
+
+    # Leave the database at head for the rest of the suite, and record that the
+    # withdrawal removes the repaired index along with its table.
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            )
+        ).scalar() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid kind/expires-at pin-index repair test",
+)
+async def test_model_source_pins_kind_expires_index_repairs_invalid_leftover_postgresql(db_setup):
+    """An interrupted ``CREATE INDEX CONCURRENTLY`` leaves an invalid index; the revision rebuilds it.
+
+    ``CREATE INDEX CONCURRENTLY IF NOT EXISTS`` would happily accept the
+    leftover by name, and an invalid index serves no query while still blocking
+    the create -- so the revision drops it first when ``pg_index.indisvalid`` is
+    false. Step back below the revision, plant an invalid same-named index, and
+    assert the re-applied migration leaves a valid one on ``(kind, expires_at)``.
+    """
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260910_020000_add_dashboard_role_mappings"
+    index_name = "ix_model_source_pins_kind_expires_at"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            )
+        ).scalar() is None
+        await session.execute(text(f"CREATE INDEX {index_name} ON model_source_pins (kind)"))
+        await session.execute(
+            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+            {"name": index_name},
+        )
+        await session.commit()
+
+    # Stop at the revision under test rather than at head: the feature was
+    # withdrawn and 20260914_000000_drop_subscription_overflow_schema takes the
+    # table (and with it this index) away again. The repair still has to happen
+    # on the way through, because an install stranded below it upgrades here.
+    index_revision = "20260911_000000_model_source_pins_kind_expires_index"
+    await to_thread.run_sync(lambda: command.upgrade(_build_alembic_config(_DATABASE_URL), index_revision))
+
+    async with SessionLocal() as session:
+        indisvalid = (
+            await session.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+                ),
+                {"name": index_name},
+            )
+        ).scalar_one()
+        indexdef = (
+            await session.execute(
+                text("SELECT pg_get_indexdef(CAST(:name AS regclass))"),
+                {"name": index_name},
+            )
+        ).scalar_one()
+
+    assert indisvalid is True
+    assert indexdef.endswith("(kind, expires_at)")  # rebuilt, not the accepted invalid decoy on kind alone
+    assert indexdef.startswith("CREATE INDEX ")
+
+    # Leave the database at head for the rest of the suite, and record that the
+    # withdrawal removes the repaired index along with its table.
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(
+                text("SELECT 1 FROM pg_class WHERE relname = :name"),
+                {"name": index_name},
+            )
+        ).scalar() is None
 
 
 @pytest.mark.asyncio
@@ -2807,6 +2989,55 @@ async def test_dashboard_conversation_archive_migration_upgrade_and_downgrade(tm
 # end M5 conversation archive
 
 
+# R2 spool retention
+@pytest.mark.asyncio
+async def test_dashboard_spool_retention_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the nullable ``http_responses_session_bridge_operation_spool_retention_seconds``
+    column; downgrade drops it; a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'spool-retention.sqlite'}"
+    spool_revision = "20260910_010000_dashboard_spool_retention"
+    column = "http_responses_session_bridge_operation_spool_retention_seconds"
+    # Read the parent from the graph, not from a literal: a rebase onto a
+    # newer main re-chains ``down_revision``.
+    parent_revision = (
+        ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(spool_revision).down_revision
+    )
+    assert isinstance(parent_revision, str)
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(dashboard_settings)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert column not in await _columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, spool_revision, bootstrap_legacy=False))
+        columns = await _columns(engine)
+        # Nullable without a default: NULL = inherit the env alias / 7-day default.
+        assert columns[column] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert column not in await _columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert column in await _columns(engine)
+    finally:
+        await engine.dispose()
+
+
+# end R2 spool retention
+
+
 _LIVE_FACET_INDEXES = {
     "idx_logs_live_api_key",
     "idx_logs_live_model_effort",
@@ -2962,3 +3193,189 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_guest_session_generation_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds the NOT NULL guest_session_generation counter seeded at 0;
+    downgrade drops it; a final walk to head proves the single-head graph."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'guest-generation.sqlite'}"
+    parent_revision = "20260910_010000_dashboard_spool_retention"
+    target_revision = "20260908_000000_add_guest_session_generation"
+
+    async def _dashboard_columns(engine) -> set[str]:
+        async with engine.connect() as conn:
+            rows = await conn.execute(text("PRAGMA table_info('dashboard_settings')"))
+            return {row[1] for row in rows}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        assert "guest_session_generation" not in await _dashboard_columns(engine)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, target_revision, bootstrap_legacy=False))
+        assert "guest_session_generation" in await _dashboard_columns(engine)
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SELECT guest_session_generation FROM dashboard_settings"))).all()
+            assert all(row == (0,) for row in rows)
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        assert "guest_session_generation" not in await _dashboard_columns(engine)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert "guest_session_generation" in await _dashboard_columns(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_terminal_append_phase_migration_upgrade_and_downgrade(tmp_path):
+    """The terminal-append phase is additive and defaults to ``pending``.
+
+    A pre-migration operation can legitimately sit at ``completed`` with
+    ``event_spool_complete = 0``: the relay publishes the operation state
+    before appending the terminal transcript block, so that is the shape of
+    every ordinary operation whose terminal append has not committed yet. Those
+    rows must come out of the upgrade appendable — ``pending`` — because the
+    column fences one dispatch's terminal write, and no legacy row carries such
+    a fence. A final walk to head proves the revision sits on a single-head
+    graph.
+    """
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-terminal-append-phase.sqlite'}"
+    parent_revision = "20260911_010000_merge_pin_index_and_affinity_heads"
+    phase_revision = "20260911_020000_add_http_bridge_terminal_append_phase"
+    table = "http_bridge_operations"
+    column = "terminal_append_phase"
+
+    def _columns(sync_conn):
+        return {item["name"] for item in sa_inspect(sync_conn).get_columns(table)}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert column not in await conn.run_sync(_columns)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash,
+                        api_key_scope, owner_instance_id, owner_epoch, state,
+                        created_at, updated_at, last_seen_at
+                    ) VALUES (
+                        'legacy-session', 'conversation', 'legacy-conversation', 'legacy-hash',
+                        'legacy-scope', 'legacy-instance', 1, 'active',
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, state,
+                        event_bytes, event_spool_complete, spool_format,
+                        created_at, updated_at
+                    ) VALUES (
+                        'legacy-incomplete-terminal', 'legacy-session', 'fp-incomplete', 'completed',
+                        0, 0, 'rows_v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    ), (
+                        'legacy-replayable-terminal', 'legacy-session', 'fp-replayable', 'completed',
+                        12, 1, 'rows_v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, phase_revision, bootstrap_legacy=False))
+
+        async with engine.connect() as conn:
+            assert column in await conn.run_sync(_columns)
+            phase_rows = (
+                await conn.execute(text(f"SELECT operation_id, {column} FROM {table} ORDER BY operation_id"))
+            ).all()
+            phases = {str(row[0]): str(row[1]) for row in phase_rows}
+        # Neither legacy shape had recorded a terminal transcript outcome, so
+        # both stay appendable; the incomplete-spool row in particular must not
+        # be fenced out of its own terminal append.
+        assert phases == {
+            "legacy-incomplete-terminal": "pending",
+            "legacy-replayable-terminal": "pending",
+        }
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert column not in await conn.run_sync(_columns)
+    finally:
+        await engine.dispose()
+
+
+# begin bridge continuity abandonment
+
+
+@pytest.mark.asyncio
+async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp_path):
+    """Upgrade adds both nullable retirement markers to ``http_bridge_sessions``;
+    downgrade drops them; a final walk to head proves the revision sits on a single-head graph."""
+    from alembic import command
+    from alembic.script import ScriptDirectory
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'bridge-abandonment.sqlite'}"
+    revision = "20260911_060000_add_bridge_session_continuity_abandonment"
+    columns_added = ("continuity_abandoned_at", "continuity_abandonment_scope")
+    # Read the parent from the graph, not from a literal: a rebase onto a
+    # newer main re-chains ``down_revision``.
+    parent_revision = ScriptDirectory.from_config(_build_alembic_config(db_url)).get_revision(revision).down_revision
+    assert isinstance(parent_revision, str)
+
+    async def _columns(engine) -> dict[str, dict[str, object]]:
+        async with engine.connect() as conn:
+            result = await conn.execute(text("PRAGMA table_info(http_bridge_sessions)"))
+            return {row[1]: {"notnull": row[3], "default": row[4]} for row in result.fetchall()}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        before = await _columns(engine)
+        assert all(column not in before for column in columns_added)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        after = await _columns(engine)
+        for column in columns_added:
+            # Nullable without a default: an existing row keeps hard ownership
+            # until a writer retires it, which is what makes the rollout safe.
+            assert after[column] == {"notnull": 0, "default": None}
+
+        config = _build_alembic_config(db_url)
+        await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        reverted = await _columns(engine)
+        assert all(column not in reverted for column in columns_added)
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        final = await _columns(engine)
+        assert all(column in final for column in columns_added)
+    finally:
+        await engine.dispose()
+
+
+# end bridge continuity abandonment

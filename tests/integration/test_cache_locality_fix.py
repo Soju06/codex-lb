@@ -56,24 +56,31 @@ def test_mini_and_large_requests_use_different_cache_keys():
     from app.core.openai.requests import ResponsesRequest
     from app.modules.proxy.affinity import _derive_prompt_cache_key
 
+    thread = [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+        {"role": "user", "content": "Again"},
+    ]
+
     mini_payload = ResponsesRequest(
         model="gpt-5.4-mini",
         instructions="You are helpful.",
-        input=_json_value([{"role": "user", "content": "Hello"}]),
+        input=_json_value(thread),
     )
 
     large_payload = ResponsesRequest(
         model="gpt-5.3-codex",
         instructions="You are helpful.",
-        input=_json_value([{"role": "user", "content": "Hello"}]),
+        input=_json_value(thread),
     )
 
     mini_key = _derive_prompt_cache_key(mini_payload, None)
     large_key = _derive_prompt_cache_key(large_payload, None)
 
     assert mini_key != large_key, "Mini and large models should produce different cache keys"
-    assert mini_key.startswith("mini-"), f"Mini key should start with 'mini-', got {mini_key}"
-    assert large_key.startswith("codex-"), f"Large key should start with 'codex-', got {large_key}"
+    assert mini_key is not None and large_key is not None
+    assert "-mini-" in mini_key, f"Mini key should name the mini model class, got {mini_key}"
+    assert "-codex-" in large_key, f"Large key should name the codex model class, got {large_key}"
 
 
 def test_same_model_class_produces_same_cache_key():
@@ -84,7 +91,13 @@ def test_same_model_class_produces_same_cache_key():
     payload = ResponsesRequest(
         model="gpt-5.3-codex",
         instructions="You are helpful.",
-        input=_json_value([{"role": "user", "content": "Hello"}]),
+        input=_json_value(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "user", "content": "Again"},
+            ]
+        ),
     )
 
     key1 = _derive_prompt_cache_key(payload, None)

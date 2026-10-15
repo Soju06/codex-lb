@@ -7,7 +7,14 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import type { DashboardSettings } from "@/features/settings/schemas";
-import { createDashboardSettings } from "@/test/mocks/factories";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
+  createDashboardSettings,
+  createSessionUser,
+  createUpstreamProxyAdmin,
+} from "@/test/mocks/factories";
 
 const useSettingsMock = vi.fn();
 const useAccountsMock = vi.fn();
@@ -27,7 +34,7 @@ const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
-  useUpstreamProxyAdmin: () => useUpstreamProxyAdminMock(),
+  useUpstreamProxyAdmin: (options: unknown) => useUpstreamProxyAdminMock(options),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -92,6 +99,10 @@ vi.mock("@/features/settings/components/model-catalogue-settings", () => ({
 
 vi.mock("@/features/settings/components/background-jobs-settings", () => ({
   BackgroundJobsSettings: () => <div>Background Jobs Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/totp-settings", () => ({
+  TotpSettings: () => <div>TOTP Settings</div>,
 }));
 
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
@@ -183,6 +194,7 @@ describe("SettingsPage", () => {
       passwordManagementEnabled: true,
       passwordSessionActive: false,
       canWrite: true,
+      permissions: ADMIN_PERMISSIONS,
     });
 
     mockSettingsQuery({
@@ -273,6 +285,31 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Telemetry Settings")).toBeInTheDocument();
   });
 
+  it("renders the security-bearing controls read-only for an operator (write without security:write)", async () => {
+    useAuthStore.setState({ permissions: OPERATOR_PERMISSIONS });
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    renderSettings();
+
+    expect(screen.queryByText("Read-only access")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: false, policyControlsDisabled: true }),
+    );
+
+    await expandAdvancedSettings();
+
+    expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ busy: false, canCreateEndpoint: false }),
+    );
+    expect(modelSourcesSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
   it("mounts every advanced section after one expand interaction", async () => {
     renderSettings();
 
@@ -289,8 +326,17 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 
-  it("disables write-capable sections for read-only guests", async () => {
+  it("disables write-capable sections and hides restricted surfaces for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
+    // The guest query is disabled, so it usually has no data; the cached-data
+    // case is covered separately below.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: undefined, error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
 
     renderSettings();
 
@@ -299,18 +345,97 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Password Settings")).not.toBeInTheDocument();
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(telemetrySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    // Backend answers API-key and upstream-proxy reads with 403 for guests, so
+    // the section is not mounted and the admin query is never enabled.
+    expect(screen.queryByText("API Keys Section")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: false });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     await expandAdvancedSettings();
 
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(upstreamTimeoutSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
+    expect(stickySessionsSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not render cached upstream-proxy data for read-only guests", async () => {
+    useAuthStore.setState({ canWrite: false });
+    // `enabled: false` only stops fetching: data cached by an earlier admin
+    // session is still returned by the hook and must not reach the card.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+
+    renderSettings();
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Routing Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("mounts API key and sticky-session sections and enables the upstream-proxy query for writers", async () => {
+    renderSettings();
+
+    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: true });
+
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Upstream Proxy Settings")).toBeInTheDocument();
+    expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
+    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
+  it("mounts the Access card for a fully signed-in Viewer (own password and TOTP, no security controls)", async () => {
+    useAuthStore.setState({
+      canWrite: false,
+      permissions: VIEWER_PERMISSIONS,
+      passwordSessionActive: true,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    expect(await screen.findByText("Password Settings")).toBeInTheDocument();
+    expect(await screen.findByText("TOTP Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
+    expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("folds guest access, password, session and TOTP into the Access card in today's order", async () => {
+    useAuthStore.setState({ passwordSessionActive: true });
+    renderSettings();
+
+    const card = document.getElementById("access");
+    expect(card).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    await screen.findByText("TOTP Settings");
+    const labels = ["Guest Access Settings", "Password Settings", "Session Settings", "TOTP Settings"].map(
+      (label) => screen.getByText(label),
+    );
+    expect(labels.every((node) => card?.contains(node))).toBe(true);
+    // Each control follows the previous one: today's order, nothing reshuffled.
+    expect(
+      labels.slice(1).every((node, index) => Boolean(labels[index].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    ).toBe(true);
+    // Cards outside the Access card keep their place: Access sits between Reset credits and API keys.
+    expect(screen.getByText("API Keys Section").compareDocumentPosition(card!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   });
 
   it("keeps guest access settings available for writable sessions", async () => {
@@ -508,4 +633,19 @@ describe("SettingsPage", () => {
     elementLookup.mockRestore();
   });
 
+
+  it("mounts the Access card for a reverse-proxy account that cannot write", async () => {
+    // No password session, no `write`: its own two-factor is still how it
+    // confirms sensitive changes, so the card must be reachable.
+    useAuthStore.setState({
+      canWrite: false,
+      passwordManagementEnabled: true,
+      passwordSessionActive: false,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(await screen.findByText("Access")).toBeInTheDocument();
+  });
 });

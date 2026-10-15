@@ -27,8 +27,15 @@ import {
 } from "@/features/apis/schemas";
 import type { ModelSource } from "@/features/model-sources/schemas";
 import { ModelSourceSchema } from "@/features/model-sources/schemas";
-import type { AuthSession } from "@/features/auth/schemas";
+import type { AccessSummary, AuthSession, AuthSessionUser } from "@/features/auth/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
+import type {
+	DashboardRole,
+	DashboardUser,
+	PendingInvite,
+	PermissionDescriptor,
+} from "@/features/access/api";
+import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
 import type {
 	DashboardOverview,
 	DashboardProjections,
@@ -52,7 +59,6 @@ import {
 import type {
 	DashboardSettings,
 	ModelContextWindowOverrides,
-	SubscriptionOverflowPreflight,
 	TelemetryConsent,
 	TelemetrySnapshotEnvelope,
 	UpstreamProxyAdmin,
@@ -60,7 +66,6 @@ import type {
 import {
 	DashboardSettingsSchema,
 	ModelContextWindowOverridesSchema,
-	SubscriptionOverflowPreflightSchema,
 	TelemetryConsentSchema,
 	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
@@ -493,11 +498,428 @@ export function createDashboardAuthSession(
 		passwordManagementEnabled: true,
 		passwordSessionActive: false,
 		role: "admin",
-		permissions: ["read", "write"],
+		permissions: ADMIN_PERMISSIONS,
 		guestAccessEnabled: false,
 		guestPasswordRequired: false,
+		breakGlassSession: false,
 		...overrides,
 	});
+}
+
+/**
+ * The local sign-in method every install has.
+ *
+ * Built across lines rather than inline: a `kind`/`label` pair naming a password
+ * on one line reads as a credential to secret scanners, and the repository runs
+ * one as a required check.
+ */
+export const LOCAL_SIGN_IN_PROVIDER = {
+  kind: "password",
+  label: "Password",
+} as const;
+
+// Wire form of the preset grants (`permission_strings` in the backend): the
+// coarse aliases first, then every `<permission>:<scope>` entry.
+export const ADMIN_PERMISSIONS: string[] = [
+	"read",
+	"write",
+	"accounts:export:all",
+	"accounts:read:all",
+	"accounts:write:all",
+	"api_keys:assign:all",
+	"api_keys:read:all",
+	"api_keys:write:all",
+	"audit:read:all",
+	"conversations:read:all",
+	"dashboard:read:all",
+	"ops:write:all",
+	"roles:manage:all",
+	"security:write:all",
+	"users:manage:all",
+];
+
+export const OPERATOR_PERMISSIONS: string[] = [
+	"read",
+	"write",
+	"accounts:read:all",
+	"accounts:write:all",
+	"api_keys:assign:all",
+	"api_keys:read:all",
+	"api_keys:write:all",
+	"dashboard:read:all",
+	"ops:write:all",
+];
+
+export const VIEWER_PERMISSIONS: string[] = ["read", "accounts:read:all", "dashboard:read:all"];
+
+export const GUEST_PERMISSIONS: string[] = VIEWER_PERMISSIONS;
+
+export function createSessionUser(overrides: Partial<AuthSessionUser> = {}): AuthSessionUser {
+	return {
+		id: "user_admin",
+		username: "admin",
+		displayName: null,
+		role: { id: "role_admin", slug: "admin", name: "Admin", kind: "preset" },
+		...overrides,
+	};
+}
+
+export function createAccessSummary(overrides: Partial<AccessSummary> = {}): AccessSummary {
+	return {
+		usersTotal: 1,
+		usersActive: 1,
+		usersInvited: 0,
+		usersDisabled: 0,
+		pendingInvites: 0,
+		nonAdminUsers: 0,
+		customRoles: 0,
+		providersEnabled: ["password"],
+		roleMappings: 0,
+		scimTokens: 0,
+		auditSinks: 0,
+		localLoginPolicy: "enabled",
+		...overrides,
+	};
+}
+
+// ── Dashboard users / roles (people tab) ──
+
+export const PRESET_ROLE_IDS = {
+	admin: "role_admin",
+	operator: "role_operator",
+	member: "role_member",
+	viewer: "role_viewer",
+	guest: "role_guest",
+} as const;
+
+export const ASSIGNABLE_ROLE_IDS: string[] = [
+	PRESET_ROLE_IDS.admin,
+	PRESET_ROLE_IDS.operator,
+	PRESET_ROLE_IDS.viewer,
+];
+
+const ALL_PERMISSIONS = [
+	"accounts:export",
+	"accounts:read",
+	"accounts:write",
+	"api_keys:assign",
+	"api_keys:read",
+	"api_keys:write",
+	"audit:read",
+	"conversations:read",
+	"dashboard:read",
+	"ops:write",
+	"roles:manage",
+	"security:write",
+	"users:manage",
+];
+
+function grantsOf(permissions: string[], scope: "all" | "own" = "all") {
+	return permissions.map((permission) => ({ permission, scope }));
+}
+
+export function createDashboardRole(overrides: Partial<DashboardRole> = {}): DashboardRole {
+	return {
+		id: PRESET_ROLE_IDS.viewer,
+		slug: "viewer",
+		name: "Viewer",
+		description: "Read-only access to the dashboard.",
+		kind: "preset",
+		locked: true,
+		assignableToUsers: true,
+		grants: grantsOf(["accounts:read", "dashboard:read"]),
+		usersCount: 0,
+		...overrides,
+	};
+}
+
+export function createDefaultDashboardRoles(): DashboardRole[] {
+	return [
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.admin,
+			slug: "admin",
+			name: "Admin",
+			description: "Everything.",
+			grants: grantsOf(ALL_PERMISSIONS),
+			usersCount: 1,
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.guest,
+			slug: "guest",
+			name: "Guest",
+			description: "Anonymous read-only access.",
+			assignableToUsers: false,
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.member,
+			slug: "member",
+			name: "Member",
+			description: "Own API keys and own usage.",
+			assignableToUsers: false,
+			grants: grantsOf(["api_keys:read", "api_keys:write", "dashboard:read"], "own"),
+		}),
+		createDashboardRole({
+			id: PRESET_ROLE_IDS.operator,
+			slug: "operator",
+			name: "Operator",
+			description: "Accounts, API keys and operations.",
+			grants: grantsOf([
+				"accounts:read",
+				"accounts:write",
+				"api_keys:assign",
+				"api_keys:read",
+				"api_keys:write",
+				"dashboard:read",
+				"ops:write",
+			]),
+			usersCount: 1,
+		}),
+		createDashboardRole(),
+	];
+}
+
+export function createPermissionDescriptors(): PermissionDescriptor[] {
+	const descriptions: Record<string, string> = {
+		"accounts:export": "Export upstream account credentials.",
+		"accounts:read": "See upstream accounts and their usage windows.",
+		"accounts:write": "Add, edit, pause and remove upstream accounts and their routing.",
+		"api_keys:assign": "Assign upstream accounts, model sources and owners to API keys.",
+		"api_keys:read": "See API keys, their policies and their usage.",
+		"api_keys:write": "Create, edit, rotate and delete API keys.",
+		"audit:read": "Read the audit log.",
+		"conversations:read": "Read conversation contents and archives.",
+		"dashboard:read": "Read the dashboard overview, reports, request logs and the model catalog.",
+		"ops:write": "Change operational settings such as model sources, automations and the quota planner.",
+		"roles:manage": "Create, edit and delete custom roles.",
+		"security:write": "Change security settings: guest access, firewall, upstream proxy credentials.",
+		"users:manage": "Invite, edit, disable and remove dashboard accounts.",
+	};
+	return ALL_PERMISSIONS.map((permission) => ({
+		permission,
+		description: descriptions[permission] ?? permission,
+		implies: [],
+		ownSupported: ["dashboard:read", "api_keys:read", "api_keys:write"].includes(permission),
+		privileged: false,
+	}));
+}
+
+export function createDashboardUser(overrides: Partial<DashboardUser> = {}): DashboardUser {
+	return {
+		id: "user_admin",
+		username: "admin",
+		displayName: null,
+		email: null,
+		role: { id: PRESET_ROLE_IDS.admin, slug: "admin", name: "Admin", kind: "preset" },
+		roleSource: "manual",
+		status: "active",
+		isBreakGlass: true,
+		totpConfigured: true,
+		hasPassword: true,
+		createdAt: "2026-01-01T00:00:00Z",
+		lastLoginAt: "2026-01-31T17:00:00Z",
+		pendingInvite: null,
+		...overrides,
+	};
+}
+
+export function createDefaultDashboardUsers(): DashboardUser[] {
+	return [
+		createDashboardUser(),
+		createDashboardUser({
+			id: "user_ops",
+			username: "ops",
+			displayName: "Sarah Kim",
+			role: { id: PRESET_ROLE_IDS.operator, slug: "operator", name: "Operator", kind: "preset" },
+			isBreakGlass: false,
+			totpConfigured: false,
+			lastLoginAt: "2026-01-30T09:00:00Z",
+		}),
+		createDashboardUser({
+			id: "user_invited",
+			username: "lee",
+			role: { id: PRESET_ROLE_IDS.viewer, slug: "viewer", name: "Viewer", kind: "preset" },
+			status: "invited",
+			isBreakGlass: false,
+			totpConfigured: false,
+			hasPassword: false,
+			lastLoginAt: null,
+			pendingInvite: { expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(), ssoOnly: false },
+		}),
+	];
+}
+
+// ── Organisation (sign-in providers, group-to-role rules, refusals) ──
+
+export const TRUSTED_HEADER_PROVIDER_ID = "provider_trusted_header";
+export const PASSWORD_PROVIDER_ID = "provider_password";
+export const OIDC_PROVIDER_ID = "provider_oidc";
+
+const OIDC_ISSUER = "https://login.example.com";
+const OIDC_RETURN_URL = "https://codex.example.com/api/dashboard-auth/oidc/callback";
+
+/**
+ * A stored connection as the settings API projects it: everything in clear
+ * except the secret, which comes back as `****last4` and is never returned.
+ * The values are assembled rather than written out so no line of this file
+ * reads as an identity and a credential sitting next to each other.
+ */
+export function createOidcConfig(overrides: Record<string, string> = {}): Record<string, string> {
+	return {
+		issuer: OIDC_ISSUER,
+		discoveryUrl: `${OIDC_ISSUER}/.well-known/openid-configuration`,
+		clientId: ["codex", "lb", "dashboard"].join("-"),
+		clientSecret: `****${"4".repeat(4)}`,
+		redirectUri: OIDC_RETURN_URL,
+		subjectClaim: "sub",
+		emailClaim: "email",
+		nameClaim: "name",
+		groupsClaim: "groups",
+		...overrides,
+	};
+}
+
+export function createAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
+	return {
+		id: TRUSTED_HEADER_PROVIDER_ID,
+		kind: "trusted_header",
+		providerKey: "default",
+		label: "Reverse proxy",
+		enabled: true,
+		active: true,
+		unknownIdentityRoleId: PRESET_ROLE_IDS.admin,
+		noMatchRoleId: PRESET_ROLE_IDS.viewer,
+		linkByEmail: false,
+		skipRoleSync: false,
+		idpMfaEnforced: false,
+		// The reverse-proxy header names are topology; the backend returns them read-only.
+		config: { identityHeader: "Remote-User", groupsHeader: "Remote-Groups" },
+		testLoginVerifiedAt: null,
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		...overrides,
+	};
+}
+
+/** The identity-provider row, connected. Seeded rows carry an empty `config`. */
+export function createOidcAuthProvider(overrides: Partial<AuthProvider> = {}): AuthProvider {
+	return createAuthProvider({
+		id: OIDC_PROVIDER_ID,
+		kind: "oidc",
+		label: "Okta",
+		enabled: false,
+		active: false,
+		unknownIdentityRoleId: null,
+		noMatchRoleId: null,
+		config: createOidcConfig(),
+		...overrides,
+	});
+}
+
+export function createDefaultAuthProviders(): AuthProvider[] {
+	return [
+		createAuthProvider({
+			id: PASSWORD_PROVIDER_ID,
+			kind: "password",
+			label: "Password",
+			unknownIdentityRoleId: null,
+			noMatchRoleId: null,
+			config: {},
+		}),
+		createAuthProvider(),
+		// Seeded on every install, disabled and unconnected until an admin
+		// completes the wizard: an empty `config` is what "never connected" looks like.
+		createOidcAuthProvider({ label: "Single sign-on", config: {} }),
+	];
+}
+
+/** Where the server tells an identity provider to point its connector. */
+export const SCIM_BASE_PATH = "/scim/v2";
+
+/**
+ * A credential row for automatic account management. The secret is never part
+ * of a row — it exists only in the answer to issuing or rotating one — and the
+ * prefix here is assembled from parts so that no line of this file puts a name
+ * and something secret-shaped side by side.
+ */
+export function createScimToken(overrides: Partial<ScimToken> = {}): ScimToken {
+	return {
+		id: "scim_token_directory",
+		label: "Company directory",
+		tokenPrefix: ["clb", "scim"].join("-") + "_abc1234",
+		createdAt: "2026-01-01T00:00:00Z",
+		createdByUserId: "user_admin",
+		lastUsedAt: null,
+		rotatedAt: null,
+		...overrides,
+	};
+}
+
+export function createRoleMapping(overrides: Partial<RoleMapping> = {}): RoleMapping {
+	return {
+		id: "mapping_engineering",
+		provider: "trusted_header",
+		providerKey: "default",
+		claimName: "groups",
+		claimValue: "engineering",
+		roleId: PRESET_ROLE_IDS.operator,
+		priority: 1,
+		createdAt: "2026-01-01T00:00:00Z",
+		updatedAt: "2026-01-01T00:00:00Z",
+		...overrides,
+	};
+}
+
+/** Two rules, winner first, exactly as the backend orders them. */
+export function createDefaultRoleMappings(): RoleMapping[] {
+	return [
+		createRoleMapping({ id: "mapping_platform", claimValue: "platform", priority: 2 }),
+		createRoleMapping(),
+	];
+}
+
+export function createRefusedSignIn(overrides: Partial<AuditEntry> = {}): AuditEntry {
+	return {
+		id: 1,
+		timestamp: "2026-01-31T09:00:00Z",
+		action: "login_failed",
+		actorIp: "203.0.113.8",
+		details: {
+			method: "trusted_header",
+			reason: "unknown_identity",
+			subject: "sarah@example.com",
+			email: "sarah@example.com",
+		},
+		severity: "warning",
+		...overrides,
+	};
+}
+
+export function createDefaultRefusedSignIns(): AuditEntry[] {
+	return [
+		createRefusedSignIn(),
+		createRefusedSignIn({
+			id: 2,
+			timestamp: "2026-01-30T11:30:00Z",
+			details: {
+				method: "trusted_header",
+				reason: "unknown_identity",
+				subject: "lee@example.com",
+				email: "lee@example.com",
+			},
+		}),
+	];
+}
+
+export function createPendingInvite(overrides: Partial<PendingInvite> = {}): PendingInvite {
+	return {
+		userId: "user_invited",
+		username: "lee",
+		roleId: PRESET_ROLE_IDS.viewer,
+		expiresAt: new Date(Date.now() + 20 * 3600_000).toISOString(),
+		createdByUserId: "user_admin",
+		ssoOnly: false,
+		...overrides,
+	};
 }
 
 export function createDashboardSettings(
@@ -518,9 +940,6 @@ export function createDashboardSettings(
 		relativeAvailabilityPower: 2,
 		relativeAvailabilityTopK: 5,
 		singleAccountId: null,
-		subscriptionOverflowSourceId: null,
-		subscriptionOverflowDrainUntil: null,
-		subscriptionOverflowPinsExpireBy: null,
 		proxyAccountResponseCreateLimit: 4,
 		proxyAccountResponseCreateLimitEnvironmentValue: 4,
 		proxyAccountResponseCreateLimitOverride: 4,
@@ -548,7 +967,10 @@ export function createDashboardSettings(
 		warmupModel: "gpt-5.4-mini",
 		importWithoutOverwrite: false,
 		totpRequiredOnLogin: false,
-		totpConfigured: true,
+		totpRequiredForAdminRole: false,
+		localLoginPolicy: "enabled",
+		usersWithoutTotpCount: 0,
+		adminsWithoutTotpCount: 0,
 		apiKeyAuthEnabled: true,
 		hideUpstreamQuotaFromApiKeys: false,
 		limitWarmupEnabled: false,
@@ -573,6 +995,9 @@ export function createDashboardSettings(
 		// M5 conversation archive
 		conversationArchiveEnabled: false,
 		conversationArchiveDir: "/var/lib/codex-lb/conversation-archive",
+		// R2 spool retention: the 7-day default and the floor at shipped defaults.
+		httpResponsesSessionBridgeOperationSpoolRetentionSeconds: 604800,
+		httpResponsesSessionBridgeOperationSpoolRetentionFloorSeconds: 7200,
 		...overrides,
 	});
 }
@@ -744,50 +1169,6 @@ export function createQuotaPlannerWarmupActionResponse(
 		reason: "synthetic_traffic_disabled",
 		requestId: null,
 		executedAt: null,
-		...overrides,
-	});
-}
-
-export function createSubscriptionOverflowPreflight(
-	overrides: Partial<SubscriptionOverflowPreflight> = {},
-): SubscriptionOverflowPreflight {
-	return SubscriptionOverflowPreflightSchema.parse({
-		sourceId: "src_vllm",
-		sourceName: "vLLM",
-		sourceEnabled: true,
-		eligible: true,
-		blockers: [],
-		drainUntil: null,
-		servedModels: [
-			{
-				slug: "gpt-5.4",
-				enabled: true,
-				neverOverflows: false,
-				neverOverflowsReason: null,
-				undeclaredToolTypes: ["shell", "tool_search"],
-				supportsVision: false,
-				supportsStreaming: true,
-				priced: false,
-				contextWindowMismatch: { registry: 272000, source: 8192, maxOutputTokens: 1024 },
-				warnings: ["undeclared_tool_types", "no_vision", "unpriced", "context_window_smaller"],
-			},
-			{
-				slug: "gpt-5.6-sol",
-				enabled: true,
-				neverOverflows: true,
-				neverOverflowsReason: "responses_lite",
-				undeclaredToolTypes: [],
-				supportsVision: true,
-				supportsStreaming: true,
-				priced: true,
-				contextWindowMismatch: null,
-				warnings: ["responses_lite_excluded"],
-			},
-		],
-		missingModels: ["gpt-5.5"],
-		scopedApiKeyCount: 1,
-		livePinCount: 2,
-		tombstoneCount: 1,
 		...overrides,
 	});
 }

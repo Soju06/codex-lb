@@ -1797,8 +1797,229 @@ async def test_v1_responses_previous_response_owner_lookup_failure_without_http_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "delivery_point",
+    [
+        "created",
+        "completed",
+        "in_progress",
+        "queued_json",
+        "in_progress_json",
+        "synthetic",
+        "oversized",
+        "normalized_error",
+    ],
+)
+async def test_http_previous_response_owner_is_ready_before_persistence(
+    app_instance, monkeypatch: pytest.MonkeyPatch, delivery_point: str
+):
+    """Real sockets expose the ID while its originating log cannot exist yet."""
+    import uvicorn
+    from aiohttp import web
+
+    from app.core.config.settings import get_settings
+
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "http"
+    origin_accounts: list[str | None] = []
+    finish_origin = asyncio.Event()
+    persist_started = asyncio.Event()
+    finish_persistence = asyncio.Event()
+    background_json = delivery_point.endswith("_json")
+    synthesized_id = delivery_point in {"synthetic", "oversized", "normalized_error"}
+    anchor_id = "req_http_owner_unobserved" if synthesized_id else "resp_http_owner_before_persistence"
+    original_persist = proxy_module.ProxyService._persist_request_log
+
+    async def delayed_persist(self, **kwargs):
+        if kwargs["request_id"] == anchor_id:
+            persist_started.set()
+            await finish_persistence.wait()
+        await original_persist(self, **kwargs)
+
+    async def upstream(request: web.Request) -> web.StreamResponse:
+        payload = await request.json()
+        origin_accounts.append(request.headers.get("chatgpt-account-id"))
+        followup = payload.get("previous_response_id") is not None
+        response_id = "resp_http_owner_followup" if followup else anchor_id
+        if background_json and not followup:
+            assert payload["stream"] is False
+            assert payload["background"] is True
+            return web.json_response(
+                {"id": response_id, "object": "response", "status": delivery_point.removesuffix("_json"), "output": []}
+            )
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        if synthesized_id:
+            if delivery_point == "oversized":
+                await response.write(b"data: " + b"x" * 2048 + b"\n\n")
+            elif delivery_point == "normalized_error":
+                await response.write(
+                    (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "error",
+                                "error": {
+                                    "type": "server_error",
+                                    "code": "upstream_error",
+                                    "message": "origin failure",
+                                },
+                            }
+                        )
+                        + "\n\n"
+                    ).encode()
+                )
+            await response.write_eof()
+            return response
+        if not followup:
+            if delivery_point in {"created", "in_progress"}:
+                if delivery_point == "in_progress":
+                    await response.write(b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n')
+                event = {"type": f"response.{delivery_point}", "response": {"id": response_id, "status": "in_progress"}}
+            else:
+                # The supported no-created stream exposes its ID in a later terminal event.
+                event = {"type": "response.output_text.delta", "delta": "hello"}
+            await response.write(("data: " + json.dumps(event) + "\n\n").encode())
+            if delivery_point in {"created", "in_progress"}:
+                await finish_origin.wait()
+        await response.write(
+            (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "object": "response",
+                            "status": "completed",
+                            "output": [],
+                            "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                        },
+                    }
+                )
+                + "\n\n"
+            ).encode()
+        )
+        await response.write_eof()
+        return response
+
+    origin_app = web.Application()
+    origin_app.router.add_post("/codex/responses", upstream)
+    runner = web.AppRunner(origin_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    origin_port = runner.addresses[0][1]
+    monkeypatch.setenv("CODEX_LB_UPSTREAM_BASE_URL", f"http://127.0.0.1:{origin_port}")
+    monkeypatch.setattr(proxy_client_module, "MAX_SSE_EVENT_BYTES", 1024)
+    get_settings.cache_clear()
+    monkeypatch.setattr(proxy_module, "get_settings", get_settings)
+    monkeypatch.setattr(proxy_module.ProxyService, "_persist_request_log", delayed_persist)
+    server = uvicorn.Server(uvicorn.Config(app_instance, host="127.0.0.1", port=0, log_level="warning"))
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                if serve_task.done():
+                    await serve_task
+                await asyncio.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        async with AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as client:
+            for number in range(2):
+                auth = _make_auth_json(f"acc_http_owner_{number}", f"http-owner-{number}@example.com")
+                imported = await client.post(
+                    "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+                )
+                assert imported.status_code == 200
+            async with client.stream(
+                "POST",
+                "/backend-api/codex/responses" if background_json else "/v1/responses",
+                json={
+                    "model": "gpt-5.4",
+                    "input": "start",
+                    "stream": not background_json,
+                    **({"background": True, "instructions": "hi"} if background_json else {}),
+                },
+                headers={
+                    "session_id": "sid_http_owner_before_persistence",
+                    "x-request-id": anchor_id if synthesized_id else "req_http_owner_start",
+                },
+            ) as first:
+                try:
+                    if synthesized_id:
+                        await first.aread()
+                        assert first.status_code == 200
+                        failure = next(
+                            event
+                            for event in _iter_sse_events(first.text.splitlines())
+                            if event["type"] == "response.failed"
+                        )
+                        assert failure["response"]["id"] == anchor_id
+                        if delivery_point == "oversized":
+                            assert failure["response"]["error"]["code"] == "stream_event_too_large"
+                        await asyncio.wait_for(persist_started.wait(), 5)
+                        attempts = len(origin_accounts)
+                        followup = await client.post(
+                            "/v1/responses",
+                            json={"model": "gpt-5.4", "input": "continue", "previous_response_id": anchor_id},
+                            headers={"session_id": "sid_http_owner_before_persistence"},
+                        )
+                        assert followup.status_code == 502
+                        assert followup.json()["error"]["code"] == "previous_response_owner_unavailable"
+                        assert len(origin_accounts) == attempts
+                        return
+                    assert first.status_code == 200
+                    if background_json:
+                        await first.aread()
+                        assert first.json()["id"] == anchor_id
+                        assert first.json()["status"] == delivery_point.removesuffix("_json")
+                        await asyncio.wait_for(persist_started.wait(), 5)
+                    else:
+                        lines = first.aiter_lines()
+                        async for line in lines:
+                            if not line.startswith("data: "):
+                                continue
+                            event = json.loads(line[6:])
+                            if event.get("type") == f"response.{delivery_point}":
+                                if event.get("response", {}).get("id") == anchor_id:
+                                    break
+                        else:
+                            pytest.fail("the upstream response ID was never delivered")
+                        if delivery_point == "completed":
+                            _ = [line async for line in lines]
+                            await asyncio.wait_for(persist_started.wait(), 5)
+                        else:
+                            assert not persist_started.is_set()
+                    async with SessionLocal() as session:
+                        assert (
+                            await session.execute(select(RequestLog).where(RequestLog.request_id == anchor_id))
+                        ).scalar_one_or_none() is None
+                    second = await client.post(
+                        "/v1/responses",
+                        json={"model": "gpt-5.4", "input": "continue", "previous_response_id": anchor_id},
+                        headers={"session_id": "sid_http_owner_before_persistence"},
+                    )
+                    assert second.status_code == 200, second.text
+                    assert second.json()["id"] == "resp_http_owner_followup"
+                    assert len(origin_accounts) == 2
+                    assert origin_accounts[0] in {"acc_http_owner_0", "acc_http_owner_1"}
+                    assert origin_accounts[0] == origin_accounts[1]
+                finally:
+                    finish_origin.set()
+                    finish_persistence.set()
+    finally:
+        finish_origin.set()
+        finish_persistence.set()
+        server.should_exit = True
+        await asyncio.wait_for(serve_task, 10)
+        await runner.cleanup()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_previous_response_followup_without_http_bridge_recovers_owner_from_request_logs(
     async_client,
+    app_instance,
     monkeypatch,
 ):
     owner_email = "prev-http-owner-anchor@example.com"
@@ -1883,6 +2104,8 @@ async def test_v1_responses_previous_response_followup_without_http_bridge_recov
         ).scalar_one_or_none()
     assert persisted_log is not None
     assert persisted_log.session_id == "sid_prev_http_anchor"
+
+    app_instance.state.proxy_service._websocket_previous_response_account_index.clear()
 
     second_response = await async_client.post(
         "/v1/responses",
@@ -2218,7 +2441,11 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
     dashboard_settings = DashboardSettings(
         id=1,
         sticky_threads_enabled=False,
-        upstream_stream_transport="websocket",
+        # The subject here is "the HTTP upstream does not slim", so the HTTP
+        # upstream is pinned explicitly. Before #2363 this test reached it only
+        # through the input_image transport pin, which no longer fires for a
+        # small inline image.
+        upstream_stream_transport="http",
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -2311,6 +2538,114 @@ async def test_v1_responses_without_http_bridge_http_upstream_preserves_historic
             "type": "input_image",
             "image_url": "data:image/png;base64," + ("B" * 1200),
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_without_http_bridge_websocket_upstream_keeps_small_inline_images(
+    async_client,
+    monkeypatch,
+):
+    # Regression for #2363: an operator's explicit websocket pin is precedence
+    # item 1, so a request carrying a small inline image must follow it instead
+    # of being forced onto upstream HTTP, and its image must survive verbatim.
+    email = "stream-ws-inline@example.com"
+    raw_account_id = "acc_stream_ws_inline"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    app_settings = Settings(
+        http_responses_session_bridge_enabled=False,
+        proxy_request_budget_seconds=75.0,
+        compact_request_budget_seconds=75.0,
+        transcription_request_budget_seconds=120.0,
+        stream_idle_timeout_seconds=300.0,
+        proxy_response_create_limit=64,
+    )
+    dashboard_settings = DashboardSettings(
+        id=1,
+        sticky_threads_enabled=False,
+        upstream_stream_transport="websocket",
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        openai_cache_affinity_max_age_seconds=300,
+        import_without_overwrite=False,
+        totp_required_on_login=False,
+        api_key_auth_enabled=False,
+        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+        http_responses_session_bridge_gateway_safe_mode=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
+        http_downstream_transport_policy="smart",
+    )
+
+    class _SettingsCache:
+        async def get(self) -> DashboardSettings:
+            return dashboard_settings
+
+    class _CoreProxySettings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        proxy_request_budget_seconds = 75.0
+        trace_channels = frozenset()
+
+    captured: dict[str, object] = {}
+
+    async def fail_open_upstream_websocket(**kwargs):
+        del kwargs
+        raise AssertionError("HTTP /v1/responses must not open upstream websocket")
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        upstream_stream_transport_override=None,
+    ):
+        del headers, access_token, account_id, base_url, raise_for_status
+        captured["transport"] = upstream_stream_transport_override
+        captured["payload"] = payload.to_payload()
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_ws_stream_inline","object":"response",'
+            '"status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: app_settings)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_client_module, "get_settings", lambda: _CoreProxySettings())
+    monkeypatch.setattr(proxy_client_module, "_open_upstream_websocket", fail_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    inline_image = "data:image/png;base64," + ("B" * 1200)
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": inline_image},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_ws_stream_inline"
+    assert captured["transport"] == "websocket"
+    request_input = cast(dict[str, object], captured["payload"])["input"]
+    assert isinstance(request_input, list)
+    assert cast(dict[str, object], request_input[0])["content"] == [
+        {"type": "input_text", "text": "describe this"},
+        {"type": "input_image", "image_url": inline_image},
     ]
 
 

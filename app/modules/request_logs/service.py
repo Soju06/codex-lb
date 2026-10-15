@@ -102,6 +102,8 @@ class RequestLogsService:
         cache_mode: str = "since",
         timeframe: str | None = None,
         include_sensitive_metadata: bool,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> RequestLogsPage:
         status_filter = _map_status_filter(status)
         normalized_model_options = (
@@ -127,6 +129,8 @@ class RequestLogsService:
             cache_mode=cache_mode,
             timeframe=timeframe,
             include_sensitive_metadata=include_sensitive_metadata,
+            include_account_identity=include_account_identity,
+            include_api_key_identity=include_api_key_identity,
         )
         logs = result.logs
         total = result.total
@@ -137,13 +141,14 @@ class RequestLogsService:
                 request_count=total,
                 aggregated_cost_usd=result.aggregated_cost_usd,
             )
-        api_key_ids = [log.api_key_id for log in logs if log.api_key_id]
-        api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids)
+        api_key_ids = [log.api_key_id for log in logs if log.api_key_id] if include_api_key_identity else []
+        api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids) if api_key_ids else {}
         requests = [
             to_request_log_entry(
                 log,
                 api_key_name=api_key_name_by_id.get(log.api_key_id or ""),
                 include_sensitive_metadata=include_sensitive_metadata,
+                include_api_key_identity=include_api_key_identity,
             )
             for log in logs
         ]

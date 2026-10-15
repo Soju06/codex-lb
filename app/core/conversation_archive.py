@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import contextlib
 import errno
 import gzip
 import json
@@ -11,7 +12,8 @@ import queue
 import threading
 import time
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -89,6 +91,30 @@ def resolve_archive_enabled(dashboard_settings: object | None, startup_settings:
     )
 
 
+#: Set while synthetic diagnostic traffic is in flight. The archive exists to
+#: record what Codex and the upstream actually said to each other; a generated
+#: filler corpus an operator diagnostic invented is neither, and at ~28k tokens
+#: per call it would bury the real traffic it sits between.
+_ARCHIVE_SUPPRESSED: ContextVar[bool] = ContextVar("conversation_archive_suppressed", default=False)
+
+
+@contextlib.contextmanager
+def suppress_conversation_archive() -> Iterator[None]:
+    """Keep generated diagnostic traffic out of the archive for this task.
+
+    Scoped to the current context, so it covers the upstream calls awaited
+    inside the block (and any task spawned from them) without touching the
+    operator's ``conversation_archive_enabled`` setting or any concurrent real
+    request.
+    """
+
+    token = _ARCHIVE_SUPPRESSED.set(True)
+    try:
+        yield
+    finally:
+        _ARCHIVE_SUPPRESSED.reset(token)
+
+
 def archive_enabled() -> bool:
     """Whether the writer records traffic, as of the last dashboard-settings snapshot.
 
@@ -99,7 +125,13 @@ def archive_enabled() -> bool:
     refreshes the snapshot off the cache-invalidation bus, so a dashboard
     toggle reaches frames of already-open streams without a restart and
     without a request having to arrive first.
+
+    Synthetic diagnostic traffic inside ``suppress_conversation_archive()`` is
+    excluded regardless of the setting: it is generated locally, not a record
+    of anything Codex said.
     """
+    if _ARCHIVE_SUPPRESSED.get():
+        return False
     return resolve_archive_enabled(get_settings_cache().cached_row())
 
 

@@ -115,7 +115,10 @@ These rules encode recurring review blockers observed across codex-lb PRs.
   must sit on the current intended parent with a single-head upgrade path, have
   downgrade/upgrade coverage where the project expects it, and include
   historical-row backfills or compatibility handling when new fields affect
-  existing data.
+  existing data. Fetch `main` and run `make lint`
+  (`scripts/check_migration_topology.py`) after adding a revision: it fails on a
+  forked graph, on a revision whose parent `main` has already built on, and on a
+  timestamp slot another revision already took.
 - Issue-resolving PRs must name the exact `Fixes #N` / `Closes #N`, or state
   that they are partial. Keep PRs one concern wide. Revive stale work by making
   a focused branch on current `main`; do not drag an old broad/conflicted branch

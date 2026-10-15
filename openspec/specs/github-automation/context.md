@@ -132,3 +132,9 @@ therefore had to subscribe to `pull_request: edited`.
   runs the full suite regardless.
 - If the guards ever need the matrix result, do not fold them back into
   `ci.yml`; gate on the separate contexts instead.
+
+## Changed OpenSpec validation
+
+Issue #2032 exposed that canonical-only validation accepts malformed active deltas. The required OpenSpec job also runs `.github/scripts/validate_changed_openspec.py` against GitHub event revisions. PR selection uses the merge base and event head, while validation runs in the normal merge checkout. A target-only invalid change added after a PR branches does not enter that PR's validation set.
+
+Full history makes the merge base available. Disabling rename detection includes both old and new paths; surviving folders are validated, fully removed folders and archive paths are skipped. Strict validation is limited to touched active folders because unrelated legacy deltas can still be invalid. Validator arguments terminate options before the folder name, so a folder named `--help` cannot skip validation.

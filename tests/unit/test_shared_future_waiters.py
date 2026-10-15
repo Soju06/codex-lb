@@ -158,3 +158,57 @@ async def test_timed_wait_runs_through_injected_scheduler_and_untimed_wait_does_
     assert [timeout for _awaitable, timeout in recorded] == [5]
     assert isinstance(recorded[0][0], asyncio.Future)
     assert recorded[0][0] is not shared
+
+
+async def test_a_failure_that_lands_with_no_waiter_left_is_still_consumed():
+    """A waiter that times out leaves the shared future unattended.
+
+    ``wait_on_shared_future`` discards the waiter's proxy when it times out, so
+    a shared future that completes in the gap before the next wait reaches the
+    fan-out callback with an empty waiter set. If the fan-out only consumed the
+    exception while delivering it, nothing would retrieve it, and asyncio logs
+    ``Task exception was never retrieved`` — an ERROR plus traceback — when the
+    task is collected. Production saw exactly that from the SSE keepalive
+    injector: one per stream whose source ended between waits, on requests that
+    had otherwise returned 200.
+    """
+
+    started = asyncio.Event()
+
+    async def _fails() -> str:
+        started.set()
+        await asyncio.sleep(0.02)
+        raise StopAsyncIteration
+
+    task = asyncio.create_task(_fails())
+    with pytest.raises(asyncio.TimeoutError):
+        await wait_on_shared_future(task, timeout=0.001)
+    await started.wait()
+    # No waiter is registered from here on, which is the production shape.
+    assert not getattr(task, _WAITERS_ATTR, set())
+
+    # Let the task fail with nobody awaiting it. Awaiting it here would
+    # retrieve the exception and hide the very thing under test.
+    await asyncio.wait([task])
+    # The fan-out is a done callback, so it runs a loop pass *after* the task
+    # completes; asserting on ``done()`` alone races it.
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    # ``_log_traceback`` is what asyncio's destructor checks before logging;
+    # retrieving the exception clears it. Asserting the flag is how the test
+    # observes "nobody would be told about this" without racing the GC.
+    assert task._log_traceback is False
+    assert isinstance(task.exception(), StopAsyncIteration)
+
+
+async def test_a_failure_delivered_to_a_live_waiter_is_still_consumed():
+    """The empty-set fix must not regress the delivering path."""
+
+    async def _fails() -> str:
+        raise RuntimeError("upstream gone")
+
+    task = asyncio.create_task(_fails())
+    with pytest.raises(RuntimeError):
+        await wait_on_shared_future(task)
+    assert task._log_traceback is False

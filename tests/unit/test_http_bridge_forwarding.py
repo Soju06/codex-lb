@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyUsageReservationData
@@ -21,6 +22,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_CODEX_AFFINITY_HEADER,
     HTTP_BRIDGE_FILE_OWNER_HEADER,
     HTTP_BRIDGE_FORWARDED_HEADER,
+    HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
@@ -1406,6 +1408,85 @@ async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
         await collect()
     assert rejected["called"] is True
     assert dispatched["called"] is False
+
+
+@pytest.mark.parametrize(
+    ("owner_headers", "expected_local_refusal"),
+    [
+        ({HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}, True),
+        ({}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_owner_forward_non_200_carries_local_refusal_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_headers: dict[str, str],
+    expected_local_refusal: bool,
+) -> None:
+    """The rebuilt error must keep what only the owner could know.
+
+    A non-200 owner response is rebuilt into a fresh ``ProxyResponseError`` from
+    the status and the body, and the body cannot express whether the owner
+    refused before dispatch or observed a transport failure — both are
+    ``stream_incomplete``. The owner's marker is the only carrier, and a non-200
+    on its own must not be read as one (issue #2364).
+    """
+
+    class FakeResponse:
+        status = 502
+        headers = owner_headers
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def text(self) -> str:
+            return (
+                '{"error":{"message":"The previous response anchor was rejected upstream; '
+                'retry the request.","type":"server_error","code":"stream_incomplete"}}'
+            )
+
+    class FakeSession:
+        def __init__(self, *, timeout: aiohttp.ClientTimeout, trust_env: bool) -> None:
+            del timeout, trust_env
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+
+    async def collect() -> None:
+        client = HTTPBridgeOwnerClient()
+        async for _event in client.stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=_payload(),
+            headers={"Authorization": "Bearer proxy-key"},
+            context=HTTPBridgeForwardContext(
+                origin_instance="instance-a",
+                target_instance="instance-b",
+                codex_session_affinity=False,
+                downstream_turn_state=None,
+            ),
+            request_started_at=10.0,
+            clock=VirtualClock(monotonic_value=10.0),
+        ):
+            return
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await collect()
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert exc_info.value.local_pre_dispatch_refusal is expected_local_refusal
 
 
 @pytest.mark.asyncio

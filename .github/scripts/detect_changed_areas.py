@@ -35,6 +35,11 @@ FILTERS = {
         "docs/reference/settings.md",
         ".env.example",
         ".github/simplicity-budgets.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/**",
+        "Dockerfile",
+        "Dockerfile.*",
     ],
     "rust": [
         "Cargo.toml",

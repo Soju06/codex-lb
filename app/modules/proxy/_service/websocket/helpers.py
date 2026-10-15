@@ -350,6 +350,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
     is_upstream_model_capacity_error,
+    is_upstream_usage_limit_rejection,
 )
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
@@ -358,6 +359,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 
 def _facade() -> Any:
@@ -697,18 +699,41 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
+    """Drop the completed-response anchor and the state that only exists for it."""
+    continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_input_count = 0
+    continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.last_pending_function_call_ids = []
+    continuity_state.last_pending_tool_call_types = {}
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
+    api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
         return None
     previous_response_id = continuity_state.last_completed_response_id
     if previous_response_id is None:
+        return None
+    if _is_websocket_stale_previous_response(previous_response_id=previous_response_id, api_key_id=api_key_id):
+        # Upstream already denied this anchor (``previous_response_not_found``)
+        # and the fail-closed path remembered it. Injecting it again would
+        # fail the client's retry identically (#1921): retire it from session
+        # continuity so the full-context resend goes unanchored, and so the
+        # same id cannot return once the negative cache entry expires.
+        _retire_websocket_continuity_anchor(continuity_state)
+        _facade().logger.info(
+            "websocket_session_anchor_retired response_id=%s reason=stale_previous_response",
+            previous_response_id,
+        )
         return None
     stored_count = continuity_state.last_completed_input_count
     if not _facade()._input_prefix_matches_stored_context(
@@ -786,12 +811,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
-        continuity_state.last_completed_response_id = None
-        continuity_state.last_completed_input_count = 0
-        continuity_state.last_completed_input_prefix_fingerprint = None
-        continuity_state.last_pending_function_call_ids = []
-        continuity_state.last_pending_tool_call_types = {}
+        _retire_websocket_continuity_anchor(continuity_state)
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -1035,9 +1057,7 @@ def _websocket_precreated_retry_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return "server_is_overloaded"
-    if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
-        return None
-    return error_code
+    return _websocket_transparent_replay_error_code(error_code, error_message)
 
 
 def _websocket_precreated_replay_fallback_error(
@@ -1203,7 +1223,8 @@ def _websocket_owner_pinned_quota_error_code(
         _websocket_event_error_code(event_type, payload),
         _websocket_event_error_type(event_type, payload),
     )
-    if is_upstream_model_capacity_error(_websocket_event_error_message(event_type, payload)):
+    error_message = _websocket_event_error_message(event_type, payload)
+    if is_upstream_model_capacity_error(error_message):
         if error_code in {
             "rate_limit_exceeded",
             "usage_limit_reached",
@@ -1215,9 +1236,26 @@ def _websocket_owner_pinned_quota_error_code(
         if _websocket_response_id(None, payload) is not None:
             return None
         return "server_is_overloaded"
-    if error_code not in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
-        return None
-    return error_code
+    return _websocket_transparent_replay_error_code(error_code, error_message)
+
+
+def _websocket_transparent_replay_error_code(error_code: str, error_message: str | None) -> str | None:
+    """The code this terminal frame may be replayed under, or ``None`` to surface it.
+
+    The code set cannot answer for the serialized usage-limit rejection, which
+    upstream sends with no error code at all: that frame normalizes to
+    ``upstream_error``, which the set does not contain, so the turn is surfaced
+    on a spent account while the identical coded frame is replayed elsewhere.
+    A frame whose sentence proves the usage limit answers under the usage-limit
+    code, so every later question -- whether an owner-pinned turn may move, what
+    the account's health write records -- gets the same answer for both forms
+    upstream chooses between.
+    """
+    if error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES:
+        return error_code
+    if is_upstream_usage_limit_rejection(error_code=error_code, message=error_message):
+        return USAGE_LIMIT_REACHED
+    return None
 
 
 async def _pop_replayable_precreated_websocket_request_state(
@@ -1837,6 +1875,15 @@ def _draining_websocket_request_states(
     return [request_state for request_state in pending_requests if request_state.draining_until_terminal]
 
 
+def _is_response_output_event(event_type: str | None) -> bool:
+    """A ``response.*`` frame that is neither a terminal nor an error carries response output."""
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("response.")
+        and event_type not in {"response.completed", "response.failed", "response.incomplete"}
+    )
+
+
 def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1845,6 +1892,7 @@ def _match_websocket_request_state_for_anonymous_event(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
+    event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -1853,6 +1901,18 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    if _is_response_output_event(event_type):
+        # Output frames carry no response id. On a pipelined socket they belong
+        # to the one response upstream has already created, whether that request
+        # is still visible or draining, never to a sibling still waiting for its
+        # own response.created (issue #2350). Vendor telemetry such as
+        # ``codex.rate_limits`` keeps the pre-created ownership below.
+        created_requests = [
+            request_state for request_state in pending_requests if request_state.response_id is not None
+        ]
+        if len(created_requests) == 1:
+            return created_requests[0]
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

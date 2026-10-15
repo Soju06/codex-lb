@@ -614,5 +614,6 @@ describe("requestLogFiltersApplied", () => {
     expect(requestLogFiltersApplied({ ...defaults, timeframe: "24h" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, statuses: ["error"] })).toBe(true);
   });
 });

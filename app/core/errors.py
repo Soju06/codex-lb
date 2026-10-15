@@ -69,6 +69,8 @@ class OpenAIErrorEnvelope(TypedDict):
 class DashboardErrorDetail(TypedDict):
     code: str
     message: str
+    param: NotRequired[str]
+    details: NotRequired[dict[str, JsonValue]]
 
 
 class DashboardErrorEnvelope(TypedDict):
@@ -118,6 +120,21 @@ SYNTHETIC_TRANSPORT_FAILURE_MARKER = "_codex_lb_synthetic_transport_failure"
 SYNTHETIC_TRANSPORT_FAILURE_CODES = frozenset(
     {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
 )
+# Every sentence upstream uses to say the account's subscription window is
+# spent, written in the form ``is_upstream_usage_limit_message`` normalizes to:
+# lowercase alphanumeric words joined by single spaces. The passive
+# "The usage limit has been reached" is what the HTTP bridge, the Codex
+# WebSocket and the SDK error body actually carry; the second-person forms come
+# from the native client rendering and from the promo text appended to a
+# decline. A table built from one voice is a table that never fires.
+_USAGE_LIMIT_MESSAGE_MARKERS = (
+    "usage limit has been reached",
+    "usage limit reached",
+    "hit your usage limit",
+    "reached your usage limit",
+    "exceeded your usage limit",
+)
+_MESSAGE_WORD_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
 
 
 def openai_error(
@@ -133,8 +150,46 @@ def openai_error(
     return {"error": detail}
 
 
-def dashboard_error(code: str, message: str) -> DashboardErrorEnvelope:
-    return {"error": {"code": code, "message": message}}
+def dashboard_error(
+    code: str,
+    message: str,
+    *,
+    param: str | None = None,
+    details: Mapping[str, JsonValue] | None = None,
+) -> DashboardErrorEnvelope:
+    detail: DashboardErrorDetail = {"code": code, "message": message}
+    if param is not None:
+        detail["param"] = param
+    if details:
+        detail["details"] = dict(details)
+    return {"error": detail}
+
+
+#: RFC 7644 §3.12. Every body from ``/scim/v2`` carries this media type, and
+#: every refusal carries the error schema below; an identity provider reads
+#: both and neither the dashboard nor the OpenAI envelope means anything to it.
+SCIM_CONTENT_TYPE = "application/scim+json"
+SCIM_ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
+
+
+class ScimErrorEnvelope(TypedDict):
+    schemas: list[str]
+    status: str
+    detail: str
+    scimType: NotRequired[str]
+
+
+def scim_error(status_code: int, detail: str, *, scim_type: str | None = None) -> ScimErrorEnvelope:
+    """RFC 7644's error body. ``status`` is a string there, not a number."""
+
+    envelope: ScimErrorEnvelope = {
+        "schemas": [SCIM_ERROR_SCHEMA],
+        "status": str(status_code),
+        "detail": detail,
+    }
+    if scim_type is not None:
+        envelope["scimType"] = scim_type
+    return envelope
 
 
 def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:
@@ -143,6 +198,23 @@ def previous_response_stream_incomplete_error() -> OpenAIErrorEnvelope:
         PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
         error_type="server_error",
     )
+
+
+def is_upstream_usage_limit_message(message: str | None) -> bool:
+    """True when the message asserts the account's usage limit is spent.
+
+    Upstream delivers this rejection as an HTTP body and as a serialized
+    ``response.failed`` frame that carries no status and often no error code, so
+    neither the status nor the code table can be the gate and every path that
+    needs the answer has to read it from the same place. The words are matched
+    after folding each run of non-alphanumeric characters to a single space,
+    because the same sentence arrives with a straight apostrophe, a curly one,
+    a hyphen joining "usage" and "limit", or wrapped across a line break.
+    """
+    if message is None:
+        return False
+    normalized = _MESSAGE_WORD_SEPARATOR_RE.sub(" ", message.lower()).strip()
+    return any(marker in normalized for marker in _USAGE_LIMIT_MESSAGE_MARKERS)
 
 
 def is_previous_response_not_found_message(message: str | None) -> bool:

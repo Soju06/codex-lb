@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import gzip
@@ -988,6 +989,55 @@ def test_dashboard_row_disables_archiving_even_when_the_environment_enables_it(m
     conversation_archive.flush_archive_writer()
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_suppression_excludes_generated_traffic_without_changing_the_setting(monkeypatch, tmp_path):
+    """Operator diagnostics generate their own payloads; the archive records what
+    Codex and the upstream said, so that traffic is excluded at the same gate."""
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
+
+    assert conversation_archive.archive_enabled() is True
+    with conversation_archive.suppress_conversation_archive():
+        assert conversation_archive.archive_enabled() is False
+        conversation_archive.archive_json(
+            direction="codex_to_server", kind="responses", transport="http", payload={"filler": "x"}
+        )
+    conversation_archive.flush_archive_writer()
+
+    assert conversation_archive.archive_enabled() is True
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_suppression_does_not_reach_a_request_already_in_flight(monkeypatch, tmp_path):
+    """Context-scoped, not global: a real request that was already running when
+    the diagnostic started keeps being archived."""
+
+    monkeypatch.setattr(
+        conversation_archive, "get_settings", lambda: _ArchiveSettings(enabled=True, directory=tmp_path)
+    )
+    monkeypatch.setattr(conversation_archive, "get_settings_cache", lambda: _CachedRow(None))
+
+    observed: list[bool] = []
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def _concurrent_request() -> None:
+        started.set()
+        await resume.wait()
+        observed.append(conversation_archive.archive_enabled())
+
+    task = asyncio.create_task(_concurrent_request())
+    await started.wait()
+    with conversation_archive.suppress_conversation_archive():
+        assert conversation_archive.archive_enabled() is False
+        resume.set()
+        await task
+
+    assert observed == [True]
 
 
 def test_upstream_client_call_sites_are_unchanged_and_do_not_read_the_toggle():

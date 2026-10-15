@@ -24,6 +24,8 @@ _COMPACT_RESPONSE_ADAPTER = TypeAdapter(CompactResponsePayload)
 _LIFECYCLE_EVENT_TYPES = frozenset(
     {
         "response.created",
+        "response.queued",
+        "response.in_progress",
         "response.completed",
         "response.incomplete",
         "response.failed",

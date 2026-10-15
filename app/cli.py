@@ -57,6 +57,55 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
 
+    admin = subparsers.add_parser(
+        "admin",
+        help="Host recovery commands that act on the database directly (see docs/sso.md).",
+        formatter_class=_CliHelpFormatter,
+    )
+    admin_subparsers = admin.add_subparsers(dest="admin_command")
+    reset_password = admin_subparsers.add_parser(
+        "reset-password",
+        help="Set a new password for one account. The password is prompted for, never taken from the arguments.",
+        formatter_class=_CliHelpFormatter,
+    )
+    reset_password.add_argument("username", help="Account whose password to reset.")
+    reset_password.add_argument(
+        "--clear-two-factor",
+        action="store_true",
+        help="Also remove the account's two-factor secret. Use when the authenticator is lost too.",
+    )
+    local_login = admin_subparsers.add_parser(
+        "local-login",
+        help="Re-open local password sign-in.",
+        formatter_class=_CliHelpFormatter,
+    )
+    local_login_subparsers = local_login.add_subparsers(dest="admin_local_login_command")
+    local_login_subparsers.add_parser(
+        "enable",
+        help="Set the local sign-in policy back to enabled.",
+        formatter_class=_CliHelpFormatter,
+    )
+    disable_provider = admin_subparsers.add_parser(
+        "disable-provider",
+        help="Turn one company sign-in provider off.",
+        formatter_class=_CliHelpFormatter,
+    )
+    disable_provider.add_argument(
+        "provider_id",
+        metavar="ID",
+        help="Provider row id. Run with an unknown id to list the providers in the database.",
+    )
+    reset_login_policy = admin_subparsers.add_parser(
+        "reset-login-policy",
+        help="Re-open local sign-in and disable every company sign-in provider.",
+        formatter_class=_CliHelpFormatter,
+    )
+    reset_login_policy.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the reset and allow a non-interactive run.",
+    )
+
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
@@ -97,6 +146,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         raise SystemExit("codex-sessions requires a subcommand")
 
+    if args.command == "admin":
+        _run_admin_command(args)
+        return
+
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
@@ -116,6 +169,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         proxy_headers=False,
         log_config=_build_log_config(),
     )
+
+
+def _run_admin_command(args: argparse.Namespace) -> None:
+    """Host recovery commands (docs/sso.md). Imported late: the server path must not pay for them."""
+
+    from app.admin_cli import run_admin_command
+
+    run_admin_command(args)
 
 
 def _load_uvicorn():

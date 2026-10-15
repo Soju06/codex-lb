@@ -34,6 +34,22 @@ describe("AccountListItem", () => {
     expect(screen.getByText("Reset in 1d")).toBeInTheDocument();
   });
 
+  it("renders a guest-masked summary without ChatGPT account or workspace ids", () => {
+    const account = createAccountSummary({
+      email: "p***@example.com",
+      displayName: "p***@example.com",
+      chatgptAccountId: null,
+      workspaceId: null,
+      workspaceLabel: null,
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("p***@example.com")).toBeInTheDocument();
+    expect(screen.getByText(/Personal \/ unknown workspace/)).toBeInTheDocument();
+    expect(screen.queryByText(/chatgpt_acc_primary/)).not.toBeInTheDocument();
+  });
+
   it("omits the 5h row for weekly-only accounts", () => {
     const account = createAccountSummary({
       usage: {

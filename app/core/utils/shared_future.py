@@ -35,13 +35,22 @@ _WAITERS_ATTR = "_shared_future_fanout_waiters"
 
 
 def _fan_out(shared: "asyncio.Future[_T]", waiters: "set[asyncio.Future[_T]]") -> None:
+    cancelled = shared.cancelled()
+    # Read the exception here, before the loop, so it is consumed whether or
+    # not a waiter is still registered. A waiter that timed out discards its
+    # proxy, so a shared future completing in that gap reaches this callback
+    # with an empty set -- and an exception nobody retrieved makes asyncio log
+    # "Task exception was never retrieved" when the task is collected. In
+    # production that surfaced as an ERROR + traceback per SSE stream whose
+    # source ended (``StopAsyncIteration``) while the keepalive injector was
+    # between waits, on requests that had otherwise succeeded.
+    exc = None if cancelled else shared.exception()
     for waiter in waiters:
         if waiter.done():
             continue
-        if shared.cancelled():
+        if cancelled:
             waiter.cancel()
             continue
-        exc = shared.exception()
         if exc is not None:
             waiter.set_exception(exc)
             # Consume eagerly: a waiter whose task was cancelled between this

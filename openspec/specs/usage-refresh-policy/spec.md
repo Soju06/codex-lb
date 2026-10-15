@@ -2,7 +2,9 @@
 
 ## Purpose
 Define how background usage refresh reacts to auth-like failures without permanently hammering bad accounts.
+
 ## Requirements
+
 ### Requirement: Usage refresh cools down repeated auth-like failures
 
 Background usage refresh MUST apply a cooldown to accounts that repeatedly fail usage refresh with ambiguous `401` or `403` responses. Accounts in that cooldown window MUST be skipped until the cooldown expires or a later successful refresh clears it.
@@ -534,12 +536,12 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 
 ### Requirement: Operators can probe an account to wake the upstream limiter
 
-The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe `responses.create` MUST set `max_output_tokens` to `16`, the current Codex token floor; values below that floor MUST NOT be used. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
+The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe request MUST omit `max_output_tokens`, which the Codex Responses endpoint rejects. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
 
 #### Scenario: Probe wakes the upstream limiter and refreshes usage state
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
-- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=16`, `stream=true`, `store=false`
+- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `stream=true`, `store=false`, and no `max_output_tokens` field
 - **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
 - **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
 
@@ -2207,3 +2209,17 @@ with zero configuration and MUST NOT require an operator setting.
 - **WHEN** two refreshes of that account observe `plan_type` `free` concurrently
 - **THEN** the recorded observation count reflects both observations rather than one
 
+### Requirement: Default account probe model selection
+Account probes without an explicit model MUST use the same ordered registry selection as Images: `gpt-5.6-luna`, then `gpt-5.5`, requiring nonempty plan visibility and no suppression, with `gpt-5.6-luna` as fallback. Explicit probe models MUST remain unchanged.
+
+#### Scenario: Cold registry prefers the current host
+- **WHEN** the registry uses the bootstrap catalog
+- **THEN** the internal model is `gpt-5.6-luna`
+
+#### Scenario: Preferred model unavailable in registry
+- **WHEN** only `gpt-5.5` has registry plan visibility without suppression
+- **THEN** the internal model is `gpt-5.5`
+
+#### Scenario: No candidate qualifies
+- **WHEN** neither candidate has plan visibility without suppression
+- **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies

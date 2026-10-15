@@ -14,7 +14,9 @@ Checks:
    ``MIGRATING`` entry (error). A ``DASHBOARD_HOMES`` target that is not
    ``table.column`` or names a column that does not exist is an error. A
    ``MIGRATING`` or ``DASHBOARD_HOMES`` entry that is redundant (the same-name
-   column exists, the field is not T3, or the field is gone) only warns.
+   column exists, the field is not T3, or the field is gone) only warns. An
+   empty ``MIGRATING`` is the intended terminal state of the backlog, not a
+   config error: every T3 field then has a database home.
 3. No ``os.environ`` / ``os.getenv`` / ``dotenv_values`` use under ``app/``
    outside ``app/core/config/settings.py``, except the allowlisted files, each
    capped at its recorded number of reading lines (error when a file exceeds

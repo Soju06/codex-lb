@@ -3,6 +3,9 @@ import { z } from "zod";
 const DashboardApiErrorDetailSchema = z.object({
   code: z.string(),
   message: z.string(),
+  param: z.string().optional(),
+  // Structured hints, e.g. `{ methods: ["password", "totp"] }` on `step_up_required`.
+  details: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const DashboardApiErrorSchema = z.object({

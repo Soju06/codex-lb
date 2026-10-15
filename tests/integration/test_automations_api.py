@@ -267,7 +267,7 @@ async def test_automations_write_endpoints_require_dashboard_write_access(app_in
             session_payload = session_response.json()
             assert session_payload["authenticated"] is True
             assert session_payload["role"] == "guest"
-            assert session_payload["permissions"] == ["read"]
+            assert session_payload["permissions"] == ["read", "accounts:read:all", "dashboard:read:all"]
 
             list_response = await remote_client.get("/api/automations")
             assert list_response.status_code == 200

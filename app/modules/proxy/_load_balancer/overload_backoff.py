@@ -23,12 +23,25 @@ account with two escalation stages:
    churns warm sessions.
 2. **Isolation** (the configured trip level, sustained overload): the account
    is held out for a longer, operator-configured interval and established
-   *soft* sticky owners are rerouted as well. Only a soft sticky mapping is a
-   locality hint; every request that re-enters the pinned account is a fresh
-   upstream admission, so keeping the owner pinned just replays the rejection
-   wait per request. Hard continuity owners (``previous_response_id``, bridge
-   ownership, file pins) are resolved before soft selection and are never
-   moved by this module.
+   *soft* sticky owners are served by a sibling as well. Only a soft sticky
+   mapping is a locality hint; every request that re-enters the pinned
+   account is a fresh upstream admission, so keeping the owner pinned just
+   replays the rejection wait per request. Hard continuity owners
+   (``previous_response_id``, bridge ownership, file pins) are resolved
+   before soft selection and are never moved by this module.
+
+   The release is **request-local**: the sibling serves the turn while the
+   sticky row keeps pointing at the owner, so the thread returns home once
+   isolation lifts. Rebinding instead was measurably worse -- nothing ever
+   returned a rebound thread to its owner, so each isolation episode a
+   conversation touched added one more account to it permanently, and the
+   observed accounts-per-conversation factor rose from ~1.02 against a quiet
+   upstream to 2.29 on a healthy day and 3.45 during an incident. Because the
+   turn still goes to the sibling either way, retaining the mapping costs
+   nothing in availability. The substitute must be *stable* across turns for
+   this to hold (see ``isolation_substitute_seed``): a per-turn
+   random pick would bounce the thread across siblings and be worse than the
+   single rebind.
 
 In both stages the account is dropped from a candidate pool only while at
 least one other candidate remains, so the window can never empty the pool.
@@ -52,6 +65,7 @@ the burst path.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -67,6 +81,15 @@ logger = logging.getLogger(__name__)
 # Upstream error codes that mean "admission refused: overloaded". Both spellings
 # reach ``_handle_stream_error`` normalized to ``retryable_transient``.
 UPSTREAM_OVERLOAD_CODES: frozenset[str] = frozenset({"server_is_overloaded", "overloaded_error"})
+
+# Upstream error codes that carry the same *observable shape* as an admission
+# rejection -- upstream accepted the turn and then terminated it -- but without
+# an explicit overload code. Upstream returns a bare ``server_error`` for both
+# genuine one-off faults and sustained capacity refusal, so these observations
+# are counted at ``SOFT_OVERLOAD_TRIP_WEIGHT`` rather than 1.0: a lone fault can
+# never trip the window by itself, while a sustained refusal still trips.
+UPSTREAM_SOFT_OVERLOAD_CODES: frozenset[str] = frozenset({"server_error"})
+SOFT_OVERLOAD_TRIP_WEIGHT = 0.5
 
 # Trip when this many rejections land inside the window. Three keeps a lone
 # rejection (upstream hiccup) from deprioritizing an account, while a rejected
@@ -145,9 +168,16 @@ def record_overload_rejection_locked(
     now: float,
     *,
     isolation: OverloadIsolationPolicy | None = None,
+    soft: bool = False,
 ) -> float | None:
     """Record one overload rejection observed at ``now``; return the new
     backoff deadline when it trips the window, else ``None``.
+
+    ``soft`` marks an observation whose code does not name overload explicitly
+    (a bare ``server_error`` terminal). Soft observations accumulate in their
+    own window and contribute ``SOFT_OVERLOAD_TRIP_WEIGHT`` each toward the
+    shared trip threshold, so they can trip the window on their own only when
+    sustained, and they combine naturally with explicit overload rejections.
 
     When ``isolation`` says the new level isolates, the deadline is the
     isolation interval and ``runtime.overload_isolated_until`` is set to it.
@@ -159,12 +189,18 @@ def record_overload_rejection_locked(
     if quiet_since is not None and now - quiet_since >= OVERLOAD_LEVEL_DECAY_SECONDS:
         runtime.overload_backoff_level = 0
     window_start = now - OVERLOAD_WINDOW_SECONDS
-    recent = [at for at in (runtime.overload_rejections or ()) if at > window_start]
-    recent.append(now)
-    if len(recent) < OVERLOAD_TRIP_COUNT:
-        runtime.overload_rejections = recent
+    hard = [at for at in (runtime.overload_rejections or ()) if at > window_start]
+    soft_recent = [at for at in (runtime.soft_overload_rejections or ()) if at > window_start]
+    if soft:
+        soft_recent.append(now)
+    else:
+        hard.append(now)
+    if len(hard) + len(soft_recent) * SOFT_OVERLOAD_TRIP_WEIGHT < OVERLOAD_TRIP_COUNT:
+        runtime.overload_rejections = hard
+        runtime.soft_overload_rejections = soft_recent
         return None
     runtime.overload_rejections = []
+    runtime.soft_overload_rejections = []
     runtime.overload_backoff_level = min(runtime.overload_backoff_level + 1, OVERLOAD_MAX_LEVEL)
     runtime.overload_last_trip_at = now
     isolated = isolation is not None and isolation.isolates(runtime.overload_backoff_level)
@@ -190,6 +226,7 @@ async def record_upstream_overload(
     *,
     redact_account_id: bool = False,
     isolation: OverloadIsolationPolicy | None = None,
+    soft: bool = False,
 ) -> None:
     """Record one upstream overload rejection for ``account`` at the balancer clock.
 
@@ -208,7 +245,7 @@ async def record_upstream_overload(
     async with lock:
         now = float(balancer._clock.time())
         runtime = runtime_map.setdefault(account.id, RuntimeState())
-        deadline = record_overload_rejection_locked(runtime, now, isolation=isolation)
+        deadline = record_overload_rejection_locked(runtime, now, isolation=isolation, soft=soft)
         isolated = deadline is not None and overload_isolation_active(runtime, now)
     if deadline is None:
         return
@@ -323,3 +360,35 @@ def sticky_owner_isolation_reroute_pool(
     if pool is states:
         return None
     return pool
+
+
+def isolation_substitute_seed(*, sticky_key: str, owner_account_id: str) -> str:
+    """Per-thread seed for the sibling that serves an isolated owner's turns.
+
+    The isolation release is request-local -- the mapping stays on the owner so
+    the thread returns home when isolation lifts -- which means the replacement
+    is re-picked on *every* turn of the thread instead of once. A weighted draw
+    would therefore bounce the thread across siblings turn after turn, which is
+    strictly worse than the single rebind it replaces. Seeding the selector's
+    pick with the thread's identity gives one substitute per (thread, pool)
+    instead, spreads distinct threads across the siblings rather than herding
+    every released thread onto the single best account, and lets replicas that
+    observe the same pool converge without shared state.
+
+    The owner is mixed in so a thread that is released again under a *different*
+    owner does not inherit the earlier substitute.
+
+    Convergence is best-effort only: each replica keeps its own overload window,
+    so the pools themselves can differ and the same thread can hold a different
+    substitute per replica. That caps the fan-out at one substitute per
+    (replica, pool) instead of eliminating it.
+
+    The seed is spent inside the selector, among the accounts it would otherwise
+    draw from, so every eligibility gate -- budget, health tier, routing policy,
+    quota, cooldown, backoff -- stays authoritative and this can only ever
+    express a preference among candidates the selector already accepts.
+    """
+    return hashlib.blake2b(
+        f"{owner_account_id}\x00{sticky_key}".encode("utf-8", "surrogatepass"),
+        digest_size=16,
+    ).hexdigest()

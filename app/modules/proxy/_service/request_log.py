@@ -12,6 +12,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._load_balancer.throughput_cohort import record_tps_sample
 from app.modules.proxy._load_balancer.ttft_cohort import record_ttft_sample
 from app.modules.proxy.affinity import _extract_model_class
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -153,6 +154,7 @@ class _RequestLogMixin:
     async def _write_request_log(
         self,
         *,
+        affinity_observation: AffinityObservation | None = None,
         account_id: str | None,
         api_key: ApiKeyData | None,
         request_id: str,
@@ -219,6 +221,7 @@ class _RequestLogMixin:
     ) -> None:
         task = scheduler_for(self).create_task(
             self._persist_request_log(
+                affinity_observation=affinity_observation,
                 account_id=account_id,
                 api_key_id=api_key.id if api_key else None,
                 request_id=request_id,
@@ -428,6 +431,7 @@ class _RequestLogMixin:
     async def _persist_request_log(
         self,
         *,
+        affinity_observation: AffinityObservation | None = None,
         account_id: str | None,
         api_key_id: str | None,
         request_id: str,
@@ -479,6 +483,9 @@ class _RequestLogMixin:
         try:
             async with proxy._repo_factory() as repos:
                 await repos.request_logs.add_log(
+                    sticky_key_source=affinity_observation.source if affinity_observation is not None else None,
+                    sticky_kind=affinity_observation.kind if affinity_observation is not None else None,
+                    sticky_key_hash=affinity_observation.key_hash if affinity_observation is not None else None,
                     account_id=account_id,
                     api_key_id=api_key_id,
                     session_id=_normalize_session_id(session_id),
@@ -537,6 +544,7 @@ class _RequestLogMixin:
     async def _write_stream_preflight_error(
         self,
         *,
+        affinity_observation: AffinityObservation | None = None,
         account_id: str | None,
         api_key: ApiKeyData | None,
         request_id: str,
@@ -555,6 +563,7 @@ class _RequestLogMixin:
         client_ip: str | None = None,
     ) -> None:
         await self._write_request_log(
+            affinity_observation=affinity_observation,
             account_id=account_id,
             api_key=api_key,
             request_id=request_id,

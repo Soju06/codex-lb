@@ -31,6 +31,12 @@ class RuntimeState:
     # the deprioritization deadline once tripped, the exponential level, and
     # when the level last tripped (for decay). Replica-local, never persisted.
     overload_rejections: list[float] | None = None
+    # Recent *soft* overload observations: bare ``server_error`` terminals that
+    # upstream returns for the same admission-rejection condition but without
+    # the explicit overload code. Counted at a fractional weight so a genuine
+    # one-off fault never trips the window on its own, while a sustained
+    # ``server_error`` refusal still deprioritizes the account.
+    soft_overload_rejections: list[float] | None = None
     overload_backoff_until: float | None = None
     overload_backoff_level: int = 0
     overload_last_trip_at: float | None = None

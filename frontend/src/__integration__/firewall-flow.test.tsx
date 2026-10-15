@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import App from "@/App";
 import { renderWithProviders } from "@/test/utils";
+import { ADMIN_PERMISSIONS } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 describe("firewall flow integration", () => {
@@ -19,6 +20,8 @@ describe("firewall flow integration", () => {
           passwordRequired: true,
           totpRequiredOnLogin: false,
           totpConfigured: true,
+          role: "admin",
+          permissions: ADMIN_PERMISSIONS,
         }),
       ),
       http.get("/api/firewall/ips", () =>

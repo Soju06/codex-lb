@@ -184,44 +184,6 @@ async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
     }, f"unexpected changed_fields set: {changed!r}"
 
 
-async def _create_responses_model_source(async_client, name: str) -> str:
-    response = await async_client.post(
-        "/api/model-sources/",
-        json={
-            "name": name,
-            "baseUrl": "http://127.0.0.1:9/v1",
-            "supportsChatCompletions": True,
-            "supportsResponses": True,
-            "models": [{"model": "gpt-5.1", "supportsStreaming": True}],
-        },
-    )
-    assert response.status_code == 200
-    return response.json()["id"]
-
-
-@pytest.mark.asyncio
-async def test_settings_audit_records_subscription_overflow_designation_and_drain(async_client) -> None:
-    """The overflow designation cannot ride the parametrized table above: its value
-    must be a real Responses-capable source id, and clearing it also arms the
-    read-only drain deadline, which must be reported as its own changed field."""
-    source_id = await _create_responses_model_source(async_client, "overflow-audit")
-
-    designated = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": source_id})
-    assert designated.status_code == 200
-    designated_log = await _wait_for_settings_changed_audit_log()
-    assert designated_log.details is not None
-    assert json.loads(designated_log.details)["changed_fields"] == ["subscription_overflow_source_id"]
-
-    cleared = await async_client.put("/api/settings", json={"subscriptionOverflowSourceId": None})
-    assert cleared.status_code == 200
-    cleared_log = await _wait_for_settings_changed_audit_log(after_id=designated_log.id)
-    assert cleared_log.details is not None
-    assert json.loads(cleared_log.details)["changed_fields"] == [
-        "subscription_overflow_source_id",
-        "subscription_overflow_drain_until",
-    ]
-
-
 @pytest.mark.asyncio
 async def test_model_context_window_override_writes_are_audited(async_client) -> None:
     """A row that changes what the catalog advertises to every client is audited
@@ -303,12 +265,15 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
 ) -> None:
     """When the auth mode carries an identity, the dedicated event records it.
 
-    Password auth has no per-user identity yet, so `actor` is null there; the
-    field exists so an identity-carrying mode (and the RBAC work) fills it in.
+    A proxy-asserted identity is resolved to a dashboard account (provisioned on
+    first arrival), so the acting principal the event names is that account: its
+    username, which is the subject with ``@`` folded to ``.``. The companion
+    ``settings_changed`` row carries the same account in its actor columns.
     """
     from app.core.auth.dashboard_mode import DashboardAuthMode
     from app.core.config.settings import get_settings
     from app.core.conversation_archive import CONVERSATION_ARCHIVE_TOGGLED_ACTION
+    from app.modules.dashboard_users.identity_resolver import slugify_subject
 
     monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_MODE", DashboardAuthMode.TRUSTED_HEADER)
     monkeypatch.setenv("CODEX_LB_FIREWALL_TRUST_PROXY_HEADERS", "true")
@@ -316,10 +281,11 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
     monkeypatch.setenv("CODEX_LB_DASHBOARD_AUTH_PROXY_HEADER", "Remote-User")
     get_settings.cache_clear()
 
+    subject = "alice@example.com"
     enabled = await async_client.put(
         "/api/settings",
         json={"conversationArchiveEnabled": True},
-        headers={"Remote-User": "alice@example.com"},
+        headers={"Remote-User": subject},
     )
     assert enabled.status_code == 200
 
@@ -327,9 +293,14 @@ async def test_conversation_archive_toggle_audit_names_the_actor_under_trusted_h
     assert event is not None
     assert event.details is not None
     details = json.loads(event.details)
-    assert details["actor"] == "alice@example.com"
+    assert details["actor"] == slugify_subject(subject) == "alice.example.com"
     assert details["actor_role"] == "admin"
     assert details["enabled"] is True
+
+    settings_changed = await _wait_for_settings_changed_audit_log()
+    assert settings_changed.actor_username == details["actor"]
+    assert settings_changed.actor_user_id is not None
+    assert settings_changed.auth_method == "trusted_header"
 
 
 @pytest.mark.asyncio

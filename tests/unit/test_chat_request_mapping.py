@@ -475,7 +475,7 @@ def test_chat_response_format_json_object_maps_to_text_format():
     assert text.get("format") == {"type": "json_object"}
 
 
-def test_chat_response_format_json_object_preserves_instruction_roles_in_input():
+def test_chat_response_format_json_object_keeps_json_instruction_in_input():
     payload = {
         "model": "gpt-5.2",
         "messages": [
@@ -489,11 +489,45 @@ def test_chat_response_format_json_object_preserves_instruction_roles_in_input()
     responses = req.to_responses_request()
     dumped = responses.to_payload()
 
-    assert dumped["instructions"] == "Return JSON.\nKeep it short."
+    assert dumped["instructions"] == "Keep it short."
     assert dumped["input"] == [
+        {"role": "developer", "content": [{"type": "input_text", "text": "Return JSON."}]},
         {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
     ]
     assert dumped["text"] == {"format": {"type": "json_object"}}
+
+
+def test_chat_response_format_json_object_without_json_mention_hoists_instructions():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "Say hello."},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    dumped = ChatCompletionsRequest.model_validate(payload).to_responses_request().to_payload()
+
+    assert dumped["instructions"] == "Be brief."
+    assert dumped["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
+    ]
+
+
+def test_chat_system_json_mention_without_json_object_format_is_hoisted():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [
+            {"role": "system", "content": "Return JSON."},
+            {"role": "user", "content": "Say hello."},
+        ],
+    }
+    dumped = ChatCompletionsRequest.model_validate(payload).to_responses_request().to_payload()
+
+    assert dumped["instructions"] == "Return JSON."
+    assert dumped["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Say hello."}]},
+    ]
 
 
 def test_chat_response_format_json_schema_maps_schema_fields():

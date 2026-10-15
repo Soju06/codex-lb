@@ -332,7 +332,7 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     return sanitized_input
 
 
-def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
+def _normalize_responses_input_instructions(data: JsonValue, *, keep_json_mode_instructions: bool = False) -> JsonValue:
     if not is_json_mapping(data):
         return data
     input_value = data.get("input")
@@ -343,6 +343,7 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     # developer message into the top-level ``instructions`` field.
     if responses_input_uses_lite_tools(input_value):
         return data
+    keep_json_mentions = keep_json_mode_instructions and _requests_json_object_format(data.get("text"))
 
     instruction_parts: list[str] = []
     input_items: list[JsonValue] = []
@@ -369,6 +370,15 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
             input_items.append(item)
             continue
         instruction_text, preserved_content = _split_responses_instruction_item_content(item_mapping)
+        if keep_json_mentions and _mentions_json(instruction_text):
+            # JSON mode only counts a JSON mention inside input messages, not in
+            # top-level instructions. Keep this instruction where it is, as a
+            # developer message: upstream rejects the system role in input.
+            kept_item = dict(item_mapping)
+            kept_item["role"] = "developer"
+            input_items.append(kept_item)
+            changed = True
+            continue
         if instruction_text:
             instruction_parts.append(instruction_text)
         if preserved_content is not None:
@@ -390,6 +400,20 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     normalized["instructions"] = merged_instructions
     normalized["input"] = input_items
     return normalized
+
+
+def _mentions_json(text: str) -> bool:
+    return "json" in text.lower()
+
+
+def _requests_json_object_format(text: JsonValue) -> bool:
+    if isinstance(text, ResponsesTextControls):
+        return text.format is not None and text.format.type == "json_object"
+    text_mapping = _json_mapping_or_none(text)
+    if text_mapping is None:
+        return False
+    text_format = _json_mapping_or_none(text_mapping.get("format"))
+    return text_format is not None and text_format.get("type") == "json_object"
 
 
 def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
@@ -648,7 +672,9 @@ class ResponsesRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
-        return _normalize_responses_input_instructions(data)
+        # Compact requests drop ``text`` before upstream, so only this request
+        # type can carry JSON mode.
+        return _normalize_responses_input_instructions(data, keep_json_mode_instructions=True)
 
     model: str = Field(min_length=1)
     instructions: str

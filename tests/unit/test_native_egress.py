@@ -1081,7 +1081,7 @@ async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path,
     helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
     client = SubprocessNativeEgressClient(helper)
     try:
-        with pytest.raises(NativeEgressProtocolError, match=capability):
+        with pytest.raises(NativeEgressUnavailable, match=capability):
             await client.request(NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024)))
         assert client._process is None
         assert not client._streams

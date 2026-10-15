@@ -27,11 +27,6 @@
   `test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image` so that it
   uses a current-turn image.
   The existing unit bypass fixture already supplies a current-turn user image.
-- [ ] 2.3 Prove (a) fails on `09a140fa9` with only the `app/` diff
-  reverse-applied, and passes with it. Mutation-prove guards a′, b, and c.
-  Focused runtime mutation proves the baseline whole-input predicate fails (a)
-  and disabling each guard fails a′, b, and c. Exact app-diff reverse application
-  remains for the lead's isolated baseline verification.
 
 ## 3. Spec hygiene
 

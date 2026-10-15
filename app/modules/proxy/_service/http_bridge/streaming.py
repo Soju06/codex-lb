@@ -1037,7 +1037,7 @@ class _HTTPBridgeStreamingMixin:
             else None
         )
         if runtime_config.enabled and (
-            _responses_request_requires_image_bridge_bypass(payload) or image_generation_request
+            (image_request and _responses_request_requires_image_bridge_bypass(payload)) or image_generation_request
         ):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(

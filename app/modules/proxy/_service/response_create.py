@@ -190,7 +190,18 @@ def _responses_request_requires_image_bridge_bypass(payload: ResponsesRequest) -
     for item in input_value:
         if is_json_mapping(item) and (
             item.get("role") == "assistant"
-            or item.get("type") in ("reasoning", "function_call", "custom_tool_call", "apply_patch_call")
+            or item.get("type")
+            in (
+                "reasoning",
+                "function_call",
+                "custom_tool_call",
+                "apply_patch_call",
+                "tool_search_call",
+                "web_search_call",
+                "mcp_call",
+                "local_shell_call",
+                "image_generation_call",
+            )
         ):
             current_turn_has_image = False
         elif not current_turn_has_image:

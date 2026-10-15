@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 import pytest
@@ -96,6 +97,118 @@ async def _populate_test_registry() -> None:
         _make_upstream_model("gpt-5.3-codex"),
     ]
     await registry.update({"plus": models, "pro": models})
+
+
+def _notes_model(slug: str, *, visibility: str = "list") -> UpstreamModel:
+    return _make_upstream_model(
+        slug,
+        raw={
+            "shell_type": "shell_command",
+            "visibility": visibility,
+            "supports_streaming": True,
+            "supports_experimental_context": False,
+            "model_messages": {
+                "other_message": "preserve",
+                "token_budget": {
+                    "enabled": False,
+                    "use_history_notes_extension": False,
+                    "reminder_threshold_tokens": 6144,
+                    "reminder_message_template": "Remaining: {n_remaining}",
+                    "guidance_message": "Keep progress notes.",
+                    "auto_compact_fallback_prompt": "Save progress.",
+                    "auto_compact_fallback_buffer_tokens": 16384,
+                    "future_field": {"keep": True},
+                },
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/models", "/v1/models?client_version=0.156.0"])
+async def test_astra_notes_catalog_is_per_key_and_tracks_edits(async_client, path):
+    models = [_notes_model(slug) for slug in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")]
+    original = deepcopy(models[0].raw)
+    await get_model_registry().update({"plus": models})
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+
+    opted_in = await async_client.post("/api/api-keys/", json={"name": "notes", "autoEnableAstraNotes": True})
+    ordinary = await async_client.post("/api/api-keys/", json={"name": "ordinary"})
+    assert opted_in.status_code == ordinary.status_code == 200
+    key = opted_in.json()
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    other_headers = {"Authorization": f"Bearer {ordinary.json()['key']}"}
+    generic_before = (await async_client.get("/v1/models", headers=headers)).json()
+
+    response = await async_client.get(path, headers=headers)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["vary"] == "Authorization"
+    entries = {m["slug"]: m for m in response.json()["models"]}
+    expected = deepcopy(original["model_messages"])
+    assert isinstance(expected, dict)
+    budget = expected["token_budget"]
+    assert isinstance(budget, dict)
+    budget.update(enabled=True, use_history_notes_extension=True)
+    assert entries["gpt-6-astra"]["supports_experimental_context"] is True
+    assert entries["gpt-6-astra"]["model_messages"] == expected
+    for slug in ("gpt-6-sol", "gpt-6-luna"):
+        assert entries[slug]["model_messages"] == original["model_messages"]
+        assert entries[slug]["supports_experimental_context"] is False
+    assert models[0].raw == original
+
+    other = await async_client.get(path, headers=other_headers)
+    other_astra = next(m for m in other.json()["models"] if m["slug"] == "gpt-6-astra")
+    assert other_astra["model_messages"] == original["model_messages"]
+    updated = await async_client.patch(f"/api/api-keys/{key['id']}", json={"autoEnableAstraNotes": False})
+    assert updated.status_code == 200
+    assert updated.json()["autoEnableAstraNotes"] is False
+    restored = await async_client.get(path, headers=headers)
+    assert restored.json() == other.json()
+    generic_after = (await async_client.get("/v1/models", headers=headers)).json()
+    for catalog in (generic_before, generic_after):
+        for model in catalog["data"]:
+            model.pop("created")
+    assert generic_after == generic_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["hidden", "disallowed", "hidden_by_key", "enforced_other", "external", "missing"])
+async def test_astra_notes_opt_in_preserves_model_restrictions(async_client, monkeypatch, case):
+    astra = _notes_model("gpt-6-astra", visibility="hide" if case == "hidden" else "list")
+    native = [_notes_model("gpt-6-sol")]
+    if case not in ("external", "missing"):
+        native.append(astra)
+    await get_model_registry().update({"plus": native})
+    if case == "external":
+
+        async def sources(*args, **kwargs):
+            return [astra]
+
+        monkeypatch.setattr(proxy_api, "_list_enabled_source_catalog_models", sources)
+    assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
+    payload = {"name": case, "autoEnableAstraNotes": True}
+    if case in ("disallowed", "hidden_by_key"):
+        payload["allowedModels"] = ["gpt-6-sol"]
+        payload["applyToCodexModel"] = case == "hidden_by_key"
+    if case == "enforced_other":
+        payload["enforcedModel"] = "gpt-6-sol"
+    created = await async_client.post("/api/api-keys/", json=payload)
+    assert created.status_code == 200
+    response = await async_client.get(
+        "/backend-api/codex/models", headers={"Authorization": f"Bearer {created.json()['key']}"}
+    )
+    assert response.status_code == 200
+    entries = [m for m in response.json()["models"] if m["slug"] == "gpt-6-astra"]
+    if case in ("disallowed", "enforced_other", "missing"):
+        assert entries == []
+    else:
+        assert len(entries) == 1
+        assert entries[0]["supports_experimental_context"] is False
+        assert entries[0]["model_messages"] == astra.raw["model_messages"]
+        if case != "external":
+            assert entries[0]["visibility"] == "hide"
 
 
 @pytest.mark.asyncio

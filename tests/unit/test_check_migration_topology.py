@@ -414,3 +414,30 @@ def test_missing_base_ref_skips_the_branch_fork_check(checker: ModuleType) -> No
     assert checker.base_ref_revisions("refs/heads/definitely-not-a-real-ref") is None
     _, summary = checker.run_all(versions_dir=VERSIONS_DIR, base_ref="refs/heads/definitely-not-a-real-ref")
     assert "base-ref check: skipped (ref unavailable)" in summary
+
+
+def test_repaired_branch_includes_upstream_head(checker: ModuleType, tmp_path: Path) -> None:
+    versions = tmp_path / "versions"
+    root = _linear_fixture(checker, versions)
+    upstream = "20260912_000000_upstream"
+    branch = "20260912_010000_branch"
+    _write_revision(versions, upstream, root)
+    _write_revision(versions, branch, root)
+    _write_revision(versions, "20260912_020000_merge", (upstream, branch))
+    revisions = checker.load_graph(versions)
+    base = [r for r in revisions if r.revision not in {branch, "20260912_020000_merge"}]
+    assert checker.check_branch_fork(revisions, base, "origin/main").errors == []
+    unmerged = [r for r in revisions if r.revision != "20260912_020000_merge"]
+    assert checker.check_branch_fork(unmerged, base, "origin/main").errors
+
+
+@pytest.mark.parametrize("collision_name", ["_DEPLOYED_CONTEXT_COLLISION", "_PUBLISHED_UPSTREAM_COLLISION"])
+def test_deployed_collision_does_not_allow_new_members_or_changed_parents(
+    checker: ModuleType, collision_name: str
+) -> None:
+    pair = [_base_revision(checker, name, parents) for name, parents in getattr(checker, collision_name).items()]
+    assert checker.check_timestamp_prefix_collisions(pair).errors == []
+    extra = _base_revision(checker, pair[0].revision[:15] + "_new_collision", pair[0].revision)
+    assert checker.check_timestamp_prefix_collisions([*pair, extra]).errors
+    changed = _base_revision(checker, pair[0].revision, "20260910_000000_changed_parent")
+    assert checker.check_timestamp_prefix_collisions([changed, pair[1]]).errors

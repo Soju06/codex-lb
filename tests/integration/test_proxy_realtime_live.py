@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -472,7 +472,6 @@ def test_constrained_live_routes_reject_malformed_call_ids_before_live_service(
     assert service_called is False
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("call_id", "location", "sideband_call_id", "sideband_template", "expected_upstream_url"),
     [
@@ -528,9 +527,8 @@ def test_constrained_live_routes_reject_malformed_call_ids_before_live_service(
         "current-app-canonicalized-absolute-uppercase-uuid",
     ],
 )
-async def test_realtime_call_location_drives_supported_account_bound_sideband_routes(
+def test_realtime_call_location_drives_supported_account_bound_sideband_routes(
     app_instance,
-    async_client,
     monkeypatch,
     call_id: str,
     location: str,
@@ -655,39 +653,39 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_upstream_route_for_account", fake_resolve_route)
 
-    auth_json = _auth_json("acc_live_full", "live-full@example.com")
-    imported = await async_client.post(
-        "/api/accounts/import",
-        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
-    )
-    assert imported.status_code == 200
-    key_a_response = await async_client.post("/api/api-keys/", json={"name": "live-full-a"})
-    key_b_response = await async_client.post("/api/api-keys/", json={"name": "live-full-b"})
-    assert key_a_response.status_code == 200
-    assert key_b_response.status_code == 200
-    key_a = key_a_response.json()["key"]
-    key_b = key_b_response.json()["key"]
+    # Keep HTTP, WebSocket and database work on one lifespan and portal loop.
+    with TestClient(app_instance, base_url="http://127.0.0.1", client=("127.0.0.1", 123)) as client:
+        auth_json = _auth_json("acc_live_full", "live-full@example.com")
+        imported = client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+        )
+        assert imported.status_code == 200
+        key_a_response = client.post("/api/api-keys/", json={"name": "live-full-a"})
+        key_b_response = client.post("/api/api-keys/", json={"name": "live-full-b"})
+        assert key_a_response.status_code == 200
+        assert key_b_response.status_code == 200
+        key_a = key_a_response.json()["key"]
+        key_b = key_b_response.json()["key"]
 
-    selection_cache = AccountSelectionCache(ttl_seconds=5)
-    get_proxy_service_for_app(app_instance)._load_balancer._selection_inputs_cache = selection_cache
+        selection_cache = AccountSelectionCache(ttl_seconds=5)
+        get_proxy_service_for_app(app_instance)._load_balancer._selection_inputs_cache = selection_cache
 
-    created = await async_client.post(
-        "/backend-api/codex/realtime/calls",
-        content=b"v=offer\r\n",
-        headers={"content-type": "application/sdp", "Authorization": f"Bearer {key_a}"},
-    )
-    assert created.status_code == 201
-    assert created.headers["location"] == location
-    returned_call_id = created.headers["location"].rsplit("/", maxsplit=1)[-1]
-    assert returned_call_id == call_id
-    sideband_path = sideband_template.format(call_id=sideband_call_id)
-    assert control_calls == [
-        ("access-token", "acc_live_full"),
-        ("rotated-access-token", "acc_live_rotated"),
-    ]
+        created = client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"v=offer\r\n",
+            headers={"content-type": "application/sdp", "Authorization": f"Bearer {key_a}"},
+        )
+        assert created.status_code == 201
+        assert created.headers["location"] == location
+        returned_call_id = created.headers["location"].rsplit("/", maxsplit=1)[-1]
+        assert returned_call_id == call_id
+        sideband_path = sideband_template.format(call_id=sideband_call_id)
+        assert control_calls == [
+            ("access-token", "acc_live_full"),
+            ("rotated-access-token", "acc_live_rotated"),
+        ]
 
-    async with off_loop_test_client(app_instance) as client:
-        app_instance.state.proxy_service._load_balancer._selection_inputs_cache = selection_cache
         with pytest.raises(WebSocketDenialResponse) as denied:
             with client.websocket_connect(
                 sideband_path,
@@ -709,10 +707,10 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
             assert close_message["code"] == 1000
 
         assert client.portal is not None
-        deadline = asyncio.get_running_loop().time() + 1
+        deadline = time.monotonic() + 5
         while True:
-            client.portal.call(lambda: app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=1))
-            request_logs = await async_client.get("/api/request-logs?limit=100")
+            client.portal.call(lambda: app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5))
+            request_logs = client.get("/api/request-logs?limit=100")
             assert request_logs.status_code == 200, request_logs.text
             matching_logs = [
                 entry for entry in request_logs.json()["requests"] if entry["requestKind"] == "realtime_live"
@@ -720,9 +718,9 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
             if matching_logs:
                 live_log = matching_logs[0]
                 break
-            if asyncio.get_running_loop().time() >= deadline:
+            if time.monotonic() >= deadline:
                 raise AssertionError("realtime live request log was not exposed by the request-logs API")
-            await asyncio.sleep(0.01)
+            time.sleep(0.01)
 
         assert live_log["status"] == "ok"
         assert live_log["transport"] == "websocket"
@@ -763,10 +761,13 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         ):
             assert secret not in serialized_live_log
 
-        async with SessionLocal() as session:
-            persisted = (
-                await session.execute(select(RequestLog).where(RequestLog.request_kind == "realtime_live"))
-            ).scalar_one()
+        async def read_persisted_log() -> RequestLog:
+            async with SessionLocal() as session:
+                return (
+                    await session.execute(select(RequestLog).where(RequestLog.request_kind == "realtime_live"))
+                ).scalar_one()
+
+        persisted = client.portal.call(read_persisted_log)
         assert persisted.status == "success"
         assert persisted.api_key_id == key_a_response.json()["id"]
         assert persisted.transport == "websocket"

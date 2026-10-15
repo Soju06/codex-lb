@@ -53,6 +53,27 @@ _TEST_MODELS = ["model-alpha", "model-beta"]
 _HIDDEN_MODEL = "model-hidden"
 
 
+@pytest.mark.asyncio
+async def test_astra_notes_preference_defaults_and_patch_semantics(async_client):
+    created = await async_client.post("/api/api-keys/", json={"name": "notes preference"})
+    assert created.status_code == 200
+    key = created.json()
+    assert key["autoEnableAstraNotes"] is False
+    endpoint = f"/api/api-keys/{key['id']}"
+    for payload, expected in [
+        ({"autoEnableAstraNotes": True}, True),
+        ({"name": "renamed"}, True),
+        ({"autoEnableAstraNotes": None}, True),
+        ({"autoEnableAstraNotes": False}, False),
+    ]:
+        response = await async_client.patch(endpoint, json=payload)
+        assert response.status_code == 200
+        assert response.json()["autoEnableAstraNotes"] is expected
+        listed = await async_client.get("/api/api-keys/")
+        stored = next(item for item in listed.json() if item["id"] == key["id"])
+        assert stored["autoEnableAstraNotes"] is expected
+
+
 def _make_upstream_model(slug: str, *, supported_in_api: bool = True) -> UpstreamModel:
     return UpstreamModel(
         slug=slug,

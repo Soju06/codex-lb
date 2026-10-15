@@ -3382,6 +3382,13 @@ def test_extract_input_file_ids_string_input_returns_empty_set():
     assert extract_input_file_ids("Hello world") == set()
 
 
+@pytest.mark.parametrize("item_type", [[], {}])
+def test_extract_input_file_ids_preserves_content_references_with_non_string_item_type(item_type):
+    assert extract_input_file_ids(
+        [{"type": item_type, "content": [{"type": "input_file", "file_id": "file_123"}]}]
+    ) == {"file_123"}
+
+
 def test_extract_input_file_ids_finds_actual_input_references_but_not_tool_metadata():
     input_value: list[JsonValue] = [
         {

@@ -276,6 +276,7 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.catalog_notes import with_astra_notes_default
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import (
@@ -892,7 +893,7 @@ class _CodexControlAdapter(Protocol):
 
 
 class _PassthroughCodexControlAdapter:
-    privacy_policy: Final[CodexControlRequestPrivacyPolicy] = CodexControlRequestPrivacyPolicy.STANDARD
+    privacy_policy: Final = CodexControlRequestPrivacyPolicy.STANDARD
     success_gate: Final[None] = None
 
     async def finalize(
@@ -976,6 +977,14 @@ class _RealtimeCallCodexControlAdapter:
 _PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
 
 
+def _codex_context_error_response(request: Request, status_code: int) -> JSONResponse:
+    return _logged_error_json_response(
+        request,
+        status_code,
+        openai_error("context_backend_unavailable", "Codex context backend is unavailable", error_type="server_error"),
+    )
+
+
 async def _codex_control_proxy(
     request: Request,
     path: str,
@@ -1014,6 +1023,49 @@ async def _codex_control_proxy(
         )
         return _realtime_call_error_response(request, status_code=503)
     return await adapter.finalize(request, context, response)
+
+
+@router.post("/alpha/history/v2/list_windows")
+@router.post("/alpha/history/v2/list_windows/", include_in_schema=False)
+@router.post("/alpha/history/v2/list_items")
+@router.post("/alpha/history/v2/list_items/", include_in_schema=False)
+@router.post("/alpha/history/v2/read_item")
+@router.post("/alpha/history/v2/read_item/", include_in_schema=False)
+@router.post("/alpha/history/v2/search_contents")
+@router.post("/alpha/history/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/thread_hint")
+@router.post("/alpha/notes/v2/thread_hint/", include_in_schema=False)
+@router.post("/alpha/notes/v2/list_files_by_prefix")
+@router.post("/alpha/notes/v2/list_files_by_prefix/", include_in_schema=False)
+@router.post("/alpha/notes/v2/read_file")
+@router.post("/alpha/notes/v2/read_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/search_contents")
+@router.post("/alpha/notes/v2/search_contents/", include_in_schema=False)
+@router.post("/alpha/notes/v2/append_to_file")
+@router.post("/alpha/notes/v2/append_to_file/", include_in_schema=False)
+@router.post("/alpha/notes/v2/write_file")
+@router.post("/alpha/notes/v2/write_file/", include_in_schema=False)
+async def codex_history_notes(
+    request: Request,
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData = Security(validate_required_proxy_api_key),
+) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
+    try:
+        response = await context.service.codex_context_request(
+            request.url.path.removeprefix("/backend-api/codex/").rstrip("/"),
+            payload=await request.body(),
+            headers=request.headers,
+            query_params=list(request.query_params.multi_items()),
+            api_key=api_key,
+        )
+    except ProxyResponseError as exc:
+        return _codex_context_error_response(request, exc.status_code)
+    except Exception:
+        return _codex_context_error_response(request, 503)
+    return _codex_control_response(response)
 
 
 @router.get("/thread/goal/get")
@@ -3854,7 +3906,10 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         request_service_tier=None,
     )
     try:
-        return await _build_codex_models_response_body(api_key)
+        response = await _build_codex_models_response_body(api_key)
+        response.headers["Cache-Control"] = "private, no-cache"
+        response.headers["Vary"] = "Authorization"
+        return response
     finally:
         if reservation is not None:
             await _release_reservation_deferring_cancellation(reservation)
@@ -3867,6 +3922,7 @@ async def _build_codex_models_response_body(
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
+    auto_enable_astra_notes = api_key is not None and api_key.auto_enable_astra_notes
     context_window_overrides = await _effective_context_window_overrides()
 
     registry = get_model_registry()
@@ -3919,7 +3975,11 @@ async def _build_codex_models_response_body(
         if visibility_allowed_models is None:
             if allowed_models is not None and slug not in allowed_models:
                 continue
-            entry = _to_codex_model_entry(model, context_window_overrides=context_window_overrides)
+            entry = _to_codex_model_entry(
+                model,
+                context_window_overrides=context_window_overrides,
+                auto_enable_astra_notes=auto_enable_astra_notes,
+            )
             entries.append(entry)
             seen_slugs.add(slug)
             if model.supported_in_api and entry.visibility == "list":
@@ -3936,6 +3996,7 @@ async def _build_codex_models_response_body(
             model,
             context_window_overrides=context_window_overrides,
             visibility="list" if slug in visibility_allowed_models else "hide",
+            auto_enable_astra_notes=auto_enable_astra_notes,
         )
         entries.append(entry)
         seen_slugs.add(slug)
@@ -4191,7 +4252,11 @@ def _codex_wire_default_reasoning_level(model: UpstreamModel) -> str | None:
 
 
 def _to_codex_model_entry(
-    model: UpstreamModel, *, context_window_overrides: Mapping[str, int], visibility: str | None = None
+    model: UpstreamModel,
+    *,
+    context_window_overrides: Mapping[str, int],
+    visibility: str | None = None,
+    auto_enable_astra_notes: bool = False,
 ) -> CodexModelEntry:
     raw = model.raw
     reasoning_levels = _codex_wire_reasoning_levels(model)
@@ -4228,7 +4293,7 @@ def _to_codex_model_entry(
     if effective_cw != model.context_window and "max_context_window" in extra:
         extra["max_context_window"] = effective_cw
 
-    return CodexModelEntry(
+    entry = CodexModelEntry(
         slug=model.slug,
         display_name=model.display_name,
         description=model.description,
@@ -4254,6 +4319,7 @@ def _to_codex_model_entry(
         experimental_supported_tools=_codex_model_experimental_supported_tools(model),
         **extra,
     )
+    return with_astra_notes_default(entry) if auto_enable_astra_notes else entry
 
 
 async def _effective_context_window_overrides() -> Mapping[str, int]:

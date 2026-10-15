@@ -194,6 +194,7 @@ async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     legacy_head = "013_add_dashboard_settings_routing_strategy"
     async with SessionLocal() as session:
@@ -213,6 +214,7 @@ async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     legacy_firewall_revision = "014_add_api_firewall_allowlist"
     async with SessionLocal() as session:
@@ -235,6 +237,7 @@ async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db
 @pytest.mark.skipif(not _HAS_REVISION_REMAP, reason="requires revision remap support")
 async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_alembic_id_together(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     async with SessionLocal() as session:
         await session.execute(
@@ -304,6 +307,7 @@ async def test_postgresql_upgrade_head_from_empty_database(db_setup):
 )
 async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
     await run_startup_migrations(_DATABASE_URL)
+    await _omit_context_tables_from_historical_schema()
 
     async with SessionLocal() as session:
         await session.execute(
@@ -3189,6 +3193,178 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT count(*) FROM sqlite_master WHERE name='idx_logs_missing_cost'")) == 0
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+    finally:
+        await engine.dispose()
+
+
+async def _omit_context_tables_from_historical_schema() -> None:
+    """Current metadata must not pre-create tables when simulating older revisions."""
+    async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE IF EXISTS codex_context_participants"))
+        await session.execute(text("DROP TABLE IF EXISTS codex_context_sessions"))
+        await session.commit()
+
+
+@pytest.fixture
+async def db_setup(_reset_db_state):
+    await _omit_context_tables_from_historical_schema()
+    return _reset_db_state
+
+
+@pytest.mark.asyncio
+async def test_codex_context_migration_preserves_rows_and_round_trips(db_setup):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    parent = "20260830_000000_add_quota_warmup_claim_expiry"
+    tables = {"codex_context_sessions", "codex_context_participants"}
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("context-preserved", "test@example.com", "plus"))
+        await session.execute(
+            text("INSERT INTO codex_context_sessions VALUES ('00000000-0000-4000-8000-000000000011', 'key', 'owner')")
+        )
+        await session.execute(
+            text("INSERT INTO codex_context_participants VALUES ('00000000-0000-4000-8000-000000000011', 'owner')")
+        )
+        await session.commit()
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    async with SessionLocal() as session:
+        assert await session.scalar(text("SELECT count(*) FROM codex_context_participants")) == 1
+        assert await session.scalar(text("SELECT owner_account_id FROM codex_context_sessions")) == "owner"
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent))
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            assert not tables & set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+        async with engine.connect() as conn:
+            assert tables <= set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+        assert not check_schema_drift(_DATABASE_URL)
+        async with SessionLocal() as session:
+            assert await session.get(Account, "context-preserved") is not None
+            assert await session.scalar(text("SELECT count(*) FROM codex_context_sessions")) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_astra_notes_key_migration_defaults_and_round_trip(db_setup):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    parent = "20260922_000000_merge_context_scim_overflow_heads"
+    config = _build_alembic_config(_DATABASE_URL)
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    await to_thread.run_sync(lambda: command.downgrade(config, parent))
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.begin() as conn:
+            assert "auto_enable_astra_notes" not in await conn.run_sync(
+                lambda c: {column["name"] for column in sa_inspect(c).get_columns("api_keys")}
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, is_active) "
+                    "VALUES ('notes-migration', 'Existing key', 'synthetic-hash', 'test', TRUE)"
+                )
+            )
+        for _ in range(2):
+            await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+            async with engine.begin() as conn:
+                row = (
+                    await conn.execute(
+                        text("SELECT name, auto_enable_astra_notes FROM api_keys WHERE id = 'notes-migration'")
+                    )
+                ).one()
+                assert row[0] == "Existing key"
+                assert not row[1]
+                await conn.execute(text("UPDATE api_keys SET auto_enable_astra_notes = TRUE"))
+            assert not await to_thread.run_sync(lambda: check_schema_drift(_DATABASE_URL))
+            await to_thread.run_sync(lambda: command.downgrade(config, parent))
+        await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True))
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "existing_tables",
+    [
+        ("codex_context_sessions",),
+        ("codex_context_participants",),
+        ("codex_context_sessions", "codex_context_participants"),
+    ],
+)
+async def test_codex_context_migration_rejects_unowned_tables_without_changes(db_setup, existing_tables):
+    from sqlalchemy import inspect as sa_inspect
+
+    parent = "20260913_000000_add_oidc_provider_flow"
+    await to_thread.run_sync(lambda: run_upgrade(_DATABASE_URL, parent, bootstrap_legacy=False))
+    async with SessionLocal() as session:
+        for table in existing_tables:
+            await session.execute(text(f"CREATE TABLE {table} (marker TEXT NOT NULL)"))
+            await session.execute(text(f"INSERT INTO {table} (marker) VALUES ('preserve-me')"))
+        await session.commit()
+    with pytest.raises(RuntimeError, match="Refusing to adopt pre-existing context tables"):
+        # Exercise the ownership migration itself. Independent upstream branches
+        # may legitimately advance before a later upgrade-to-head failure.
+        await to_thread.run_sync(
+            lambda: run_upgrade(_DATABASE_URL, "20260905_120000_add_codex_context_ownership", bootstrap_legacy=False)
+        )
+    async with SessionLocal() as session:
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == parent
+        for table in existing_tables:
+            assert (await session.scalars(text(f"SELECT marker FROM {table}"))).all() == ["preserve-me"]
+    engine = create_async_engine(_DATABASE_URL)
+    try:
+        async with engine.connect() as conn:
+            tables = set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+            assert tables & {"codex_context_sessions", "codex_context_participants"} == set(existing_tables)
+    finally:
+        await engine.dispose()
+
+
+async def test_model_source_pins_kind_expires_index_upgrade_downgrade_and_query_plan(tmp_path):
+    """The dashboard's live thread-pin count rides the index instead of walking the table."""
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'pins-kind-expires.sqlite'}"
+    parent = "20260910_020000_add_dashboard_role_mappings"
+    # The subsequent overflow retirement drops this table. Inspect the index
+    # while its owning revision is active, then verify the final head separately.
+    await to_thread.run_sync(
+        lambda: run_upgrade(db_url, "20260911_000000_model_source_pins_kind_expires_index", bootstrap_legacy=False)
+    )
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.connect() as conn:
+            plan = (
+                await conn.execute(
+                    text(
+                        "EXPLAIN QUERY PLAN SELECT count(*) FROM model_source_pins "
+                        "WHERE kind = :kind AND expires_at > :now AND purge_at > :now"
+                    ),
+                    {"kind": "thread", "now": "2026-09-11 00:00:00"},
+                )
+            ).fetchall()
+            assert "ix_model_source_pins_kind_expires_at" in str(plan)
+            assert "SCAN model_source_pins" not in str(plan)
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent))
+        async with engine.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("SELECT count(*) FROM sqlite_master WHERE name='ix_model_source_pins_kind_expires_at'")
+                )
+                == 0
+            )
         await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:

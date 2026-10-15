@@ -536,6 +536,8 @@ class _FileOpsMixin:
                         files_exc.status_code,
                         files_exc.payload,
                         failure_phase=files_exc.failure_phase,
+                        retryable_same_contract=files_exc.retryable_same_contract is True,
+                        failure_detail="transport_error" if files_exc.retryable_same_contract is not None else None,
                     ) from files_exc
                 finally:
                     if route_trace.mode is not None:

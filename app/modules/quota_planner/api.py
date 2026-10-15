@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 
@@ -137,6 +138,17 @@ def _validate_working_days(days: list[int] | None, current: tuple[int, ...]) -> 
     return normalized
 
 
+def _validate_timezone(value: str | None, current: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return current
+    try:
+        ZoneInfo(normalized)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise DashboardBadRequestError("timezone must be a valid timezone name", code="invalid_quota_planner") from exc
+    return normalized
+
+
 @router.get("/settings", response_model=QuotaPlannerSettingsResponse)
 async def get_quota_planner_settings(
     context: QuotaPlannerContext = Depends(get_quota_planner_context),
@@ -154,7 +166,7 @@ async def update_quota_planner_settings(
     current = await context.repository.get_settings()
     updated = PlannerSettings(
         mode=payload.mode or current.mode,
-        timezone=(payload.timezone or current.timezone).strip() or current.timezone,
+        timezone=_validate_timezone(payload.timezone, current.timezone),
         working_days=_validate_working_days(payload.working_days, current.working_days),
         working_hours_start=payload.working_hours_start or current.working_hours_start,
         working_hours_end=payload.working_hours_end or current.working_hours_end,

@@ -18,32 +18,46 @@ import { formatChartDateTime } from "@/utils/formatters";
 
 type MergedPoint = {
   t: string;
-  primary: number;
-  secondary: number;
+  primary: number | null;
+  secondary: number | null;
   secondaryScheduled?: number;
 };
 
+/** Align observations and scheduled values on distinct instants across all series. */
 function mergePoints(
   primary: UsageTrendPoint[],
   secondary: UsageTrendPoint[],
   secondaryScheduled: UsageTrendPoint[],
 ): MergedPoint[] {
-  const secondaryMap = new Map(secondary.map((p) => [p.t, p.v]));
-  const primaryMap = new Map(primary.map((p) => [p.t, p.v]));
-  const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [p.t, p.v]));
+  const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [Date.parse(p.t), p.v]));
+  const timestamps = [...new Set([...primary, ...secondary, ...secondaryScheduled].map((p) => Date.parse(p.t)))]
+    .sort((a, b) => a - b);
+  const primaryValues = interpolatePoints(primary, timestamps);
+  const secondaryValues = interpolatePoints(secondary, timestamps);
 
-  if (primary.length === 0 && secondary.length === 0 && secondaryScheduled.length === 0) {
-    return [];
-  }
-
-  const basePoints = primary.length > 0 ? primary : secondary.length > 0 ? secondary : secondaryScheduled;
-
-  return basePoints.map((p) => ({
-    t: p.t,
-    primary: primaryMap.get(p.t) ?? 0,
-    secondary: secondaryMap.get(p.t) ?? 0,
-    secondaryScheduled: secondaryScheduledMap.get(p.t),
+  return timestamps.map((t, index) => ({
+    t: new Date(t).toISOString(),
+    primary: primaryValues[index],
+    secondary: secondaryValues[index],
+    secondaryScheduled: secondaryScheduledMap.get(t),
   }));
+}
+
+/** Fill gaps between observations while leaving time before the first sample unknown. */
+function interpolatePoints(points: UsageTrendPoint[], timestamps: number[]): (number | null)[] {
+  const sorted = [...points].sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
+  let nextIndex = 0;
+  return timestamps.map((time) => {
+    while (nextIndex < sorted.length && Date.parse(sorted[nextIndex].t) <= time) {
+      nextIndex += 1;
+    }
+    const previous = sorted[nextIndex - 1];
+    const next = sorted[nextIndex];
+    if (!previous) return null;
+    if (!next) return previous.v;
+    const fraction = (time - Date.parse(previous.t)) / (Date.parse(next.t) - Date.parse(previous.t));
+    return previous.v + fraction * (next.v - previous.v);
+  });
 }
 
 function formatXTick(isoStr: string): string {
@@ -66,9 +80,11 @@ type ChartTooltipProps = {
   active?: boolean;
   payload?: ChartTooltipPayloadEntry[];
   label?: string;
+  monthly?: boolean;
 };
 
-function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
+/** Render quota series labels according to the account's quota window. */
+function CustomTooltip({ active, payload, label, monthly }: ChartTooltipProps) {
   const { t } = useTranslation();
   if (!active || !payload?.length) return null;
   const heading = formatChartDateTime(label as string);
@@ -83,7 +99,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
               className="inline-block h-2 w-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
-            <span className="text-muted-foreground">{meta ? t(`accounts.trend.series.${entry.dataKey}`, { defaultValue: meta.label }) : ""}</span>
+            <span className="text-muted-foreground">{meta ? (monthly && entry.dataKey === "secondary" ? t("common.quota.monthly") : monthly && entry.dataKey === "secondaryScheduled" ? t("accounts.usage.monthlyPlan") : t(`accounts.trend.series.${entry.dataKey}`, { defaultValue: meta.label })) : ""}</span>
             <span className="ml-auto tabular-nums font-medium">{entry.value?.toFixed(1)}%</span>
           </div>
         );
@@ -98,14 +114,17 @@ export type AccountTrendChartProps = {
   primary: UsageTrendPoint[];
   secondary: UsageTrendPoint[];
   secondaryScheduled?: UsageTrendPoint[];
+  monthly?: boolean;
 };
 
 const EMPTY_TREND_POINTS: UsageTrendPoint[] = [];
 
+/** Plot merged account quota observations and any scheduled quota values. */
 export function AccountTrendChart({
   primary,
   secondary,
   secondaryScheduled = EMPTY_TREND_POINTS,
+  monthly = false,
 }: AccountTrendChartProps) {
   const { t } = useTranslation();
   const chartColors = useChartColors();
@@ -158,7 +177,7 @@ export function AccountTrendChart({
           width={38}
         />
         <Tooltip
-          content={<CustomTooltip />}
+          content={<CustomTooltip monthly={monthly} />}
           cursor={{ stroke: "hsl(var(--border))", strokeWidth: 1 }}
         />
         {primary.length > 0 && (

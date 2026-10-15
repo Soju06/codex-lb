@@ -25,6 +25,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
     parse_sse_data_json_text,
+    parse_websocket_json_text,
     sse_block_with_payload,
     sse_event_type_from_block,
 )
@@ -347,6 +348,23 @@ def test_parse_sse_data_json_text_matches_framed_parse(text: str) -> None:
 def test_parse_sse_data_json_text_matches_framed_parse_for_json_objects(payload, ensure_ascii, indent) -> None:
     text = json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent)
     assert parse_sse_data_json_text(text) == parse_sse_data_json(f"data: {text}\n\n")
+
+
+@given(payload=json_objects, ensure_ascii=st.booleans(), indent=st.sampled_from([None, 2]))
+@settings(max_examples=60, deadline=None)
+def test_parse_websocket_json_text_parses_every_json_object_frame(payload, ensure_ascii, indent) -> None:
+    # A websocket frame is one JSON document, even when it spans several lines.
+    text = json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent)
+    assert parse_websocket_json_text(text) == json.loads(text)
+
+
+@pytest.mark.parametrize("text", _UNUSUAL_DATA_TEXTS)
+def test_parse_websocket_json_text_matches_json_object_decoding(text: str) -> None:
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        decoded = None
+    assert parse_websocket_json_text(text) == (decoded if isinstance(decoded, dict) else None)
 
 
 def test_parse_sse_data_json_text_preserves_unicode_line_separators() -> None:

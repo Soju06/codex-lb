@@ -10,7 +10,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any, cast
 
-from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
+from sqlalchemy import and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -4362,7 +4362,7 @@ _SNAPSHOT_COLUMNS = (
 )
 
 
-def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSessionSnapshot:
+def _returned_row_to_snapshot(row: Any) -> DurableBridgeSessionSnapshot:
     mapping = row._mapping
     continuity_abandoned = _bridge_continuity_is_abandoned(
         mapping[HttpBridgeSessionRecord.continuity_abandoned_at],

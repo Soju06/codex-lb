@@ -90,6 +90,10 @@ dev = [
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
+    # ty 0.0.86 upgrades deprecated-contextmanager and redundant-cast rules to
+    # report 149 diagnostics and exit 1. Migrating all those annotations and
+    # casts across app/ and tests/ is too broad for this dependency-only PR, so
+    # keep the known-clean 0.0.78 baseline and revisit in a dedicated ty PR.
     "ty==0.0.78",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
@@ -137,7 +141,7 @@ codex-lb = "app.cli:main"
 codex-lb-db = "app.db.migrate:main"
 
 [build-system]
-requires = ["hatchling==1.32.0"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]

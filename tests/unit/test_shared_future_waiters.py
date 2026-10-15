@@ -141,7 +141,8 @@ async def test_timed_wait_runs_through_injected_scheduler_and_untimed_wait_does_
     recorded: list[tuple[object, float | None]] = []
 
     class RecordingScheduler(RealScheduler):
-        async def wait_for(self, fut, timeout):
+        @staticmethod
+        async def wait_for(fut, timeout):
             recorded.append((fut, timeout))
             return await asyncio.wait_for(fut, timeout)
 

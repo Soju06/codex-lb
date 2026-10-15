@@ -76,16 +76,26 @@ AccountCapRejectionCallback = Callable[[AccountLeaseKind | None], None]
 
 
 class SelectionInputsProtocol(Protocol):
-    accounts: list[Account]
-    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_monthly: dict[str, UsageHistory]
-    quota_planner_settings: PlannerSettings
-    runtime_accounts: list[Account] | None
-    error_message: str | None
-    error_code: str | None
-    ignore_standard_quota_account_ids: frozenset[str]
-    routing_policy_override: str | None
+    @property
+    def accounts(self) -> list[Account]: ...
+    @property
+    def latest_primary(self) -> dict[str, UsageHistory | AdditionalUsageHistory]: ...
+    @property
+    def latest_secondary(self) -> dict[str, UsageHistory | AdditionalUsageHistory]: ...
+    @property
+    def latest_monthly(self) -> dict[str, UsageHistory]: ...
+    @property
+    def quota_planner_settings(self) -> PlannerSettings: ...
+    @property
+    def runtime_accounts(self) -> list[Account] | None: ...
+    @property
+    def error_message(self) -> str | None: ...
+    @property
+    def error_code(self) -> str | None: ...
+    @property
+    def ignore_standard_quota_account_ids(self) -> frozenset[str]: ...
+    @property
+    def routing_policy_override(self) -> str | None: ...
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...

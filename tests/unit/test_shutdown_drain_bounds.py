@@ -187,7 +187,8 @@ async def test_h17_terminal_settlement_gets_post_drain_reserve_grace() -> None:
         the seam on the injected scheduler instead.
         """
 
-        async def wait(self, fs: Any, *, timeout: float | None = None, return_when: str = asyncio.ALL_COMPLETED) -> Any:
+        @staticmethod
+        async def wait(fs: Any, *, timeout: float | None = None, return_when: str = asyncio.ALL_COMPLETED) -> Any:
             wait_timeout.append(float(timeout or 0.0))
             return await asyncio.wait(fs, timeout=0, return_when=return_when)
 

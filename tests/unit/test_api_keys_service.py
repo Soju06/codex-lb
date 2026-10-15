@@ -31,6 +31,7 @@ from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
+    ApiKeyUsageTotals,
     ReservationResult,
     UsageReservationData,
     UsageReservationItemData,
@@ -137,6 +138,24 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
 
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
         return {}
+
+    async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
+        del key_id
+        return ApiKeyUsageSummary(request_count=0, total_tokens=0, cached_input_tokens=0, total_cost_usd=0.0)
+
+    async def trends_by_key(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 3600,
+    ) -> list[ApiKeyTrendBucket]:
+        del key_id, since, until, bucket_seconds
+        return []
+
+    async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
+        del key_id, since, until
+        return ApiKeyUsageTotals(total_requests=0, total_tokens=0, cached_input_tokens=0, total_cost_usd=0.0)
 
     async def get_limit_usage_value(
         self,

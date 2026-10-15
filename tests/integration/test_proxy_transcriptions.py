@@ -5,6 +5,7 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from tempfile import SpooledTemporaryFile
+from typing import Any
 from unittest.mock import patch
 
 import aiohttp
@@ -404,7 +405,7 @@ async def test_transcription_invalid_file_shape_has_no_route_side_effects(
     monkeypatch.setattr(proxy_api, "_select_audio_transcriptions_model_source", unexpected_call)
     monkeypatch.setattr(proxy_api, "_enforce_request_limits", unexpected_call)
     monkeypatch.setattr(proxy_module.ProxyService, "transcribe", unexpected_call)
-    fields = [("model", (None, "gpt-4o-transcribe"))] if endpoint.startswith("/v1/") else []
+    fields: list[tuple[str, Any]] = [("model", (None, "gpt-4o-transcribe"))] if endpoint.startswith("/v1/") else []
     if invalid_shape == "missing_file":
         fields.append(("prompt", (None, "missing audio")))
     else:

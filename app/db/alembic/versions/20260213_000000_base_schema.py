@@ -59,6 +59,10 @@ def _account_status_enum() -> sa.Enum:
 def upgrade() -> None:
     bind = op.get_bind()
     account_status = _account_status_enum()
+    if bind.dialect.name == "postgresql":
+        # SQLAlchemy >= 2.1 no longer emits CREATE TYPE for create_type=False
+        # enums during op.create_table, so create the type explicitly.
+        account_status.create(bind, checkfirst=True)
 
     created_accounts = not _table_exists(bind, "accounts")
     if created_accounts:

@@ -28296,7 +28296,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },
     ]
-    payload_data: dict[str, proxy_service.JsonValue] = {
+    payload_data: dict[str, Any] = {
         "model": "gpt-5.4",
         "instructions": "hi",
         "input": [

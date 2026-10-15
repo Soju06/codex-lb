@@ -10,7 +10,7 @@ from __future__ import annotations
 revision = "20260830_010000_merge_accounts_email_index_and_quota_warmup_heads"
 down_revision = (
     "20260828_010000_add_accounts_email_lower_index",
-    "20260830_000000_add_quota_warmup_claim_expiry",
+    "20260918_000000_merge_scim_and_overflow_heads",
 )
 branch_labels = None
 depends_on = None

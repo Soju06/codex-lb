@@ -2664,7 +2664,9 @@ class _HTTPBridgeStreamingMixin:
                         owner_pre_dispatch=_owner_forward_failure_was_pre_dispatch(exc),
                         key=bridge_session_key,
                         headers=headers,
+                        payload=effective_payload,
                         previous_response_id=effective_payload.previous_response_id,
+                        durable_lookup=durable_lookup,
                     )
                 )
                 should_attempt_turn_state_takeover = False

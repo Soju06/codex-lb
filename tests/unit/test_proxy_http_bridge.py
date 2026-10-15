@@ -22399,7 +22399,9 @@ async def test_should_attempt_local_bootstrap_rebind_for_session_header_without_
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123"},
+            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
             previous_response_id=None,
+            durable_lookup=None,
         )
         is True
     )
@@ -22409,7 +22411,9 @@ async def test_should_attempt_local_bootstrap_rebind_for_session_header_without_
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123", "x-codex-turn-state": "http_turn_123"},
+            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
             previous_response_id=None,
+            durable_lookup=None,
         )
         is False
     )
@@ -22443,7 +22447,10 @@ def test_turn_state_bootstrap_rebind_requires_explicit_draining_owner_rejection(
             exc,
             key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
+            # Full-context resend, so a local rebind cannot lose context.
+            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "prior context " * 400}),
             previous_response_id=None,
+            durable_lookup=None,
             owner_pre_dispatch=http_bridge_owner_forwarding_module._owner_forward_failure_was_pre_dispatch(exc),
         )
         is expected
@@ -22457,7 +22464,11 @@ async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     turn_state = "http_turn_drain_rebind"
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None)
-    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+    # Full-context resend (>=4096 chars of input), so local recovery cannot
+    # drop context the client actually sent.
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "prior context " * 400}
+    )
     started_at = time.monotonic()
     prepared_states: list[proxy_service._WebSocketRequestState] = []
 
@@ -22585,6 +22596,133 @@ async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining
     assert get_or_create.await_args_list[1].kwargs["allow_bootstrap_owner_rebind"] is True
 
 
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_delta_turn_state_drain_rejection_keeps_retryable_owner_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delta-only turn-state request must not start a fresh local session.
+
+    The client never resent its prior context and no durable anchor exists, so
+    a local bootstrap rebind would silently drop the conversation; the owner's
+    retryable drain rejection has to surface instead.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    turn_state = "http_turn_drain_delta"
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None)
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+    )
+    started_at = time.monotonic()
+    prepared_states: list[proxy_service._WebSocketRequestState] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        assert prepared_payload.previous_response_id is None
+        state = proxy_service._WebSocketRequestState(
+            request_id=f"req-drain-delta-{len(prepared_states)}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=started_at,
+            event_queue=asyncio.Queue(),
+            transport="http",
+        )
+        prepared_states.append(state)
+        return state, '{"type":"response.create"}'
+
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=key,
+    )
+
+    async def fake_owner_stream_responses(**kwargs: object):
+        del kwargs
+        raise ProxyResponseError(
+            503,
+            proxy_service.openai_error(
+                "bridge_drain_active",
+                "HTTP bridge owner is draining",
+                error_type="server_error",
+            ),
+        )
+        yield ""
+
+    async def fake_stream_http_bridge_session_events(
+        session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ):
+        del session, kwargs
+        raise AssertionError("delta-only turn-state request must not rebind locally")
+        yield ""
+
+    recovery_session = _make_bridge_session(key=key, key_value=turn_state)
+    recovery_session.headers = {"x-codex-turn-state": turn_state}
+    get_or_create = AsyncMock(side_effect=[owner_forward, recovery_session])
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_owner_client",
+        cast(Any, SimpleNamespace(stream_responses=fake_owner_stream_responses)),
+    )
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-turn-state": turn_state, "x-codex-session-id": "sid-drain-delta"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=900.0,
+            max_sessions=8,
+            queue_limit=4,
+            downstream_turn_state=turn_state,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 503
+    error = cast(dict[str, Any], exc_info.value.payload).get("error")
+    assert isinstance(error, dict)
+    assert error.get("code") == "bridge_drain_active"
+    assert get_or_create.await_count == 1
+    assert len(prepared_states) == 1
+
+
 @pytest.mark.parametrize(
     "turn_state",
     [
@@ -22594,7 +22732,11 @@ async def test_stream_via_http_bridge_recovers_turn_state_locally_after_draining
     ],
 )
 def test_turn_state_only_drain_rejection_preserves_retryable_owner_error(turn_state: str) -> None:
-    """A turn-state-only key has no local creator fallback whatever its text."""
+    """A delta-only turn-state key has no local creator fallback whatever its text.
+
+    Not even a session header may unlock the rebind without a full-resend
+    payload or a durable anchor, so the owner's retryable rejection survives.
+    """
 
     source = ProxyResponseError(
         503,
@@ -22605,13 +22747,18 @@ def test_turn_state_only_drain_rejection_preserves_retryable_owner_error(turn_st
         outcome=http_bridge_owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
     )
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None)
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+    )
 
     assert (
         proxy_service._http_bridge_should_attempt_local_bootstrap_rebind(
             exc,
             key=key,
             headers={"x-codex-turn-state": turn_state},
+            payload=payload,
             previous_response_id=None,
+            durable_lookup=None,
             owner_pre_dispatch=True,
         )
         is False
@@ -22621,10 +22768,12 @@ def test_turn_state_only_drain_rejection_preserves_retryable_owner_error(turn_st
             exc,
             key=key,
             headers={"x-codex-turn-state": turn_state, "x-codex-session-id": "sid-fallback"},
+            payload=payload,
             previous_response_id=None,
+            durable_lookup=None,
             owner_pre_dispatch=True,
         )
-        is True
+        is False
     )
 
 
@@ -22639,7 +22788,9 @@ def test_ambiguous_drain_rejection_does_not_bootstrap_rebind_session_key() -> No
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123"},
+            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
             previous_response_id=None,
+            durable_lookup=None,
             owner_pre_dispatch=False,
         )
         is False
@@ -22661,7 +22812,9 @@ def test_turn_state_draining_owner_rejection_does_not_rebind_previous_response()
             exc,
             key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
+            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
             previous_response_id="resp-123",
+            durable_lookup=None,
             owner_pre_dispatch=True,
         )
         is False

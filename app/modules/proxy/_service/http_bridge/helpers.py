@@ -3610,7 +3610,9 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
     *,
     key: _HTTPBridgeSessionKey,
     headers: Mapping[str, str],
+    payload: ResponsesRequest,
     previous_response_id: str | None,
+    durable_lookup: DurableBridgeLookup | None,
     owner_pre_dispatch: bool = False,
 ) -> bool:
     if key.affinity_kind not in {"session_header", "thread_header", "turn_state_header"}:
@@ -3627,9 +3629,18 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         # ``http_turn_*`` and client-chosen alike, because provenance lives on
         # the recorded alias, not in the text.
         if key.affinity_kind == "turn_state_header":
-            return (
-                _codex_backend_identity(headers).thread_selection_key is not None
-                or _sticky_key_from_session_header(headers) is not None
+            if (
+                _codex_backend_identity(headers).thread_selection_key is None
+                and _sticky_key_from_session_header(headers) is None
+            ):
+                return False
+            # Fail closed for delta-only turns: rebinding one to a fresh local
+            # session would drop the conversation context the client never
+            # resent. Rebind only when the client sent a full-context resend or
+            # the durable anchor the local drain gate already requires exists.
+            return _http_bridge_payload_looks_like_full_resend(payload) or _http_bridge_has_durable_recovery_anchor(
+                previous_response_id=previous_response_id,
+                durable_lookup=durable_lookup,
             )
         return True
     if turn_state_key is not None:

@@ -22399,7 +22399,9 @@ async def test_should_attempt_local_bootstrap_rebind_for_session_header_without_
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123"},
-            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
+            payload=proxy_service.ResponsesRequest.model_validate(
+                {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+            ),
             previous_response_id=None,
             durable_lookup=None,
         )
@@ -22411,7 +22413,9 @@ async def test_should_attempt_local_bootstrap_rebind_for_session_header_without_
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123", "x-codex-turn-state": "http_turn_123"},
-            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
+            payload=proxy_service.ResponsesRequest.model_validate(
+                {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+            ),
             previous_response_id=None,
             durable_lookup=None,
         )
@@ -22448,7 +22452,9 @@ def test_turn_state_bootstrap_rebind_requires_explicit_draining_owner_rejection(
             key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
             # Full-context resend, so a local rebind cannot lose context.
-            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "prior context " * 400}),
+            payload=proxy_service.ResponsesRequest.model_validate(
+                {"model": "gpt-5.4", "instructions": "hi", "input": "prior context " * 400}
+            ),
             previous_response_id=None,
             durable_lookup=None,
             owner_pre_dispatch=http_bridge_owner_forwarding_module._owner_forward_failure_was_pre_dispatch(exc),
@@ -22788,7 +22794,9 @@ def test_ambiguous_drain_rejection_does_not_bootstrap_rebind_session_key() -> No
             exc,
             key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-123", None),
             headers={"x-codex-session-id": "sid-123"},
-            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
+            payload=proxy_service.ResponsesRequest.model_validate(
+                {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+            ),
             previous_response_id=None,
             durable_lookup=None,
             owner_pre_dispatch=False,
@@ -22812,7 +22820,9 @@ def test_turn_state_draining_owner_rejection_does_not_rebind_previous_response()
             exc,
             key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None),
             headers={"thread-id": "thread-123", "x-codex-turn-state": "http_turn_123"},
-            payload=proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "continue"}),
+            payload=proxy_service.ResponsesRequest.model_validate(
+                {"model": "gpt-5.4", "instructions": "hi", "input": "continue"}
+            ),
             previous_response_id="resp-123",
             durable_lookup=None,
             owner_pre_dispatch=True,

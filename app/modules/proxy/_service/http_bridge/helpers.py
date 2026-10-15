@@ -3645,10 +3645,10 @@ def _http_bridge_should_attempt_local_bootstrap_rebind(
         return True
     if turn_state_key is not None:
         return False
-    payload = exc.payload
-    if not isinstance(payload, dict):
+    error_payload = exc.payload
+    if not isinstance(error_payload, dict):
         return False
-    error = payload.get("error")
+    error = error_payload.get("error")
     if not isinstance(error, dict):
         return False
     code = error.get("code")

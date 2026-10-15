@@ -1771,6 +1771,21 @@ class _HTTPBridgeUpstreamEventsMixin:
         observed_response_events = (
             response_events_seen if response_events_seen is not None else observed_response_events
         )
+        # A reader failure that saw no response events leaves a proxy-injected
+        # anchor pointing at a response upstream never completed -- the shape an
+        # upstream keepalive ping timeout produces. Every later turn re-injects
+        # that id and upstream answers previous_response_not_found, with no
+        # self-healing path. The durable-anchor clear below already covers the
+        # missing-``response.created`` timeout, so key it on the same
+        # ``response_event_count == 0`` condition here, under the same guard:
+        # only anchors codex-lb injected onto a full-resend-shaped payload, so
+        # the client can still convey prior context once the anchor is gone.
+        if observed_response_events == 0 and any(
+            getattr(request_state, "proxy_injected_previous_response_id", None)
+            and getattr(request_state, "proxy_injected_anchor_had_full_resend_payload", False)
+            for request_state in pending_request_states
+        ):
+            await _clear_durable_http_bridge_response_anchor(self, session)
         close_classification = (
             _classify_upstream_close(observed_close_code, response_events_seen=observed_response_events)
             if observed_close_code is not None

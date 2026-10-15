@@ -132,3 +132,27 @@ async def test_plugin_catalog_is_read_only(async_client, upstream_calls):
 
     assert response.status_code == 405
     assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_catalog_forwards_upstream_error_verbatim(async_client, monkeypatch):
+    await _import_account(async_client, "acc_catalog_err", "catalog-err@example.com")
+    upstream_body = b'{"error":{"code":"upstream_deny","message":"denied"}}'
+    upstream_headers = {"content-type": "application/json", "cache-control": "no-store", "etag": '"v1"'}
+
+    async def failing_codex_control_request(*_args, **_kwargs):
+        raise core_proxy.ProxyResponseError(
+            403,
+            {"error": {"code": "upstream_deny", "message": "denied"}},
+            failure_phase="status",
+            response_body=upstream_body,
+            response_headers=upstream_headers,
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", failing_codex_control_request)
+    response = await async_client.get("/ps/plugins/list", params=[("scope", "GLOBAL")])
+
+    assert response.status_code == 403
+    assert response.content == upstream_body
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["etag"] == '"v1"'

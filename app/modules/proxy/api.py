@@ -1010,7 +1010,15 @@ async def _codex_control_proxy(
     except ProxyResponseError as exc:
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             return _realtime_call_error_response(request, status_code=exc.status_code)
-        return _logged_error_json_response(request, exc.status_code, exc.payload)
+        if exc.response_body is None:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
+        return _codex_control_response(
+            CodexControlResponse(
+                status_code=exc.status_code,
+                body=exc.response_body,
+                headers=exc.response_headers or {},
+            )
+        )
     except ClientPayloadError as exc:
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
             return _realtime_call_error_response(request, status_code=400)

@@ -52,7 +52,7 @@ working. The `Account:` line still shows the local `auth.json` identity, and
 the usage-limit-reset hint is not surfaced through this path.
 
 Spec:
-[codex-plugin-catalog-passthrough](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/codex-plugin-catalog-passthrough).
+[codex-plugin-catalog-passthrough](https://github.com/Soju06/codex-lb/tree/main/openspec/changes/codex-plugin-catalog-passthrough/specs/codex-plugin-catalog-passthrough).
 
 ### Opting into the 872k context window
 

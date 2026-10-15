@@ -602,10 +602,14 @@ class ProxyResponseError(Exception):
         retry_after_header: str | None = None,
         reservation_released: bool = False,
         local_pre_dispatch_refusal: bool = False,
+        response_body: bytes | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
         self.payload = payload
+        self.response_body = response_body
+        self.response_headers = response_headers
         self.failure_phase = failure_phase
         self.retryable_same_contract = retryable_same_contract
         self.failure_detail = failure_detail
@@ -5741,10 +5745,17 @@ async def codex_control_request(
                         await close()
             status_code = _codex_response_status(response)
             body = await _codex_response_body(response)
+            response_headers = _codex_response_headers(response)
             if status_code >= 400:
                 error_payload = await _codex_error_payload_from_response(response)
                 error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(status_code, error_payload)
+                raise ProxyResponseError(
+                    status_code,
+                    error_payload,
+                    failure_phase="status",
+                    response_body=body,
+                    response_headers=response_headers,
+                )
             return CodexControlResponse(
                 status_code=status_code,
                 body=body,
@@ -5778,7 +5789,13 @@ async def codex_control_request(
             if resp.status >= 400:
                 error_payload = await _error_payload_from_raw_body(resp, body)
                 error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload, failure_phase="status")
+                raise ProxyResponseError(
+                    resp.status,
+                    error_payload,
+                    failure_phase="status",
+                    response_body=body,
+                    response_headers={key: value for key, value in resp.headers.items()},
+                )
             return CodexControlResponse(
                 status_code=resp.status,
                 body=body,

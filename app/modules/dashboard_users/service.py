@@ -693,10 +693,9 @@ class DashboardUsersService:
                 "designate another admin with two-factor first"
             )
         await self._repo.commit_user(user_id, bump_generation=True)
-        # Owner status first, key cascade second: the guarded UPDATE above is
-        # already in this transaction, so the cascade now runs after the flip. A
-        # cascade ordered the other way can miss a key activated in the window
-        # and leave a disabled owner holding a working key (measured on InnoDB).
+        # The key cascade runs before the guarded status update. It locks the
+        # owner row first; key activation takes the same lock before assigning
+        # is_active, so activation cannot commit between the cascade and flip.
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
         AuditService.log_async(

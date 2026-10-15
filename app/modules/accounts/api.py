@@ -216,7 +216,7 @@ async def list_accounts(
 @router.post("/bundle/export", openapi_extra=_ACCOUNT_BUNDLE_EXPORT_OPENAPI_EXTRA)
 async def export_account_bundle(
     request: Request,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_EXPORT)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> Response:
     payload = await _read_bundle_export_request(request)
@@ -248,7 +248,7 @@ async def export_account_bundle(
 async def preflight_account_bundle(
     request: Request,
     response: Response,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountBundlePreflightResponse:
     raise_for_unsupported_multipart_content_encoding(request)
@@ -288,7 +288,7 @@ async def preflight_account_bundle(
 async def commit_account_bundle(
     request: Request,
     response: Response,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountBundleCommitResponse:
     raise_for_unsupported_multipart_content_encoding(request)

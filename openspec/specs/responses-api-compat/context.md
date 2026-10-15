@@ -272,11 +272,18 @@ OpenSpec change first.
 Healthy native HTTP requests use normal policy. The proxy cannot infer every
 client-local WebSocket failure from HTTP alone; it uses its existing 60-second
 upstream-connect failure marker as concrete failure evidence. Operator HTTP
-pins and size bypasses remain effective. The image bypass keeps requests off the
-HTTP session bridge but no longer pins the upstream transport, which is resolved
-by ordinary precedence; an `input_image` request keeps upstream HTTP only when
-its payload exceeds the WebSocket frame budget or still carries an external
-image URL. External-URL detection for that decision recurses the whole input, so
+pins and size bypasses remain effective. Below-budget inline `data:` images,
+including retained history, now use the ordinary reusable HTTP session bridge.
+An `input_image` request bypasses it and keeps upstream HTTP only when its
+payload exceeds the WebSocket frame budget or still carries an external image
+URL. Synthetic pre-created error, cancellation and silent-upstream regressions
+cover local settlement; they do not reproduce the uncaptured #903 provider frame.
+A silent image request fails at the existing acknowledgement deadline (normally
+60 seconds) without image replay. Current-turn bridge eligibility still requires
+a maintainer decision. Connection reuse is not proof of provider cache hits.
+The backend compatibility route with explicit `stream: false` remains on its
+existing non-bridge collection path even without images. External-URL detection
+for that decision recurses the whole input, so
 a URL nested inside a tool-output array keeps the pin even though the image
 inliner never rewrites it — that is the case where the URL is still external at
 the upstream. The inliner and the bridge's post-inline guard still read only

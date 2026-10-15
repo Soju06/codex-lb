@@ -52,3 +52,7 @@ leaves in place when its fetch fails.
 - `codex_lb_upstream_transport_decisions_total` will show
   `upstream_transport="http",policy="explicit"` falling and `"auto"` rising for
   image traffic; `http_bridge_routing{reason="image"}` stays flat.
+
+## Rebase
+
+The image bridge requirement is now owned by `reuse-http-bridge-inline-images`. Its overlapping delta is removed here so a later archive cannot restore the old blanket bypass. The transport-precedence delta remains unchanged; the earlier bypass statements above describe the original scope.

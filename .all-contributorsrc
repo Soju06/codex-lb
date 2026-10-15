@@ -1532,6 +1532,17 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "McHersheys",
+      "name": "McHersheys",
+      "avatar_url": "https://avatars.githubusercontent.com/u/285552078?v=4",
+      "profile": "https://github.com/McHersheys",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -214,9 +214,8 @@ def _input_image_request_requires_http_upstream(
     """Return whether an ``input_image`` request must stay on the upstream HTTP transport.
 
     Inline ``data:`` images ride the upstream websocket unchanged, so carrying one
-    is not by itself a reason to pin upstream HTTP; the bridge bypass exists to
-    free bridge pending slots (#903), not to avoid the websocket. Two
-    websocket-specific hazards survive, and only those keep the pin (#2363). A
+    is not by itself a reason to bypass a reusable bridge or pin upstream HTTP.
+    Two websocket-specific hazards keep the HTTP pin (#2363). A
     payload over the websocket frame budget would reach
     ``_prepare_websocket_response_create_payload``, which replaces every
     historical inline image with an omission notice. An external ``http(s)``

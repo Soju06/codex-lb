@@ -2,48 +2,6 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Responses input images bypass the HTTP bridge
-
-The service MUST bypass the HTTP responses bridge when a `/v1/responses`,
-`/backend-api/codex/responses`, `/responses/compact`, or `/v1/responses/compact`
-request contains any `input_image` part in top-level input items, nested
-message content, or tool output content, and send the request over the raw
-(non-bridge) Responses stream path. This bypass MUST happen after rejecting
-unsupported uploaded-image references and MUST be limited to the current
-request; subsequent text-only requests MAY continue using the HTTP responses
-bridge.
-
-The raw (non-bridge) path is the source of truth for image validation and
-upstream image error semantics. The bridge MUST NOT hold image requests waiting
-for `response.created` when upstream rejects an invalid inline image payload.
-
-This bridge bypass MUST NOT by itself pin the upstream stream transport. The
-upstream transport for a bypassed image request MUST be resolved by the ordinary
-upstream-transport precedence.
-
-#### Scenario: Nested input_image bypasses bridge
-
-- **GIVEN** the HTTP responses bridge is enabled
-- **WHEN** a Responses request contains a nested content part with `type = "input_image"`
-- **THEN** the request is sent through the raw (non-bridge) stream path
-- **AND** the HTTP responses bridge is not used for that request
-
-#### Scenario: Image bypass does not disable future text bridge use
-
-- **GIVEN** the HTTP responses bridge is enabled
-- **WHEN** an image-bearing request bypasses the bridge
-- **THEN** the bypass applies only to that request
-- **AND** a later text-only request can still use the HTTP responses bridge
-
-#### Scenario: Image bypass does not pin the upstream transport
-
-- **GIVEN** the HTTP responses bridge is enabled
-- **AND** `upstream_stream_transport` is `"auto"`
-- **WHEN** a Responses request carrying an inline `data:` image below the
-  WebSocket frame budget bypasses the bridge
-- **THEN** the request MUST NOT be forced onto upstream HTTP
-- **AND** the configured transport policy MUST decide its upstream transport
-
 ### Requirement: Downstream-HTTP upstream transport follows a configurable policy
 
 When a downstream HTTP/SSE request (`request_transport == "http"`) resolves its base upstream transport to `"websocket"`, the proxy MUST decide the final upstream transport using the configured `http_downstream_transport_policy`, after all higher-precedence rails have been applied, and the policy MUST NOT affect native WebSocket clients (`request_transport == "websocket"`), which keep their dedicated upstream WebSocket path.

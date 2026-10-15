@@ -4813,7 +4813,7 @@ async def test_core_inline_input_image_urls_converts_top_level_input_image(monke
 
 
 @pytest.mark.asyncio
-async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monkeypatch):
+async def test_stream_http_bridge_or_retry_uses_bridge_for_inline_input_image(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
@@ -4900,8 +4900,8 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
         )
     ]
 
-    assert output == ["data: retry\n\n"]
-    assert calls == [("retry", payload, None, 180.0, None)]
+    assert output == ["data: bridge\n\n"]
+    assert calls == [("bridge", None, None, None, None)]
 
     text_payload = ResponsesRequest.model_validate(
         {
@@ -5024,7 +5024,8 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_image_generation_
 
 
 @pytest.mark.asyncio
-async def test_native_image_bypass_emits_capacity_keepalive_before_upstream_start(monkeypatch):
+async def test_native_external_image_bypass_emits_capacity_keepalive_before_upstream_start(monkeypatch):
+    # External URLs retain the raw-path bypass; inline data images now bridge.
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     settings = _make_proxy_settings()
     account = _make_account("acc_native_image_capacity")
@@ -5092,7 +5093,7 @@ async def test_native_image_bypass_emits_capacity_keepalive_before_upstream_star
                     "role": "user",
                     "content": [
                         {"type": "input_text", "text": "describe"},
-                        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                        {"type": "input_image", "image_url": "https://example.com/screenshot.png"},
                     ],
                 }
             ],

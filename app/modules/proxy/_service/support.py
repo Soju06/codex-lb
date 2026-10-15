@@ -1210,6 +1210,11 @@ class _WebSocketRequestState:
     preferred_account_id: str | None = None
     context_ciphertexts: set[str] = field(default_factory=set)
     context_dispatch: ContextDispatchIdentity | None = None
+    # Participation is recorded only after the first classified upstream event
+    # confirms the request; the pre-send dispatch call is an ownership fence
+    # only. Prewarm requests never record participation at all.
+    record_context_participation: bool = True
+    context_participation_recorded: bool = False
     # Once an account-bound body has been dispatched, retries remain pinned to
     # that owner even when stale-anchor recovery removes previous_response_id.
     replay_required_account_id: str | None = None

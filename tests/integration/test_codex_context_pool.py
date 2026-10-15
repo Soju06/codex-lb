@@ -495,9 +495,15 @@ def test_context_dispatch_and_ciphertext_expansion_on_websocket_transports(
             async with SessionLocal() as session:
                 row = await session.get(CodexContextSession, SID)
                 assert row is not None and row.api_key_id == key.id
-                assert await session.scalar(
+                participant = await session.scalar(
                     select(CodexContextParticipant.account_id).where(CodexContextParticipant.session_id == SID)
                 )
+                if transport == "websocket":
+                    assert participant is not None
+                elif not quota_rejection:
+                    # HTTP bridge records participation only after the first
+                    # upstream event confirms the request, never pre-send.
+                    assert participant is None
             sent = json.loads(text)
             assert sent["input"][-1]["output"][0]["encrypted_content"] == "native-cipher"
             assert "codex-lb-context-v1:" not in text

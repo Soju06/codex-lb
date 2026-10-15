@@ -52,6 +52,7 @@ from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
 from app.db.models import Account
+from app.modules.proxy.context_dispatch import record_context_dispatch
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -2724,6 +2725,19 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # that attempt transition before any later recovery await can
                 # classify the send as eventless.
                 _mark_response_create_attempt_observed(matched_request_state, event_type)
+                # Record context participation only after a parsed upstream
+                # event with a classified type confirms the request; the
+                # pre-send dispatch was an ownership fence only, and prewarm
+                # states never record participation.
+                if (
+                    event_type is not None
+                    and matched_request_state.record_context_participation
+                    and not matched_request_state.context_participation_recorded
+                ):
+                    matched_request_state.context_participation_recorded = True
+                    await record_context_dispatch(
+                        matched_request_state.context_dispatch, session.api_key, session.account.id
+                    )
                 session.last_upstream_event_generation += 1
                 now = clock.monotonic()
                 if matched_request_state.latency_first_upstream_event_ms is None:

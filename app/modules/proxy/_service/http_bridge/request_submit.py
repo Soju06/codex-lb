@@ -431,7 +431,12 @@ async def _send_http_bridge_request_text_with_archive_id(
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
-    await record_context_dispatch(request_state.context_dispatch, session.api_key, session.account.id)
+    # Pre-send ownership fence only: participation is recorded after the first
+    # upstream event confirms the request, so a failed or cancelled send (or a
+    # prewarm) can never leave a false history participant behind.
+    await record_context_dispatch(
+        request_state.context_dispatch, session.api_key, session.account.id, record_participant=False
+    )
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
@@ -2494,6 +2499,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_id=f"http_prewarm_{uuid4().hex}",
                 model=request_state.model,
                 context_dispatch=request_state.context_dispatch,
+                # A prewarm is not the real request: it must never record
+                # history participation.
+                record_context_participation=False,
                 service_tier=request_state.service_tier,
                 reasoning_effort=request_state.reasoning_effort,
                 api_key_reservation=None,

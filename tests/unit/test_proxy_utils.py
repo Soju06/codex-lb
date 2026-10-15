@@ -55211,6 +55211,64 @@ async def test_process_upstream_websocket_text_defers_accepted_replay_health_unt
     assert request_state.api_key_reservation is None
 
 
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_defers_precreated_replay_health_until_api_key_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """P1 (settlement-before-health): a keyed pre-created request keeps its
+    reservation open across a transparent capacity replay. The replay branch
+    must not write the failing account's health while that reservation is
+    unsettled; it queues the penalty for settlement instead of calling
+    ``_handle_stream_error`` immediately."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    calls: list[str] = []
+
+    async def handle_stream_error(
+        account: Account, _error: object, code: str, http_status: int | None = None, **_kwargs
+    ) -> None:
+        del http_status
+        calls.append(f"health:{account.id}:{code}")
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    api_key = _make_api_key_data("key_ws_precreated_replay_settlement")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_precreated_replay_settlement",
+        key_id=api_key.id,
+        model="gpt-5.6-sol",
+    )
+    failing_account = _make_account("acc_ws_precreated_keyed_failing")
+    request_state = _accepted_lifecycle_request_state(
+        request_id="ws_req_precreated_keyed_replay",
+        api_key_reservation=reservation,
+        awaiting_response_created=True,
+        response_id=None,
+        response_event_count=0,
+        response_create_gate_acquired=True,
+    )
+    request_state.api_key = api_key
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    await service._process_upstream_websocket_text(
+        json.dumps(_accepted_capacity_error_payload(), separators=(",", ":")),
+        account=failing_account,
+        account_id_value=failing_account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=api_key,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+    )
+
+    assert upstream_control.replay_request_state is request_state
+    assert calls == []
+    assert [(penalty.account.id, penalty.code) for penalty in request_state.deferred_keyed_stream_health] == [
+        (failing_account.id, "server_is_overloaded")
+    ]
+
+
 @pytest.mark.parametrize(
     ("replay_downstream_response_id", "expected"),
     [

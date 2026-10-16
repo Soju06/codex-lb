@@ -87,7 +87,9 @@ the bridge. Images bypass only when they occur in the current-turn input suffix,
 when an external `http(s)` image URL survives anywhere in the input (at any depth,
 with case-insensitive schemes), or when an `image_generation` tool is requested.
 The current turn starts after the last assistant-role message or model-output
-item (`reasoning`, `function_call`, `custom_tool_call`, or `apply_patch_call`);
+item (`reasoning`, `function_call`, `custom_tool_call`, `apply_patch_call`,
+`tool_search_call`, `web_search_call`, `mcp_call`, `local_shell_call`,
+`image_generation_call`, `computer_call`, or `code_interpreter_call`);
 without one, the whole input is current. Replayed inline `data:` images alone
 remain bridge-eligible and are forwarded unchanged below the size budget.
 Bypassing the bridge does not force upstream

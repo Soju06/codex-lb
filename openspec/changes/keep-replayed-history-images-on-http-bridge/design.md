@@ -12,7 +12,9 @@ bypass = image_generation_tool
 
 `current_turn(input)` is the suffix of `input` after the last model-output item.
 A model-output item is an assistant-role message or an item of type
-`reasoning`, `function_call`, `custom_tool_call`, or `apply_patch_call`, the
+`reasoning`, `function_call`, `custom_tool_call`, `apply_patch_call`,
+`tool_search_call`, `web_search_call`, `mcp_call`, `local_shell_call`,
+`image_generation_call`, `computer_call`, or `code_interpreter_call`, the
 same set `_http_bridge_input_item_type` already treats as response output. If
 there is no model-output item, the whole input is the current turn.
 
@@ -62,4 +64,4 @@ Guards (a′), (b), and (c) must be proven by mutation: disabling each clause of
 the predicate must fail its guard. The unit-level boundary is covered by
 `tests/unit/test_proxy_utils.py` cases for `current_turn` on inputs with no
 model-output item, a trailing `reasoning` item, and `custom_tool_call` /
-`apply_patch_call` boundaries.
+`apply_patch_call` / `computer_call` / `code_interpreter_call` boundaries.

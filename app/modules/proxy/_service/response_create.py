@@ -201,6 +201,8 @@ def _responses_request_requires_image_bridge_bypass(payload: ResponsesRequest) -
                 "mcp_call",
                 "local_shell_call",
                 "image_generation_call",
+                "computer_call",
+                "code_interpreter_call",
             )
         ):
             current_turn_has_image = False

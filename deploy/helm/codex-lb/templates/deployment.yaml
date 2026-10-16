@@ -344,9 +344,11 @@ spec:
             httpGet:
               path: /health/startup
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 2
-            failureThreshold: 30
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.startupProbe.successThreshold }}
           readinessProbe:
             httpGet:
               path: /health/ready

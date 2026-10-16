@@ -1513,7 +1513,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
     },
     {
       "login": "nhdong1993",
@@ -1529,6 +1530,33 @@
       "name": "Vincent Dev",
       "avatar_url": "https://avatars.githubusercontent.com/u/246649517?v=4",
       "profile": "https://github.com/tubededentifrice-dev",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "h4zardi",
+      "name": "h4zardi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/266002614?v=4",
+      "profile": "https://github.com/h4zardi",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "lenoit",
+      "name": "lenoit",
+      "avatar_url": "https://avatars.githubusercontent.com/u/221324151?v=4",
+      "profile": "https://github.com/lenoit",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "TheFoolThatDoesntBelongToThisEra",
+      "name": "⃟",
+      "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
+      "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
       "contributions": [
         "code"
       ]

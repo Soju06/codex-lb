@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-13T14:24:35.150319+00:00",
+  "updated_at": "2026-10-16T12:10:23.860021+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -537,6 +537,11 @@
       "flex_long_context_cached_input_per_1m": 0.5
     },
     "gpt-5.5-cyber": {
+      "input_per_1m": 12.5,
+      "output_per_1m": 75.0,
+      "cached_input_per_1m": 1.25
+    },
+    "gpt-5.5-cyber-preview": {
       "input_per_1m": 12.5,
       "output_per_1m": 75.0,
       "cached_input_per_1m": 1.25

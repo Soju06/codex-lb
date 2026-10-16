@@ -49,6 +49,16 @@ function DialogOverlay({
   )
 }
 
+// <body> stays interactive while a dialog is open (see index.css), so a press
+// outside the content that misses the overlay landed on something a third party
+// drew over the dialog — a password manager's suggestion list, say. Choosing
+// from it must not dismiss the dialog; only the overlay stands for "outside".
+function guardThirdPartySurface(event: { target: EventTarget | null; preventDefault: () => void }) {
+  if (!(event.target instanceof Element && event.target.closest("[data-slot='dialog-overlay']"))) {
+    event.preventDefault()
+  }
+}
+
 function DialogContent({
   className,
   children,
@@ -83,6 +93,7 @@ function DialogContent({
         onPointerDownOutside={(event) => {
           onPointerDownOutside?.(event)
           guardDismiss(event)
+          guardThirdPartySurface(event)
         }}
         {...props}
       >

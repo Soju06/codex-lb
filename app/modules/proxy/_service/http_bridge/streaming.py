@@ -468,6 +468,7 @@ class _VerifiedDurableFullResend:
             replay_projection.input_items,
             stored_count=replay_projection.stored_prefix_count,
             canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+            allow_same_owner_agent_messages=True,
         ) or (
             pending_tool_calls is not None
             and responses_input_suffix_matches_pending_tool_calls(
@@ -475,6 +476,7 @@ class _VerifiedDurableFullResend:
                 stored_count=replay_projection.stored_prefix_count,
                 pending_tool_calls=pending_tool_calls,
                 canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+                allow_same_owner_agent_messages=True,
             )
         )
         if not safe_fresh_context:
@@ -1598,6 +1600,7 @@ class _HTTPBridgeStreamingMixin:
                 replay_projection.input_items,
                 stored_count=replay_projection.stored_prefix_count,
                 canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+                allow_same_owner_agent_messages=True,
             ) or (
                 lookup.latest_pending_tool_calls is not None
                 and responses_input_suffix_matches_pending_tool_calls(
@@ -1605,6 +1608,7 @@ class _HTTPBridgeStreamingMixin:
                     stored_count=replay_projection.stored_prefix_count,
                     pending_tool_calls=lookup.latest_pending_tool_calls,
                     canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+                    allow_same_owner_agent_messages=True,
                 )
             )
 
@@ -2273,6 +2277,11 @@ class _HTTPBridgeStreamingMixin:
                 return False
             if payload.previous_response_id is not None or rewritten_file_account_id is not None:
                 return False
+            if durable_full_resend_proof is not None:
+                # This unanchored body is authorized only for its durable
+                # owner. Account-neutral recovery has its own projection
+                # and eligibility check; retirement cannot bypass them.
+                return False
             retiring_account_id = request_state.preferred_account_id
             if durable_lookup is None or retiring_account_id is None:
                 # Nothing durable to retire: the owner came from the
@@ -2521,7 +2530,9 @@ class _HTTPBridgeStreamingMixin:
                     request_stage=request_state.request_stage,
                     preferred_account_id=request_state.preferred_account_id,
                     preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
-                    fallback_on_preferred_account_unavailable=not file_required_preferred_account,
+                    fallback_on_preferred_account_unavailable=not (
+                        file_required_preferred_account or durable_full_resend_proof is not None
+                    ),
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,

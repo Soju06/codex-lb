@@ -9452,6 +9452,179 @@ async def test_backend_responses_verified_full_resend_ignores_stale_broad_owner_
         )
 
 
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize(
+    "replay_case",
+    [
+        "fresh",
+        "stale-anchor",
+        "after-output",
+        "missing-output",
+        "unknown-manifest",
+        "malformed-message",
+        "owner-unavailable",
+        "quarantined-owner-unavailable",
+        "fence-unavailable",
+    ],
+)
+@pytest.mark.asyncio
+async def test_http_bridge_preserves_agent_message_full_resend(
+    async_client, app_instance, monkeypatch, path, replay_case
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(async_client, "acc_agent_owner", "agent-owner@example.com")
+    owner = await _get_account(owner_id)
+    service = get_proxy_service_for_app(app_instance)
+    first_upstream = _InterruptedCustomToolUpstreamWebSocket(emit_added=replay_case != "unknown-manifest")
+    rejecting_upstream = (
+        _PreviousResponseNotFoundAfterOutputUpstreamWebSocket()
+        if replay_case == "after-output"
+        else _PreviousResponseNotFoundUpstreamWebSocket()
+    )
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_agent_recovered")
+    connected_accounts: list[str] = []
+
+    async def ensure_fresh(self, account, *, force=False, timeout_seconds):
+        return account
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        connected_accounts.append(account_id_header)
+        assert account_id_header == owner.chatgpt_account_id
+        if len(connected_accounts) == 1:
+            return first_upstream
+        if replay_case in {"stale-anchor", "after-output", "fence-unavailable"} and len(connected_accounts) == 2:
+            return rejecting_upstream
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    headers = {"x-codex-session-id": "agent-message-conversation"}
+    historical_input = [{"role": "user", "content": [{"type": "input_text", "text": "Run the check."}]}]
+    first_events = await _collect_sse_events(
+        async_client,
+        path,
+        json_body={"model": "gpt-5.1", "instructions": "Return OK.", "input": historical_input, "stream": True},
+        headers=headers,
+    )
+    previous_response_id = first_events[-1]["response"]["id"]
+    bridge_session = next(iter(service._http_bridge_sessions.values()))
+    await service._close_http_bridge_session(bridge_session)
+    await _import_account(async_client, "acc_agent_alternate", "agent-alternate@example.com")
+    if replay_case in {"owner-unavailable", "quarantined-owner-unavailable"}:
+        async with SessionLocal() as session:
+            await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.PAUSED))
+            await session.commit()
+    if replay_case == "quarantined-owner-unavailable":
+        # A quarantined key already suppresses anchor injection, so it skips
+        # the fresh-bridge-only proof branch. The durable proof still binds
+        # the original opaque input to its account.
+        monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_session_key_quarantined", lambda *_args: True)
+
+    full_resend = [
+        *historical_input,
+        {"type": "reasoning", "id": "rs_prior", "summary": [], "encrypted_content": "opaque-prior-reasoning"},
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_shell",
+            "call_id": "call_custom_shell",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+        },
+        *(
+            []
+            if replay_case == "missing-output"
+            else [{"type": "custom_tool_call_output", "call_id": "call_custom_shell", "output": "/workspace"}]
+        ),
+        {"type": "reasoning", "id": "rs_interrupted", "summary": [], "encrypted_content": "opaque-interrupted"},
+        {
+            "type": "agent_message",
+            "id": "amsg_worker",
+            "author": "/root/worker",
+            "recipient": "/root",
+            "content": [
+                {"type": "input_text", "text": "Worker completed."},
+                {"type": "encrypted_content", "encrypted_content": "opaque-agent-content"},
+            ],
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_agent"},
+        },
+    ]
+    request_body = {
+        "model": "gpt-5.1",
+        "instructions": "Return OK.",
+        "input": full_resend,
+        "store": False,
+        "stream": True,
+    }
+    if replay_case == "malformed-message":
+        full_resend[-1]["id"] = " "
+    if replay_case in {"stale-anchor", "after-output", "fence-unavailable"}:
+        request_body["previous_response_id"] = previous_response_id
+    if replay_case == "fence-unavailable":
+        monkeypatch.setattr(
+            http_bridge_streaming_module,
+            "_http_bridge_verified_stale_anchor_replay_is_operation_fenced",
+            lambda _session, _request_state: False,
+        )
+        response = await async_client.post(path, json=request_body, headers=headers)
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert replacement_upstream.sent_text == []
+        assert len(connected_accounts) == 2
+        return
+    if replay_case in {"owner-unavailable", "quarantined-owner-unavailable"}:
+        response = await async_client.post(path, json=request_body, headers=headers)
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "previous_response_owner_unavailable"
+        assert len(connected_accounts) == 1
+        assert replacement_upstream.sent_text == []
+        return
+
+    events, response_headers = await _collect_sse_events_with_headers(
+        async_client, path, json_body=request_body, headers=headers
+    )
+    if replay_case == "after-output":
+        if path == "/backend-api/codex/responses":
+            assert any(event["type"] == "response.reasoning_summary_text.delta" for event in events)
+        assert events[-1]["type"] == "response.failed"
+        assert replacement_upstream.sent_text == []
+        assert len(connected_accounts) == 2
+        return
+    assert events[-1]["type"] == "response.completed"
+    assert len(replacement_upstream.sent_text) == 1
+    sent_payload = json.loads(replacement_upstream.sent_text[0])
+    if replay_case in {"missing-output", "unknown-manifest", "malformed-message"}:
+        assert sent_payload["previous_response_id"] == previous_response_id
+    else:
+        assert "previous_response_id" not in sent_payload
+        assert sent_payload["input"] == full_resend
+        assert sent_payload["store"] is False
+    assert connected_accounts == [owner.chatgpt_account_id] * (3 if replay_case == "stale-anchor" else 2)
+    assert len(rejecting_upstream.sent_text) == (1 if replay_case == "stale-anchor" else 0)
+
+    if replay_case in {"fresh", "stale-anchor"}:
+        # The replacement becomes the owner of subsequent incremental turns;
+        # recovery must not keep reusing the response ID from the old socket.
+        next_input = [*full_resend, *events[-1]["response"]["output"], {"role": "user", "content": "Continue."}]
+        next_events = await _collect_sse_events(
+            async_client,
+            path,
+            json_body={**request_body, "input": next_input, "previous_response_id": None},
+            headers={
+                **headers,
+                **{key: value for key, value in response_headers.items() if key == "x-codex-turn-state"},
+            },
+        )
+        assert next_events[-1]["type"] == "response.completed"
+        assert len(replacement_upstream.sent_text) == 2
+        next_payload = json.loads(replacement_upstream.sent_text[1])
+        if "previous_response_id" in next_payload:
+            assert next_payload["previous_response_id"] == events[-1]["response"]["id"]
+            assert next_payload["input"] == next_input[-2:]
+        else:
+            assert next_payload["input"] == next_input
+
+
 @pytest.mark.asyncio
 async def test_backend_responses_verified_full_resend_fails_over_to_new_account_after_owner_loss(
     async_client,

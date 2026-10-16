@@ -240,6 +240,10 @@ def _project_account_neutral_replay_item(
         return item
     if item_type is not None and not isinstance(item_type, str):
         return item
+    if item_type == "agent_message":
+        # Only same-owner context proofs accept these opaque input items.
+        # Preserve their complete shape for validation; they are not portable.
+        return item
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):
@@ -312,6 +316,7 @@ def responses_input_suffix_retains_prior_output(
     *,
     stored_count: int,
     canonical_lite_developer_index: int | None = None,
+    allow_same_owner_agent_messages: bool = False,
 ) -> bool:
     """Prove that a stored input prefix is followed by prior output and new input."""
 
@@ -374,7 +379,7 @@ def responses_input_suffix_retains_prior_output(
             fresh_followup_count = 0
             fresh_followup_is_user_message = False
             continue
-        if _is_fresh_followup_input(item):
+        if _is_fresh_followup_input(item) or (allow_same_owner_agent_messages and _is_same_owner_agent_message(item)):
             if not retained_output_seen or pending_suffix_calls:
                 return False
             fresh_followup_seen = True
@@ -402,6 +407,7 @@ def responses_input_suffix_matches_pending_tool_calls(
     stored_count: int,
     pending_tool_calls: Mapping[str, str],
     canonical_lite_developer_index: int | None = None,
+    allow_same_owner_agent_messages: bool = False,
 ) -> bool:
     """Prove the suffix exactly settles the durable prior-response call manifest."""
 
@@ -415,6 +421,13 @@ def responses_input_suffix_matches_pending_tool_calls(
     if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
         return False
     suffix = input_items[stored_count:]
+    if allow_same_owner_agent_messages:
+        # New subagent input may follow the settled response, but cannot stand
+        # in for a missing call/output or interrupt a parallel call batch. Only
+        # the proof view omits these items; dispatch retains the original body
+        # on its proven owner. Account-neutral checks still reject them.
+        while suffix and _is_same_owner_agent_message(suffix[-1]):
+            suffix.pop()
     if (
         len(suffix) == 3
         and isinstance(suffix[1], dict)
@@ -442,6 +455,36 @@ def responses_input_suffix_matches_pending_tool_calls(
             suffix_outputs[call_id] = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE[item_type]
     expected = dict(pending_tool_calls)
     return suffix_calls == expected and suffix_outputs == expected
+
+
+def _is_same_owner_agent_message(item: JsonValue) -> bool:
+    """Recognize opaque Codex subagent input without claiming account portability."""
+    if not isinstance(item, dict) or item.get("type") != "agent_message":
+        return False
+    if item.keys() - {"type", "id", "author", "recipient", "content", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}:
+        return False
+    if not _is_nonblank_string(item.get("author")) or not _is_nonblank_string(item.get("recipient")):
+        return False
+    if "id" in item and not _is_nonblank_string(item["id"]):
+        return False
+    metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    if metadata is not None and not isinstance(metadata, dict):
+        return False
+    content = item.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            return False
+        if part.get("type") == "input_text":
+            if part.keys() != {"type", "text"} or not _is_nonblank_string(part.get("text")):
+                return False
+        elif part.get("type") == "encrypted_content":
+            if part.keys() != {"type", "encrypted_content"} or not _is_nonblank_string(part.get("encrypted_content")):
+                return False
+        else:
+            return False
+    return True
 
 
 def _direct_tool_call_prefix_state(

@@ -328,3 +328,19 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Subagent messages after HTTP bridge replacement
+
+Codex can append an `agent_message` when a subagent interrupts generation.
+Treating that input as an unsupported replay suffix caused complete cumulative
+requests to receive an old socket's `store=false` anchor. The replacement socket
+then rejected the anchor, even though the client had supplied enough history.
+
+The same-owner context proof recognizes a well-formed agent message after
+retained assistant output or an exactly settled durable tool-call manifest.
+For example, `[stored user input, custom call, matching output, agent message]`
+can start on a replacement socket using the original input and encrypted
+content. A missing output cannot be filled in by the agent message. The proof
+does not make the payload portable: unavailable-owner fallback and retirement
+cannot move that original body to another account. Account-neutral recovery
+retains its separate eligibility and projection rules.

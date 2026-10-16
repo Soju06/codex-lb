@@ -116,6 +116,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_task_deferring_cancellation
 from app.core.utils.sse import (
     ParsedSseBlock,
+    extract_sse_event_type,
     format_local_sse_event,
     format_sse_event,
     parse_sse_data_json,
@@ -2211,11 +2212,24 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
     return payload
 
 
-def _format_normalized_stream_event(payload: dict[str, JsonValue], normalized: dict[str, JsonValue]) -> str:
+def _format_normalized_stream_event(
+    payload: dict[str, JsonValue], normalized: dict[str, JsonValue], *, source_block: str | None = None
+) -> str:
     block = format_sse_event(normalized)
+    is_upstream_keepalive = payload.get("type") == "codex.keepalive" or (
+        source_block is not None
+        and (
+            isinstance(source_block, ParsedSseBlock)
+            and source_block.is_upstream_keepalive
+            or extract_sse_event_type(source_block) == "codex.keepalive"
+        )
+    )
     # Error normalization creates a local response ID, but upstream activity occurred.
-    if normalized is not payload and normalized.get("type") == "response.failed":
-        return ParsedSseBlock(block, normalized, response_id_is_local=True)
+    response_id_is_local = normalized is not payload and normalized.get("type") == "response.failed"
+    if response_id_is_local or is_upstream_keepalive:
+        return ParsedSseBlock(
+            block, normalized, response_id_is_local=response_id_is_local, is_upstream_keepalive=is_upstream_keepalive
+        )
     return block
 
 
@@ -2257,7 +2271,7 @@ def _normalize_stream_payload_for_http_block(
         return event_block, event_type if isinstance(event_type, str) else None
     normalized_type = normalized.get("type")
     event_type = normalized_type if isinstance(normalized_type, str) else None
-    return _format_normalized_stream_event(payload, normalized), event_type
+    return _format_normalized_stream_event(payload, normalized, source_block=event_block), event_type
 
 
 def _non_streaming_response_event(payload: JsonValue) -> tuple[str, str]:

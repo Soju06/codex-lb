@@ -5,7 +5,8 @@ import json
 import sys
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, AsyncIterator, Literal, Mapping, cast
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal, Mapping, TypedDict, cast
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
@@ -66,7 +67,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import ParsedSseBlock, format_sse_event, parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, extract_sse_event_type, format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
@@ -308,6 +309,8 @@ from app.modules.proxy._service.support import (
     _RequestLogFailureMetadata,
     _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
+    _TTFTReasoningDeltaState,
+    _verbatim_relay_event_type,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -427,6 +430,65 @@ from app.modules.proxy.http_bridge_forwarding import (
 )
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.usage.updater import UsageUpdater
+
+
+class _HTTPPhaseLogFields(TypedDict):
+    latency_first_token_ms: int | None
+    latency_first_upstream_event_ms: int | None
+    latency_response_created_ms: int | None
+
+
+@dataclass(slots=True)
+class _HTTPPhaseLatencies:
+    first_token_ms: int | None = None
+    first_upstream_event_ms: int | None = None
+    response_created_ms: int | None = None
+
+    def parse_event(
+        self,
+        line: str,
+        started_at: float,
+        observed_at: Callable[[], float],
+        pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    ) -> tuple[dict[str, JsonValue] | None, str | None, bool]:
+        """Observe pending phases before authorizing a frame's verbatim relay."""
+        verbatim_type = _verbatim_relay_event_type(line, self.first_token_ms, pending_reasoning_deltas)
+        # A relay header cannot rule out created in the payload. Unicode escapes
+        # can encode its key or value, so those candidates still need parsing.
+        if (
+            self.first_upstream_event_ms is not None
+            and verbatim_type is not None
+            and (self.response_created_ms is not None or ("response.created" not in line and "\\u" not in line))
+        ):
+            return None, verbatim_type, True
+        payload = parse_sse_data_json(line)
+        event_type = classify_event_type(payload)
+        if (
+            payload is not None
+            and event_type != "codex.keepalive"
+            and not (isinstance(line, ParsedSseBlock) and (line.is_local or line.is_upstream_keepalive))
+            and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
+            and (
+                self.first_upstream_event_ms is None
+                or (self.response_created_ms is None and event_type == "response.created")
+            )
+            and extract_sse_event_type(line) != "codex.keepalive"
+        ):
+            elapsed_ms = max(0, int((observed_at() - started_at) * 1000))
+            if self.first_upstream_event_ms is None:
+                self.first_upstream_event_ms = elapsed_ms
+            if self.response_created_ms is None and event_type == "response.created":
+                self.response_created_ms = elapsed_ms
+        if verbatim_type is not None:
+            return None, verbatim_type, True
+        return payload, event_type, False
+
+    def log_fields(self) -> _HTTPPhaseLogFields:
+        return {
+            "latency_first_token_ms": self.first_token_ms,
+            "latency_first_upstream_event_ms": self.first_upstream_event_ms,
+            "latency_response_created_ms": self.response_created_ms,
+        }
 
 
 def _facade() -> Any:

@@ -14,9 +14,16 @@ import json
 from typing import AsyncIterator
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+import app.core.clients.proxy as proxy_client_module
+from app.core.openai.parsing import classify_event_type
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
+from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.streaming.helpers import _HTTPPhaseLatencies
 from tests.unit.test_streaming_retry_virtual_time import _make_account, _RequestLogsRecorder, _virtual_service
 
 pytestmark = pytest.mark.unit
@@ -24,6 +31,87 @@ pytestmark = pytest.mark.unit
 
 def _sse(event: dict[str, object]) -> str:
     return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+
+@given(
+    boundary=st.sampled_from(["\r", "\n", "\r\n"]),
+    space=st.sampled_from(["", " "]),
+    event_after_data=st.booleans(),
+    representation=st.sampled_from(
+        ["header", "payload", "both", "conflicting_created", "conflicting_token", "header_error", "payload_error"]
+    ),
+    parsed_carrier=st.booleans(),
+    ttft_observed=st.booleans(),
+    later_frame=st.booleans(),
+    observe_created=st.booleans(),
+    canonical=st.booleans(),
+    created_encoding=st.sampled_from(["literal", "escaped_key", "escaped_value"]),
+)
+@settings(max_examples=40, deadline=None)
+def test_http_phase_observation_ignores_equivalent_keepalives(
+    boundary: str,
+    space: str,
+    event_after_data: bool,
+    representation: str,
+    parsed_carrier: bool,
+    ttft_observed: bool,
+    later_frame: bool,
+    observe_created: bool,
+    canonical: bool,
+    created_encoding: str,
+) -> None:
+    payload: dict[str, JsonValue] = {}
+    if representation in {"payload", "both", "payload_error"}:
+        payload["type"] = "codex.keepalive"
+    elif representation == "conflicting_created":
+        payload["type"] = "response.created"
+    elif representation == "conflicting_token":
+        payload.update(type="response.output_text.delta", delta="heartbeat")
+    if representation in {"header_error", "payload_error"}:
+        payload["error"] = {"code": "server_error", "message": "Upstream failure", "type": "server_error"}
+    header = "response.in_progress" if representation in {"payload", "payload_error"} else "codex.keepalive"
+    fields = [f"event:{space}{header}", f"data:{space}{json.dumps(payload)}"]
+    if event_after_data:
+        fields.reverse()
+    # A later event field replaces an earlier one, independently of data order.
+    if canonical:
+        block = f"event: {header}\ndata: {json.dumps(payload)}\n\n"
+    else:
+        block = boundary.join(["event: ignored", *fields, "", ""])
+    if parsed_carrier:
+        block = ParsedSseBlock(block, payload)
+    block, _ = proxy_client_module._normalize_stream_payload_for_http_block(block)
+    normalized_payload = parse_sse_data_json(block)
+    phases = _HTTPPhaseLatencies(first_token_ms=125 if ttft_observed else None)
+
+    def unexpected_clock() -> float:
+        pytest.fail("Excluded or settled phases must not observe the clock")
+
+    if later_frame:
+        assert phases.parse_event(": keepalive\n\n", 1.0, unexpected_clock, {}) == (None, None, False)
+    relay_verbatim = (
+        canonical and ttft_observed and representation in {"header", "both", "conflicting_created", "conflicting_token"}
+    )
+    assert phases.parse_event(block, 1.0, unexpected_clock, {}) == (
+        (None, header, True) if relay_verbatim else (normalized_payload, classify_event_type(normalized_payload), False)
+    )
+    assert phases.first_upstream_event_ms is None
+    assert phases.response_created_ms is None
+    token = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+    assert phases.parse_event(token, 1.0, lambda: 1.25, {})[2] is ttft_observed
+    assert phases.first_upstream_event_ms == 250
+    phases.first_token_ms = 250
+    if observe_created:
+        created_data = '{"type":"response.created"}'
+        if created_encoding == "escaped_key":
+            created_data = created_data.replace('"type"', '"\\u0074ype"')
+        elif created_encoding == "escaped_value":
+            created_data = created_data.replace("created", "\\u0063reated")
+        created = f"event: response.output_text.delta\ndata: {created_data}\n\n"
+        assert phases.parse_event(created, 1.0, lambda: 1.5, {}) == (None, "response.output_text.delta", True)
+        phases.parse_event(created, 1.0, unexpected_clock, {})
+    assert phases.response_created_ms == (500 if observe_created else None)
+    assert phases.parse_event(token, 1.0, unexpected_clock, {}) == (None, "response.output_text.delta", True)
 
 
 @pytest.mark.asyncio

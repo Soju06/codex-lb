@@ -4,9 +4,10 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -17,6 +18,7 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.downstream_delivery as downstream_delivery_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.clients.http import get_http_client
 from app.core.config.settings import Settings
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.openai.models import CompactResponsePayload
@@ -25,8 +27,12 @@ from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.modules.proxy._service import request_log as request_log_module
+from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
+from app.modules.proxy.affinity import _extract_model_class
 from app.modules.proxy.downstream_delivery import (
     OUTCOME_TERMINAL_AFTER_DISCONNECT,
     OUTCOME_TERMINAL_WRITTEN,
@@ -34,8 +40,252 @@ from app.modules.proxy.downstream_delivery import (
 )
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "distinct_phases",
+        "retry",
+        "zero_created",
+        "missing_created",
+        "mismatched_created",
+        "keepalive_token",
+        "empty",
+        "no_headers",
+        "oversized",
+        "upstream_error",
+        "normalized_upstream_error",
+        "normalized_keepalive_error",
+    ],
+)
+async def test_http_phase_timings_use_observed_upstream_events_and_persist(
+    async_client, app_instance, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    auth = _make_auth_json("phase-account", "phase-timing@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    )
+    assert imported.status_code == 200
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "http"
+    proxy_module.get_settings().proxy_request_budget_seconds = 4.0
+    monkeypatch.setattr(proxy_client_module, "discover_native_egress_client", lambda: None)
+
+    # Inject the service clock used by the production timing seam; asyncio's
+    # scheduler and real deadlines remain untouched.
+    started_at = time.monotonic()
+    clock = VirtualClock(monotonic_value=started_at, epoch_value=time.time())
+    service = get_proxy_service_for_app(app_instance)
+    service._clock = clock
+    admission = service._get_work_admission()
+    acquire = admission.acquire_response_create
+    calls = 0
+
+    if case == "retry":
+        retry_auth = _make_auth_json("phase-retry-account", "phase-retry@example.com")
+        imported = await async_client.post(
+            "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(retry_auth), "application/json")}
+        )
+        assert imported.status_code == 200
+
+    async def timed_admission(*args, **kwargs):
+        lease = await acquire(*args, **kwargs)
+        clock.step_to(started_at + 0.5 + (0.75 * calls if case == "retry" else 0))
+        return lease
+
+    monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
+    created = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_http_phase"}}\n\n'
+    delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+    fast_delta = (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":" world\\n"}\n\n'
+    )
+    completed = (
+        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_http_phase",'
+        '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}\n\n'
+    )
+    blocks = [(1.5, delta), (1.75, fast_delta), (2.0, completed)]
+    expected_first, expected_created, expected_ttft = 250, None, 1000
+    if case in {"distinct_phases", "retry"}:
+        blocks[:0] = [
+            (0.75, 'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n'),
+            (1.0, created),
+        ]
+        expected_created = 500
+        if case == "distinct_phases":
+            blocks[:0] = [
+                (0.55, "event: codex.keepalive\ndata: {}\n\n"),
+                (0.575, "event:codex.keepalive\ndata: {}\n\n"),
+                (0.6, "event: codex.keepalive\r\ndata: {}\r\n\r\n"),
+                (0.625, "data: {}\nevent: codex.keepalive\n\n"),
+            ]
+        if case == "retry":
+            blocks = [(offset + 1.0, block) for offset, block in blocks]
+            expected_first, expected_created, expected_ttft = 500, 750, 1250
+    elif case == "zero_created":
+        blocks[:0] = [(0.5, created), (0.75, created)]
+        expected_first = expected_created = 0
+    elif case in {"missing_created", "mismatched_created", "keepalive_token"}:
+        blocks[0] = (0.75, delta)
+        expected_ttft = 250
+        if case == "mismatched_created":
+            blocks.insert(1, (1.0, created.replace("event: response.created", "event: response.output_text.delta")))
+            expected_created = 500
+        if case == "keepalive_token":
+            blocks[:0] = [
+                (0.625, 'event: codex.keepalive\ndata: {"type":"response.output_text.delta","delta":"heartbeat"}\n\n'),
+                (0.6875, 'event: codex.keepalive\ndata: {"type":"response.output_text.delta","delta":"heartbeat"}\n\n'),
+            ]
+            expected_ttft = 125
+    elif case in {"empty", "no_headers"}:
+        blocks = []
+        expected_first = expected_ttft = None
+    elif case == "oversized":
+        monkeypatch.setattr(proxy_client_module, "MAX_SSE_EVENT_BYTES", 1024)
+        blocks = [(0.75, 'data: {"type":"response.output_text.delta","delta":"' + "x" * 2048 + '"}\n\n')]
+        expected_first = expected_ttft = None
+    elif case in {"normalized_upstream_error", "normalized_keepalive_error"}:
+        blocks = [
+            (0.75, 'data: {"error":{"code":"server_error","message":"Upstream failure","type":"server_error"}}\n\n')
+        ]
+        expected_ttft = None
+        if case == "normalized_keepalive_error":
+            blocks = [(offset, "event: codex.keepalive\n" + block) for offset, block in blocks]
+            expected_first = None
+    else:
+        blocks = [
+            (
+                0.75,
+                'event: response.failed\ndata: {"type":"response.failed","response":{"id":"resp_http_phase",'
+                '"error":{"code":"stream_incomplete","message":"Upstream failure","type":"server_error"}}}\n\n',
+            )
+        ]
+        expected_ttft = None
+
+    class ScriptedContent:
+        def __init__(self, response_blocks: list[tuple[float, str]]) -> None:
+            self._blocks = response_blocks
+
+        async def iter_chunked(self, _size):
+            for offset, block in self._blocks:
+                clock.step_to(started_at + offset)
+                yield block.encode()
+
+    class ScriptedResponse:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self, response_blocks: list[tuple[float, str]]) -> None:
+            self.content = ScriptedContent(response_blocks)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def scripted_post(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if case == "no_headers":
+            raise proxy_client_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+        if case == "retry" and calls == 1:
+            return ScriptedResponse(
+                [
+                    (
+                        0.75,
+                        'event: response.failed\ndata: {"type":"response.failed","response":'
+                        '{"id":"resp_http_phase_failed","error":{"code":"usage_limit_reached",'
+                        '"message":"You have hit your ChatGPT usage limit. Try again later.",'
+                        '"type":"server_error"}}}\n\n',
+                    )
+                ]
+            )
+        return ScriptedResponse(blocks)
+
+    monkeypatch.setattr(get_http_client().session, "post", scripted_post)
+    parsed_lines: list[str] = []
+    parse = streaming_helpers_module.parse_sse_data_json
+
+    def observed_parse(line: str):
+        parsed_lines.append(line)
+        return parse(line)
+
+    monkeypatch.setattr(streaming_helpers_module, "parse_sse_data_json", observed_parse)
+
+    def phase_samples() -> dict[tuple[str, str], float]:
+        metric = request_log_module.proxy_phase_latency_seconds
+        if metric is None:
+            return {}
+        return {
+            (sample.name, sample.labels["phase"]): float(sample.value)
+            for family in cast(Any, metric).collect()
+            for sample in family.samples
+            if sample.name.endswith(("_sum", "_count"))
+            and sample.labels["transport"] == "http"
+            and sample.labels["upstream_transport"] == "http"
+            and sample.labels["model_class"] == _extract_model_class("gpt-5.4")
+        }
+
+    before_metrics = phase_samples()
+
+    async def request():
+        return await async_client.post(
+            "/v1/responses"
+            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error", "normalized_keepalive_error"}
+            else "/backend-api/codex/responses",
+            json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
+            headers={"user-agent": "codex_cli_rs/0.153.2", "x-request-id": "req_http_phase"},
+        )
+
+    response = await request()
+    assert calls == (2 if case == "retry" else 1)
+    assert await service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        statement = select(RequestLog).where(RequestLog.account_id.is_not(None)).order_by(RequestLog.latency_queue_ms)
+        rows = (await session.execute(statement)).scalars().all()
+    assert len(rows) == calls
+    if case == "retry":
+        failed = rows[0]
+        assert failed.status == "error"
+        assert failed.error_code == "usage_limit_reached"
+        assert failed.latency_queue_ms == 500
+        assert failed.latency_first_upstream_event_ms == 250
+        assert failed.latency_response_created_ms is None
+        assert failed.latency_first_token_ms is None
+        assert failed.account_id != rows[1].account_id
+    row = rows[-1]
+    assert row.latency_queue_ms == (1250 if case == "retry" else 500)
+    assert row.latency_first_token_ms == expected_ttft
+    assert row.latency_first_upstream_event_ms == expected_first
+    assert row.latency_response_created_ms == expected_created
+    if case == "oversized":
+        event = _extract_first_event(response.text.splitlines())
+        assert event["response"]["error"]["code"] == "stream_event_too_large"
+        # is_local synthetic failures must not stamp first-upstream phase (outside
+        # SYNTHETIC_TRANSPORT_FAILURE_CODES; only is_local protects the metric).
+        assert row.latency_first_upstream_event_ms is None
+    if expected_ttft is not None:
+        assert response is not None
+        assert response.status_code == 200
+        assert fast_delta not in parsed_lines, "Later token frames must bypass payload parsing"
+        assert fast_delta in response.text
+    after_metrics = phase_samples()
+    if request_log_module.PROMETHEUS_AVAILABLE:
+        for phase, expected in (("first_upstream_event", expected_first), ("response_created", expected_created)):
+            observations = [expected] if expected is not None else []
+            if case == "retry" and phase == "first_upstream_event":
+                observations.append(250)
+            count_key = ("codex_lb_proxy_phase_latency_seconds_count", phase)
+            sum_key = ("codex_lb_proxy_phase_latency_seconds_sum", phase)
+            assert after_metrics.get(count_key, 0) - before_metrics.get(count_key, 0) == len(observations)
+            assert after_metrics.get(sum_key, 0) - before_metrics.get(sum_key, 0) == pytest.approx(
+                sum(observations) / 1000
+            )
 
 
 def _encode_jwt(payload: dict) -> str:

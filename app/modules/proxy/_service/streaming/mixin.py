@@ -41,11 +41,11 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import synthetic_stream_failure_event as response_failed_event
-from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
+from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, parse_sse_event_payload
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
@@ -264,6 +264,7 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.helpers import (
     _classify_terminal_stream_error_frame,
+    _HTTPPhaseLatencies,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _observe_terminal_stream_error_frame,
@@ -299,7 +300,6 @@ from app.modules.proxy._service.support import (
     _StreamSettlement,
     _TerminalStreamError,
     _ttft_event_latency_ms,
-    _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -506,8 +506,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        # Keep selection/failover waits out of latency and TTFT, record them as
-        # queue time, then re-anchor after this attempt's admission wait.
+        # Re-anchor after admission; selection and failover waits belong to queue time.
         attempt_started_at = start = clock.monotonic()
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status, error_code, error_message = "success", None, None
@@ -518,7 +517,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         route_trace = UpstreamProxyRouteTrace()
         route_fail_closed_reason: str | None = None
         saw_text_delta = terminal_event_seen = suppressed_duplicate_tool_call = False
-        latency_first_token_ms: int | None = None
+        latencies = _HTTPPhaseLatencies()
         ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], Any] = {}
         if tool_call_dedupe is None:
             tool_call_dedupe = _WebSocketUpstreamControl()
@@ -594,6 +593,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             iterator = _facade()._stream_iterator_after_capacity_admission(stream)
             try:
                 first = await iterator.__anext__()
+                first_observed_at = clock.monotonic()
             except StopAsyncIteration:
                 response_create_lease.release()
                 await proxy._load_balancer.release_account_lease(account_response_create_lease)
@@ -631,8 +631,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
-            first_payload = parse_sse_data_json(first)
-            event_type = classify_event_type(first_payload)
+            frame = latencies.parse_event(first, attempt_started_at, lambda: first_observed_at, ttft_reasoning_deltas)
+            first_payload, event_type, _ = frame
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -771,8 +771,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
                     terminal_event_seen = terminal_event_seen or _stamp_terminal(settlement, event_type, clock)
-                    if latency_first_token_ms is None:
-                        latency_first_token_ms = _ttft_event_latency_ms(
+                    if latencies.first_token_ms is None:
+                        latencies.first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                         )
                     settlement.downstream_visible = True
@@ -782,15 +782,15 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
-                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                frame = latencies.parse_event(line, attempt_started_at, clock.monotonic, ttft_reasoning_deltas)
+                event_payload, event_type, relay_verbatim = frame
+                if relay_verbatim:
                     await _touch_api_key_reservation()
-                    if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         saw_text_delta = settlement.downstream_text_visible = True
                     settlement.downstream_visible = True
                     yield line
                     continue
-                event_payload = parse_sse_data_json(line)
-                event_type = classify_event_type(event_payload)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -928,8 +928,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
-                if latency_first_token_ms is None:
-                    latency_first_token_ms = _ttft_event_latency_ms(
+                if latencies.first_token_ms is None:
+                    latencies.first_token_ms = _ttft_event_latency_ms(
                         event_type, event_payload, ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                     )
                 if mark_duplicate_tool_call_downstream_event(
@@ -1034,8 +1034,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             reasoning_tokens = (
                 usage.output_tokens_details.reasoning_tokens if usage and usage.output_tokens_details else None
             )
-            if latency_first_token_ms is None:
-                latency_first_token_ms = _finalize_ttft_latency_ms(
+            if latencies.first_token_ms is None:
+                latencies.first_token_ms = _finalize_ttft_latency_ms(
                     ttft_reasoning_deltas, attempt_started_at, now=clock.monotonic()
                 )
             settlement.status = status
@@ -1068,7 +1068,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
-                latency_first_token_ms=latency_first_token_ms,
+                **latencies.log_fields(),
                 latency_queue_ms=latency_queue_ms,
                 latency_upstream_send_ms=0,  # attempt_started_at is re-anchored right before the upstream send
                 latency_upstream_terminal_ms=_upstream_terminal_latency_ms(settlement, attempt_started_at),

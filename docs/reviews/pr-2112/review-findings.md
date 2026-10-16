@@ -29,4 +29,4 @@ Scope: [HTTP phase timing contract](../../../openspec/specs/proxy-runtime-observ
 
 ## Design passes
 
-- After round 5, including its repeated finding in round 6 · proposal: [round-5.md](proposals/round-5.md).
+- After round 5, including its repeated finding in round 6 · proposal: [round-5.md](proposals/round-5.md); final check: [round-5-build-check.md](proposals/round-5-build-check.md).

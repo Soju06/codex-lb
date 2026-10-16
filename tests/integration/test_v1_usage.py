@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -70,7 +70,7 @@ async def _seed_upstream_usage(*, now) -> None:
                     recorded_at=now,
                     window="primary",
                     used_percent=10.0,
-                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(hours=4)),
                     window_minutes=300,
                 ),
                 UsageHistory(
@@ -78,7 +78,7 @@ async def _seed_upstream_usage(*, now) -> None:
                     recorded_at=now,
                     window="primary",
                     used_percent=20.0,
-                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(hours=4)),
                     window_minutes=300,
                 ),
                 UsageHistory(
@@ -86,7 +86,7 @@ async def _seed_upstream_usage(*, now) -> None:
                     recorded_at=now,
                     window="secondary",
                     used_percent=20.0,
-                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
                     window_minutes=10080,
                 ),
                 UsageHistory(
@@ -94,7 +94,7 @@ async def _seed_upstream_usage(*, now) -> None:
                     recorded_at=now,
                     window="secondary",
                     used_percent=30.0,
-                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
                     window_minutes=10080,
                 ),
             ]
@@ -129,7 +129,7 @@ async def _seed_upstream_usage_partial(
 
     if "primary" in windows:
         if primary_reset_at is ...:
-            primary_reset: int | None = int((now + timedelta(hours=4)).timestamp())
+            primary_reset: int | None = naive_utc_to_epoch(now + timedelta(hours=4))
         else:
             primary_reset = primary_reset_at
         entries.append(
@@ -144,7 +144,7 @@ async def _seed_upstream_usage_partial(
         )
     if "secondary" in windows:
         if secondary_reset_at is ...:
-            secondary_reset: int | None = int((now + timedelta(days=6)).timestamp())
+            secondary_reset: int | None = naive_utc_to_epoch(now + timedelta(days=6))
         else:
             secondary_reset = secondary_reset_at
         entries.append(
@@ -213,7 +213,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="primary",
                     used_percent=20.0,
-                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(hours=4)),
                     window_minutes=300,
                 ),
                 UsageHistory(
@@ -221,7 +221,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="primary",
                     used_percent=100.0,
-                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(hours=4)),
                     window_minutes=300,
                 ),
                 UsageHistory(
@@ -229,7 +229,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="primary",
                     used_percent=60.0,
-                    reset_at=int((now + timedelta(hours=4)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(hours=4)),
                     window_minutes=300,
                 ),
                 UsageHistory(
@@ -237,7 +237,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="secondary",
                     used_percent=25.0,
-                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
                     window_minutes=10080,
                 ),
                 UsageHistory(
@@ -245,7 +245,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="secondary",
                     used_percent=100.0,
-                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
                     window_minutes=10080,
                 ),
                 UsageHistory(
@@ -253,7 +253,7 @@ async def _seed_upstream_usage_with_statuses(*, now) -> None:
                     recorded_at=now,
                     window="secondary",
                     used_percent=75.0,
-                    reset_at=int((now + timedelta(days=6)).timestamp()),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
                     window_minutes=10080,
                 ),
             ]
@@ -491,6 +491,74 @@ async def test_v1_usage_returns_aggregate_credit_limits_when_upstream_usage_exis
     assert payload["upstream_limits"][0]["reset_at"].endswith("Z")
     assert payload["upstream_limits"][1]["reset_at"].endswith("Z")
     assert payload["limits"] == payload["upstream_limits"]
+
+
+@pytest.mark.asyncio
+async def test_v1_usage_aggregate_ignores_elapsed_samples_of_silent_accounts(async_client):
+    _, plain_key = await _create_api_key(name="aggregate-elapsed")
+    now = utcnow()
+    suffix = str(int(now.timestamp() * 1_000_000))
+    live_id = f"acc-plus-live-{suffix}"
+    silent_id = f"acc-plus-silent-{suffix}"
+    live_primary_reset = naive_utc_to_epoch(now + timedelta(hours=4))
+    live_secondary_reset = naive_utc_to_epoch(now + timedelta(days=6))
+    live_monthly_reset = naive_utc_to_epoch(now + timedelta(days=20))
+
+    def _account(account_id: str, plan_type: str = "plus") -> Account:
+        return Account(
+            id=account_id,
+            chatgpt_account_id=f"chatgpt-{account_id}",
+            email=f"{account_id}@example.com",
+            plan_type=plan_type,
+            access_token_encrypted=b"a",
+            refresh_token_encrypted=b"b",
+            id_token_encrypted=b"c",
+            last_refresh=now,
+            status=AccountStatus.ACTIVE,
+            reset_at=None,
+        )
+
+    def _sample(account_id: str, window: str, used: float, reset_at: int, minutes: int) -> UsageHistory:
+        return UsageHistory(
+            account_id=account_id,
+            recorded_at=now,
+            window=window,
+            used_percent=used,
+            reset_at=reset_at,
+            window_minutes=minutes,
+        )
+
+    # The silent account stopped reporting both windows weeks ago, so its last
+    # samples are never rewritten: their resets are long past.
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                _account(live_id),
+                _account(silent_id),
+                _sample(live_id, "primary", 20.0, live_primary_reset, 300),
+                _sample(live_id, "secondary", 20.0, live_secondary_reset, 10080),
+                _sample(silent_id, "primary", 99.0, naive_utc_to_epoch(now - timedelta(days=19)), 300),
+                _sample(silent_id, "secondary", 90.0, naive_utc_to_epoch(now - timedelta(days=16)), 10080),
+                # Only free plans carry a monthly capacity.
+                _account(f"{live_id}-free", "free"),
+                _account(f"{silent_id}-free", "free"),
+                _sample(f"{live_id}-free", "monthly", 10.0, live_monthly_reset, 43200),
+                _sample(f"{silent_id}-free", "monthly", 90.0, naive_utc_to_epoch(now - timedelta(days=40)), 43200),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {plain_key}"})
+
+    assert response.status_code == 200
+    windows = {limit["limit_window"]: limit for limit in response.json()["upstream_limits"]}
+
+    def _iso(epoch: int) -> str:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    assert (windows["5h"]["reset_at"], windows["5h"]["current_value"]) == (_iso(live_primary_reset), 45)
+    assert (windows["7d"]["reset_at"], windows["7d"]["current_value"]) == (_iso(live_secondary_reset), 1512)
+    assert (windows["monthly"]["reset_at"], windows["monthly"]["current_value"]) == (_iso(live_monthly_reset), 113)
 
 
 @pytest.mark.asyncio

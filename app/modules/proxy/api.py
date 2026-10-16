@@ -192,6 +192,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -2479,6 +2480,12 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
     monthly_rows = [usage_history_to_window_row(entry) for entry in monthly_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
+    # An account that stopped reporting a window keeps its last sample forever;
+    # its elapsed reset_at would win the min() below and freeze the pool's reset.
+    now_epoch = naive_utc_to_epoch(utcnow())
+    primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
+    secondary_rows = usage_core.expire_elapsed_window_rows(secondary_rows, now_epoch=now_epoch)
+    monthly_rows = usage_core.expire_elapsed_window_rows(monthly_rows, now_epoch=now_epoch)
 
     account_ids = (
         {row.account_id for row in primary_rows}

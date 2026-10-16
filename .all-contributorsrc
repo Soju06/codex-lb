@@ -1544,6 +1544,15 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "DZamataev",
+      "name": "Denis",
+      "avatar_url": "https://avatars.githubusercontent.com/u/2046717?v=4",
+      "profile": "https://github.com/DZamataev",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

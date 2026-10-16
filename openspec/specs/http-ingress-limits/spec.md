@@ -30,7 +30,7 @@ The service MUST enforce the applicable request-body budget against actual raw b
 
 ### Requirement: HTTP ingress reuses existing budgets
 
-The service MUST use the fixed general HTTP body budget (`MAX_DECOMPRESSED_BODY_BYTES`, 32 MiB, in `app/core/ingress_limits.py`) as the general raw and decompressed HTTP request-body budget. When an owning route capability defines a larger fixed budget (the Responses budget `MAX_DECOMPRESSED_RESPONSES_BODY_BYTES`, 128 MiB, in the same module), the ingress guard MUST use that route budget. Neither budget is operator-configurable; the HTTP ingress guard MUST NOT add a setting or change the fixed values.
+The service MUST use the fixed general HTTP body budget (`MAX_DECOMPRESSED_BODY_BYTES`, 32 MiB, in `app/core/ingress_limits.py`) as the general raw and decompressed HTTP request-body budget. When an owning route capability defines a larger fixed budget (the Responses budget `MAX_DECOMPRESSED_RESPONSES_BODY_BYTES`, 256 MiB, in the same module), the ingress guard MUST use that route budget. Neither budget is operator-configurable; the HTTP ingress guard MUST NOT add a setting or change the fixed values.
 
 Route-specific budget and error-envelope selection MUST use the application-relative route path after removing any matching ASGI `root_path` prefix.
 

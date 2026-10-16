@@ -721,7 +721,7 @@ The following values MUST be fixed at their previously documented defaults:
   refresh, live usage ingestion, sticky-session cleanup, the model registry
   and the quota planner scheduler (the dashboard `quota_planner_settings.mode
   = "off"` remains the only planner switch); the HTTP ingress body budgets
-  (32 MiB general, 128 MiB Responses); inline image fetching (always on, no
+  (32 MiB general, 256 MiB Responses); inline image fetching (always on, no
   host allowlist); the public default image model (`gpt-image-2`); and
   proxy-generated prompt-cache-key derivation (always on). There is no
   separate upstream compact timeout: the dashboard compact request budget is

@@ -2335,3 +2335,39 @@ def test_looks_like_sse_comment_block_fast_path_matches_scan() -> None:
 
     for event_block in blocks:
         assert proxy_api_module._looks_like_sse_comment_block(event_block) is scan(event_block), repr(event_block)
+
+
+class _TrackedCloseStream:
+    """SSE block source that records whether its ``aclose`` ran."""
+
+    def __init__(self, *blocks: str) -> None:
+        self._blocks = list(blocks)
+        self.closed = False
+
+    def __aiter__(self) -> "_TrackedCloseStream":
+        return self
+
+    async def __anext__(self) -> str:
+        if not self._blocks:
+            raise StopAsyncIteration
+        return self._blocks.pop(0)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_closes_inner_stream_on_client_disconnect() -> None:
+    source = _TrackedCloseStream('data: {"type":"response.output_text.delta","delta":"hi"}\n\n')
+    stream = proxy_api_module._normalize_public_responses_stream(source)
+    await stream.__anext__()
+    await stream.aclose()
+    assert source.closed is True
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_closes_inner_stream_on_early_return() -> None:
+    source = _TrackedCloseStream('data: {"type":"error","message":"boom"}\n\n')
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(source)]
+    assert blocks
+    assert source.closed is True

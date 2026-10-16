@@ -10014,6 +10014,82 @@ async def test_native_codex_stream_reraises_transport_failure_without_terminal_e
 
 
 @pytest.mark.asyncio
+async def test_native_transport_failure_after_event_closes_the_upstream_stream(monkeypatch) -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_native_giveup_lease")
+    lease = AccountLease(
+        lease_id="lease-native-giveup",
+        account_id=account.id,
+        kind="stream",
+        acquired_at=0.0,
+    )
+    settings = _make_proxy_settings()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None, lease=lease)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    release_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+
+    opened: list[int] = []
+    closed: list[int] = []
+
+    async def stream_then_transport_failure(*args, **kwargs):
+        del args, kwargs
+        generator_id = len(opened)
+        opened.append(generator_id)
+        try:
+            yield 'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n\n'
+            yield (
+                'data: {"type":"response.failed","_codex_lb_synthetic_transport_failure":true,'
+                '"response":{"status":"failed","error":{"code":"upstream_request_timeout",'
+                '"message":"Proxy request budget exhausted"}}}\n\n'
+            )
+        finally:
+            closed.append(generator_id)
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", stream_then_transport_failure)
+
+    chain = proxy_api._normalize_public_responses_stream(
+        proxy_api._stream_response_error_events(
+            service._stream_with_retry(
+                _make_transport_policy_payload(),
+                {"user-agent": "codex_exec/0.150.1 (Ubuntu; x86_64)", "originator": "codex_exec"},
+                codex_session_affinity=False,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override=None,
+            ),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        ),
+        preserve_native_failure_lifecycle=True,
+    )
+    with pytest.raises(proxy_module.ProxyResponseError):
+        async for _event in chain:
+            pass
+
+    # The native give-up raises from the middle of the chain while the
+    # upstream generator is suspended at its yield. Its finally must run,
+    # and the account lease must be released.
+    assert opened
+    release_lease.assert_any_await(lease)
+    assert closed == opened
+
+
+@pytest.mark.asyncio
 async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmarked_terminal() -> None:
     """A refusal the proxy raised before dispatch keeps its terminal event.
 

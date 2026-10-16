@@ -80,7 +80,11 @@ class ModelSourcesService:
         if "base_url" in fields and payload.base_url is not None:
             row.base_url = _normalize_base_url(payload.base_url)
         if "api_key" in fields:
-            row.api_key_encrypted = _encrypt_optional(self._encryptor, payload.api_key)
+            row.api_key_encrypted = _encrypt_optional_preserving(
+                self._encryptor,
+                payload.api_key,
+                existing=row.api_key_encrypted,
+            )
         if "is_enabled" in fields and payload.is_enabled is not None:
             row.is_enabled = payload.is_enabled
         if "supports_chat_completions" in fields and payload.supports_chat_completions is not None:
@@ -154,6 +158,11 @@ def _validate_raw_metadata_json(value: str | None) -> str | None:
         raise ModelSourceValidationError("raw_metadata_json must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ModelSourceValidationError("raw_metadata_json must be a JSON object")
+    if "upstream_model" in parsed:
+        upstream_model = parsed["upstream_model"]
+        if not isinstance(upstream_model, str) or not 1 <= len(upstream_model.strip()) <= 255:
+            raise ModelSourceValidationError("upstream_model must be a nonblank string of at most 255 characters")
+        parsed["upstream_model"] = upstream_model.strip()
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -191,6 +200,29 @@ def _encrypt_optional(encryptor: TokenEncryptor, value: str | None) -> bytes | N
     secret = value.strip()
     if not secret:
         return None
+    return encryptor.encrypt(secret)
+
+
+def _encrypt_optional_preserving(
+    encryptor: TokenEncryptor,
+    value: str | None,
+    *,
+    existing: bytes | None,
+) -> bytes | None:
+    """Keep Fernet bytes stable when an update submits the same token."""
+    if value is None:
+        return None
+    secret = value.strip()
+    if not secret:
+        return None
+    if existing is not None:
+        try:
+            if encryptor.decrypt(existing) == secret:
+                return existing
+        except Exception:
+            # A rotated/unavailable encryption key cannot prove equality; a new
+            # ciphertext is safer than retaining an unverifiable credential.
+            pass
     return encryptor.encrypt(secret)
 
 

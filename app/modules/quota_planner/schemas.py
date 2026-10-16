@@ -7,6 +7,8 @@ from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
 
+_CLOCK_TIME_PATTERN = r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+
 
 class QuotaPlannerSettingsResponse(DashboardModel):
     mode: str = Field(pattern=r"^(off|shadow|suggest|auto)$")
@@ -29,8 +31,8 @@ class QuotaPlannerSettingsUpdateRequest(DashboardModel):
     mode: str | None = Field(default=None, pattern=r"^(off|shadow|suggest|auto)$")
     timezone: str | None = None
     working_days: list[int] | None = None
-    working_hours_start: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
-    working_hours_end: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    working_hours_start: str | None = Field(default=None, pattern=_CLOCK_TIME_PATTERN)
+    working_hours_end: str | None = Field(default=None, pattern=_CLOCK_TIME_PATTERN)
     prewarm_enabled: bool | None = None
     prewarm_lead_minutes: int | None = Field(default=None, ge=0, le=1440)
     max_warmups_per_day: int | None = Field(default=None, ge=0)

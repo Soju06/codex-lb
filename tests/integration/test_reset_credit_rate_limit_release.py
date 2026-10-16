@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import update
@@ -14,6 +14,8 @@ from app.core.clients.rate_limit_reset_credits import (
     ResetCreditsResponse,
 )
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse
+from app.core.crypto import TokenEncryptor
+from app.core.usage import reset_credits_refresh_scheduler as reset_credits_scheduler
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -158,6 +160,33 @@ async def test_confirmed_reset_credit_releases_weekly_primary_account(async_clie
         await _prime_dashboard_credit(account_id)
         response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
+    await _assert_active(account_id)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_auto_redeem_releases_weekly_primary_account(async_client, monkeypatch) -> None:
+    account_id = await _blocked_account(async_client, "release-auto-redeem")
+    await _patch_usage_fetch(monkeypatch)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=240)).isoformat().replace("+00:00", "Z")
+
+    async def _fetch_expiring_credit(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at=expires_at)],
+            available_count=1,
+        )
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+    await reset_credits_scheduler.refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=TokenEncryptor(),
+        store=get_rate_limit_reset_credits_store(),
+        fetch_fn=_fetch_expiring_credit,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
     await _assert_active(account_id)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import timedelta
 from typing import cast
 from uuid import uuid4
@@ -345,7 +346,7 @@ class AccountsService:
         upstream_response, account = await self._consume_usage_reset_credit(
             account, redeem_request_id=redeem_request_id
         )
-        upstream_reset_confirmed_at = naive_utc_to_epoch(utcnow())
+        upstream_reset_confirmed_at = time.time()
         if upstream_response.code in ("reset", "already_redeemed", "no_credit", "nothing_to_reset"):
             await get_rate_limit_reset_credits_store().invalidate(account_id)
 

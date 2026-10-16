@@ -8,4 +8,4 @@ Issue #2602 reports an account remaining blocked after upstream successfully red
 
 ## Scope
 
-Thread the redemption completion timestamp through the two reset-credit refresh paths into usage recovery. Preserve the existing cooldown, usage availability checks, reset-confirmed transition logic, and five-second persisted-deadline anchor for every other path.
+Thread the redemption completion timestamp through every reset-credit refresh path (the accounts API, the dashboard API and the scheduler's automatic pre-expiry redemption) into usage recovery. Preserve the existing cooldown, usage availability checks, reset-confirmed transition logic, and five-second persisted-deadline anchor for every other path.

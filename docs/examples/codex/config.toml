@@ -13,6 +13,7 @@ base_url = "http://127.0.0.1:2455/backend-api/codex"
 model_catalog_url = "http://127.0.0.1:2455/backend-api/codex/models"
 wire_api = "responses"
 supports_websockets = true
+supports_standalone_web_search = true # requires codex-lb >= 1.22.0
 requires_openai_auth = true
 
 # Opt-in only. ~/.codex/daybreak-blue.config.toml selects this provider.

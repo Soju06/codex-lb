@@ -452,9 +452,8 @@ class _HTTPPhaseLatencies:
         pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     ) -> tuple[dict[str, JsonValue] | None, str | None, bool]:
         """Observe pending phases before authorizing a frame's verbatim relay."""
-        if self.first_upstream_event_ms is not None and (
-            verbatim_type := _verbatim_relay_event_type(line, self.first_token_ms, pending_reasoning_deltas)
-        ):
+        verbatim_type = _verbatim_relay_event_type(line, self.first_token_ms, pending_reasoning_deltas)
+        if self.first_upstream_event_ms is not None and verbatim_type is not None:
             return None, verbatim_type, True
         payload = parse_sse_data_json(line)
         event_type = classify_event_type(payload)
@@ -474,6 +473,8 @@ class _HTTPPhaseLatencies:
                 self.first_upstream_event_ms = elapsed_ms
             if self.response_created_ms is None and event_type == "response.created":
                 self.response_created_ms = elapsed_ms
+        if verbatim_type is not None:
+            return None, verbatim_type, True
         return payload, event_type, False
 
     def log_fields(self) -> _HTTPPhaseLogFields:

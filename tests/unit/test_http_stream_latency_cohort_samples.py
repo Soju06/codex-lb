@@ -44,6 +44,7 @@ def _sse(event: dict[str, object]) -> str:
     ttft_observed=st.booleans(),
     later_frame=st.booleans(),
     observe_created=st.booleans(),
+    canonical=st.booleans(),
 )
 @settings(max_examples=40, deadline=None)
 def test_http_phase_observation_ignores_equivalent_keepalives(
@@ -55,6 +56,7 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
     ttft_observed: bool,
     later_frame: bool,
     observe_created: bool,
+    canonical: bool,
 ) -> None:
     payload: dict[str, JsonValue] = {}
     if representation in {"payload", "both", "payload_error"}:
@@ -70,7 +72,10 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
     if event_after_data:
         fields.reverse()
     # A later event field replaces an earlier one, independently of data order.
-    block = boundary.join(["event: ignored", *fields, "", ""])
+    if canonical:
+        block = f"event: {header}\ndata: {json.dumps(payload)}\n\n"
+    else:
+        block = boundary.join(["event: ignored", *fields, "", ""])
     if parsed_carrier:
         block = ParsedSseBlock(block, payload)
     block, _ = proxy_client_module._normalize_stream_payload_for_http_block(block)
@@ -82,15 +87,16 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
 
     if later_frame:
         assert phases.parse_event(": keepalive\n\n", 1.0, unexpected_clock, {}) == (None, None, False)
+    relay_verbatim = (
+        canonical and ttft_observed and representation in {"header", "both", "conflicting_created", "conflicting_token"}
+    )
     assert phases.parse_event(block, 1.0, unexpected_clock, {}) == (
-        normalized_payload,
-        classify_event_type(normalized_payload),
-        False,
+        (None, header, True) if relay_verbatim else (normalized_payload, classify_event_type(normalized_payload), False)
     )
     assert phases.first_upstream_event_ms is None
     assert phases.response_created_ms is None
     token = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
-    assert phases.parse_event(token, 1.0, lambda: 1.25, {})[2] is False
+    assert phases.parse_event(token, 1.0, lambda: 1.25, {})[2] is ttft_observed
     assert phases.first_upstream_event_ms == 250
     phases.first_token_ms = 250
     if observe_created:

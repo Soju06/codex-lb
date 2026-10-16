@@ -7,24 +7,26 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from math import ceil
+from math import ceil, isfinite
 from typing import Protocol
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+import app.core.usage as usage_core
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.thread_cache_identity import (
     THREAD_CACHE_IDENTITY_MODES,
     normalize_thread_cache_identity_mode,
 )
+from app.core.crypto import TokenEncryptor
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
     get_pricing_for_model,
 )
 from app.core.usage.types import UsageWindowRow
-from app.core.utils.time import to_utc_naive, utcnow
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
 from app.db.session import sqlite_writer_section
 from app.db.sqlite_lock_retry import should_retry_after_sqlite_lock
@@ -40,6 +42,18 @@ from app.modules.api_keys.repository import (
     UsageReservationItemData,
     _Unset,
 )
+from app.modules.api_keys.usage_share import (
+    UsageShareDemand,
+    UsageShareDemandWindow,
+    UsageShareEstimate,
+    build_usage_share_evidence,
+    estimate_usage_share,
+)
+from app.modules.proxy.account_eligibility import (
+    reauth_access_token_is_expired,
+    stored_access_token_expires_at,
+)
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
@@ -70,6 +84,11 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]: ...
     async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
+    async def usage_share_demand_by_account(
+        self,
+        key_id: str,
+        window_by_account: dict[str, UsageShareDemandWindow],
+    ) -> dict[str, UsageShareDemand]: ...
     async def get_limit_usage_value(
         self,
         key_id: str,
@@ -80,6 +99,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         model_filter: str | None,
     ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
+    async def encrypted_access_tokens_by_account_id(self, account_ids: list[str]) -> dict[str, bytes]: ...
     async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]: ...
     async def list_all_accounts(self) -> list[Account]: ...
 
@@ -98,6 +118,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         transport_policy_override: str | None | _Unset = ...,
         thread_cache_identity_override: str | None | _Unset = ...,
         usage_sections: str | _Unset = ...,
+        usage_share_percent: int | None | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
         source_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
@@ -290,6 +311,7 @@ class ApiKeyCreateData:
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
+    usage_share_percent: int | None = None
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     assigned_source_ids: list[str] | None = None
@@ -320,6 +342,8 @@ class ApiKeyUpdateData:
     thread_cache_identity_override_set: bool = False
     usage_sections: str | None = None
     usage_sections_set: bool = False
+    usage_share_percent: int | None = None
+    usage_share_percent_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -352,6 +376,9 @@ class ApiKeyData:
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
+    usage_share_percent: int | None = None
+    usage_share_estimate: UsageShareEstimate | None = None
+    usage_share_unavailable_account_ids: tuple[str, ...] = ()
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
     account_assignment_scope_enabled: bool = False
@@ -497,6 +524,7 @@ class ApiKeysService:
             payload.thread_cache_identity_override
         )
         usage_sections = _normalize_usage_sections(payload.usage_sections)
+        usage_share_percent = _normalize_usage_share_percent(payload.usage_share_percent)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         _validate_reasoning_effort_policy(
             enforced_reasoning_effort=enforced_reasoning_effort,
@@ -519,6 +547,7 @@ class ApiKeysService:
             transport_policy_override=transport_policy_override,
             thread_cache_identity_override=thread_cache_identity_override,
             usage_sections=usage_sections,
+            usage_share_percent=usage_share_percent,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -672,6 +701,9 @@ class ApiKeysService:
         usage_sections: str | _Unset = _UNSET
         if payload.usage_sections_set:
             usage_sections = _normalize_usage_sections(payload.usage_sections)
+        usage_share_percent: int | None | _Unset = _UNSET
+        if payload.usage_share_percent_set:
+            usage_share_percent = _normalize_usage_share_percent(payload.usage_share_percent)
 
         if payload.allowed_models_set or payload.enforced_model_set:
             effective_allowed_models = (
@@ -739,6 +771,7 @@ class ApiKeysService:
                 transport_policy_override=transport_policy_override_update,
                 thread_cache_identity_override=thread_cache_identity_override_update,
                 usage_sections=usage_sections,
+                usage_share_percent=usage_share_percent,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
                 source_assignment_scope_enabled=source_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
@@ -795,6 +828,7 @@ class ApiKeysService:
             or payload.transport_policy_override_set
             or payload.thread_cache_identity_override_set
             or payload.usage_sections_set
+            or payload.usage_share_percent_set
             or payload.expires_at_set
             or payload.is_active_set
         ):
@@ -876,14 +910,104 @@ class ApiKeysService:
         refreshed = _ensure_valid_api_key_row(await self._repository.get_by_hash(key_hash)) if limits_reset else row
         if refreshed.expires_at is not None and refreshed.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
-        return _to_api_key_data(refreshed)
+        return await self._api_key_data_with_usage_share(refreshed, now=now)
 
     async def get_key_by_id(self, key_id: str) -> ApiKeyData:
         now = utcnow()
         row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
         if row.expires_at is not None and row.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
-        return _to_api_key_data(row)
+        return await self._api_key_data_with_usage_share(row, now=now)
+
+    async def _api_key_data_with_usage_share(self, row: ApiKey, *, now: datetime) -> ApiKeyData:
+        estimate, unavailable_account_ids = await self._usage_share_state(row, now=now)
+        return _to_api_key_data(
+            row,
+            usage_share_estimate=estimate,
+            usage_share_unavailable_account_ids=unavailable_account_ids,
+        )
+
+    async def _usage_share_state(
+        self,
+        row: ApiKey,
+        *,
+        now: datetime,
+    ) -> tuple[UsageShareEstimate | None, tuple[str, ...]]:
+        configured_percent = row.usage_share_percent
+        if configured_percent is None or self._usage_repository is None:
+            return None, ()
+
+        assigned_account_ids = [assignment.account_id for assignment in row.account_assignments]
+        if row.account_assignment_scope_enabled:
+            if not assigned_account_ids:
+                return None, ()
+            accounts = await self._repository.list_accounts_by_ids(assigned_account_ids)
+        else:
+            accounts = await self._repository.list_all_accounts()
+        routing_expiries: list[int] = []
+        reauth_account_ids = [account.id for account in accounts if account.status == AccountStatus.REAUTH_REQUIRED]
+        if reauth_account_ids:
+            encrypted_tokens = await self._repository.encrypted_access_tokens_by_account_id(reauth_account_ids)
+            encryptor = TokenEncryptor()
+            now_epoch = naive_utc_to_epoch(max(to_utc_naive(now), to_utc_naive(utcnow())))
+            eligible_accounts: list[Account] = []
+            for account in accounts:
+                if account.status != AccountStatus.REAUTH_REQUIRED:
+                    eligible_accounts.append(account)
+                    continue
+                encrypted_token = encrypted_tokens.get(account.id)
+                if encrypted_token is None:
+                    continue
+                expires_at = stored_access_token_expires_at(encrypted_token, encryptor)
+                if reauth_access_token_is_expired(account.status, expires_at, now=now_epoch):
+                    continue
+                eligible_accounts.append(account)
+                if expires_at is not None and isfinite(expires_at):
+                    routing_expiries.append(int(expires_at))
+            accounts = eligible_accounts
+        if not accounts:
+            return None, ()
+
+        account_ids = [account.id for account in accounts]
+        monthly_account_ids = [
+            account.id for account in accounts if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None
+        ]
+        primary = await self._usage_repository.latest_by_account("primary", account_ids=account_ids)
+        secondary = await self._usage_repository.latest_by_account("secondary", account_ids=account_ids)
+        monthly = (
+            await self._usage_repository.latest_by_account("monthly", account_ids=monthly_account_ids)
+            if monthly_account_ids
+            else {}
+        )
+        evidence_now = max(to_utc_naive(now), to_utc_naive(utcnow()))
+        evidence = build_usage_share_evidence(
+            accounts,
+            primary_rows=(usage_history_to_window_row(entry) for entry in primary.values()),
+            secondary_rows=(usage_history_to_window_row(entry) for entry in secondary.values()),
+            monthly_rows=(usage_history_to_window_row(entry) for entry in monthly.values()),
+            now=evidence_now,
+        )
+        if evidence.unavailable_account_ids:
+            return None, evidence.unavailable_account_ids
+        if not evidence.accounts:
+            return None, ()
+
+        demand = await self._repository.usage_share_demand_by_account(
+            row.id,
+            {
+                account.account_id: UsageShareDemandWindow(
+                    started_at=account.window_started_at,
+                    observed_at=account.observed_at,
+                )
+                for account in evidence.accounts
+            },
+        )
+        return estimate_usage_share(
+            configured_percent,
+            evidence.accounts,
+            demand,
+            routing_expires_at=min(routing_expiries, default=None),
+        ), ()
 
     async def enforce_limits_for_request(
         self,
@@ -1418,6 +1542,14 @@ _VALID_USAGE_SECTIONS = {"upstream_limits", "account_pool_usage"}
 _DEFAULT_USAGE_SECTIONS = "upstream_limits,account_pool_usage"
 
 
+def _normalize_usage_share_percent(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+        raise ApiKeyValidationError("usage_share_percent must be an integer from 1 through 100")
+    return value
+
+
 def _normalize_usage_sections(raw: str | None) -> str:
     if raw is None:
         return _DEFAULT_USAGE_SECTIONS
@@ -1876,6 +2008,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         transport_policy_override=data.transport_policy_override,
         thread_cache_identity_override=data.thread_cache_identity_override,
         usage_sections=data.usage_sections,
+        usage_share_percent=data.usage_share_percent,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -1895,6 +2028,8 @@ def _to_api_key_data(
     *,
     usage_summary: ApiKeyUsageSummaryData | None = None,
     pooled_credits: PooledCreditData | None = None,
+    usage_share_estimate: UsageShareEstimate | None = None,
+    usage_share_unavailable_account_ids: tuple[str, ...] = (),
 ) -> ApiKeyData:
     limits = [_to_limit_rule_data(limit) for limit in row.limits] if row.limits else []
     account_assignments = getattr(row, "account_assignments", [])
@@ -1919,6 +2054,9 @@ def _to_api_key_data(
             getattr(row, "thread_cache_identity_override", None)
         ),
         usage_sections=_get_usage_sections_with_default(row),
+        usage_share_percent=row.usage_share_percent,
+        usage_share_estimate=usage_share_estimate,
+        usage_share_unavailable_account_ids=usage_share_unavailable_account_ids,
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,

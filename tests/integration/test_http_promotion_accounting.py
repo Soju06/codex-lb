@@ -10,6 +10,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.db.models import ApiKeyUsageReservation
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy import api as proxy_api
 from app.modules.proxy import service as proxy_module
 from app.modules.proxy._service import observability, support
 from app.modules.proxy._service.http_bridge import helpers, streaming
@@ -290,6 +291,69 @@ async def test_http_bridge_outage_counts_only_the_gate_that_disables_bridge(
     ]
     expected = {"disabled": [], "image_generation": ["image"], "recent_failure": ["recent_ws_failure"]}
     assert bypass_reasons == expected[gate]
+
+
+@pytest.mark.asyncio
+async def test_chat_bridge_policy_failure_precedes_fixed_limit_reservation(
+    async_client, promotion_transport, monkeypatch
+):
+    key = await _key(async_client, "bridge-policy-failure")
+
+    async def fail_policy(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("bridge policy unavailable")
+
+    monkeypatch.setattr(proxy_api, "_http_bridge_active_for_request", fail_policy)
+    with pytest.raises(RuntimeError, match="bridge policy unavailable"):
+        await async_client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-5.4", "messages": _promotion_history()},
+            headers={"Authorization": f"Bearer {key['key']}"},
+        )
+
+    async with SessionLocal() as session:
+        reservations = (
+            (
+                await session.execute(
+                    select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key["id"])
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert reservations == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_responses_bridge_policy_failure_precedes_fixed_limit_reservation(
+    async_client, promotion_transport, monkeypatch, stream
+):
+    key = await _key(async_client, f"responses-bridge-policy-failure-{stream}")
+
+    async def fail_policy(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("bridge policy unavailable")
+
+    monkeypatch.setattr(proxy_api, "_http_bridge_active_for_request", fail_policy)
+    with pytest.raises(RuntimeError, match="bridge policy unavailable"):
+        await async_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.4", "input": _promotion_history(), "stream": stream},
+            headers={"Authorization": f"Bearer {key['key']}"},
+        )
+
+    async with SessionLocal() as session:
+        reservations = (
+            (
+                await session.execute(
+                    select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key["id"])
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert reservations == []
 
 
 @pytest.mark.asyncio

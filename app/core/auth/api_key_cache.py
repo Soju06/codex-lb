@@ -33,14 +33,24 @@ class ApiKeyCache(Generic[_CacheValueT]):
             return entry.data
         return None
 
-    async def set(self, key_hash: str, data: _CacheValueT, *, if_version: int | None = None) -> None:
+    async def set(
+        self,
+        key_hash: str,
+        data: _CacheValueT,
+        *,
+        if_version: int | None = None,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        if ttl_seconds is not None and ttl_seconds < 0:
+            raise ValueError("ttl_seconds must be non-negative")
+        ttl = self._ttl if ttl_seconds is None else min(self._ttl, ttl_seconds)
         async with self._lock:
             if if_version is not None and if_version != self._version:
                 return
             if len(self._cache) >= self._max_entries:
                 oldest = min(self._cache.keys(), key=lambda key: self._cache[key].expires_at)
                 del self._cache[oldest]
-            self._cache[key_hash] = CachedApiKey(data=data, expires_at=time.monotonic() + self._ttl)
+            self._cache[key_hash] = CachedApiKey(data=data, expires_at=time.monotonic() + ttl)
 
     async def invalidate(self, key_hash: str) -> None:
         async with self._lock:

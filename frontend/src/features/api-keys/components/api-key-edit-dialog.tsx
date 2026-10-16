@@ -30,6 +30,7 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
+import { UsageSharePercentField } from "@/features/api-keys/components/usage-share-percent-field";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
   ApiKey,
@@ -97,6 +98,7 @@ type ApiKeyEditDraft = {
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
   usageSections: string;
+  usageSharePercent: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
@@ -115,6 +117,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
     usageSections: apiKey.usageSections,
+    usageSharePercent: apiKey.usageSharePercent?.toString() ?? "",
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
@@ -187,6 +190,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     }
     if (shouldSubmitAssignedSourceIds) {
       payload.assignedSourceIds = draft.selectedSourceIds;
+    }
+    const usageSharePercent = draft.usageSharePercent ? Number(draft.usageSharePercent) : null;
+    if (usageSharePercent !== apiKey.usageSharePercent) {
+      payload.usageSharePercent = usageSharePercent;
     }
     if (hasLimitRuleChanges(initialLimitRules, draft.limitRules)) {
       payload.limits = normalizedLimits;
@@ -400,6 +407,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
           {/* Right column — Limits */}
           <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.limits")}</h4>
+            <UsageSharePercentField
+              id="edit-api-key-usage-share-percent"
+              value={draft.usageSharePercent}
+              onChange={(usageSharePercent) => updateDraft({ usageSharePercent })}
+            />
             <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
 
             {apiKey.limits.length > 0 ? (

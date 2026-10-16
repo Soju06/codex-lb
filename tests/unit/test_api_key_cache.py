@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.core.auth.api_key_cache import ApiKeyCache, get_api_key_cache
@@ -31,5 +33,32 @@ async def test_clear_bumps_version_and_blocks_stale_set() -> None:
     cache: ApiKeyCache[str] = ApiKeyCache(ttl_seconds=60)
     version_before_read = cache.version
     cache.clear()
-    await cache.set("hash_a", "stale", if_version=version_before_read)
+    await cache.set("hash_a", "stale", if_version=version_before_read, ttl_seconds=5)
     assert await cache.get("hash_a") is None
+
+
+@pytest.mark.asyncio
+async def test_short_entry_ttl_expires_without_shortening_complete_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr("app.core.auth.api_key_cache.time", SimpleNamespace(monotonic=lambda: now["value"]))
+    cache: ApiKeyCache[str] = ApiKeyCache(ttl_seconds=60)
+    await cache.set("incomplete", "short", ttl_seconds=5)
+    await cache.set("complete", "ordinary")
+    await cache.set("bounded", "ordinary", ttl_seconds=120)
+
+    now["value"] = 104.9
+    assert await cache.get("incomplete") == "short"
+    now["value"] = 105.0
+    assert await cache.get("incomplete") is None
+    assert await cache.get("complete") == "ordinary"
+    now["value"] = 160.0
+    assert await cache.get("complete") is None
+    assert await cache.get("bounded") is None
+
+
+@pytest.mark.asyncio
+async def test_short_entry_ttl_rejects_negative_duration() -> None:
+    cache: ApiKeyCache[str] = ApiKeyCache(ttl_seconds=60)
+    with pytest.raises(ValueError, match="ttl_seconds must be non-negative"):
+        await cache.set("hash", "data", ttl_seconds=-1)
+    assert await cache.get("hash") is None

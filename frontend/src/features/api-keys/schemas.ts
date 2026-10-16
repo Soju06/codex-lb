@@ -23,6 +23,8 @@ export const LimitRuleCreateSchema = z.object({
   modelFilter: z.string().nullable().optional(),
 });
 
+const UsageSharePercentSchema = z.number().int().min(1).max(100);
+
 const ApiKeyUsageSummarySchema = z.object({
   requestCount: z.number().int().nonnegative(),
   totalTokens: z.number().int().nonnegative(),
@@ -59,6 +61,7 @@ export const ApiKeySchema = z.object({
     .nullable()
     .default(null),
   usageSections: z.string().default("upstream_limits,account_pool_usage"),
+  usageSharePercent: UsageSharePercentSchema.nullable().default(null),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
   accountAssignmentScopeEnabled: z.boolean().default(false),
@@ -96,6 +99,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .nullable()
     .optional(),
   usageSections: z.string().optional(),
+  usageSharePercent: UsageSharePercentSchema.nullable().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
@@ -121,6 +125,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .nullable()
     .optional(),
   usageSections: z.string().optional(),
+  usageSharePercent: UsageSharePercentSchema.nullable().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),

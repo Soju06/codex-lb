@@ -150,7 +150,11 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    get_account_selection_cache,
+    mark_account_routing_unavailable,
+    request_account_routing_change,
+)
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,
@@ -1768,8 +1772,11 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            if downgraded and state.status == AccountStatus.DEACTIVATED:
-                mark_account_routing_unavailable(account.id)
+            if downgraded:
+                if state.status == AccountStatus.DEACTIVATED:
+                    mark_account_routing_unavailable(account.id)
+                elif state.status == AccountStatus.REAUTH_REQUIRED:
+                    request_account_routing_change()
             self._selection_inputs_cache.invalidate()
             return downgraded
 

@@ -61,6 +61,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         transport_policy_override=row.transport_policy_override,
         thread_cache_identity_override=row.thread_cache_identity_override,
         usage_sections=row.usage_sections,
+        usage_share_percent=row.usage_share_percent,
         expires_at=row.expires_at,
         is_active=row.is_active,
         account_assignment_scope_enabled=row.account_assignment_scope_enabled,
@@ -158,6 +159,7 @@ async def create_api_key(
                     if payload.usage_sections is not None
                     else "upstream_limits,account_pool_usage"
                 ),
+                usage_share_percent=payload.usage_share_percent,
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
                 assigned_source_ids=payload.assigned_source_ids,
@@ -228,6 +230,8 @@ async def update_api_key(
         thread_cache_identity_override_set="thread_cache_identity_override" in fields,
         usage_sections=payload.usage_sections,
         usage_sections_set="usage_sections" in fields,
+        usage_share_percent=payload.usage_share_percent,
+        usage_share_percent_set="usage_share_percent" in fields,
         expires_at=payload.expires_at,
         expires_at_set="expires_at" in fields,
         is_active=payload.is_active,

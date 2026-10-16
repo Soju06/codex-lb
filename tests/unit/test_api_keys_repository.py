@@ -225,6 +225,27 @@ class TestAccountLookupQueries:
         assert "id_token_encrypted" not in statements[0]
         assert "plan_type" in statements[0]
 
+    @pytest.mark.asyncio
+    async def test_encrypted_access_token_lookup_loads_no_other_credentials(self) -> None:
+        session = AsyncMock()
+        repo = ApiKeysRepository(session)
+        statements: list[str] = []
+
+        async def _execute(statement):
+            statements.append(str(statement))
+            return SimpleNamespace(all=lambda: [("acc_1", b"encrypted-access")])
+
+        session.execute.side_effect = _execute
+
+        result = await repo.encrypted_access_tokens_by_account_id(["acc_1"])
+
+        assert result == {"acc_1": b"encrypted-access"}
+        assert len(statements) == 1
+        assert "access_token_encrypted" in statements[0]
+        assert "refresh_token_encrypted" not in statements[0]
+        assert "id_token_encrypted" not in statements[0]
+        assert "delete_requested_at IS NULL" in statements[0]
+
 
 class TestUsage7d:
     @pytest.mark.asyncio

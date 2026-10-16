@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.db.models import Account, AccountStatus
+from app.modules.automations import service as automations_service_module
 from app.modules.automations.repository import AutomationRunRecord, run_claim_timeout_seconds
 from app.modules.automations.service import (
     AutomationsService,
@@ -213,6 +214,44 @@ def test_is_account_eligible_for_automation_allows_reauth_required() -> None:
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_automation_reauth_failure_publishes_routing_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    updates: list[tuple[str, AccountStatus]] = []
+    invalidations: list[bool] = []
+    routing_changes: list[bool] = []
+
+    class AccountsRepository:
+        async def update_status(
+            self,
+            account_id: str,
+            status: AccountStatus,
+            _reason: str,
+        ) -> bool:
+            updates.append((account_id, status))
+            return True
+
+    class SelectionCache:
+        def invalidate(self) -> None:
+            invalidations.append(True)
+
+    monkeypatch.setattr(automations_service_module, "get_account_selection_cache", SelectionCache)
+    monkeypatch.setattr(
+        automations_service_module,
+        "request_account_routing_change",
+        lambda: routing_changes.append(True),
+    )
+    service = object.__new__(AutomationsService)
+    object.__setattr__(service, "_accounts_repository", AccountsRepository())
+    account = Account(id="automation-reauth", status=AccountStatus.ACTIVE)
+
+    await service._mark_permanent_account_failure(account, "refresh_token_expired")
+
+    assert updates == [(account.id, AccountStatus.REAUTH_REQUIRED)]
+    assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert invalidations == [True]
+    assert routing_changes == [True]
 
 
 def test_pick_dispatch_offsets_seconds_always_includes_zero_anchor() -> None:

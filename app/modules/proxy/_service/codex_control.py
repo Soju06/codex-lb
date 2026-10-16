@@ -590,6 +590,7 @@ class _CodexControlMixin:
                 error_code=None if sensitive_realtime_request else log_error_code,
                 error_message=None if sensitive_realtime_request else log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                request_kind=request_kind,
                 failure_phase=None if sensitive_realtime_request else failure_metadata.failure_phase,
                 failure_detail=None if sensitive_realtime_request else failure_metadata.failure_detail,
                 failure_exception_type=(

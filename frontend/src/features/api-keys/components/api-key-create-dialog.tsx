@@ -29,6 +29,7 @@ import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-edi
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
+import { UsageSharePercentField } from "@/features/api-keys/components/usage-share-percent-field";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
   ApiKeyCreateRequest,
@@ -69,6 +70,7 @@ type ApiKeyCreateDraft = {
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   usageSections: string;
+  usageSharePercent: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   enforcedModel: string;
@@ -85,6 +87,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedSourceIds: [],
   selectedReasoningEfforts: [],
   usageSections: "upstream_limits,account_pool_usage",
+  usageSharePercent: "",
   limitRules: [],
   expiresAt: null,
   enforcedModel: "",
@@ -123,6 +126,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
+      ...(draft.usageSharePercent ? { usageSharePercent: Number(draft.usageSharePercent) } : {}),
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none"
@@ -315,6 +319,11 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
             <div className="space-y-3 pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.limits")}</h4>
+            <UsageSharePercentField
+              id="create-api-key-usage-share-percent"
+              value={draft.usageSharePercent}
+              onChange={(usageSharePercent) => updateDraft({ usageSharePercent })}
+            />
             <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
           </div>
         </div>

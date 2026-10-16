@@ -24,6 +24,7 @@ class _WebSocketServiceProtocol(Protocol):
     _emit_websocket_proxy_request_timeout: Any
     _emit_websocket_security_work_missing_pool: Any
     _emit_websocket_terminal_error: Any
+    _enforce_api_key_usage_share: Any
     _encryptor: Any
     _ensure_fresh_with_budget: Any
     _fail_expired_pending_websocket_requests: Any

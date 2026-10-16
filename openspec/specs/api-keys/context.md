@@ -37,3 +37,9 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Estimated usage-share policy
+
+`usage_share_percent` is an optional API-key policy, not an `ApiKeyLimit` counter. `ApiKeysService` builds the current rough estimate while producing `ApiKeyData`, so HTTP authentication reuses the normal API-key cache and direct WebSocket policy refresh uses the same projection code. The estimate has no independent ledger, reservation, scheduler, or cache.
+
+The estimator combines current long-window account usage with the key's proportional request demand over those account windows. Assigned keys use their assigned account pool; unscoped keys use the eligible global pool. For monthly-capacity plans, a later weekly-duration quota explicitly reported in the primary slot supersedes older monthly residue; an ordinary secondary row never does. Missing evidence is surfaced as account ids on the policy snapshot rather than guessed as zero.

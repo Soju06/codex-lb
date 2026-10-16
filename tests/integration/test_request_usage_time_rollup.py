@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 
 import app.modules.accounts.usage_time_rollup as time_rollup_module
 from app.core.crypto import TokenEncryptor
@@ -17,7 +18,7 @@ from app.db.models import (
     RequestLog,
     RequestUsageHourlyRollup,
 )
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import FOLD_LAG, lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
@@ -36,6 +37,8 @@ from app.modules.accounts.usage_time_rollup import (
     run_hourly_fold_pass,
     to_dimension,
 )
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.usage_share import UsageShareDemandWindow
 from app.modules.reports.repository import ReportsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
@@ -380,6 +383,7 @@ async def _add_log(
     request_kind: str = "normal",
     service_tier: str | None = None,
     api_key_id: str | None = None,
+    model_source_id: str | None = None,
     model: str = "gpt-5.1-codex",
     conversation_id: str | None = None,
 ):
@@ -399,6 +403,7 @@ async def _add_log(
         request_kind=request_kind,
         service_tier=service_tier,
         api_key_id=api_key_id,
+        model_source_id=model_source_id,
         conversation_id=conversation_id,
     )
 
@@ -1638,3 +1643,145 @@ async def test_account_hard_delete_removes_conversation_presence(db_setup):
     assert await _dump_conversation_rollups() == [
         (epoch_seconds(hour), "conv_shared", "acc_cother", False, 1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_usage_share_demand_combines_folded_and_raw_account_traffic(db_setup):
+    now = utcnow()
+    # Exercise the rollup's escaped dimension representation as well as the
+    # ordinary raw account id; both segments must reduce to one account.
+    account_id = DIMENSION_SENTINEL + "acc_usage_share"
+    key_id = "key_usage_share"
+    window_started_at = floor_to_hour(now - timedelta(days=7)) + timedelta(minutes=7)
+    folded_at = floor_to_hour(now - timedelta(days=2)) + timedelta(minutes=1)
+    raw_at = now - timedelta(minutes=30)
+    evidence_observed_at = raw_at + timedelta(minutes=2, seconds=30)
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account(account_id, "usage-share@example.com"))
+        logs = RequestLogsRepository(session)
+        for request_id, requested_at, input_tokens, api_key_id, request_kind in (
+            ("before-window", window_started_at - timedelta(minutes=1), 60_000, key_id, "normal"),
+            ("leading-edge-key", window_started_at + timedelta(minutes=1), 5_000, key_id, "normal"),
+            ("folded-key", folded_at, 10_000, key_id, "normal"),
+            ("folded-peer", folded_at + timedelta(minutes=1), 20_000, "key_peer", "normal"),
+            ("folded-prewarm", folded_at + timedelta(minutes=4), 60_000, key_id, "prewarm"),
+            ("raw-key", raw_at, 30_000, key_id, "normal"),
+            ("raw-unkeyed", raw_at + timedelta(minutes=1), 40_000, None, "normal"),
+            ("raw-warmup", raw_at + timedelta(minutes=2), 50_000, key_id, "warmup"),
+            ("raw-prewarm", raw_at + timedelta(minutes=2, seconds=15), 70_000, key_id, "prewarm"),
+            (
+                "post-evidence-key",
+                evidence_observed_at + timedelta(seconds=1),
+                1_000_000,
+                key_id,
+                "normal",
+            ),
+            ("future-key", now + timedelta(minutes=5), 1_000_000, key_id, "normal"),
+        ):
+            await _add_log(
+                logs,
+                account_id=account_id,
+                request_id=request_id,
+                requested_at=requested_at,
+                input_tokens=input_tokens,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cost_usd=0.0,
+                api_key_id=api_key_id,
+                request_kind=request_kind,
+            )
+        # Model-source dispatch is mutually exclusive with account attribution;
+        # source rows therefore fold under the NULL-account sentinel and cannot
+        # join this account's folded demand. The raw filter independently
+        # excludes the still-live source row.
+        for request_id, requested_at in (
+            ("folded-source", folded_at + timedelta(minutes=5)),
+            ("raw-source", raw_at + timedelta(minutes=5)),
+        ):
+            await _add_log(
+                logs,
+                account_id=None,
+                model_source_id="source_usage_share",
+                request_id=request_id,
+                requested_at=requested_at,
+                input_tokens=1_000_000,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cost_usd=0.0,
+                api_key_id=key_id,
+            )
+        for request_id, requested_at, model, request_kind in (
+            ("folded-file", folded_at + timedelta(minutes=2), "files-create", "normal"),
+            ("folded-control", folded_at + timedelta(minutes=3), "", "codex_control_alpha_search"),
+            ("raw-file", raw_at + timedelta(minutes=3), "files-finalize", "normal"),
+            ("raw-control", raw_at + timedelta(minutes=4), "", "thread_goal_set"),
+        ):
+            await _add_log(
+                logs,
+                account_id=account_id,
+                request_id=request_id,
+                requested_at=requested_at,
+                input_tokens=100_000,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cost_usd=0.0,
+                api_key_id=key_id,
+                model=model,
+                request_kind=request_kind,
+            )
+
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    captured: list[tuple[str, Any]] = []
+
+    def capture_statement(_connection, _cursor, statement, parameters, _context, _executemany):
+        if "usage_share_demand" in statement and statement.lstrip().upper().startswith("WITH"):
+            captured.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+    try:
+        async with SessionLocal() as session:
+            demand = await ApiKeysRepository(session).usage_share_demand_by_account(
+                key_id,
+                {
+                    account_id: UsageShareDemandWindow(
+                        started_at=window_started_at,
+                        observed_at=evidence_observed_at,
+                    )
+                },
+            )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_statement)
+
+    if engine.dialect.name == "sqlite":
+        statement, parameters = captured[-1]
+        async with engine.connect() as connection:
+            plan = (await connection.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).all()
+        assert "idx_request_demand_account_slot" in " ".join(str(row[-1]) for row in plan)
+
+    # Demand units are input tokens / 1000 here. Unkeyed traffic, internal
+    # warm-up, and direct-WebSocket prewarm remain in the denominator, but the
+    # synthetic requests are never charged to the key carrying them. File and
+    # control operations contribute to neither side because they bypass usage-share admission.
+    # The exact leading partial quarter-hour remains raw even after its full
+    # sibling buckets were folded; traffic one minute before the boundary does
+    # not leak into the estimate. Demand after the contributing usage sample is
+    # also excluded, so new key traffic cannot inherit earlier pool usage.
+    assert demand[account_id].total_units == pytest.approx(285.0)
+    assert demand[account_id].key_units == pytest.approx(45.0)
+
+
+@pytest.mark.asyncio
+async def test_usage_share_demand_accepts_large_account_pool(db_setup):
+    observed_at = utcnow()
+    window = UsageShareDemandWindow(started_at=observed_at - timedelta(days=7), observed_at=observed_at)
+    account_windows = {f"acc_usage_share_{index}": window for index in range(1_100)}
+
+    async with SessionLocal() as session:
+        demand = await ApiKeysRepository(session).usage_share_demand_by_account(
+            "key_usage_share",
+            account_windows,
+        )
+
+    assert demand == {}

@@ -274,4 +274,25 @@ describe("ApiKeyCreateDialog", () => {
     expect(await screen.findByRole("button", { name: "All accounts" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "1 account selected" })).not.toBeInTheDocument();
   });
+
+  it("submits an estimated usage-share percentage", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Adaptive key");
+    await user.type(screen.getByLabelText("Estimated pool allocation (%)"), "20");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].usageSharePercent).toBe(20);
+  });
 });

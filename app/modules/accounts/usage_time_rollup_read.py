@@ -50,10 +50,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import BigInteger, ColumnElement, Integer, Select, and_, cast, func, literal, or_, select, union_all
-from sqlalchemy import cast as sa_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnExpressionArgument
-from sqlalchemy.sql.selectable import CompoundSelect
+from sqlalchemy.sql.selectable import CompoundSelect, FromClause
 
 from app.db.models import (
     AccountUsageRollupState,
@@ -101,6 +100,17 @@ def floor_to_grid(value: datetime, grid_seconds: int) -> datetime:
 def ceil_to_grid(value: datetime, grid_seconds: int) -> datetime:
     floored = floor_to_grid(value, grid_seconds)
     return floored if floored == value else floored + timedelta(seconds=grid_seconds)
+
+
+def datetime_epoch_expr(
+    session: AsyncSession,
+    value: ColumnExpressionArgument[Any],
+) -> ColumnElement[int]:
+    """Convert a database datetime expression to whole Unix seconds."""
+
+    if session.get_bind().dialect.name == "postgresql":
+        return cast(func.floor(func.extract("epoch", value)), BigInteger)
+    return cast(func.strftime("%s", value), Integer)
 
 
 def _partition_raw_windows(
@@ -191,10 +201,7 @@ async def sum_demand_window(
     to the exact legacy raw read.
     """
     lo_epoch = epoch_seconds(ceil_to_grid(since, QUARTER_SLOT_SECONDS))
-    if session.get_bind().dialect.name == "postgresql":
-        watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
-    else:
-        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+    watermark_epoch = datetime_epoch_expr(session, AccountUsageRollupState.hourly_folded_through)
     join_conditions = [
         *filters,
         RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
@@ -231,6 +238,47 @@ class DemandSlotUnitsRow:
     slot_epoch: int
     request_kind: str
     demand_units: float
+
+
+def raw_demand_grain_stmt(
+    session: AsyncSession,
+    bucket_seconds: int,
+    *,
+    filters: Sequence[ColumnElement[bool]] = (),
+    from_clause: FromClause | None = None,
+) -> Select:
+    """Aggregate live request logs at the demand rollup's legacy grain."""
+
+    bucket = _requested_at_epoch_bucket_expr(session, bucket_seconds).label("slot_epoch")
+    request_kind = func.coalesce(RequestLog.request_kind, literal("real")).label("request_kind")
+    statement = select(
+        bucket,
+        RequestLog.account_id,
+        RequestLog.api_key_id,
+        RequestLog.model,
+        RequestLog.reasoning_effort,
+        request_kind,
+        RequestLog.status,
+        func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+        func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+        func.coalesce(
+            func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+            0,
+        ).label("output_tokens"),
+        func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+        func.count(RequestLog.id).label("request_count"),
+    )
+    if from_clause is not None:
+        statement = statement.select_from(from_clause)
+    return statement.where(RequestLog.deleted_at.is_(None), *filters).group_by(
+        bucket,
+        RequestLog.account_id,
+        RequestLog.api_key_id,
+        RequestLog.model,
+        RequestLog.reasoning_effort,
+        request_kind,
+        RequestLog.status,
+    )
 
 
 def demand_units_sql_expr(
@@ -280,10 +328,7 @@ async def read_demand_slot_units_window(
     """
     lo_epoch = epoch_seconds(ceil_to_grid(since, QUARTER_SLOT_SECONDS))
     dialect = session.get_bind().dialect.name
-    if dialect == "postgresql":
-        watermark_epoch = sa_cast(func.extract("epoch", AccountUsageRollupState.hourly_folded_through), BigInteger)
-    else:
-        watermark_epoch = sa_cast(func.strftime("%s", AccountUsageRollupState.hourly_folded_through), Integer)
+    watermark_epoch = datetime_epoch_expr(session, AccountUsageRollupState.hourly_folded_through)
     join_conditions = [
         *filters,
         RequestDemandQuarterRollup.slot_epoch >= lo_epoch,
@@ -374,11 +419,7 @@ def _conversation_watermark_subquery() -> ColumnElement:
 def _conversation_watermark_epoch_subquery(session: AsyncSession) -> ColumnElement:
     """Epoch seconds of the conversation watermark (whole hours, so the
     conversion is exact), dialect-split like the bucket expressions."""
-    column = AccountUsageRollupState.conversation_folded_through
-    if session.get_bind().dialect.name == "postgresql":
-        epoch = cast(func.floor(func.extract("epoch", column)), BigInteger)
-    else:
-        epoch = cast(func.strftime("%s", column), Integer)
+    epoch = datetime_epoch_expr(session, AccountUsageRollupState.conversation_folded_through)
     return select(epoch).where(AccountUsageRollupState.id == _STATE_ROW_ID).scalar_subquery()
 
 

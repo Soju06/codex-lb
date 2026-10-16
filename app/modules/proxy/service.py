@@ -1259,6 +1259,7 @@ class ProxyService(
                 error_code=log_error_code,
                 error_message=log_error_message,
                 transport=_REQUEST_TRANSPORT_HTTP,
+                request_kind=request_kind,
                 failure_phase=failure_metadata.failure_phase,
                 failure_detail=failure_metadata.failure_detail,
                 failure_exception_type=failure_metadata.failure_exception_type,
@@ -1446,11 +1447,8 @@ class ProxyService(
         if isinstance(affinity_policy, _AffinityPolicy):
             # Expand once at the compatibility edge so transport callers cannot drift.
             kwargs.update(affinity_policy.selection_kwargs())
-        required_capability_kwargs = {}
-        if kwargs.get("require_security_work_authorized") is True:
-            required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
-                "require_security_work_authorized"
-            )
+        require_security = kwargs.pop("require_security_work_authorized", False)
+        required_capability_kwargs = {"require_security_work_authorized": True} if require_security is True else {}
         return await _call_with_supported_optional_kwargs(
             self._select_account_with_budget,
             deadline,

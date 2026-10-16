@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 from sqlalchemy import select
 
+import app.modules.proxy.service as proxy_service_module
 from app.core.clients import http as http_module
 from app.core.clients.http import get_http_client
 from app.core.utils.time import utcnow
@@ -129,6 +130,15 @@ async def test_source_audio_transcription_routes_multipart_and_settles_usage(
     assert created.status_code == 200
     key = created.json()["key"]
     spools = _record_multipart_spools(monkeypatch)
+
+    def fail_usage_share_admission(*_args, **_kwargs) -> None:
+        raise AssertionError("model-source traffic must bypass usage-share admission")
+
+    monkeypatch.setattr(
+        proxy_service_module.ProxyService,
+        "_enforce_api_key_usage_share",
+        fail_usage_share_admission,
+    )
 
     response = await async_client.post(
         "/v1/audio/transcriptions",

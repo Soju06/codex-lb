@@ -260,7 +260,7 @@ def _disable_request_path_usage_refresh(request, monkeypatch):
     Background usage refresh is always on in production (the env kill switch
     was constantized; issue #1340), and it is not only the scheduler's loop:
     ``UsageUpdater.refresh_accounts`` runs on account import and
-    ``UsageUpdater.request_refresh`` after a streamed ``usage_limit_reached``.
+    ``UsageUpdater.request_refresh`` handles request-triggered proxy refreshes.
     Left live, every imported account would fetch usage from the unreachable
     test upstream (measured 20-30 s per import). Tests that exercise the
     updater itself opt out with ``@pytest.mark.usage_refresh_request_path``.

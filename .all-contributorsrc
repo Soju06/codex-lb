@@ -1544,6 +1544,17 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "ApexoTeam",
+      "name": "APEXO",
+      "avatar_url": "https://avatars.githubusercontent.com/u/298384897?v=4",
+      "profile": "https://github.com/ApexoTeam",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

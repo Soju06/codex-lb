@@ -16,6 +16,11 @@ The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest
 
 ## Codex CLI / IDE Extension
 
+For an opt-in loopback relay that keeps the built-in OpenAI provider with
+file-backed ChatGPT authentication, see the
+[experimental Codex Desktop auth bridge](desktop-bridge.md). Its compatibility
+limits and separate setup are documented there; full Composer support is not claimed.
+
 `~/.codex/config.toml`:
 
 ```toml

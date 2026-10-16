@@ -49,7 +49,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._capture()
-        self._respond(503)
+        if urlsplit(self.path).path in {"/ordinary/models", "/daybreak/models"}:
+            self._respond(200, b'{"models":[]}')
+        else:
+            self._respond(503)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if length := int(self.headers.get("content-length", "0")):
@@ -66,9 +69,10 @@ def _write_config(codex_home: Path, port: int) -> None:
     for provider, path in (("codex-lb", "ordinary"), ("codex-lb-daybreak-blue", "daybreak")):
         section = f"[model_providers.{provider}]"
         section_start = config.index(section)
-        base_start = config.index('base_url = "', section_start)
-        base_end = config.index("\n", base_start)
-        config = config[:base_start] + f'base_url = "http://127.0.0.1:{port}/{path}"' + config[base_end:]
+        for key, suffix in (("base_url", ""), ("model_catalog_url", "/models")):
+            value_start = config.index(f'{key} = "', section_start)
+            value_end = config.index("\n", value_start)
+            config = config[:value_start] + f'{key} = "http://127.0.0.1:{port}/{path}{suffix}"' + config[value_end:]
     codex_home.mkdir(parents=True)
     (codex_home / "config.toml").write_text(config, encoding="utf-8")
     shutil.copyfile(_PROFILE, codex_home / "daybreak-blue.config.toml")
@@ -127,7 +131,17 @@ def test_installed_codex_daybreak_profile_emits_authenticated_capability_before_
         port = server.server_address[1]
         result = _run_codex(codex, sandbox_exec, tmp_path / "configured", port, include_key=True)
         assert server.requests, result.stdout + result.stderr
-        method, path, headers = server.requests[0]
+        catalog_requests = [request for request in server.requests if request[1].endswith("/models")]
+        assert catalog_requests, result.stdout + result.stderr
+        assert all(method == "GET" and path == "/daybreak/models" for method, path, _headers in catalog_requests)
+        assert all(headers["authorization"] == f"Bearer {_API_KEY}" for _method, _path, headers in catalog_requests)
+        assert all(
+            headers["x-codex-lb-required-capability"] == "trusted_cyber" for _method, _path, headers in catalog_requests
+        )
+
+        inference_requests = [request for request in server.requests if not request[1].endswith("/models")]
+        assert inference_requests, result.stdout + result.stderr
+        method, path, headers = inference_requests[0]
         assert (method, path, headers["upgrade"].lower()) == ("GET", "/daybreak/responses", "websocket")
         assert headers["authorization"] == f"Bearer {_API_KEY}"
         assert headers["x-codex-lb-required-capability"] == "trusted_cyber"

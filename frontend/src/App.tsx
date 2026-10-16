@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { matchPath, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
 import { AppHeader } from "@/components/layout/app-header";
 import { routePermission } from "@/components/layout/nav-items";
@@ -21,6 +21,7 @@ import { hasPermission, useAuthStore } from "@/features/auth/hooks/use-auth";
 import { signedInLoginDestination } from "@/features/auth/oidc-window";
 import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
+import { cn } from "@/lib/utils";
 
 // Route-level code splitting: only the visited page's chunk loads, instead
 // of one entry bundle carrying all six pages' code.
@@ -59,6 +60,7 @@ function RouteGuard() {
 
 function AppLayout() {
   const { hash, key: locationKey, pathname, search } = useLocation();
+  const fullscreenAccounts = matchPath("/dashboard", pathname) !== null && new URLSearchParams(search).get("accountsFullscreen") === "1";
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const role = useAuthStore((state) => state.role);
@@ -70,12 +72,14 @@ function AppLayout() {
 
   return (
     <div
-      className="flex min-h-screen flex-col bg-background"
+      className={cn("flex flex-col bg-background", fullscreenAccounts ? "isolate h-dvh overflow-hidden" : "min-h-screen")}
       data-time-format={timeFormat}
+      data-dashboard-shell
       style={{ paddingBottom: statusBarHeight }}
     >
       <RouteScrollRestoration />
       <AppHeader
+        className="shrink-0"
         onLogout={() => {
           void logout();
         }}
@@ -83,7 +87,7 @@ function AppLayout() {
         showAdminLogin={isGuest && passwordRequired}
         showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
       />
-      <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-8 sm:px-6">
+      <main className={cn("mx-auto flex w-full max-w-375 flex-1 flex-col px-4 pb-8 sm:px-6", fullscreenAccounts ? "min-h-0" : "pt-8")}>
         <RouteErrorBoundary
           key={pathname}
           resetKey={`${locationKey}:${pathname}${search}${hash}`}

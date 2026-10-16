@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import { cn } from "@/lib/utils";
 
 const ACCOUNT_CARD_VISIBLE_ROWS = 2;
 // Account cards can grow when the optional email row is rendered.
@@ -14,11 +15,12 @@ const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  expanded?: boolean;
   readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, expanded = false, readOnly = false, onAction }: AccountCardsProps) {
   const { t } = useTranslation();
 
   if (accounts.length === 0) {
@@ -39,8 +41,11 @@ export function AccountCards({ accounts, readOnly = false, onAction }: AccountCa
   return (
     <div
       data-testid="dashboard-account-cards"
-      className="grid gap-4 overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:grid-cols-2 lg:grid-cols-3"
-      style={{
+      className={cn(
+        "grid gap-4 pr-1 sm:grid-cols-2 lg:grid-cols-3",
+        expanded ? "content-start" : "overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+      )}
+      style={expanded ? undefined : {
         maxHeight: `calc(${ACCOUNT_CARD_VISIBLE_ROWS} * ${ACCOUNT_CARD_ROW_HEIGHT_REM}rem + ${(ACCOUNT_CARD_VISIBLE_ROWS - 1) * ACCOUNT_CARD_ROW_GAP_REM}rem)`,
       }}
     >

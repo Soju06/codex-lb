@@ -696,6 +696,7 @@ def _resolved_lock_timeout_seconds(lock_timeout_seconds: float | None) -> float:
 #: and refusing that jump would keep every existing install from starting.
 CREDENTIAL_REPROJECTION_REVISION = "20260909_020000_reproject_compat_admin_credentials"
 CREDENTIAL_DROP_REVISION = "20260912_010000_drop_legacy_dashboard_credentials"
+DISPATCH_GENERATION_REVISION = "20261002_000000_add_http_bridge_dispatch_generation"
 
 #: The table the dropped columns live in, and therefore the evidence that there
 #: is an install here at all: a replica of an earlier release maps those columns
@@ -707,6 +708,16 @@ _CREDENTIAL_DROP_DRAIN_WARNING = (
     "Dropping the legacy dashboard credential columns (%s). Replicas of any earlier release map these "
     "columns and load the settings row whole, so their settings reads fail once this commits: stop them "
     "before this migration runs, not after. Rollback is supported to the immediately previous release only."
+)
+
+#: Existing HTTP-bridge operation rows prove that a pre-generation worker may
+#: still be serving. The migration runner cannot observe live replicas, so it
+#: warns before applying the first schema that generation-aware code requires.
+_DISPATCH_OPERATION_TABLE = "http_bridge_operations"
+_DISPATCH_GENERATION_DRAIN_WARNING = (
+    "Adding HTTP bridge dispatch-generation fencing (%s). Replicas of any earlier release can still write "
+    "operations without a generation predicate and may overwrite a newer dispatch: stop them before this "
+    "migration runs, not after. The Helm migration Job runs before replacement pods roll."
 )
 
 
@@ -831,6 +842,44 @@ def check_legacy_credential_drop(
 
     if CREDENTIAL_DROP_REVISION in _pending_revisions(config, current_revisions, revision):
         logger.warning(_CREDENTIAL_DROP_DRAIN_WARNING, CREDENTIAL_DROP_REVISION)
+
+
+def _check_dispatch_generation_migration(config: Config, sync_database_url: str, revision: str) -> None:
+    """Warn before generation-aware code can share a database with legacy writers."""
+
+    with _sync_connection(sync_database_url) as connection:
+        tables = _read_table_names(connection)
+        current_revisions = (
+            _read_current_revisions_from_connection(connection) if _ALEMBIC_VERSION_TABLE in tables else ()
+        )
+        has_existing_operations = _DISPATCH_OPERATION_TABLE in tables
+    check_dispatch_generation_migration(
+        config,
+        current_revisions,
+        revision,
+        has_existing_operations=has_existing_operations,
+    )
+
+
+def check_dispatch_generation_migration(
+    config: Config,
+    current_revisions: Sequence[str],
+    revision: str,
+    *,
+    has_existing_operations: bool,
+) -> None:
+    """State the quiescence contract before dispatch generations are added.
+
+    The ledger can prove that this revision is pending and the schema can prove
+    that an existing bridge installation may have legacy writers. Neither can
+    prove those writers have stopped, so this is deliberately a warning rather
+    than a false runtime assertion or a Helm/RBAC control plane.
+    """
+
+    if not has_existing_operations:
+        return
+    if DISPATCH_GENERATION_REVISION in _pending_revisions(config, current_revisions, revision):
+        logger.warning(_DISPATCH_GENERATION_DRAIN_WARNING, DISPATCH_GENERATION_REVISION)
 
 
 def _read_runtime_sentinel(connection: Connection, name: str) -> str | None:
@@ -997,6 +1046,7 @@ def _run_upgrade_locked(
     # reconciliation may all have moved the ledger, and the question is what
     # this database has actually applied at the moment the upgrade starts.
     _check_legacy_credential_drop(config, _required_sqlalchemy_url(config), revision)
+    _check_dispatch_generation_migration(config, _required_sqlalchemy_url(config), revision)
     command.upgrade(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)

@@ -1,4 +1,13 @@
-"""Add nullable HTTP bridge dispatch generation without rewriting existing data."""
+"""Add nullable HTTP bridge dispatch generation without rewriting existing data.
+
+This upgrade is not rolling-safe. The Helm migration Job is a ``pre-upgrade``
+hook, so it runs before the StatefulSet replaces and drains old replicas. A
+pre-generation worker can still update an operation without a generation
+predicate after a newer dispatch advances the row, overwriting its state or
+response identity. Every old replica must therefore be stopped before this
+migration runs. ``run_upgrade`` warns before the DDL; the exact supported Helm
+sequence lives in ``docs/deployment/kubernetes.md``.
+"""
 
 from __future__ import annotations
 

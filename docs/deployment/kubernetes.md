@@ -72,6 +72,34 @@ is in flight; roll back the schema first, then the image.
 
 Contract: [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations).
 
+## Upgrading to dispatch-generation fencing
+
+**Stop every old replica before the migration runs.** The migration adds the
+generation used to fence durable HTTP-bridge operation writes. An earlier
+release does not include that generation in its update predicates, so allowing
+one of its delayed writes to overlap a newer dispatch can replace the newer
+state or response identity.
+
+The chart runs its migration Job as a `pre-upgrade` hook, before the StatefulSet
+rolls. A normal rolling `helm upgrade` therefore does not provide the required
+quiescence. Use this sequence (substitute the release and namespace):
+
+```bash
+kubectl -n <namespace> scale statefulset/<release>-codex-lb-workload --replicas=0
+kubectl -n <namespace> wait --for=delete pod \
+  -l app.kubernetes.io/instance=<release> --timeout=5m
+helm upgrade <release> oci://ghcr.io/soju06/charts/codex-lb \
+  --namespace <namespace> --wait
+```
+
+The final command restores the StatefulSet replica count from the Helm values.
+For blue/green deployments, stop the old colour before running the new colour's
+migration. Alternatively disable the chart migration Job and run
+`python -m app.db.migrate upgrade head` only after the old replicas have
+stopped. There is no supported mixed-version window across this migration.
+The migration command emits a warning when it is about to apply the revision to
+an existing HTTP-bridge schema, but it cannot detect live old replicas.
+
 ## Multi-replica behavior
 
 The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica installs using a headless-service DNS name per pod. The default cluster domain is `cluster.local`; set Helm `clusterDomain` if your cluster uses a different suffix. Override `config.sessionBridgeAdvertiseBaseUrl` only if pods must be reached through a different internal address.

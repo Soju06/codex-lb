@@ -26,6 +26,7 @@ from app.db.backup import create_sqlite_pre_migration_backup, list_sqlite_pre_mi
 from app.db.migrate import (
     CREDENTIAL_DROP_REVISION,
     CREDENTIAL_REPROJECTION_REVISION,
+    DISPATCH_GENERATION_REVISION,
     MigrationBootstrapError,
     _build_alembic_config,
     _collect_migration_policy_violations,
@@ -2668,6 +2669,7 @@ def test_a_fresh_install_is_not_warned(tmp_path: Path, caplog) -> None:
     assert result.current_revision == inspect_migration_state(url).head_revision
     warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
     assert not [message for message in warnings if CREDENTIAL_DROP_REVISION in message]
+    assert not [message for message in warnings if DISPATCH_GENERATION_REVISION in message]
 
     # An empty ledger is the fresh case only when there is no schema under it;
     # the same emptiness over an existing install is a lost ledger, and is told.
@@ -2704,6 +2706,30 @@ def test_the_drain_warning_fires_once_on_a_populated_database(tmp_path: Path, ca
     with caplog.at_level("WARNING", logger="app.db.migrate"):
         run_upgrade(url, "head", bootstrap_legacy=False)
     assert not [record for record in caplog.records if CREDENTIAL_DROP_REVISION in record.getMessage()]
+
+
+def test_dispatch_generation_migration_warns_existing_install_once(tmp_path: Path, caplog) -> None:
+    url = _db_url(tmp_path / "dispatch-generation.db")
+    config = _build_alembic_config(url)
+    revision = ScriptDirectory.from_config(config).get_revision(DISPATCH_GENERATION_REVISION)
+    assert revision is not None and isinstance(revision.down_revision, str)
+    run_upgrade(url, revision.down_revision, bootstrap_legacy=False)
+
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and DISPATCH_GENERATION_REVISION in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "stop them before this migration runs" in warnings[0]
+    assert "before replacement pods roll" in warnings[0]
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app.db.migrate"):
+        run_upgrade(url, "head", bootstrap_legacy=False)
+    assert not [record for record in caplog.records if DISPATCH_GENERATION_REVISION in record.getMessage()]
 
 
 def _drop_revision_parent(url: str) -> str:

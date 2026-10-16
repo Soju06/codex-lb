@@ -13,3 +13,5 @@ Session ownership can advance while an admitted HTTP-bridge predecessor is still
 ## Impact
 
 HTTP-bridge persistence, dispatch and tests only. Direct WebSocket, compact and realtime paths are unchanged.
+The schema transition is not rolling-safe: operators must stop pre-generation
+replicas before the Helm pre-upgrade migration Job runs.

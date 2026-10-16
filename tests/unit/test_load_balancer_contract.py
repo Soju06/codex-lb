@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -347,6 +348,56 @@ async def test_required_continuity_owner_miss_does_not_mark_healthy_pool_degrade
     assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
     assert degraded_reasons == []
     assert normal_calls == []
+
+
+@pytest.mark.asyncio
+async def test_required_continuity_owner_in_transient_backoff_is_still_admitted(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    """The unbound path narrows to the owner, so its backoff must not kill the turn.
+
+    ``run_unbound_selection_path`` calls ``_prepare_sticky_selection_states``
+    with ``required_account_id``, which leaves a pool of exactly one account.
+    A bounded transient backoff on that owner then empties the pool and the
+    turn dies as ``continuity_owner_unavailable`` even though the account is
+    ACTIVE and merely serving a backoff it would leave in seconds.
+    """
+    owner = _account("contract-backoff-owner")
+    available_alternate = _account("contract-backoff-alternate")
+    balancer, _, _, _ = _balancer([owner, available_alternate], selection_cache)
+    balancer._runtime[owner.id] = load_balancer_module.RuntimeState(
+        error_count=5,
+        last_error_at=time.time() - 1.0,
+    )
+
+    selection = await balancer.select_account(
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == owner.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_required_continuity_owner_paused_still_fails_closed(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    owner = _account("contract-paused-owner")
+    owner.status = AccountStatus.PAUSED
+    available_alternate = _account("contract-paused-alternate")
+    balancer, _, _, _ = _balancer([owner, available_alternate], selection_cache)
+
+    selection = await balancer.select_account(
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
 
 
 @pytest.mark.asyncio

@@ -74,3 +74,20 @@ Source-qualified markers leave the legacy timestamp NULL, so an older binary
 safely restores conservative hard ownership during rollback. Dropping the scope
 column loses only restart-recovery state; it does not make the retained owner
 mobile.
+
+## Required-owner recovery during transient backoff
+
+A hard continuation narrows selection to its resolved owner. Its transient
+error backoff must not be mistaken for a missing owner: the usual fallback's
+comparison with other pool members cannot work when no other member exists.
+The explicit hard-owner capability admits that same account without erasing
+its health evidence. Persisted unavailability, caps, scope, security policy,
+and caller exclusions still apply; soft locality can prefer a healthy sibling.
+See `spec.md`, "Transient backoff preserves required owner availability".
+
+For example, a proxy anchor can be denied and its prefix metadata cleared
+while its account A serves transient backoff. A separate thread may use B,
+while a complete retry on the original thread recovers on A with its encrypted
+reasoning and completed tool history unchanged. This neither reconstructs
+missing history nor makes that body portable to B. Real quota exhaustion still
+refuses the owned turn. The behavior requires no new setting or migration.

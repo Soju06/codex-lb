@@ -95,7 +95,9 @@ class _DecisionHarness(ws_mixin._WebSocketMixin):
 
 
 def _request_state() -> Any:
-    return SimpleNamespace(request_log_id="req-transport-fallback", request_id="req-transport-fallback")
+    return SimpleNamespace(
+        request_log_id="req-transport-fallback", request_id="req-transport-fallback", replay_required_account_id=None
+    )
 
 
 def _account() -> Any:

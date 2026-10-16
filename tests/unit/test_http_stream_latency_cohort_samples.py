@@ -45,6 +45,7 @@ def _sse(event: dict[str, object]) -> str:
     later_frame=st.booleans(),
     observe_created=st.booleans(),
     canonical=st.booleans(),
+    created_encoding=st.sampled_from(["literal", "escaped_key", "escaped_value"]),
 )
 @settings(max_examples=40, deadline=None)
 def test_http_phase_observation_ignores_equivalent_keepalives(
@@ -57,6 +58,7 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
     later_frame: bool,
     observe_created: bool,
     canonical: bool,
+    created_encoding: str,
 ) -> None:
     payload: dict[str, JsonValue] = {}
     if representation in {"payload", "both", "payload_error"}:
@@ -100,8 +102,14 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
     assert phases.first_upstream_event_ms == 250
     phases.first_token_ms = 250
     if observe_created:
-        phases.parse_event(_sse({"type": "response.created"}), 1.0, lambda: 1.5, {})
-        phases.parse_event(_sse({"type": "response.created"}), 1.0, unexpected_clock, {})
+        created_data = '{"type":"response.created"}'
+        if created_encoding == "escaped_key":
+            created_data = created_data.replace('"type"', '"\\u0074ype"')
+        elif created_encoding == "escaped_value":
+            created_data = created_data.replace("created", "\\u0063reated")
+        created = f"event: response.output_text.delta\ndata: {created_data}\n\n"
+        assert phases.parse_event(created, 1.0, lambda: 1.5, {}) == (None, "response.output_text.delta", True)
+        phases.parse_event(created, 1.0, unexpected_clock, {})
     assert phases.response_created_ms == (500 if observe_created else None)
     assert phases.parse_event(token, 1.0, unexpected_clock, {}) == (None, "response.output_text.delta", True)
 

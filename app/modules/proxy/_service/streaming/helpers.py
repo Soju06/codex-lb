@@ -453,7 +453,13 @@ class _HTTPPhaseLatencies:
     ) -> tuple[dict[str, JsonValue] | None, str | None, bool]:
         """Observe pending phases before authorizing a frame's verbatim relay."""
         verbatim_type = _verbatim_relay_event_type(line, self.first_token_ms, pending_reasoning_deltas)
-        if self.first_upstream_event_ms is not None and verbatim_type is not None:
+        # A relay header cannot rule out created in the payload. Unicode escapes
+        # can encode its key or value, so those candidates still need parsing.
+        if (
+            self.first_upstream_event_ms is not None
+            and verbatim_type is not None
+            and (self.response_created_ms is not None or ("response.created" not in line and "\\u" not in line))
+        ):
             return None, verbatim_type, True
         payload = parse_sse_data_json(line)
         event_type = classify_event_type(payload)

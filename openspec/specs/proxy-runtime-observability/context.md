@@ -109,3 +109,5 @@ GROUP BY sticky_key_source, sticky_kind, sticky_key_hash;
 The affinity history converges with dashboard roles, users, the final compatibility-credential projection and audit actor columns through a no-op merge. Published revisions remain unchanged. Databases already on the authentication branch retain their current credentials and session generations; the earlier credential projection is not replayed on merge-only reupgrade. Databases on the older affinity history run the existing authentication backfills once. Ledgerless schema bootstrap retains those migrations' existing legacy-credential projection behavior.
 
 The subsequent invite migration converges through a second no-op join. Pending, consumed and revoked invite rows retain their hashes, expiry/consumption/revocation times, creator snapshots and flags. The older affinity history creates an empty invite table through the unchanged upstream migration.
+
+When the relay header and JSON type disagree, pending created timing follows the payload. The HTTP owner conservatively parses literal created candidates and Unicode escapes, then preserves the existing relay decision; ordinary token frames remain lazy.

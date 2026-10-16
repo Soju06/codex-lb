@@ -53,6 +53,7 @@ pytestmark = pytest.mark.integration
         "retry",
         "zero_created",
         "missing_created",
+        "mismatched_created",
         "keepalive_token",
         "empty",
         "no_headers",
@@ -100,7 +101,9 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
     created = 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_http_phase"}}\n\n'
     delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
-    fast_delta = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":" world"}\n\n'
+    fast_delta = (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta", "delta":" world\\n"}\n\n'
+    )
     completed = (
         'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_http_phase",'
         '"object":"response","status":"completed","usage":{"input_tokens":2,"output_tokens":2}}}\n\n'
@@ -126,9 +129,12 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     elif case == "zero_created":
         blocks[:0] = [(0.5, created), (0.75, created)]
         expected_first = expected_created = 0
-    elif case in {"missing_created", "keepalive_token"}:
+    elif case in {"missing_created", "mismatched_created", "keepalive_token"}:
         blocks[0] = (0.75, delta)
         expected_ttft = 250
+        if case == "mismatched_created":
+            blocks.insert(1, (1.0, created.replace("event: response.created", "event: response.output_text.delta")))
+            expected_created = 500
         if case == "keepalive_token":
             blocks[:0] = [
                 (0.625, 'event: codex.keepalive\ndata: {"type":"response.output_text.delta","delta":"heartbeat"}\n\n'),

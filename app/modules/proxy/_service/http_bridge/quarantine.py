@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +45,10 @@ _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON = "retry_circuit_poisoned_anchor"
 @dataclass(slots=True)
 class _HTTPBridgeQuarantineEntry:
     generation: int = 0
+    owner_ref: weakref.ReferenceType[_HTTPBridgeSession] | None = None
+    local_failure_generation: int = 0
+    local_poison_generation: int = 0
+    local_poison_until: float = 0.0
     quarantined_until: float = 0.0
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
@@ -75,6 +80,53 @@ def _http_bridge_quarantine_registry(
         registry = {}
         service._http_bridge_quarantined_keys = registry
     return registry
+
+
+def _http_bridge_local_failure_fence(service: Any) -> int:
+    return getattr(service, "_http_bridge_quarantine_sequence", 0)
+
+
+def _next_http_bridge_quarantine_generation(service: Any) -> int:
+    generation = _http_bridge_local_failure_fence(service) + 1
+    service._http_bridge_quarantine_sequence = generation
+    return generation
+
+
+def _http_bridge_quarantine_owned_by(
+    service: Any, session: _HTTPBridgeSession, entry: _HTTPBridgeQuarantineEntry
+) -> bool:
+    current = getattr(service, "_http_bridge_sessions", {}).get(session.key)
+    if current is not None:
+        return current is session
+    return entry.owner_ref is not None and entry.owner_ref() is session
+
+
+def _retain_http_bridge_local_failure(service: Any, entry: _HTTPBridgeQuarantineEntry, cutoff: int, now: float) -> bool:
+    """Subtract settled poison while retaining independent local evidence."""
+    if entry.local_failure_generation <= cutoff:
+        return False
+    poison_until = entry.local_poison_until if entry.local_poison_generation > cutoff else 0.0
+    weaker_until = entry.suppressed_weaker_until
+    weaker_reason = entry.suppressed_weaker_reason
+    if entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+        return True
+    if poison_until <= now:
+        entry.local_poison_generation = 0
+        entry.local_poison_until = 0.0
+    entry.poison_quarantined_until = poison_until
+    entry.poison_generation = entry.local_poison_generation if poison_until > now else 0
+    if poison_until > now:
+        entry.quarantined_until = max(poison_until, weaker_until)
+    elif weaker_reason is not None and weaker_until > now:
+        entry.reason = weaker_reason
+        entry.quarantined_until = weaker_until
+        entry.suppressed_weaker_reason = None
+        entry.suppressed_weaker_until = 0.0
+    else:
+        entry.reason = None
+        entry.quarantined_until = 0.0
+    entry.generation = _next_http_bridge_quarantine_generation(service)
+    return entry.quarantined_until > now or entry.consecutive_eventless_timeouts > 0
 
 
 def _prune_http_bridge_quarantine_registry(
@@ -110,6 +162,8 @@ def _revoke_http_bridge_poison_quarantine(
     generation: int | None,
     restore_reason: str | None = None,
     restore_until: float = 0.0,
+    local_failure_fence: int | None = None,
+    session: _HTTPBridgeSession | None = None,
 ) -> bool:
     """Remove a poison quarantine whose opening did not survive persistence.
 
@@ -138,7 +192,14 @@ def _revoke_http_bridge_poison_quarantine(
         # let disproved poison evidence outlive its revocation.
         and entry.poison_generation == generation
     ):
+        if local_failure_fence is not None:
+            if session is not None and not _http_bridge_quarantine_owned_by(service, session, entry):
+                return False
+            if _retain_http_bridge_local_failure(service, entry, local_failure_fence, clock_for(service).monotonic()):
+                return False
         entry.poison_quarantined_until = 0.0
+        entry.local_poison_generation = 0
+        entry.local_poison_until = 0.0
         if (
             entry.suppressed_weaker_reason is not None
             and entry.suppressed_weaker_until > clock_for(service).monotonic()
@@ -147,12 +208,12 @@ def _revoke_http_bridge_poison_quarantine(
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service)
             return True
         if restore_reason is not None and restore_until > clock_for(service).monotonic():
             entry.reason = restore_reason
             entry.quarantined_until = restore_until
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service)
             return True
         registry.pop(key, None)
         return True
@@ -231,14 +292,14 @@ def _http_bridge_quarantine_clear_fence(service: Any, key: _HTTPBridgeSessionKey
 
     Poison entries fence on their poison provenance so a weaker arm during
     the completion's durable awaits cannot block the clear; other entries
-    fence on the raw generation. ``None`` records that nothing was active at
+    fence on the raw generation. ``None`` records that no entry was present at
     capture, so a quarantine armed afterwards survives the clear.
     """
     registry = _http_bridge_quarantine_registry(service)
     now = clock_for(service).monotonic()
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.get(key)
-    if entry is None or entry.quarantined_until <= now:
+    if entry is None:
         return None
     if entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
         return entry.poison_generation
@@ -251,11 +312,16 @@ def _quarantine_http_bridge_session(
     *,
     reason: str,
     minimum_seconds: float | None = None,
+    durable_adoption: bool = False,
 ) -> None:
     """Quarantine a bridge session that has proven silent/wedged.
 
     Session-scoped only: no account-health writes happen here, and the entry
     is bounded by TTL, a registry size cap, and the healthy-completion clear.
+
+    ``durable_adoption`` records a loaded row without granting cleanup
+    authority over local failures. Its deadline can be removed independently
+    of a newer local poison arm's own deadline.
 
     ``minimum_seconds`` raises the floor for callers whose suppression window
     is itself bounded elsewhere. The default TTL equals the retry circuit's
@@ -273,10 +339,18 @@ def _quarantine_http_bridge_session(
     # the window the weaker evidence earned.
     prior_reason = entry.reason
     prior_quarantined_until = entry.quarantined_until
-    entry.generation += 1
+    entry.generation = _next_http_bridge_quarantine_generation(service)
     ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
     if minimum_seconds is not None:
         ttl_seconds = max(ttl_seconds, minimum_seconds)
+    if not durable_adoption:
+        entry.local_failure_generation = entry.generation
+        entry.owner_ref = weakref.ref(session)
+        if reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+            entry.local_poison_generation = entry.generation
+            entry.local_poison_until = max(entry.local_poison_until, now + ttl_seconds)
+    elif entry.owner_ref is None and isinstance(session, _HTTPBridgeSession):
+        entry.owner_ref = weakref.ref(session)
     entry.quarantined_until = max(entry.quarantined_until, now + ttl_seconds)
     entry.last_touched_monotonic = now
     # The registry holds one entry per key, so a wedged-reattach or
@@ -363,6 +437,9 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     # not be resurrected into a "consecutive" second strike hours later.
     _prune_http_bridge_quarantine_registry(registry, now)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
+    entry.generation = _next_http_bridge_quarantine_generation(service)
+    entry.local_failure_generation = entry.generation
+    entry.owner_ref = weakref.ref(session)
     entry.consecutive_eventless_timeouts += 1
     entry.last_touched_monotonic = now
     if entry.consecutive_eventless_timeouts < _HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD:
@@ -379,29 +456,38 @@ def _clear_http_bridge_quarantine(
     session: _HTTPBridgeSession,
     *,
     key_generation: int | None,
+    local_failure_fence: int | None = None,
     additional_key: _HTTPBridgeSessionKey | None = None,
     additional_key_generation: int | None = None,
+    additional_local_failure_fence: int | None = None,
 ) -> None:
     """A completed response disproves the wedges captured when it settled.
 
-    Each key clears only against the generation fence captured before the
-    completion's durable awaits: a strike arming a new quarantine during
-    those awaits is fresh evidence this response does not disprove, and it
-    survives the clear. A poison entry fences on its own provenance — a
-    weaker arm during the window bumps the raw generation without disproving
+    The early local cutoff protects failures during every completion await.
+    The later generation fence authorizes cleanup of adopted durable evidence
+    only after settlement and registration succeed. A poison entry fences
+    on its own provenance: a weaker arm bumps the raw generation without disproving
     the recovery — and a matched clear downgrades to a concurrent weaker
     fence instead of evicting it.
     """
     registry = _http_bridge_quarantine_registry(service)
     now = clock_for(service).monotonic()
 
-    def clear_fenced(key: _HTTPBridgeSessionKey, captured_generation: int | None) -> bool:
+    def clear_fenced(key: _HTTPBridgeSessionKey, captured_generation: int | None, local_cutoff: int | None) -> bool:
         entry = registry.get(key)
         if entry is None:
             return True
+        if key == session.key and not _http_bridge_quarantine_owned_by(service, session, entry):
+            return False
+        if local_cutoff is not None and entry.local_failure_generation > local_cutoff:
+            if entry.reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON:
+                return False
         if entry.quarantined_until <= now:
-            # An inactive entry still carries the eventless strike counter;
-            # a healthy completion resets it regardless of the fence.
+            if local_cutoff is None:
+                if captured_generation is None or entry.generation != captured_generation:
+                    return False
+            elif entry.generation > local_cutoff:
+                return False
             registry.pop(key, None)
             return True
         fence_generation = (
@@ -411,6 +497,8 @@ def _clear_http_bridge_quarantine(
         )
         if captured_generation is None or fence_generation != captured_generation:
             return False
+        if local_cutoff is not None and _retain_http_bridge_local_failure(service, entry, local_cutoff, now):
+            return entry.quarantined_until <= now
         if (
             entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
             and entry.suppressed_weaker_reason is not None
@@ -419,11 +507,14 @@ def _clear_http_bridge_quarantine(
             # The concurrent weaker fence stands on its own evidence:
             # downgrade to it instead of evicting the entry with the
             # disproved poison classification.
+            entry.local_poison_generation = 0
+            entry.local_poison_until = 0.0
+            entry.poison_quarantined_until = 0.0
             entry.reason = entry.suppressed_weaker_reason
             entry.quarantined_until = entry.suppressed_weaker_until
             entry.suppressed_weaker_reason = None
             entry.suppressed_weaker_until = 0.0
-            entry.generation += 1
+            entry.generation = _next_http_bridge_quarantine_generation(service)
             return False
         registry.pop(key, None)
         _log_http_bridge_event(
@@ -437,7 +528,13 @@ def _clear_http_bridge_quarantine(
         )
         return True
 
-    if clear_fenced(session.key, key_generation):
+    origin_cutoff = (
+        additional_local_failure_fence if additional_local_failure_fence is not None else additional_key_generation
+    )
+    if additional_key == session.key:
+        key_generation = additional_key_generation
+        local_failure_fence = origin_cutoff
+    if clear_fenced(session.key, key_generation, local_failure_fence):
         session.quarantined = False
     if additional_key is not None and additional_key != session.key:
-        clear_fenced(additional_key, additional_key_generation)
+        clear_fenced(additional_key, additional_key_generation, origin_cutoff)

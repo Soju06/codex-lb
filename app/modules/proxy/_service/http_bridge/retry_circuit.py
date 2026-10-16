@@ -538,7 +538,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 raise
             key_lock.release()
 
-    async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
+    async def _load_http_bridge_retry_circuit(
+        self: Any, session: _HTTPBridgeSession, *, local_failure_fence: int | None = None
+    ) -> bool:
         key = session.key
         if key.strength != "hard":
             return True
@@ -617,6 +619,8 @@ class _HTTPBridgeRetryCircuitMixin:
                             self,
                             key,
                             generation=_http_bridge_quarantine_clear_fence(self, key),
+                            local_failure_fence=local_failure_fence,
+                            session=session,
                         )
             return True
 
@@ -724,6 +728,8 @@ class _HTTPBridgeRetryCircuitMixin:
                                 self,
                                 key,
                                 generation=_http_bridge_quarantine_clear_fence(self, key),
+                                local_failure_fence=local_failure_fence,
+                                session=session,
                             )
                 return True
 
@@ -893,12 +899,15 @@ class _HTTPBridgeRetryCircuitMixin:
                 session,
                 reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
                 minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(poison_cooldown_remaining),
+                durable_adoption=True,
             )
         elif revoke_stale_poison_quarantine and _http_bridge_session_key_poison_quarantined(self, key):
             _revoke_http_bridge_poison_quarantine(
                 self,
                 key,
                 generation=_http_bridge_quarantine_clear_fence(self, key),
+                local_failure_fence=local_failure_fence,
+                session=session,
             )
         return True
 
@@ -2144,6 +2153,7 @@ class _HTTPBridgeRetryCircuitMixin:
         settled_detail: str | None = None,
         settled_detail_authoritative: bool = False,
         expected_episode: tuple[float, int, int] | None = None,
+        local_failure_fence: int | None = None,
     ) -> bool:
         """Settle a hard key's retry circuit; ``True`` when settlement held.
 
@@ -2165,6 +2175,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 settled_detail=settled_detail,
                 settled_detail_authoritative=settled_detail_authoritative,
                 expected_episode=expected_episode,
+                local_failure_fence=local_failure_fence,
             )
         finally:
             key_lock.release()
@@ -2176,9 +2187,12 @@ class _HTTPBridgeRetryCircuitMixin:
         settled_detail: str | None = None,
         settled_detail_authoritative: bool = False,
         expected_episode: tuple[float, int, int] | None = None,
+        local_failure_fence: int | None = None,
     ) -> bool:
         key = session.key
-        durable_load_succeeded = await self._load_http_bridge_retry_circuit(session)
+        durable_load_succeeded = await self._load_http_bridge_retry_circuit(
+            session, local_failure_fence=local_failure_fence
+        )
         if expected_episode is not None:
             # The caller settles a specific authorized episode — an
             # abandonment clears only the circuit its abandonment

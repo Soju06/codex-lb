@@ -1,3 +1,4 @@
+import { hasApiKeyUsage } from "@/features/api-keys/usage";
 import { useTranslation } from "react-i18next";
 
 import type { ApiKey } from "@/features/api-keys/schemas";
@@ -154,7 +155,7 @@ export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
   const totalKeys = apiKeys.length;
   const activeKeys = apiKeys.filter((apiKey) => apiKey.isActive && !isExpired(apiKey)).length;
   const expiredKeys = apiKeys.filter((apiKey) => isExpired(apiKey)).length;
-  const usedKeys = apiKeys.filter((apiKey) => (apiKey.usageSummary?.requestCount ?? 0) > 0).length;
+  const usedKeys = apiKeys.filter(hasApiKeyUsage).length;
   const totalRequests = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.requestCount ?? 0), 0);
   const totalTokens = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.totalTokens ?? 0), 0);
   const totalCostUsd = apiKeys.reduce((sum, apiKey) => sum + (apiKey.usageSummary?.totalCostUsd ?? 0), 0);

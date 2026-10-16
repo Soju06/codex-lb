@@ -31,7 +31,7 @@ from typing import (
     TypeAlias,
     cast,
 )
-from urllib.parse import ParseResult, urlparse, urlunparse
+from urllib.parse import ParseResult, unquote, urlparse, urlunparse
 
 import aiohttp
 from aiohttp import hdrs
@@ -602,10 +602,14 @@ class ProxyResponseError(Exception):
         retry_after_header: str | None = None,
         reservation_released: bool = False,
         local_pre_dispatch_refusal: bool = False,
+        response_body: bytes | None = None,
+        response_headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
         self.payload = payload
+        self.response_body = response_body
+        self.response_headers = response_headers
         self.failure_phase = failure_phase
         self.retryable_same_contract = retryable_same_contract
         self.failure_detail = failure_detail
@@ -5591,6 +5595,26 @@ async def thread_goal_request(
                 await lease.close()
 
 
+def _reject_control_path_dot_segments(path: str) -> None:
+    """Reject ``.``/``..`` segments instead of normalising them away.
+
+    The plugin-catalog route forwards a path-converter value into the
+    credentialed upstream URL; normalising dot segments would let a caller
+    escape the intended namespace when the URL is resolved. Percent-encoded
+    forms (``%2e``) decode to the same segments, so each segment is decoded
+    before comparison. Raises ``ClientPayloadError`` (surfaced as 400).
+    """
+    for segment in path.strip("/").split("/"):
+        decoded = unquote(segment)
+        # Repeatedly decode to catch double-encoded forms like ``%252e``.
+        previous = segment
+        while decoded != previous:
+            previous = decoded
+            decoded = unquote(decoded)
+        if decoded in {".", ".."}:
+            raise ClientPayloadError(f"Invalid control path: {path!r}", param="path", code="invalid_request_error")
+
+
 async def codex_control_request(
     path: str,
     *,
@@ -5609,13 +5633,19 @@ async def codex_control_request(
     privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     allow_direct_egress: bool = True,
 ) -> CodexControlResponse:
+    _reject_control_path_dot_segments(path)
     settings = with_dashboard_overrides(get_settings())
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
     normalized_path = path.strip("/")
     effective_privacy_policy = (
         CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME if normalized_path == "realtime/calls" else privacy_policy
     )
-    upstream_path = normalized_path if normalized_path.startswith("wham/") else f"codex/{normalized_path}"
+    # Control requests default to the ``codex/`` namespace; ``wham/`` and the
+    # plugin catalog (``ps/plugins/*``, ``plugins/featured``) sit directly under
+    # ``backend-api`` upstream and are forwarded verbatim.
+    upstream_path = (
+        normalized_path if normalized_path.startswith(("wham/", "ps/", "plugins/")) else f"codex/{normalized_path}"
+    )
     url = f"{upstream_base}/{upstream_path}"
     request_method = method.upper()
     upstream_headers = _build_upstream_headers(headers, access_token, account_id, accept=headers.get("accept", "*/*"))
@@ -5715,10 +5745,17 @@ async def codex_control_request(
                         await close()
             status_code = _codex_response_status(response)
             body = await _codex_response_body(response)
+            response_headers = _codex_response_headers(response)
             if status_code >= 400:
                 error_payload = await _codex_error_payload_from_response(response)
                 error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(status_code, error_payload)
+                raise ProxyResponseError(
+                    status_code,
+                    error_payload,
+                    failure_phase="status",
+                    response_body=body,
+                    response_headers=response_headers,
+                )
             return CodexControlResponse(
                 status_code=status_code,
                 body=body,
@@ -5752,7 +5789,13 @@ async def codex_control_request(
             if resp.status >= 400:
                 error_payload = await _error_payload_from_raw_body(resp, body)
                 error_code, error_message = _error_details_from_envelope(error_payload)
-                raise ProxyResponseError(resp.status, error_payload, failure_phase="status")
+                raise ProxyResponseError(
+                    resp.status,
+                    error_payload,
+                    failure_phase="status",
+                    response_body=body,
+                    response_headers={key: value for key, value in resp.headers.items()},
+                )
             return CodexControlResponse(
                 status_code=resp.status,
                 body=body,

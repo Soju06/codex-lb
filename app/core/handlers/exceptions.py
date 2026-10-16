@@ -94,6 +94,9 @@ def _error_format(request: Request) -> str | None:
     # ``{"detail": ...}``, which no SCIM client parses.
     if path == "/scim" or path.startswith("/scim/"):
         return "scim"
+    # Codex plugin-catalog namespace (reached via chatgpt_base_url).
+    if path in {"/ps", "/plugins"} or path.startswith(("/ps/", "/plugins/")):
+        return "openai"
     return None
 
 

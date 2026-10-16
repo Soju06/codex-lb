@@ -1034,6 +1034,7 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.wham_router)
+    app.include_router(proxy_api.plugin_catalog_router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
@@ -1077,7 +1078,10 @@ def create_app() -> FastAPI:
     # probes for resources this release does not implement (Groups,
     # ServiceProviderConfig), and answering those with index.html and a 200
     # tells it they are supported. They must be a SCIM 404.
-    excluded_prefixes = ("api/", "v1/", "backend-api/", "health", "scim/")
+    # ``ps/`` and ``plugins/`` are the Codex plugin-catalog namespace: an unknown
+    # path there must 404 like any other API miss instead of returning the
+    # dashboard HTML to a client expecting JSON.
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "health", "scim/", "ps/", "plugins/")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

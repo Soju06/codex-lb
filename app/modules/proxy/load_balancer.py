@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
 
@@ -59,7 +59,7 @@ from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.resilience.toggles import resolve_resilience_toggles
-from app.core.usage.quota import apply_usage_quota
+from app.core.usage.quota import apply_usage_quota, usage_windows_allow_recovery
 from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -149,6 +149,12 @@ from app.modules.proxy._load_balancer.types import (
 from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
+)
+from app.modules.proxy._load_balancer.usage_recovery import (
+    _extract_credit_status,
+    _rate_limited_freshness_entry,
+    _usage_entry_is_recent_enough,
+    _usage_entry_recorded_after_block,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
@@ -2287,9 +2293,12 @@ def _state_from_account(
         primary_entry,
         effective_secondary_entry,
         secondary_entry,
-        recorded_after=effective_blocked_at if account.status == AccountStatus.QUOTA_EXCEEDED else None,
+        recorded_after=(
+            effective_blocked_at
+            if account.status in {AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED}
+            else None
+        ),
     )
-
     # If the usage window has reset (reset_at is in the past), the last
     # recorded sample describes an expired window at ANY used percentage:
     # upstream may have stopped reporting the window entirely (e.g. the
@@ -2319,11 +2328,31 @@ def _state_from_account(
     if secondary_used is not None and secondary_reset is not None and secondary_reset <= int(now):
         secondary_used = 0.0
         secondary_reset = None
+    quota_primary_used = _health_tier_primary_used(plan_type=account.plan_type, primary_used=primary_used)
+    quota_available = usage_windows_allow_recovery(
+        quota_primary_used, secondary_used, credits_has, credits_unlimited, credits_balance
+    )
     ignore_zero_capacity_primary_runtime_reset = False
     status_seed = account.status
-    long_window_quota_available = _usage_entry_is_recent_available(effective_secondary_entry, now=now)
-    # Preserve actual 429 cooldowns (marked by blocked_at) before zero-primary
-    # recovery can rewrite status from fresh long-window usage.
+    long_window_quota_available = (
+        effective_secondary_entry is not None
+        and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at, now=now)
+        and effective_secondary_entry.used_percent is not None
+        and (
+            secondary_used is not None
+            and secondary_used < 100.0
+            or effective_secondary_entry.reset_at is None
+            or float(effective_secondary_entry.reset_at) > now
+        )
+        and quota_available
+    )
+    # An account marked RATE_LIMITED by an actual 429 always carries a
+    # blocked_at marker (stale window-derived RATE_LIMITED rows do not).
+    # Evaluate the persisted cooldown against the ORIGINAL persisted
+    # status/blocked_at/reset_at, before the zero-primary-capacity ACTIVE
+    # rewrite below, so that rewrite cannot erase rate-limit cooldown
+    # semantics: fresh monthly/long-window quota is recovery evidence for
+    # stale window data, not for an upstream 429 whose cooldown is running.
     rate_limited_cooldown_deadline: float | None = None
     if account.status == AccountStatus.RATE_LIMITED and effective_blocked_at is not None:
         persisted_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
@@ -2345,10 +2374,11 @@ def _state_from_account(
                 long_window_entry=effective_secondary_entry,
                 now=now,
             )
-            if _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
+            if quota_available and _usage_entry_recorded_after_block(early_freshness_entry, effective_blocked_at):
                 rate_limited_cooldown_deadline = None
 
-    if usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0 and (
+    primary_capacity = usage_core.capacity_for_plan(account.plan_type, "primary")
+    if primary_capacity == 0.0 and (
         account.status != AccountStatus.RATE_LIMITED
         or (
             rate_limited_cooldown_deadline is None
@@ -2449,7 +2479,8 @@ def _state_from_account(
             )
         else:
             freshness_entry = None
-        if _usage_entry_recorded_after_block(freshness_entry, effective_blocked_at):
+        recovery_quota_available = account.status != AccountStatus.RATE_LIMITED or quota_available
+        if recovery_quota_available and _usage_entry_recorded_after_block(freshness_entry, effective_blocked_at):
             effective_runtime_reset = None
 
     rejected_reset_recovery_evidence = False
@@ -2460,14 +2491,9 @@ def _state_from_account(
             long_window_entry=effective_secondary_entry,
             now=now,
         )
-        # Recovery requires actual evidence without exhaustion in any applicable window.
-        all_quota_windows_available = (
-            (primary_used is None or float(primary_used) < 100.0)
-            and (secondary_used is None or float(secondary_used) < 100.0)
-            and (primary_used is not None or secondary_used is not None)
-        )
-        rejected_reset_recovery_evidence = all_quota_windows_available and _usage_entry_is_recent_available(
-            rejected_reset_freshness_entry, now=now
+        rejected_reset_recovery_evidence = quota_available and _usage_entry_is_recent_enough(
+            rejected_reset_freshness_entry.recorded_at if rejected_reset_freshness_entry else None,
+            now=now,
         )
         if effective_blocked_at is not None:
             # A sample predating the 429 cannot disprove the persisted block.
@@ -2756,10 +2782,32 @@ def background_recovery_state_from_account(
         soft_drain_enabled=soft_drain_enabled,
     )
     if account.status == AccountStatus.RATE_LIMITED:
+        normalized_usage = _normalize_usage_inputs(
+            account=account,
+            primary_entry=primary_entry,
+            secondary_entry=secondary_entry,
+            now_epoch=int(now),
+        )
+        credits_has, credits_unlimited, credits_balance = _extract_credit_status(
+            primary_entry,
+            normalized_usage.effective_secondary_entry,
+            secondary_entry,
+            recorded_after=blocked_at,
+        )
+        quota_available = usage_windows_allow_recovery(
+            _health_tier_primary_used(
+                plan_type=account.plan_type,
+                primary_used=normalized_usage.primary_used,
+            ),
+            normalized_usage.secondary_used,
+            credits_has,
+            credits_unlimited,
+            credits_balance,
+        )
         freshness_entry = _rate_limited_freshness_entry(
             account=account,
             primary_entry=primary_entry,
-            long_window_entry=secondary_entry,
+            long_window_entry=normalized_usage.effective_secondary_entry,
             now=now,
         )
         # Keep elapsed resets intact until _state_from_account evaluates the
@@ -2768,7 +2816,11 @@ def background_recovery_state_from_account(
             minimum_floor_deadline = blocked_at + RATE_LIMITED_MIN_COOLDOWN_SECONDS
             # An early explicit reset does not let scheduler reconciliation
             # bypass the persisted post-429 minimum floor.
-            if now < minimum_floor_deadline or not _usage_entry_recorded_after_block(freshness_entry, blocked_at):
+            if (
+                now < minimum_floor_deadline
+                or not quota_available
+                or not _usage_entry_recorded_after_block(freshness_entry, blocked_at)
+            ):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2777,7 +2829,9 @@ def background_recovery_state_from_account(
                     cooldown_until=max(reset_at, minimum_floor_deadline),
                 )
         elif blocked_at is None and reset_at is not None and reset_at <= now:
-            if not _usage_entry_is_recent_available(freshness_entry, now=now):
+            if not quota_available or not _usage_entry_is_recent_enough(
+                getattr(freshness_entry, "recorded_at", None), now=now
+            ):
                 return replace(
                     state,
                     status=AccountStatus.RATE_LIMITED,
@@ -2802,104 +2856,10 @@ def _select_long_window_entry(
     monthly_entry: UsageHistory | None,
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
-    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+    monthly_capacity = usage_core.capacity_for_plan(account.plan_type, "monthly")
+    if monthly_entry is not None and monthly_capacity is not None:
         return monthly_entry
     return secondary_entry
-
-
-def _rate_limited_freshness_entry(
-    *,
-    account: Account,
-    primary_entry: _UsageWindowEntry | None,
-    long_window_entry: _UsageWindowEntry | None,
-    now: float,
-) -> _UsageWindowEntry | None:
-    if (
-        long_window_entry is not None
-        and long_window_entry.reset_at is not None
-        and long_window_entry.reset_at <= int(now)
-    ):
-        long_window_entry = None
-    if (
-        long_window_entry is not None
-        and long_window_entry.window == "monthly"
-        and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
-    ):
-        long_window_entry = None
-    # Freshness cannot prove recovery while an applicable long window is
-    # still exhausted, even if the primary sample reports available quota.
-    if long_window_entry is not None and not (
-        long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
-    ):
-        return None
-    if long_window_entry is not None and long_window_entry.window == "monthly":
-        return long_window_entry
-    if primary_entry is None:
-        return long_window_entry
-    # A newer long-window row can replace primary evidence only after the
-    # primary reset expires. Otherwise the primary sample must itself
-    # report available quota.
-    primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= now
-    if (
-        primary_window_expired
-        and long_window_entry is not None
-        and long_window_entry.recorded_at > primary_entry.recorded_at
-    ):
-        return long_window_entry
-    if primary_entry.used_percent is not None and float(primary_entry.used_percent) < 100.0:
-        return primary_entry
-    return None
-
-
-def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None, *, now: float) -> bool:
-    return (
-        entry is not None
-        and _usage_entry_is_recent_enough(entry.recorded_at, now=now)
-        and entry.used_percent is not None
-        and float(entry.used_percent) < 100.0
-    )
-
-
-def _usage_entry_recorded_after_block(entry: _UsageWindowEntry | None, blocked_at: float) -> bool:
-    if entry is None or entry.recorded_at is None:
-        return False
-    recorded_at = entry.recorded_at
-    if recorded_at.tzinfo is None:
-        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
-    # Persistence truncates block timestamps to whole seconds. A sample
-    # within that same second cannot prove it was captured after the block.
-    return int(recorded_at.timestamp()) > int(blocked_at)
-
-
-def _extract_credit_status(
-    *entries: _UsageWindowEntry | None,
-    recorded_after: float | None = None,
-) -> tuple[bool | None, bool | None, float | None]:
-    credit_entries: list[UsageHistory] = [
-        entry
-        for entry in entries
-        if isinstance(entry, UsageHistory)
-        and (recorded_after is None or _usage_entry_recorded_after_block(entry, recorded_after))
-        and not (entry.credits_has is None and entry.credits_unlimited is None and entry.credits_balance is None)
-    ]
-    if not credit_entries:
-        return None, None, None
-    entry = max(
-        credit_entries,
-        key=lambda item: item.recorded_at if item.recorded_at is not None else datetime.min,
-    )
-    if entry is not None:
-        return entry.credits_has, entry.credits_unlimited, entry.credits_balance
-    return None, None, None
-
-
-def _usage_entry_is_recent_enough(recorded_at: datetime | None, *, now: float) -> bool:
-    if recorded_at is None:
-        return False
-    current_time = datetime.fromtimestamp(now, tz=timezone.utc)
-    interval_seconds = usage_freshness_horizon_seconds()
-    recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
-    return recorded_time >= current_time - timedelta(seconds=interval_seconds)
 
 
 def _filter_accounts_for_model(

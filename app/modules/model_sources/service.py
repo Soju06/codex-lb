@@ -45,6 +45,7 @@ class ModelSourcesService:
         return await self._repository.list_enabled_sources()
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
+        _validate_websocket_capability(payload.supports_responses, payload.supports_responses_websocket)
         model_rows = _model_inputs_to_rows(payload.models)
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
@@ -56,6 +57,7 @@ class ModelSourcesService:
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
             supports_responses=payload.supports_responses,
+            supports_responses_websocket=payload.supports_responses_websocket,
             supports_audio_transcriptions=payload.supports_audio_transcriptions,
             supports_embeddings=payload.supports_embeddings,
             timeout_seconds=payload.timeout_seconds,
@@ -75,18 +77,30 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
         fields = payload.model_fields_set
+        _validate_websocket_capability(
+            payload.supports_responses if payload.supports_responses is not None else row.supports_responses,
+            payload.supports_responses_websocket
+            if payload.supports_responses_websocket is not None
+            else row.supports_responses_websocket,
+        )
         if "name" in fields and payload.name is not None:
             row.name = _normalize_name(payload.name)
         if "base_url" in fields and payload.base_url is not None:
             row.base_url = _normalize_base_url(payload.base_url)
         if "api_key" in fields:
-            row.api_key_encrypted = _encrypt_optional(self._encryptor, payload.api_key)
+            row.api_key_encrypted = _encrypt_optional_preserving(
+                self._encryptor,
+                payload.api_key,
+                existing=row.api_key_encrypted,
+            )
         if "is_enabled" in fields and payload.is_enabled is not None:
             row.is_enabled = payload.is_enabled
         if "supports_chat_completions" in fields and payload.supports_chat_completions is not None:
             row.supports_chat_completions = payload.supports_chat_completions
         if "supports_responses" in fields and payload.supports_responses is not None:
             row.supports_responses = payload.supports_responses
+        if "supports_responses_websocket" in fields and payload.supports_responses_websocket is not None:
+            row.supports_responses_websocket = payload.supports_responses_websocket
         if "supports_audio_transcriptions" in fields and payload.supports_audio_transcriptions is not None:
             row.supports_audio_transcriptions = payload.supports_audio_transcriptions
         if "supports_embeddings" in fields and payload.supports_embeddings is not None:
@@ -123,6 +137,11 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
 
+def _validate_websocket_capability(responses: bool, websocket: bool) -> None:
+    if websocket and not responses:
+        raise ModelSourceValidationError("Responses WebSocket requires Responses support")
+
+
 def _normalize_name(value: str) -> str:
     name = value.strip()
     if not name:
@@ -154,6 +173,11 @@ def _validate_raw_metadata_json(value: str | None) -> str | None:
         raise ModelSourceValidationError("raw_metadata_json must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ModelSourceValidationError("raw_metadata_json must be a JSON object")
+    if "upstream_model" in parsed:
+        upstream_model = parsed["upstream_model"]
+        if not isinstance(upstream_model, str) or not 1 <= len(upstream_model.strip()) <= 255:
+            raise ModelSourceValidationError("upstream_model must be a nonblank string of at most 255 characters")
+        parsed["upstream_model"] = upstream_model.strip()
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
@@ -194,6 +218,29 @@ def _encrypt_optional(encryptor: TokenEncryptor, value: str | None) -> bytes | N
     return encryptor.encrypt(secret)
 
 
+def _encrypt_optional_preserving(
+    encryptor: TokenEncryptor,
+    value: str | None,
+    *,
+    existing: bytes | None,
+) -> bytes | None:
+    """Keep Fernet bytes stable when an update submits the same token."""
+    if value is None:
+        return None
+    secret = value.strip()
+    if not secret:
+        return None
+    if existing is not None:
+        try:
+            if encryptor.decrypt(existing) == secret:
+                return existing
+        except Exception:
+            # A rotated/unavailable encryption key cannot prove equality; a new
+            # ciphertext is safer than retaining an unverifiable credential.
+            pass
+    return encryptor.encrypt(secret)
+
+
 def _to_model_response(row: ModelSourceModel) -> ModelSourceModelResponse:
     return ModelSourceModelResponse(
         id=row.id,
@@ -226,6 +273,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,
         supports_responses=row.supports_responses,
+        supports_responses_websocket=row.supports_responses_websocket,
         supports_audio_transcriptions=row.supports_audio_transcriptions,
         supports_embeddings=row.supports_embeddings,
         timeout_seconds=row.timeout_seconds,

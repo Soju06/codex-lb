@@ -191,6 +191,7 @@ export function createModelSource(
 		healthStatus: "unknown",
 		supportsChatCompletions: true,
 		supportsResponses: false,
+		supportsResponsesWebsocket: false,
 		supportsAudioTranscriptions: false,
 		supportsEmbeddings: false,
 		timeoutSeconds: null,

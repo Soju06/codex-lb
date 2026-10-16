@@ -25,8 +25,10 @@ from aiohttp import web
 from sqlalchemy import select
 from starlette.requests import Request
 
+from app.core.clock import RealClock
 from app.db.models import ApiKeyUsageReservation, ModelSource, RequestLog
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import source_dispatch as dispatch_module
 from app.modules.proxy.source_admission import get_source_bulkhead
@@ -836,11 +838,27 @@ async def test_client_leaving_after_the_stall_window_is_a_stall_abandonment(
     """(c) headers delayed past the evidence window, then the client leaves -> ``source_stall_abandoned``."""
 
     monkeypatch.setattr(dispatch_module, "STALL_EVIDENCE_SECONDS", 0.3)
+
+    class AdvanceableClock(RealClock):
+        offset = 0.0
+
+        def monotonic(self):
+            return super().monotonic() + self.offset
+
+    clock = AdvanceableClock()
+    monkeypatch.setattr(get_proxy_service_for_app(_app(async_client)), "_clock", clock)
     await _enable_api_key_auth(async_client)
     state = _StubState()
     delay_headers = asyncio.Event()
+    arrived = asyncio.Event()
+    handler = _sse_handler(state, before_hold=[_created(), _completed(_USAGE)], delay_headers=delay_headers)
+
+    async def observed_handler(request):
+        arrived.set()
+        return await handler(request)
+
     base_url = await source_upstream(
-        _sse_handler(state, before_hold=[_created(), _completed(_USAGE)], delay_headers=delay_headers),
+        observed_handler,
         handler_cancellation=True,
         shutdown_timeout=1.0,
     )
@@ -857,7 +875,8 @@ async def test_client_leaving_after_the_stall_window_is_a_stall_abandonment(
         body=json.dumps(_request_body(model)).encode(),
     )
     runner = asyncio.create_task(stream.run())
-    await asyncio.sleep(0.6)
+    await asyncio.wait_for(arrived.wait(), timeout=10)
+    clock.offset = 1.0
     stream.disconnect()
     await asyncio.wait_for(runner, timeout=10)
     await _drain(async_client)
@@ -885,10 +904,12 @@ async def test_cancellation_between_the_reservation_and_the_open_releases(
     )
     key, key_id = await _create_limited_key(async_client, source_id, name=f"{model}-key")
 
-    def interrupt(*args: object, **kwargs: object) -> dict[str, Any]:
+    async def interrupt(*args: object, **kwargs: object) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(proxy_api, "_shape_source_responses_payload", interrupt)
+    # Payload shaping also runs during pre-admission ownership validation.
+    # Interrupt the owned open to exercise cleanup after reservation/transfer.
+    monkeypatch.setattr(proxy_api, "_open_owned_source_stream", interrupt)
     stream = _AsgiStream(
         app=_app(async_client),
         path="/v1/responses",
@@ -1409,7 +1430,7 @@ async def test_unlimited_key_streams_live_without_a_settlement(async_client, sou
 
 
 def test_direct_routing_claims_only_inside_the_source_route_helper() -> None:
-    """The bulkhead claim and the owner are reachable only from ``_source_responses_response`` (I9)."""
+    """Only source HTTP/WS dispatch preparation may claim source inference admission (I9)."""
 
     module = ast.parse(Path(proxy_api.__file__).read_text(encoding="utf-8"))
     parents = {child: parent for parent in ast.walk(module) for child in ast.iter_child_nodes(parent)}
@@ -1430,5 +1451,5 @@ def test_direct_routing_claims_only_inside_the_source_route_helper() -> None:
         and node.func.id in {"try_claim_source_admission", "SourceDispatch"}
     ]
     assert claim_sites, "the source route no longer claims through the bulkhead"
-    assert set(claim_sites) == {"_source_responses_response"}
+    assert set(claim_sites) == {"_source_responses_response", "_prepare_source_websocket_turn"}
     assert "context: ProxyContext | None = None" in inspect.getsource(proxy_api._source_responses_response)

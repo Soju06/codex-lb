@@ -671,7 +671,7 @@ class _ApiKeyUsageMixin:
         *,
         action: str,
         request_id: str,
-    ) -> None:
+    ) -> asyncio.Task[None]:
         task = scheduler_for(self).create_task(coro, name=f"proxy-{action}-{request_id}")
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(task)
@@ -691,6 +691,7 @@ class _ApiKeyUsageMixin:
                 )
 
         task.add_done_callback(_cleanup_done)
+        return task
 
     async def _release_unsettled_stream_api_key_usage(
         self,

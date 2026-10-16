@@ -17,6 +17,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     healthStatus: "unknown",
     supportsChatCompletions: true,
     supportsResponses: false,
+    supportsResponsesWebsocket: false,
     supportsAudioTranscriptions: false,
     supportsEmbeddings: false,
     timeoutSeconds: null,
@@ -388,5 +389,83 @@ describe("ModelSourceEditDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][1].apiKey).toBe("sk-new-token");
+  });
+});
+
+describe("ModelSourceEditDialog aliases", () => {
+  it("renames an upstream model into an alias without losing capabilities or disabled state", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({ multi_agent_version: "v2", base_instructions: "Spawn agents" });
+    source.models[0].isEnabled = false;
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByDisplayValue(source.models[0].model);
+    await user.clear(models);
+    await user.type(models, `cd/gpt-6-astra=${source.models[0].model}`);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const model = onSubmit.mock.calls[0][1].models[0];
+    expect(model).toMatchObject({ model: "cd/gpt-6-astra", displayName: "cd/gpt-6-astra", contextWindow: 32768,
+      supportsTools: true, inputPer1M: 0.5, outputPer1M: 1.5, isEnabled: false });
+    expect(JSON.parse(model.rawMetadataJson)).toEqual({ multi_agent_version: "v2", base_instructions: "Spawn agents", upstream_model: source.models[0].model });
+  });
+
+  it.each([false, true])("preserves an alias through pricing edits or explicitly removes it: %s", async (removeAlias) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0].rawMetadataJson = JSON.stringify({ upstream_model: "cd/linxaq", multi_agent_version: "v2" });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByDisplayValue(`${source.models[0].model}=cd/linxaq`);
+    if (removeAlias) {
+      await user.clear(models);
+      await user.type(models, source.models[0].model);
+    } else {
+      const price = screen.getByDisplayValue("1.5");
+      await user.clear(price);
+      await user.type(price, "2");
+    }
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const metadata = JSON.parse(onSubmit.mock.calls[0][1].models[0].rawMetadataJson);
+    expect(metadata.multi_agent_version).toBe("v2");
+    expect(metadata.upstream_model).toBe(removeAlias ? undefined : "cd/linxaq");
+  });
+});
+
+
+describe("model alias rename identity", () => {
+  it.each([false, true])("preserves a renamed alias with a shared target peer: %s", async (shared) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource();
+    source.models[0] = { ...source.models[0], model: "alpha", isEnabled: false,
+      rawMetadataJson: JSON.stringify({ upstream_model: "vendor-x", custom: "retained" }) };
+    if (shared) source.models.push({ ...source.models[0], id: 2, model: "peer", inputPer1M: 99, isEnabled: true });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    const models = screen.getByLabelText("Models", { exact: true });
+    expect(models).toHaveAccessibleDescription(/Clients use the alias/);
+    await user.clear(models);
+    await user.type(models, shared ? "peer=vendor-x, beta=vendor-x" : "beta=vendor-x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const renamed = onSubmit.mock.calls[0][1].models.find((model: {model: string}) => model.model === "beta");
+    expect(renamed).toMatchObject({ isEnabled: false, inputPer1M: 0.5, outputPer1M: 1.5, supportsTools: true });
+    expect(JSON.parse(renamed.rawMetadataJson)).toEqual({ upstream_model: "vendor-x", custom: "retained" });
+  });
+
+  it("rejects an ambiguous rename without submitting replacement rows", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const source = createModelSource();
+    source.models = ["alpha", "peer"].map((model, i) => ({ ...source.models[0], id: i + 1, model,
+      rawMetadataJson: JSON.stringify({ upstream_model: "vendor-x" }) }));
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
+    await user.clear(screen.getByLabelText("Models", { exact: true }));
+    await user.type(screen.getByLabelText("Models", { exact: true }), "beta=vendor-x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/Several existing models share this upstream ID/)).toBeVisible();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

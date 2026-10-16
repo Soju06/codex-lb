@@ -39,7 +39,9 @@ _IN_FLIGHT_EXCLUDED_HTTP_PATHS = frozenset(
 _IN_FLIGHT_WEBSOCKET_PATHS = frozenset(
     {
         "/backend-api/codex/responses",
+        "/backend-api/codex/responses/",
         "/v1/responses",
+        "/v1/responses/",
     }
 )
 

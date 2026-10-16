@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -1061,3 +1062,367 @@ def _mapping_has_account_scoped_reference(value: Mapping[str, JsonValue]) -> boo
         if identifiers is not None and identifiers != []:
             return True
     return False
+
+
+@dataclass(frozen=True, slots=True)
+class PortabilityView:
+    """Source request evidence before forwarding transforms."""
+
+    body: Mapping[str, JsonValue]
+
+
+def self_contained_tool_call_ids(input_items: list[JsonValue]) -> set[str]:
+    """Return complete ordered call/result groups, ignoring only bookkeeping IDs."""
+    groups: dict[str, list[JsonValue]] = {}
+    for item in input_items:
+        if isinstance(item, dict) and isinstance(call_id := item.get("call_id"), str) and call_id:
+            groups.setdefault(call_id, []).append({key: value for key, value in item.items() if key != "id"})
+    return {
+        call_id for call_id, group in groups.items() if responses_input_items_are_self_contained_fresh_replay(group)
+    }
+
+
+def client_message_id_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """An inline client message's ID is bookkeeping, not an upstream output reference."""
+
+    if "type" in item and item["type"] != "message":
+        return False
+    if not _is_one_of(item.get("role"), {"user", "system", "developer"}) or not _is_nonblank_string(item.get("id")):
+        return False
+    message = {key: value for key, value in item.items() if key != "id"}
+    return responses_payload_is_account_neutral_fresh_replay({"input": [message]})
+
+
+def client_tool_output_id_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Only the local result ID is bookkeeping; its call ID still needs an owner."""
+
+    item_type = item.get("type")
+    return (
+        isinstance(item_type, str)
+        and item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE
+        and _is_nonblank_string(item.get("id"))
+        and _is_nonblank_string(item.get("call_id"))
+        and _input_item_has_only_known_fields(item, item_type)
+        and _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+        and _caller_is_self_contained(item)
+        and _tool_output_is_self_contained(item_type, item)
+        and not _contains_account_scoped_input_state(dict(item))
+    )
+
+
+def standalone_function_output_is_account_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Codex can inject a named notification without an originating tool call."""
+
+    return (
+        item.get("type") == "function_call_output"
+        and "call_id" not in item
+        and set(item) <= {"type", "id", "name", "namespace", "output", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}
+        and _is_nonblank_string(item.get("name"))
+        and ("id" not in item or _is_nonblank_string(item["id"]))
+        and ("namespace" not in item or isinstance(item["namespace"], str))
+        and _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+        and _tool_output_is_self_contained("function_call_output", item)
+        and not _contains_account_scoped_input_state(dict(item))
+    )
+
+
+def inline_agent_message_is_source_neutral(item: Mapping[str, JsonValue]) -> bool:
+    """Codex delegates inline task content, with a client-generated message ID.
+
+    Encrypted agent text is message content understood by the receiving model,
+    not an encrypted reasoning/compaction item or an upstream object reference.
+    Keep this exception restricted to the exact agent-message wire shape.
+    """
+
+    if (
+        item.get("type") != "agent_message"
+        or not set(item) <= {"type", "id", "author", "recipient", "content", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD}
+        or not _is_nonblank_string(item.get("author"))
+        or not _is_nonblank_string(item.get("recipient"))
+        or ("id" in item and not _is_nonblank_string(item["id"]))
+        or not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD))
+    ):
+        return False
+    content = item.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    return all(
+        isinstance(part, dict)
+        and (
+            (set(part) == {"type", "text"} and part["type"] == "input_text" and isinstance(part["text"], str))
+            or (
+                set(part) == {"type", "encrypted_content"}
+                and part["type"] == "encrypted_content"
+                and _is_nonblank_string(part["encrypted_content"])
+            )
+        )
+        for part in content
+    )
+
+
+def project_direct_source_input_metadata(input_items: list[JsonValue]) -> list[JsonValue]:
+    """Normalize proven client bookkeeping only in a classification copy.
+
+    Ownership and portability share this view; forwarding and subscription
+    replay keep their original input and metadata contract.
+    """
+    projected: list[JsonValue] = []
+    for item in input_items:
+        metadata = item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD) if isinstance(item, dict) else None
+        if isinstance(item, dict) and isinstance(metadata, dict) and _direct_source_metadata_is_neutral(metadata):
+            projected.append({**item, _INTERNAL_CHAT_MESSAGE_METADATA_FIELD: {"turn_id": metadata["turn_id"]}})
+        else:
+            projected.append(item)
+    return projected
+
+
+def _direct_source_metadata_is_neutral(metadata: Mapping[str, JsonValue]) -> bool:
+    if not set(metadata) <= {"turn_id", "create_time", "content_item_kinds"} or not _is_nonblank_string(
+        metadata.get("turn_id")
+    ):
+        return False
+    if "create_time" in metadata:
+        created = metadata["create_time"]
+        if isinstance(created, bool) or not isinstance(created, (int, float)):
+            return False
+        if isinstance(created, float) and not isfinite(created):
+            return False
+    if "content_item_kinds" in metadata:
+        kinds = metadata["content_item_kinds"]
+        if not isinstance(kinds, list) or not all(_is_nonblank_string(kind) for kind in kinds):
+            return False
+    return True
+
+
+_PORTABILITY_VIEW_ONLY_FIELDS = frozenset(
+    {"max_output_tokens", "prompt_cache_retention", "safety_identifier", "temperature", "top_p", "user"}
+)
+
+
+_DIRECT_SOURCE_NEUTRAL_FIELDS = frozenset({"background", "max_tool_calls", "stream_options", "top_logprobs"})
+
+
+_STATELESS_DECLARABLE_TOOL_TYPES = frozenset({"apply_patch", "local_shell", "shell", "tool_search"})
+
+
+_STATELESS_TOOL_DECLARATION_FIELDS = frozenset({"description", "type"})
+
+
+def transcript_is_source_free(
+    view: PortabilityView,
+    *,
+    supported_tool_types: frozenset[str] = frozenset(),
+    allow_direct_source_tools: bool = False,
+) -> bool:
+    """Steps 1-2 of ``responses_payload_is_provider_portable`` only.
+
+    True when the viewed transcript carries no account-scoped upstream state:
+    it is an account-neutral fresh replay and holds no ``reasoning`` or
+    ``compaction`` item (implied by the predicate, kept explicit). Tool
+    declarations of a type the source model declares but the account-neutral
+    predicate has no vocabulary for (``_STATELESS_DECLARABLE_TOOL_TYPES``) are
+    set aside from the replay check once proven free of account-scoped
+    references; without declarations (the default) the check is the predicate's
+    own. Never raises on a body the request model admits.
+    """
+
+    input_items = _view_input_items(view)
+    # The replay predicate (and ``extract_input_file_ids`` it delegates to) expects
+    # object items with string types; anything else is declined here, never raised.
+    if any(
+        not isinstance(item, dict) or ("type" in item and not isinstance(item["type"], str)) for item in input_items
+    ):
+        return False
+    direct_source_view = view
+    if allow_direct_source_tools:
+        input_items = project_direct_source_input_metadata(input_items)
+        direct_source_body = dict(view.body)
+        local_call_ids = self_contained_tool_call_ids(input_items)
+        if isinstance(view.body.get("input"), list):
+            direct_source_body["input"] = [
+                {key: value for key, value in item.items() if key != "id"}
+                if isinstance(item, dict)
+                and (
+                    client_message_id_is_account_neutral(item)
+                    or (isinstance(call_id := item.get("call_id"), str) and call_id in local_call_ids)
+                )
+                else item
+                for item in input_items
+                if not (
+                    isinstance(item, dict)
+                    and (
+                        standalone_function_output_is_account_neutral(item)
+                        or inline_agent_message_is_source_neutral(item)
+                    )
+                )
+            ]
+        for field_name in _DIRECT_SOURCE_NEUTRAL_FIELDS:
+            value = direct_source_body.get(field_name)
+            if _direct_source_neutral_control_is_safe(field_name, value):
+                direct_source_body.pop(field_name, None)
+        direct_source_view = PortabilityView(direct_source_body)
+    classification_view = _classification_view(
+        direct_source_view,
+        supported_tool_types=supported_tool_types,
+        allow_direct_source_tools=allow_direct_source_tools,
+    )
+    if classification_view is None or not responses_payload_is_account_neutral_fresh_replay(classification_view):
+        return False
+    return not any(_item_type(item) in ("compaction", "reasoning") for item in input_items)
+
+
+def _direct_source_neutral_control_is_safe(field_name: str, value: JsonValue | None) -> bool:
+    if value is None:
+        return True
+    if field_name == "background":
+        return isinstance(value, bool)
+    if field_name == "max_tool_calls":
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    if field_name == "top_logprobs":
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 20
+    if field_name == "stream_options":
+        return (
+            isinstance(value, dict)
+            and set(value) <= {"include_obfuscation"}
+            and (not value or isinstance(value.get("include_obfuscation"), bool))
+        )
+    return False
+
+
+def _classification_view(
+    view: PortabilityView,
+    *,
+    supported_tool_types: frozenset[str] = frozenset(),
+    allow_direct_source_tools: bool = False,
+) -> dict[str, JsonValue] | None:
+    """The view restricted to what the account-neutral predicate validates, or ``None`` when it cannot be neutral.
+
+    Only the provider-neutral knobs are dropped; anything else the view carries
+    reaches the predicate, which rejects fields it has no validation for -- a
+    hand-built view with an unknown field still fails closed as history.
+    Declarations of a stateless Codex tool type the source model declares
+    (``_STATELESS_DECLARABLE_TOOL_TYPES``; the predicate's own vocabulary stops
+    at custom, function and web search) are removed from ``tools`` -- and a
+    ``tool_choice`` naming one is dropped -- only in exactly their stateless
+    shape (``_STATELESS_TOOL_DECLARATION_FIELDS``); a declaration with any
+    other field stays in the view, where the predicate rejects it. Hosted
+    declarations are never set aside.
+    """
+
+    body = {key: value for key, value in view.body.items() if key not in _PORTABILITY_VIEW_ONLY_FIELDS}
+    stateless_types = supported_tool_types & _STATELESS_DECLARABLE_TOOL_TYPES
+    if stateless_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            kept: list[JsonValue] = []
+            for tool in tools:
+                if (
+                    isinstance(tool, dict)
+                    and _is_one_of(tool.get("type"), stateless_types)
+                    and _is_portable_stateless_declaration(tool)
+                ):
+                    # Defense in depth: the shape admits no reference-bearing field.
+                    if _contains_account_scoped_tool_state(tool):
+                        return None
+                    continue
+                kept.append(tool)
+            body["tools"] = kept
+    if allow_direct_source_tools and "namespace" in supported_tool_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            kept = []
+            for tool in tools:
+                if (
+                    isinstance(tool, dict)
+                    and tool.get("type") == "namespace"
+                    and _direct_namespace_declaration_is_safe(tool)
+                ):
+                    continue
+                kept.append(tool)
+            body["tools"] = kept
+    if allow_direct_source_tools and "web_search" in supported_tool_types:
+        tools = body.get("tools")
+        if isinstance(tools, list):
+            body["tools"] = [
+                _direct_web_search_classification(tool)
+                if isinstance(tool, dict) and tool.get("type") == "web_search"
+                else tool
+                for tool in tools
+            ]
+    tool_choice = body.get("tool_choice")
+    if (
+        isinstance(tool_choice, dict)
+        and set(tool_choice) == {"type"}
+        and _is_one_of(tool_choice["type"], stateless_types)
+    ):
+        body.pop("tool_choice")
+    if (
+        allow_direct_source_tools
+        and "namespace" in supported_tool_types
+        and isinstance(tool_choice, dict)
+        and tool_choice.get("type") == "namespace"
+        and set(tool_choice) == {"type"}
+    ):
+        body.pop("tool_choice")
+    return body
+
+
+def _direct_web_search_classification(tool: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Ignore only validated neutral controls; keep unknown fields fail-closed."""
+
+    classified = dict(tool)
+    if isinstance(tool.get("external_web_access"), bool):
+        classified.pop("external_web_access")
+    content_types = tool.get("search_content_types")
+    if (
+        isinstance(content_types, list)
+        and content_types
+        and all(_is_one_of(content_type, {"text", "image"}) for content_type in content_types)
+    ):
+        classified.pop("search_content_types")
+    return classified
+
+
+def _direct_namespace_declaration_is_safe(tool: Mapping[str, JsonValue]) -> bool:
+    """Validate the stateless collaboration declaration before dropping it."""
+    if set(tool) - {"description", "name", "tools", "type"} or not _is_nonblank_string(tool.get("name")):
+        return False
+    description = tool.get("description")
+    if description is not None and not isinstance(description, str):
+        return False
+    nested = tool.get("tools")
+    if not isinstance(nested, list):
+        return False
+    for item in nested:
+        if not isinstance(item, dict) or item.get("type") != "function":
+            return False
+        if set(item) - {"description", "name", "parameters", "strict", "type"}:
+            return False
+        if not _is_nonblank_string(item.get("name")):
+            return False
+        if item.get("description") is not None and not isinstance(item.get("description"), str):
+            return False
+        if item.get("parameters") is not None and not isinstance(item.get("parameters"), dict):
+            return False
+        if item.get("strict") is not None and not isinstance(item.get("strict"), bool):
+            return False
+    return True
+
+
+def _view_input_items(view: PortabilityView) -> list[JsonValue]:
+    input_value = view.body.get("input")
+    return cast(list[JsonValue], input_value) if isinstance(input_value, list) else []
+
+
+def _item_type(item: JsonValue) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    return item_type if isinstance(item_type, str) else None
+
+
+def _is_portable_stateless_declaration(tool: Mapping[str, JsonValue]) -> bool:
+    """Exactly ``{"type": <stateless type>}`` plus an optional string ``description``."""
+
+    description = tool.get("description")
+    return set(tool) <= _STATELESS_TOOL_DECLARATION_FIELDS and (description is None or isinstance(description, str))

@@ -2148,7 +2148,7 @@ async def test_dashboard_overload_isolation_window_controls_the_balancer_without
 async def test_settings_api_rejects_dashboard_lease_ttl_below_request_budgets(async_client):
     """The dashboard lease TTL is held to the ``account-lease-ttl-covers-*`` invariants.
 
-    With the default 600 s proxy and 180 s compact request budgets a 120 s TTL
+    With the default 600 s proxy and 900 s compact request budgets a 120 s TTL
     would let stale reclaim take a response-create lease away from a healthy
     request, so the write is rejected by the same PUT-time check the C2-1
     timeouts use and nothing is stored.
@@ -2162,9 +2162,9 @@ async def test_settings_api_rejects_dashboard_lease_ttl_below_request_budgets(as
     current = await async_client.get("/api/settings")
     assert current.json()["provenance"]["proxy_account_lease_ttl_seconds"]["source"] == "default"
 
-    accepted = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 600})
+    accepted = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": 900})
     assert accepted.status_code == 200
-    assert accepted.json()["proxyAccountLeaseTtlSeconds"] == 600.0
+    assert accepted.json()["proxyAccountLeaseTtlSeconds"] == 900.0
 
 
 @pytest.mark.asyncio
@@ -2223,7 +2223,7 @@ async def test_settings_api_lease_ttl_and_request_budgets_are_checked_on_effecti
     assert response.status_code == 400
     assert "account-lease-ttl-covers-compact-budget" in response.json()["error"]["message"]
 
-    # Clearing the compact budget first (back to env 180) lets the TTL inherit again.
+    # Clearing the compact budget first (back to the 900 s default) lets the TTL inherit again.
     response = await async_client.put("/api/settings", json={"compactRequestBudgetSeconds": None})
     assert response.status_code == 200
     response = await async_client.put("/api/settings", json={"proxyAccountLeaseTtlSeconds": None})

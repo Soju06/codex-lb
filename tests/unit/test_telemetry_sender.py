@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from app.modules.telemetry.consent import TelemetryIdentity
 from app.modules.telemetry.schemas import TelemetrySnapshot, build_snapshot_envelope
 from app.modules.telemetry.sender import TelemetrySender
+from app.modules.telemetry.snapshot import _build_day_from_rows
 
 pytestmark = pytest.mark.unit
 
@@ -220,6 +221,38 @@ async def test_sender_aborts_snapshot_when_consent_recheck_fails(monkeypatch, ca
     ]
     assert context_provider.await_count == 2
     assert [record.message for record in caplog.records] == ["Anonymous telemetry consent re-check failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["inactive", "instance", "key", "unavailable", "unchanged"])
+async def test_sender_rechecks_consent_and_identity_before_day_post(monkeypatch, caplog, change: str) -> None:
+    identity = TelemetryIdentity(_snapshot().instance_id, Ed25519PrivateKey.generate())
+    day = _build_day_from_rows(identity.instance_id, date(2026, 9, 1), [])
+    replacement = TelemetryIdentity(
+        "replacement" if change == "instance" else identity.instance_id,
+        Ed25519PrivateKey.generate() if change == "key" else identity.private_key,
+    )
+    recheck = (
+        OSError("database unavailable")
+        if change == "unavailable"
+        else (False, None)
+        if change == "inactive"
+        else (True, replacement)
+    )
+    context_provider = AsyncMock(side_effect=[(True, identity), recheck])
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+
+    with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.sender"):
+        sent = await TelemetrySender("https://telemetry.example", context_provider=context_provider).send_day(day)
+
+    assert sent is (change == "unchanged")
+    expected_paths = ["/v1/register", "/v1/activate"] + (["/v1/day"] if sent else [])
+    assert [request[0] for request in session.requests] == [
+        f"https://telemetry.example{path}" for path in expected_paths
+    ]
+    assert context_provider.await_count == 2
+    assert all(record.levelno == logging.DEBUG for record in caplog.records)
 
 
 @pytest.mark.asyncio

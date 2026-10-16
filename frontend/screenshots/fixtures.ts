@@ -8,6 +8,8 @@ import {
   createRequestLogEntry,
   createRequestLogFilterOptions,
   createRequestLogsResponse,
+  createTelemetryConsent,
+  createTelemetryPreview,
   createUpstreamProxyAdmin,
   type AccountSummary,
   type AccountTrendsResponse,
@@ -504,6 +506,25 @@ export const unauthenticatedSession = createDashboardAuthSession({
 });
 
 export const settings = createDashboardSettings();
+
+// ── Telemetry consent ──
+
+// Decided at the current notice version: no dialog, settings toggle on.
+export const telemetryConsent = createTelemetryConsent();
+// First dashboard entry: undecided consent with both payload bodies attached.
+export const telemetryConsentUndecided = createTelemetryConsent({
+  state: "undecided",
+  source: "default",
+  active: true,
+});
+// Persisted decision whose acknowledged notice version is behind: the backend
+// re-attaches the preview once so the operator sees the changed payload.
+export const telemetryConsentNotice = createTelemetryConsent({
+  state: "enabled",
+  source: "persisted",
+  active: true,
+  preview: createTelemetryPreview(),
+});
 
 export const upstreamProxyAdmin = createUpstreamProxyAdmin({
   endpoints: [],

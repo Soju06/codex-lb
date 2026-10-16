@@ -12,12 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import Settings, get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardSettingsConflictError
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 
 ConsentState = Literal["undecided", "enabled", "disabled"]
 ConsentSource = Literal["env", "persisted", "default"]
 _VALID_STATES = frozenset({"undecided", "enabled", "disabled"})
+TELEMETRY_NOTICE_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,24 @@ class TelemetryConsentStore:
         self._settings = settings or get_settings()
         self._encryptor = encryptor or TokenEncryptor()
         self._repository = SettingsRepository(session)
+
+    async def acknowledge_notice(self, requested_version: int = TELEMETRY_NOTICE_VERSION) -> None:
+        row = await self._repository.get_or_create()
+        target = min(requested_version, TELEMETRY_NOTICE_VERSION)
+        if (row.telemetry_notice_version or 0) >= target:
+            return
+        row.telemetry_notice_version = target
+        try:
+            await self._repository.commit_refresh(row)
+        except DashboardSettingsConflictError:
+            await self._session.rollback()
+            row = await self._repository.get_or_create()
+            if (row.telemetry_notice_version or 0) < target:
+                raise
+
+    async def notice_version(self) -> int:
+        row = await self._repository.get_or_create()
+        return int(row.telemetry_notice_version or 0)
 
     async def resolve(self) -> ResolvedConsent:
         row = await self._repository.get_or_create()

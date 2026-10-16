@@ -60,6 +60,7 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
         </div>
 
         <p className="text-xs text-muted-foreground">{t("settings.telemetry.optOutNotice")}</p>
+        <p className="text-xs text-muted-foreground">{t("settings.telemetry.retentionNotice")}</p>
 
         {envFallback ? (
           <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">

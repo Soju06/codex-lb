@@ -14,6 +14,9 @@ import {
   requestLogs,
   resetCreditSnapshots,
   settings,
+  telemetryConsent,
+  telemetryConsentNotice,
+  telemetryConsentUndecided,
   upstreamProxyAdmin,
   unauthenticatedSession,
 } from "./fixtures";
@@ -23,6 +26,7 @@ import {
   createConversationEntry,
   createConversationsResponse,
 } from "../src/test/mocks/factories";
+import type { TelemetryConsent } from "../src/features/settings/schemas";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = path.resolve(__dirname, "../../docs/screenshots");
@@ -57,6 +61,7 @@ async function interceptApi(
   page: Page,
   session: SessionOverride = authSession,
   accountList = accounts,
+  consent: TelemetryConsent = telemetryConsent,
 ) {
   await page.route("**/api/**", (route) => {
     const url = new URL(route.request().url());
@@ -88,6 +93,7 @@ async function interceptApi(
       return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "account_not_found", message: "Account not found" } }) });
     }
     if (p === "/api/settings") return fulfill(route, settings);
+    if (p === "/api/settings/telemetry") return fulfill(route, consent);
     if (p === "/api/settings/upstream-proxy") return fulfill(route, upstreamProxyAdmin);
     const usageResetCreditsMatch = p.match(/^\/api\/accounts\/([^/]+)\/usage-reset-credits$/);
     if (usageResetCreditsMatch) {
@@ -132,12 +138,13 @@ async function capture(
     route: string;
     fullPage?: boolean;
     session?: SessionOverride;
+    telemetryConsent?: TelemetryConsent;
     waitFor?: string;
     beforeScreenshot?: (page: Page) => Promise<void>;
   },
 ) {
   await applyTheme(page, opts.theme);
-  await interceptApi(page, opts.session);
+  await interceptApi(page, opts.session, undefined, opts.telemetryConsent);
 
   // Trigger prefers-reduced-motion so the existing CSS media query kicks in.
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -375,6 +382,26 @@ test("settings — light", async ({ page }) => {
 
 test("settings — dark", async ({ page }) => {
   await capture(page, { file: "settings-dark.jpg", theme: "dark", route: "/settings", fullPage: true });
+});
+
+test("telemetry consent dialog — undecided", async ({ page }) => {
+  await capture(page, {
+    file: "telemetry-consent.jpg",
+    theme: "light",
+    route: "/dashboard",
+    telemetryConsent: telemetryConsentUndecided,
+    waitFor: '[role="dialog"]',
+  });
+});
+
+test("telemetry consent dialog — notice re-display", async ({ page }) => {
+  await capture(page, {
+    file: "telemetry-consent-notice.jpg",
+    theme: "light",
+    route: "/dashboard",
+    telemetryConsent: telemetryConsentNotice,
+    waitFor: '[role="dialog"]',
+  });
 });
 
 test("login", async ({ page }) => {

@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+from datetime import timedelta
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import __version__
@@ -13,12 +14,14 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.utils.time import utcnow
 from app.db.session import get_session
-from app.modules.telemetry.consent import ResolvedConsent, TelemetryConsentStore
+from app.modules.telemetry.consent import TELEMETRY_NOTICE_VERSION, ResolvedConsent, TelemetryConsentStore
 from app.modules.telemetry.schemas import (
     TelemetryConsentResponse,
     TelemetryConsentUpdate,
-    TelemetrySnapshotEnvelope,
+    TelemetryNoticeAcknowledgement,
+    TelemetryPreview,
     build_snapshot_envelope,
 )
 from app.modules.telemetry.sender import TelemetrySender
@@ -42,11 +45,14 @@ async def get_telemetry_consent(
 ) -> TelemetryConsentResponse:
     store = TelemetryConsentStore(session)
     consent = await store.resolve()
+    notice_version = await store.notice_version()
+    undecided_dialog_due = consent.state == "undecided" and consent.source == "default"
+    notice_upgrade_due = notice_version < TELEMETRY_NOTICE_VERSION and consent.source != "env"
     return await _response(
         session,
         store,
         consent,
-        include_preview=include_preview or (consent.state == "undecided" and consent.source == "default"),
+        include_preview=include_preview or undecided_dialog_due or notice_upgrade_due,
     )
 
 
@@ -78,6 +84,26 @@ async def update_telemetry_consent(
     return await _response(session, store, consent, include_preview=False)
 
 
+@router.post("/telemetry/notice-ack", response_model=TelemetryConsentResponse)
+async def acknowledge_telemetry_notice(
+    payload: TelemetryNoticeAcknowledgement = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
+    session: AsyncSession = Depends(get_session),
+) -> TelemetryConsentResponse:
+    if payload.notice_version > TELEMETRY_NOTICE_VERSION:
+        raise HTTPException(status_code=400, detail="Unsupported telemetry notice version")
+    store = TelemetryConsentStore(session)
+    await store.acknowledge_notice(payload.notice_version)
+    consent = await store.resolve()
+    return TelemetryConsentResponse(
+        notice_version=TELEMETRY_NOTICE_VERSION,
+        state=consent.state,
+        source=consent.source,
+        active=consent.active,
+        preview=None,
+    )
+
+
 async def _response(
     session: AsyncSession,
     store: TelemetryConsentStore,
@@ -85,7 +111,7 @@ async def _response(
     *,
     include_preview: bool,
 ) -> TelemetryConsentResponse:
-    preview: TelemetrySnapshotEnvelope | None = None
+    preview: TelemetryPreview | None = None
     if include_preview:
         identity = await store.get_or_create_identity()
         snapshot_consent = "enabled" if consent.state == "disabled" else consent.state
@@ -93,8 +119,14 @@ async def _response(
             identity.instance_id,
             consent=snapshot_consent,
         )
-        preview = build_snapshot_envelope(snapshot)
+        preview = TelemetryPreview(
+            heartbeat=build_snapshot_envelope(snapshot),
+            day=await TelemetrySnapshotBuilder(session).build_day(
+                identity.instance_id, (utcnow() - timedelta(days=1)).date()
+            ),
+        )
     return TelemetryConsentResponse(
+        notice_version=TELEMETRY_NOTICE_VERSION,
         state=consent.state,
         source=consent.source,
         active=consent.active,

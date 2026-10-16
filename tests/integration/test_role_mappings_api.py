@@ -613,6 +613,7 @@ async def test_role_mappings_migration_upgrades_and_downgrades(tmp_path) -> None
         # asserted equal to ``_TARGET_REVISION``: this revision is no longer the
         # newest one, and pinning that would break on every later migration.
         assert result.current_revision == _HEAD_REVISION
+        assert result.current_revision == inspect_migration_state(db_url).head_revision
     finally:
         await engine.dispose()
 

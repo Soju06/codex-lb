@@ -19,6 +19,8 @@ pub const CAPABILITIES: &[&str] = &[
     "websocket_responses_events_v1",
     "websocket_responses_routing_v1",
     "websocket_send_ack",
+    "websocket_text_chunking_v1",
+    "websocket_binary_chunking_v1",
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -147,6 +149,15 @@ pub enum NativeEvent {
     WebsocketText {
         request_id: String,
         text: String,
+        /// Continuation flag for chunked websocket text IPC: a helper that
+        /// emits a message larger than one IPC chunk sends it as a sequence
+        /// of ``websocket_text`` events, each ``more: true`` except the last
+        /// (``more: false``, or omitted which deserializes as ``false``).
+        /// The reassembled concatenation of the chunks' ``text`` fields is
+        /// the complete upstream message. Messages small enough for a single
+        /// event keep the pre-chunking shape exactly.
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
     },
     WebsocketResponsesText {
         request_id: String,
@@ -159,6 +170,12 @@ pub enum NativeEvent {
     WebsocketBinary {
         request_id: String,
         data: String,
+        /// Continuation flag for chunked binary IPC, mirroring
+        /// ``WebsocketText.more``: a helper splits a binary message that
+        /// would exceed one bounded IPC line into a sequence of
+        /// ``websocket_binary`` events, each ``more: true`` except the last.
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
     },
     WebsocketSent {
         request_id: String,

@@ -39,6 +39,21 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
         "websocket_send_ack",
+        # The helper splits a websocket text message that would exceed one
+        # bounded IPC line into ``websocket_text{more: true}`` chunks the
+        # pump reassembles (one upstream message may approach the bridge's
+        # 64 MiB cap, and its JSON-escaped IPC form can exceed the parent's
+        # 24 MiB readline limit). A helper WITHOUT this capability would emit
+        # such a message as one oversize line, so requiring the capability
+        # refuses it at the handshake — fail closed. Python and the helper
+        # must upgrade as a PAIR; no mixed-version wire compatibility is
+        # claimed.
+        "websocket_text_chunking_v1",
+        # Binary IPC has the same bounded-line constraint: a raw binary
+        # message near the 64 MiB bridge cap base64-expands past the 24 MiB
+        # readline limit, so the helper splits it into
+        # ``websocket_binary{more: true}`` chunks the pump reassembles.
+        "websocket_binary_chunking_v1",
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
@@ -54,6 +69,7 @@ _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
 _NATIVE_STREAM_QUEUE_LIMIT = 4096
 _NATIVE_STREAM_QUEUE_BYTES_LIMIT = 32 * 1024 * 1024
 _NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
+_NATIVE_WEBSOCKET_MESSAGE_QUEUE_BYTES_LIMIT = 32 * 1024 * 1024
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
@@ -80,6 +96,16 @@ def _event_payload_size(item: object) -> int:
         # payload. Charge both copies without reserializing the decoded object.
         copies = 2 if item.get("type") == "websocket_responses_text" else 1
         return copies * len(text.encode("utf-8")) + metadata_size
+    return 0
+
+def _websocket_message_size(message: object) -> int:
+    """Queued payload bytes of one completed websocket message."""
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return len(text.encode("utf-8"))
+    data = getattr(message, "data", None)
+    if isinstance(data, (bytes, bytearray)):
+        return len(data)
     return 0
 
 
@@ -453,8 +479,17 @@ class NativeEgressWebSocket:
         self._messages: asyncio.Queue[NativeWebSocketMessage | BaseException] = asyncio.Queue(
             maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
         )
+        self._messages_bytes = 0
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._command_sequence = 0
+        # Reassembly buffer for chunked websocket text IPC
+        # (`websocket_text_chunking_v1`): holds at most the one in-flight
+        # message, bounded by the connection's configured message cap.
+        self._text_fragments: list[str] = []
+        # Reassembly buffer for chunked websocket binary IPC
+        # (`websocket_binary_chunking_v1`): holds at most the one in-flight
+        # message as decoded bytes, bounded by the message cap.
+        self._binary_fragments: list[bytes] = []
         self._completed = False
         self._closing = False
         self._remote_closed = False
@@ -482,6 +517,7 @@ class NativeEgressWebSocket:
         item = await self._messages.get()
         if isinstance(item, BaseException):
             raise item
+        self._messages_bytes = max(0, self._messages_bytes - _websocket_message_size(item))
         return item
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -589,12 +625,22 @@ class NativeEgressWebSocket:
                         future.set_result(None)
                     continue
                 if event_type == "websocket_text":
+                    self._reject_interrupted_binary_chunks("websocket_text")
                     text = item.get("text")
-                    if not isinstance(text, str):
+                    more = item.get("more", False)
+                    if not isinstance(text, str) or type(more) is not bool:
                         raise NativeEgressProtocolError("native websocket text event is invalid")
+                    if more:
+                        self._text_fragments.append(text)
+                        continue
+                    if self._text_fragments:
+                        text = "".join(self._text_fragments) + text
+                        self._text_fragments.clear()
                     self._queue_message(NativeWebSocketMessage(kind="text", text=text))
                     continue
                 if event_type == "websocket_responses_text":
+                    self._reject_interrupted_text_chunks("websocket_responses_text")
+                    self._reject_interrupted_binary_chunks("websocket_responses_text")
                     text = item.get("text")
                     kind = item.get("event_type")
                     payload = item.get("payload")
@@ -623,16 +669,27 @@ class NativeEgressWebSocket:
                     )
                     continue
                 if event_type == "websocket_binary":
+                    self._reject_interrupted_text_chunks("websocket_binary")
                     encoded = item.get("data")
-                    if not isinstance(encoded, str):
+                    more = item.get("more", False)
+                    if not isinstance(encoded, str) or type(more) is not bool:
                         raise NativeEgressProtocolError("native websocket binary event is invalid")
                     try:
                         data = base64.b64decode(encoded, validate=True)
                     except ValueError as exc:
                         raise NativeEgressProtocolError("native websocket binary event is not base64") from exc
+                    if more:
+                        self._binary_fragments.append(data)
+                        continue
+                    if self._binary_fragments:
+                        self._binary_fragments.append(data)
+                        data = b"".join(self._binary_fragments)
+                        self._binary_fragments.clear()
                     self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
                     continue
                 if event_type == "websocket_close":
+                    self._reject_interrupted_text_chunks("websocket_close")
+                    self._reject_interrupted_binary_chunks("websocket_close")
                     code = item.get("code")
                     reason = item.get("reason")
                     if code is not None and not isinstance(code, int):
@@ -653,9 +710,13 @@ class NativeEgressWebSocket:
                     )
                     return
                 if event_type == "websocket_error":
+                    self._reject_interrupted_text_chunks("websocket_error")
+                    self._reject_interrupted_binary_chunks("websocket_error")
                     terminal_failure = _websocket_error_from_event(item)
                     return
                 if event_type == "cancelled":
+                    self._reject_interrupted_text_chunks("cancelled")
+                    self._reject_interrupted_binary_chunks("cancelled")
                     terminal_failure = NativeEgressTransportError(
                         "native websocket was cancelled",
                         failure_phase="cancelled",
@@ -686,17 +747,46 @@ class NativeEgressWebSocket:
                 self._queue_terminal(terminal_failure)
             self._finish()
 
+    def _reject_interrupted_text_chunks(self, event_type: str) -> None:
+        """Fail closed when a non-chunk event interrupts a chunked message.
+
+        One message's ``websocket_text`` chunks arrive back to back, so any
+        other event with fragments pending proves the helper abandoned a
+        chunk sequence mid-message — reassembling would silently lose data.
+        """
+        if self._text_fragments:
+            raise NativeEgressProtocolError(f"native websocket {event_type} event interrupted a chunked text message")
+
+    def _reject_interrupted_binary_chunks(self, event_type: str) -> None:
+        """Fail closed when a non-chunk event interrupts chunked binary IPC."""
+        if self._binary_fragments:
+            raise NativeEgressProtocolError(f"native websocket {event_type} event interrupted a chunked binary message")
+
     def _queue_message(self, message: NativeWebSocketMessage) -> None:
+        size = _websocket_message_size(message)
+        if size and not self._messages.empty() and self._messages_bytes + size > _NATIVE_WEBSOCKET_MESSAGE_QUEUE_BYTES_LIMIT:
+            while not self._messages.empty():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    dropped = self._messages.get_nowait()
+                    if not isinstance(dropped, BaseException):
+                        self._messages_bytes = max(0, self._messages_bytes - _websocket_message_size(dropped))
+            raise NativeEgressTransportError(
+                "native websocket consumer exceeded the bounded message queue",
+                failure_phase="consumer_backpressure",
+            )
         try:
             self._messages.put_nowait(message)
         except asyncio.QueueFull as exc:
             while not self._messages.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
-                    self._messages.get_nowait()
+                    dropped = self._messages.get_nowait()
+                    if not isinstance(dropped, BaseException):
+                        self._messages_bytes = max(0, self._messages_bytes - _websocket_message_size(dropped))
             raise NativeEgressTransportError(
                 "native websocket consumer exceeded the bounded message queue",
                 failure_phase="consumer_backpressure",
             ) from exc
+        self._messages_bytes += size
 
     def _queue_terminal(self, failure: BaseException) -> None:
         self._terminal_failure = failure

@@ -62,6 +62,10 @@ SETTING_TIERS: Final[dict[str, Tier]] = {
     "rate_limit_reset_credits_refresh_enabled": "T3",
     # K2 bridge: T4 kill switch for the request-path bridge, not a tunable.
     "http_responses_session_bridge_enabled": "T4",
+    # T4: default-on inline-image bridge contract (5,000,000-byte decoded
+    # per-image budget, 64 MiB complete-frame budget); explicit false is the
+    # documented rollback to the blanket image bypass.
+    "http_responses_session_bridge_inline_images_enabled": "T4",
     "http_responses_session_bridge_request_budget_seconds": "T3",
     "http_responses_session_bridge_codex_prewarm_enabled": "T3",
     "http_responses_session_bridge_max_sessions": "T1",

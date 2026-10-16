@@ -206,6 +206,9 @@ pub(crate) async fn execute_websocket(
                             .then(|| interpret_websocket(&text))
                             .flatten();
                         if let Some(event) = event {
+                            // Interpretation is capped at 1 MiB upstream (see
+                            // interpret_websocket), so an interpreted event is
+                            // always small enough for a single IPC line.
                             emit(
                                 output,
                                 &NativeEvent::WebsocketResponsesText {
@@ -219,24 +222,51 @@ pub(crate) async fn execute_websocket(
                             )
                             .await?;
                         } else {
-                            emit(
-                                output,
-                                &NativeEvent::WebsocketText {
-                                    request_id: request_id.clone(),
-                                    text,
-                                },
-                            )
-                            .await?;
+                            // Opaque text may be a full upstream message close
+                            // to the locally configured 64 MiB bridge cap —
+                            // and its JSON-escaped IPC form can exceed the
+                            // parent's readline limit. Emit it as a bounded
+                            // chunk sequence (see WEBSOCKET_TEXT_CHUNK_BYTES)
+                            // whose worst-case escaped line stays under the
+                            // limit for ANY configured cap; the Python pump
+                            // reassembles the concatenation.
+                            let chunks = websocket_text_chunks(&text, WEBSOCKET_TEXT_CHUNK_BYTES);
+                            let last_index = chunks.len() - 1;
+                            for (index, chunk) in chunks.into_iter().enumerate() {
+                                emit(
+                                    output,
+                                    &NativeEvent::WebsocketText {
+                                        request_id: request_id.clone(),
+                                        text: chunk.to_owned(),
+                                        more: index != last_index,
+                                    },
+                                )
+                                .await?;
+                            }
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        emit(
-                            output,
-                            &NativeEvent::WebsocketBinary {
-                                request_id: request_id.clone(),
-                                data: base64::engine::general_purpose::STANDARD.encode(data),
-                            },
-                        ).await?;
+                        // Opaque binary near the 64 MiB bridge cap base64-expands
+                        // past the parent's 24 MiB readline limit, so split it
+                        // into bounded chunks mirroring the text path; the
+                        // Python pump reassembles the decoded concatenation.
+                        // 16 MiB raw bounds one IPC line at ~21.4 MiB plus the
+                        // tiny envelope (base64 has no JSON escaping).
+                        let mut offset = 0;
+                        while offset < data.len() {
+                            let end = (offset + WEBSOCKET_BINARY_CHUNK_BYTES).min(data.len());
+                            let chunk = &data[offset..end];
+                            let last_chunk = end == data.len();
+                            emit(
+                                output,
+                                &NativeEvent::WebsocketBinary {
+                                    request_id: request_id.clone(),
+                                    data: base64::engine::general_purpose::STANDARD.encode(chunk),
+                                    more: !last_chunk,
+                                },
+                            ).await?;
+                            offset = end;
+                        }
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if let Err(error) = websocket.send(Message::Pong(payload)).await {
@@ -341,13 +371,172 @@ pub(crate) async fn connect_native_websocket(
     .await
 }
 
+/// Maximum raw UTF-8 bytes of one websocket text IPC chunk.
+///
+/// The Python parent reads the helper's stdout with a bounded
+/// ``StreamReader.readline()`` (24 MiB, `_NATIVE_EVENT_LINE_LIMIT`). One
+/// ``websocket_text`` event serializes its ``text`` field JSON-escaped, and
+/// the worst-case escape expansion is six bytes per input byte (control
+/// characters as `\uXXXX`), so a 3 MiB chunk bounds a single IPC line at
+/// ~18 MiB plus the tiny envelope — under the parent limit for ANY text,
+/// independent of the configured websocket message cap. Messages at or below
+/// the chunk size are emitted as one event exactly as before chunking
+/// existed, so traffic that fits keeps its shape and only genuinely large
+/// messages are split; the Python pump reassembles the concatenation.
+const WEBSOCKET_TEXT_CHUNK_BYTES: usize = 3 * 1024 * 1024;
+
+/// Maximum raw bytes of one websocket binary IPC chunk.
+///
+/// Base64 expands exactly 4/3 with no JSON escaping, so a 16 MiB chunk
+/// bounds one ``websocket_binary`` line at ~21.4 MiB plus the tiny envelope,
+/// under the parent's 24 MiB readline limit for ANY configured message cap.
+const WEBSOCKET_BINARY_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Split `text` into slices of at most `chunk_bytes` on char boundaries.
+///
+/// UTF-8 multi-byte characters are never split: a cut position is moved back
+/// to the preceding boundary, so the concatenation of the returned slices is
+/// byte-identical to the input.
+fn websocket_text_chunks(text: &str, chunk_bytes: usize) -> Vec<&str> {
+    assert!(chunk_bytes >= 4, "chunk size must fit one UTF-8 character");
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while rest.len() > chunk_bytes {
+        let mut cut = chunk_bytes;
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (chunk, tail) = rest.split_at(cut);
+        chunks.push(chunk);
+        rest = tail;
+    }
+    chunks.push(rest);
+    chunks
+}
+
 pub(crate) fn native_websocket_config(max_message_bytes: usize) -> WebSocketConfig {
     let mut extensions = ExtensionsConfig::default();
     extensions.permessage_deflate = Some(DeflateConfig::default());
     let mut config = WebSocketConfig::default();
     config.max_message_size = Some(max_message_bytes);
+    // Raise the frame cap with the message cap: tungstenite defaults
+    // max_frame_size to 16 MiB independently of max_message_size, so without
+    // this coupling a single >16 MiB server frame (or a fragmented message
+    // whose reassembly the message cap would allow) would still fail the
+    // connection even when the caller raised the per-connection budget. The
+    // stock caller passes MAX_SSE_EVENT_BYTES (16 MiB), where the coupling is
+    // a no-op; bridge callers retain a 64 MiB cap. This is our own local
+    // limit, not a cap negotiated with the upstream.
+    config.max_frame_size = Some(max_message_bytes);
     config.extensions = extensions;
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn websocket_config_raises_frame_and_message_caps_together() {
+        // Raising the message budget must lift BOTH receive bounds: a message
+        // cap alone leaves tungstenite's 16 MiB default frame cap in place,
+        // which would reject a >16 MiB server frame the configured budget
+        // explicitly admits.
+        let large = 64 * 1024 * 1024;
+        let config = native_websocket_config(large);
+        assert_eq!(config.max_message_size, Some(large));
+        assert_eq!(config.max_frame_size, Some(large));
+    }
+
+    #[test]
+    fn websocket_config_keeps_stock_cap_when_stock_budget_requested() {
+        // The stock caller passes MAX_SSE_EVENT_BYTES (16 MiB); the frame cap
+        // follows it down so nothing changes for non-bridge connections, and
+        // deflate stays offered for parity with the Python paths.
+        let stock = 16 * 1024 * 1024;
+        let config = native_websocket_config(stock);
+        assert_eq!(config.max_message_size, Some(stock));
+        assert_eq!(config.max_frame_size, Some(stock));
+        assert!(config.extensions.permessage_deflate.is_some());
+    }
+
+    #[test]
+    fn websocket_text_chunks_round_trip_exactly() {
+        // ASCII payload: cuts land on the requested bound.
+        let ascii = "x".repeat(2 * WEBSOCKET_TEXT_CHUNK_BYTES + 17);
+        let chunks = websocket_text_chunks(&ascii, WEBSOCKET_TEXT_CHUNK_BYTES);
+        assert_eq!(chunks.len(), 3);
+        assert!(
+            chunks[..2]
+                .iter()
+                .all(|chunk| chunk.len() == WEBSOCKET_TEXT_CHUNK_BYTES)
+        );
+        assert_eq!(chunks[2].len(), 17);
+        assert_eq!(chunks.concat(), ascii);
+
+        // Multi-byte payload: a cut never splits a UTF-8 character, and the
+        // concatenation is byte-identical to the input.
+        let tricky = format!(
+            "{}{}{}",
+            "a".repeat(WEBSOCKET_TEXT_CHUNK_BYTES - 1),
+            "é",
+            "b".repeat(10)
+        );
+        let chunks = websocket_text_chunks(&tricky, WEBSOCKET_TEXT_CHUNK_BYTES);
+        assert_eq!(chunks.len(), 2);
+        // The requested cut landed inside the two-byte é and moved back.
+        assert_eq!(chunks[0].len(), WEBSOCKET_TEXT_CHUNK_BYTES - 1);
+        assert_eq!(chunks.concat(), tricky);
+
+        // Worst-case escape size stays under the Python readline limit: each
+        // chunk's raw bytes times the 6x JSON-escape bound plus envelope.
+        let hostile = "\u{0}".repeat(4 * WEBSOCKET_TEXT_CHUNK_BYTES);
+        for chunk in websocket_text_chunks(&hostile, WEBSOCKET_TEXT_CHUNK_BYTES) {
+            let event = NativeEvent::WebsocketText {
+                request_id: "request".to_owned(),
+                text: chunk.to_owned(),
+                more: true,
+            };
+            let encoded = serde_json::to_vec(&event).expect("encode chunk event");
+            assert!(encoded.len() <= 6 * WEBSOCKET_TEXT_CHUNK_BYTES + 256);
+            assert!(encoded.len() < 24 * 1024 * 1024);
+        }
+
+        // Small payload stays a single chunk (single-event IPC shape).
+        assert_eq!(
+            websocket_text_chunks("hello", WEBSOCKET_TEXT_CHUNK_BYTES).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn websocket_binary_chunks_stay_under_ipc_line_limit() {
+        // A 20 MiB binary message previously emitted one base64 JSON line
+        // (~27 MiB) past the parent's 24 MiB readline limit; chunked at
+        // WEBSOCKET_BINARY_CHUNK_BYTES every emitted line stays under it.
+        let big = vec![0xABu8; 20 * 1024 * 1024];
+        let mut chunks: Vec<&[u8]> = Vec::new();
+        let mut offset = 0;
+        while offset < big.len() {
+            let end = (offset + WEBSOCKET_BINARY_CHUNK_BYTES).min(big.len());
+            chunks.push(&big[offset..end]);
+            offset = end;
+        }
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), WEBSOCKET_BINARY_CHUNK_BYTES);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let event = NativeEvent::WebsocketBinary {
+                request_id: "request".to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(chunk),
+                more: index + 1 != chunks.len(),
+            };
+            let encoded = serde_json::to_vec(&event).expect("encode chunk event");
+            assert!(encoded.len() < 24 * 1024 * 1024);
+        }
+        // A 64 MiB bridge-cap message splits into exactly four bounded lines.
+        let cap = vec![0xCDu8; 64 * 1024 * 1024];
+        assert_eq!((cap.len() + WEBSOCKET_BINARY_CHUNK_BYTES - 1) / WEBSOCKET_BINARY_CHUNK_BYTES, 4);
+}
 }
 
 fn native_tls_config() -> Result<Arc<ClientConfig>, WebSocketError> {

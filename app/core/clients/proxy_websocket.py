@@ -8,7 +8,7 @@ import re
 import ssl
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping, NoReturn, Protocol, Sequence, cast
+from typing import Any, Final, Mapping, NoReturn, Protocol, Sequence, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import aiohttp
@@ -219,6 +219,24 @@ def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> 
         fallback="upstream_unavailable",
         include_permanent_dns=not uses_proxy,
     )
+
+
+# RFC 6455 close code 1009: a websocket message exceeded a message-size
+# limit — the peer rejected an inbound frame, or the local adapter's own cap
+# rejected an inbound message (the shared close-code surface does not
+# distinguish the two; both mean "message too big"). This is deterministic
+# payload evidence about the REQUEST, not transport or account evidence:
+# bridge/relay owners classify it as the terminal, non-retryable client
+# error ``payload_too_large`` instead of ``stream_incomplete``, so the
+# account is neither penalized nor rotated. The classification is
+# close-code-exact: 1006/None (generic disconnect) and 1000 (clean) keep
+# their existing semantics.
+UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE: Final[int] = 1009
+
+
+def is_upstream_message_too_big_close_code(close_code: int | None) -> bool:
+    """Whether an upstream websocket close code proves a too-large message."""
+    return close_code == UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE
 
 
 def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
@@ -901,8 +919,10 @@ async def _connect_upstream_websocket(
     policy: _UpstreamWebSocketPolicy,
     subprotocols: Sequence[str] = (),
     routing_hint: tuple[str, str | None] | None = None,
+    max_message_bytes: int | None = None,
 ) -> UpstreamWebSocket:
     settings = with_dashboard_overrides(get_settings())
+    message_cap = MAX_SSE_EVENT_BYTES if max_message_bytes is None else max_message_bytes
     if policy.include_responses_beta:
         upstream_headers = _build_upstream_websocket_headers(
             headers, access_token, account_id, routing_hint=routing_hint
@@ -932,7 +952,7 @@ async def _connect_upstream_websocket(
                     retry_network_errors=policy.retry_routed_network_errors,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=MAX_SSE_EVENT_BYTES,
+                    max_msg_size=message_cap,
                     heartbeat=heartbeat,
                     compress=15,
                     native_interpret_responses=policy.include_responses_beta,
@@ -950,7 +970,7 @@ async def _connect_upstream_websocket(
                     route=route,
                     headers=upstream_headers,
                     timeout=settings.upstream_connect_timeout_seconds,
-                    max_msg_size=MAX_SSE_EVENT_BYTES,
+                    max_msg_size=message_cap,
                     heartbeat=heartbeat,
                     compress=15,
                     **protocol_kwargs,
@@ -1059,7 +1079,7 @@ async def _connect_upstream_websocket(
                     url=url,
                     headers=native_headers,
                     connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
-                    max_message_bytes=MAX_SSE_EVENT_BYTES,
+                    max_message_bytes=message_cap,
                     ping_interval_seconds=20.0,
                     ping_timeout_seconds=ping_timeout,
                     proxy_url=proxy_url,
@@ -1107,7 +1127,7 @@ async def _connect_upstream_websocket(
             user_agent_header=user_agent,
             open_timeout=settings.upstream_connect_timeout_seconds,
             ping_timeout=ping_timeout,
-            max_size=MAX_SSE_EVENT_BYTES,
+            max_size=message_cap,
             proxy=proxy_url,
             # Codex offers permessage-deflate on its upstream handshake. Keep
             # the direct path's default offer aligned with the routed aiohttp
@@ -1272,6 +1292,7 @@ async def connect_responses_websocket(
     codex_client: CodexClient | None = None,
     allow_direct_egress: bool = False,
     routing_hint: tuple[str, str | None] | None = None,
+    max_message_bytes: int | None = None,
 ) -> UpstreamWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1285,6 +1306,7 @@ async def connect_responses_websocket(
         allow_direct_egress=allow_direct_egress,
         policy=_RESPONSES_WEBSOCKET_POLICY,
         routing_hint=routing_hint,
+        max_message_bytes=max_message_bytes,
     )
 
 

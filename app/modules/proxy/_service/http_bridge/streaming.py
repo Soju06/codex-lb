@@ -22,6 +22,7 @@ from app.core.clients.proxy import (  # noqa: F401
     _client_metadata_uses_responses_lite,
     _inline_content_images,
     _inline_input_image_urls,
+    _response_create_too_large_error_envelope,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     is_confirmed_pre_dispatch_transport_error,
@@ -77,6 +78,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
     _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+    _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED,
+    _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE,
+    _HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES,
+    _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED,
     _HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR,
@@ -90,6 +95,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_budget_seconds,
     _http_bridge_eventless_max_keepalive_count,
     _http_bridge_eventless_timeout_message,
+    _http_bridge_image_request_max_frame_bytes,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_explicit_previous_response_rejection,
     _http_bridge_is_previous_response_owner_unavailable,
@@ -109,6 +115,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_should_attempt_soft_affinity_reroute,
     _http_bridge_should_rollover_after_context_overflow,
     _http_bridge_turn_state_anchor_for_owner_failure,
+    _HTTPBridgeInlineImageAdmission,
+    _inline_image_too_large_error_envelope,
+    _inline_input_image_request_admission,
     _is_missing_durable_bridge_table_error,
     _log_http_bridge_event,
     _make_http_bridge_session_header_fallback_key,
@@ -1010,7 +1019,38 @@ class _HTTPBridgeStreamingMixin:
             require_forwarded_file_owner=forwarded_request,
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes()
-        if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+        image_request = _responses_request_contains_input_image(payload)
+        image_generation_request = _responses_request_uses_image_generation(payload)
+        # Inline-image bridge contract (default ON; see the
+        # allow-bounded-inline-images-on-bridge openspec change): the blanket
+        # image bypass below frees bridge pending slots (#903) but also costs
+        # every image-bearing thread its bridge connection and cache reuse.
+        # By default a request whose EVERY input_image part is an inline
+        # data:image/(jpeg|png);base64 URL within the per-image decoded
+        # budget keeps using the bridge. Admission is fail-closed for shapes:
+        # any external URL, file_id/sediment shape, malformed part — nested
+        # anywhere or mixed with admissible images — and every
+        # image_generation request keep the bypass below, as does every image
+        # request under the explicit ``false`` rollback. The verdict is
+        # computed BEFORE the payload-size bypass, because size alone must
+        # never select the bypass: a shape-admissible request with an
+        # over-budget image flows to the explicit payload_too_large gate
+        # below (after the pin and transport-health gates) instead of
+        # silently rerouting to raw HTTP.
+        inline_image_admission = (
+            _inline_input_image_request_admission(payload)
+            if runtime_config.enabled
+            and runtime_config.inline_images_enabled
+            and image_request
+            and not image_generation_request
+            else _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0)
+        )
+        inline_image_request_admitted = inline_image_admission.verdict == _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED
+        if (
+            runtime_config.enabled
+            and not inline_image_request_admitted
+            and payload_size_estimate_bytes > ws_payload_budget_bytes
+        ):
             record_http_bridge_routing(stage="bypass", reason="payload_size")
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
@@ -1019,23 +1059,38 @@ class _HTTPBridgeStreamingMixin:
                 request_id,
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
-        image_request = _responses_request_contains_input_image(payload)
-        image_generation_request = _responses_request_uses_image_generation(payload)
         # The bridge bypass below is about bridge pending slots; it must not also
         # decide the upstream transport. An inline ``data:`` image rides the
         # upstream websocket unchanged, so only the two websocket-specific
         # hazards keep the pin (#2363). ``image_request`` gates the predicate
         # because the predicate's own first check is that same walk of the whole
-        # input, and this runs on every request on the hot path.
+        # input, and this runs on every request on the hot path. An admitted
+        # image request is exempt from the size-only leg of that pin: its
+        # payload may legitimately sit between the stock frame budget and the
+        # 64 MiB image frame cap, and pinning it "http" here would mislabel
+        # the raw fallback and block the recent-WS-failure gate below, which
+        # runs only while no override is set. The external-URL leg cannot
+        # apply to an admitted request (every part is inline by admission).
         force_upstream_stream_transport = (
             "http"
             if image_request
+            and not inline_image_request_admitted
             and _input_image_request_requires_http_upstream(
                 payload, payload_size_estimate_bytes=payload_size_estimate_bytes
             )
             else None
         )
-        if runtime_config.enabled and (image_request or image_generation_request):
+        if runtime_config.enabled and (
+            (
+                image_request
+                and not inline_image_request_admitted
+                # An over-budget (shape-valid) image request never takes the
+                # image bypass: it flows toward the explicit payload_too_large
+                # gate below (after the pin/health gates).
+                and inline_image_admission.verdict != _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE
+            )
+            or image_generation_request
+        ):
             record_http_bridge_routing(stage="bypass", reason="image")
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "
@@ -1071,6 +1126,47 @@ class _HTTPBridgeStreamingMixin:
                 )
                 runtime_config = dataclasses.replace(runtime_config, enabled=False)
             force_upstream_stream_transport = "http"
+        # Inline-image explicit budget gates, deliberately AFTER the operator
+        # HTTP pin and the transport-health fallback above: those two paths
+        # keep their documented raw behavior (logged bypasses; the raw HTTP
+        # path has its own 128 MiB ingress budget), and only a request that
+        # would actually be dispatched on the bridge fails here with the
+        # explicit 400 payload_too_large anti-retry error — never a silent
+        # size-driven fallback. The per-image gate fires for a shape-valid
+        # request with any image decoding above 5,000,000 bytes; the frame
+        # gate is the early advisory estimate of the 64 MiB complete-frame
+        # budget (the exact final frame, metadata included, is measured again
+        # at prepare and at the final send).
+        if (
+            runtime_config.enabled
+            and image_request
+            and inline_image_admission.verdict
+            in (
+                _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED,
+                _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE,
+            )
+        ):
+            if inline_image_admission.verdict == _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE:
+                raise ProxyResponseError(
+                    400,
+                    _inline_image_too_large_error_envelope(inline_image_admission.max_decoded_image_bytes),
+                    failure_phase="validation",
+                    failure_detail=(
+                        f"inline_image_decoded_bytes={inline_image_admission.max_decoded_image_bytes}"
+                        f" budget={_HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES}"
+                    ),
+                )
+            image_frame_budget_bytes = _http_bridge_image_request_max_frame_bytes()
+            if payload_size_estimate_bytes > image_frame_budget_bytes:
+                raise ProxyResponseError(
+                    400,
+                    _response_create_too_large_error_envelope(
+                        payload_size_estimate_bytes,
+                        image_frame_budget_bytes,
+                    ),
+                    failure_phase="validation",
+                    failure_detail=f"response_create_estimate_bytes={payload_size_estimate_bytes}",
+                )
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
@@ -1127,6 +1223,7 @@ class _HTTPBridgeStreamingMixin:
                     capacity_startup_ready_event=capacity_startup_ready_event,
                     deferred_account_backoff_tracker=deferred_account_backoff_tracker,
                     bridge_payload=bridge_payload,
+                    inline_image_request=inline_image_request_admitted,
                 ):
                     bridge_yielded_any = True
                     yield line
@@ -1305,6 +1402,7 @@ class _HTTPBridgeStreamingMixin:
         capacity_startup_ready_event: asyncio.Event | None = None,
         deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
         bridge_payload: JsonObject | None = None,
+        inline_image_request: bool = False,
         _denied_anchor_request_id: str | None = None,
     ) -> AsyncIterator[str]:
         scheduler = scheduler_for(self)
@@ -1315,6 +1413,18 @@ class _HTTPBridgeStreamingMixin:
         request_id = _denied_anchor_request_id or ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        # Whole-frame budget for admitted inline-image requests (decided in
+        # ``_stream_http_bridge_or_retry``): the 64 MiB complete-frame cap of
+        # the default-on inline-image contract. The override travels on the
+        # request state so every response.create size guard — prepare,
+        # installation stamping, URL inlining and the exact final send after
+        # operation/cache-identity stamping — measures the complete
+        # serialized frame against it, and historical slimming never runs for
+        # these requests. ``None`` keeps the stock global cap (with slimming)
+        # for every non-image request.
+        bridge_response_create_max_bytes = (
+            _http_bridge_image_request_max_frame_bytes() if inline_image_request else None
+        )
         if deferred_account_backoff_tracker is None:
             deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         if bridge_payload is None:
@@ -1373,6 +1483,7 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
+                    response_create_max_bytes=bridge_response_create_max_bytes,
                 )
             else:
                 request_state, text_data = self._prepare_http_bridge_request(
@@ -1382,6 +1493,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=reservation,
                     request_id=request_id,
                     client_ip=client_ip,
+                    response_create_max_bytes=bridge_response_create_max_bytes,
                 )
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event

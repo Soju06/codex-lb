@@ -38,6 +38,7 @@ from app.core.clients.proxy import codex_control_request as core_codex_control_r
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE,
     UpstreamWebSocketMessage,
 )
 from app.core.clock import Scheduler
@@ -2162,6 +2163,21 @@ def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) ->
     if message.close_code is not None:
         return f"Upstream websocket closed before response.completed (close_code={message.close_code})"
     return "Upstream websocket closed before response.completed"
+
+
+def _upstream_websocket_payload_too_large_message() -> str:
+    """Terminal message for an upstream close 1009 (message too big).
+
+    Kept separate from ``_upstream_websocket_disconnect_message`` so the
+    classified client error never reads as a generic disconnect: the frame
+    the request produced exceeded the upstream's websocket message limit,
+    which no socket recreation or account rotation can fix.
+    """
+    return (
+        "Upstream websocket rejected the response payload: message too big "
+        f"(close_code={UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE}); "
+        "reduce the request size"
+    )
 
 
 def _websocket_receive_timeout_for_pending_requests(

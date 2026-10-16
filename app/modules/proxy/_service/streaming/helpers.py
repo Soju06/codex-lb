@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, Literal, Mapping, cast
 
 from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients import proxy_websocket as core_proxy_websocket
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
@@ -606,11 +607,31 @@ def _should_retry_transient_stream_error(
     return any(marker in normalized_message for marker in _facade()._UPSTREAM_UNAVAILABLE_TRANSIENT_MESSAGE_MARKERS)
 
 
+# Close-code 1009 (message too big) is terminal payload evidence about the
+# request, not transport/account evidence: it must surface as the
+# non-retryable client error ``payload_too_large`` (see the
+# allow-bounded-inline-images-on-bridge openspec change) rather than
+# ``stream_incomplete``. The constant and predicate live in
+# ``app.core.clients.proxy_websocket`` so relay helpers can share them
+# without a circular import; the classification is close-code-exact:
+# 1006/None (generic disconnect) and 1000 (clean) keep their semantics.
+UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = core_proxy_websocket.UPSTREAM_WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE
+
+
+def _is_upstream_payload_too_large_close(close_code: int | None) -> bool:
+    """Whether an upstream websocket close code proves a too-large message."""
+    return core_proxy_websocket.is_upstream_message_too_big_close_code(close_code)
+
+
 def _classify_upstream_close(
     close_code: int | None,
     *,
     response_events_seen: int,
-) -> Literal["clean", "transient"]:
+) -> Literal["clean", "transient", "payload_too_large"]:
+    if _is_upstream_payload_too_large_close(close_code):
+        # Message-too-big is deterministic payload evidence; replaying the
+        # identical frame on another socket or account can only repeat it.
+        return "payload_too_large"
     if close_code == 1000 and response_events_seen == 0:
         # A clean websocket close before response.created does not prove that
         # the request was invalid.  The upstream can close a socket during a

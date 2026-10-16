@@ -576,4 +576,78 @@ mod tests {
             .expect("send client frame");
         server.await.expect("websocket server task");
     }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)] // callback error type is fixed by tungstenite
+    async fn large_budget_config_relays_oversixteenmib_frames_both_directions() {
+        // A raised message budget must actually carry a >16 MiB Text message
+        // through the native egress stack in BOTH directions: tungstenite's
+        // stock 16 MiB frame cap would otherwise reject the server's frame
+        // even with the message cap raised. The config function couples the
+        // two caps; bridge callers use the raised 64 MiB budget.
+        install_provider();
+        let large_budget = 64 * 1024 * 1024usize;
+        let oversized_payload: String = "x".repeat(17 * 1024 * 1024);
+        let server_expected_message = Message::Text(oversized_payload.clone().into());
+        let server_reply_payload = oversized_payload.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind websocket server");
+        let address = listener.local_addr().expect("server address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket client");
+            let mut websocket = accept_hdr_async_with_config(
+                stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    let _ = request;
+                    Ok(response)
+                },
+                Some(native_websocket_config(large_budget)),
+            )
+            .await
+            .expect("accept websocket handshake");
+            // Client -> server: the egress send path must not reject a
+            // >16 MiB outgoing frame under the raised config.
+            let from_client = websocket
+                .next()
+                .await
+                .expect("receive client frame")
+                .expect("valid client frame");
+            assert_eq!(from_client, server_expected_message);
+            // Server -> client: a >16 MiB server frame must pass the raised
+            // frame cap, not just the raised message cap.
+            websocket
+                .send(Message::Text(server_reply_payload.into()))
+                .await
+                .expect("send oversized server frame");
+        });
+
+        let request = NativeWebSocketRequest {
+            request_id: "ws-large".to_owned(),
+            url: format!("ws://{address}/v1/responses"),
+            headers: vec![],
+            connect_timeout_ms: 2_000,
+            max_message_bytes: large_budget,
+            ping_interval_ms: Some(20_000),
+            ping_timeout_ms: Some(120_000),
+            proxy_url: None,
+            interpret_responses: false,
+        };
+        let (mut websocket, response) = connect_native_websocket(&request)
+            .await
+            .expect("connect native websocket");
+        assert_eq!(response.status().as_u16(), 101);
+        websocket
+            .send(Message::Text(oversized_payload.clone().into()))
+            .await
+            .expect("send oversized client frame");
+        let from_server = websocket
+            .next()
+            .await
+            .expect("receive server frame")
+            .expect("valid server frame");
+        assert_eq!(from_server, Message::Text(oversized_payload.into()));
+        server.await.expect("websocket server task");
+    }
 }

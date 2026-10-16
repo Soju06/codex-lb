@@ -356,6 +356,10 @@ def _classify_upstream_close(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_classify_upstream_close")(*args, **kwargs)
 
 
+def _upstream_websocket_payload_too_large_message(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_upstream_websocket_payload_too_large_message")(*args, **kwargs)
+
+
 def _is_account_neutral_transport_drop(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_is_account_neutral_transport_drop")(*args, **kwargs)
 

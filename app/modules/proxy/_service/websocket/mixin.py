@@ -62,6 +62,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
@@ -362,6 +363,9 @@ from app.modules.proxy._service.support import (
     websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
+    _call_with_supported_optional_kwargs as _supported_kwargs_call,
+)
+from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
 )
 from app.modules.proxy._service.support import (
@@ -432,6 +436,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_accepted_replay_can_switch_account,
     _websocket_accepted_replay_may_exclude_account,
     _websocket_auth_failure_requires_reauth,
@@ -1285,6 +1290,15 @@ async def _process_upstream_websocket_transport_end(
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
+    # Close code 1009 (message too big) is terminal payload evidence, not
+    # transport evidence: the frame this request produced exceeded a
+    # websocket message-size limit, so replaying the identical frame —
+    # transparent or pre-created — can only repeat it. Classify it as the
+    # non-retryable client error ``payload_too_large`` with no account
+    # penalty, exclusion or rotation (allow-bounded-inline-images-on-bridge).
+    payload_too_large_close = is_upstream_message_too_big_close_code(message.close_code)
+    if payload_too_large_close:
+        message_error_code = "payload_too_large"
     # A classified local transport failure says nothing about whether an
     # already-sent response.create was accepted. Keep it account-neutral and
     # terminal: replay here could duplicate work, billing, or tool side effects.
@@ -1292,7 +1306,7 @@ async def _process_upstream_websocket_transport_end(
     if account_neutral:
         if any(state.last_downstream_sequence_number is not None for state in reader_owned):
             replay_refusal_reasons.append("sequenced_downstream_frame")
-    else:
+    elif not payload_too_large_close:
         replay_request_state = await _pop_replayable_precreated_websocket_request_state(
             reader_owned,
             pending_lock=anyio.Lock(),
@@ -1330,13 +1344,17 @@ async def _process_upstream_websocket_transport_end(
         pending_requests=reader_owned,
         pending_lock=anyio.Lock(),
         error_code=message_error_code or "stream_incomplete",
-        error_message=_upstream_websocket_disconnect_message(message),
+        error_message=(
+            _upstream_websocket_payload_too_large_message()
+            if payload_too_large_close
+            else _upstream_websocket_disconnect_message(message)
+        ),
         api_key=api_key,
         websocket=websocket,
         client_send_lock=client_send_lock,
         response_create_gate=response_create_gate,
         downstream_activity=downstream_activity,
-        penalize_account=not account_neutral,
+        penalize_account=not account_neutral and not payload_too_large_close,
         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
     )
     # A terminal receive can race the outer session cleanup, especially when
@@ -4678,6 +4696,7 @@ class _WebSocketMixin:
         *,
         timeout_seconds: float,
         request_state: "_WebSocketRequestState | None" = None,
+        max_message_bytes: int | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         clock = clock_for(proxy)
@@ -4695,11 +4714,13 @@ class _WebSocketMixin:
             connect_progress = _WebSocketConnectProgress()
             try:
                 with scheduler_for(proxy).fail_after(remaining_seconds):
-                    upstream = await proxy._open_upstream_websocket(
+                    upstream = await _supported_kwargs_call(
+                        proxy._open_upstream_websocket,
                         account,
                         headers,
                         request_state=request_state,
                         connect_progress=connect_progress,
+                        optional_kwargs={"max_message_bytes": max_message_bytes},
                     )
                 recovery.log_recovered()
                 return upstream
@@ -4754,6 +4775,7 @@ class _WebSocketMixin:
         *,
         request_state: "_WebSocketRequestState | None" = None,
         connect_progress: _WebSocketConnectProgress | None = None,
+        max_message_bytes: int | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4797,6 +4819,7 @@ class _WebSocketMixin:
                         if request_state is not None and request_state.model is not None
                         else None
                     ),
+                    "max_message_bytes": max_message_bytes,
                 },
             )
             if request_state is not None:
@@ -7016,6 +7039,20 @@ class _WebSocketMixin:
                 error_type=request_error_type,
                 error_param=request_error_param,
             )
+            if request_error_code == "payload_too_large":
+                # A terminal ``payload_too_large`` (the pre-send budget gates
+                # or an upstream close 1009 classification) is a client
+                # error, not a server failure: surface it as HTTP 400 with
+                # the OpenAI invalid-request shape when the response is
+                # still uncommitted, and as that same envelope inside the
+                # SSE ``response.failed`` event when events already
+                # streamed. Explicit request-state overrides win.
+                if request_state.error_http_status_override is None:
+                    request_state.error_http_status_override = 400
+                if request_state.error_type_override is None:
+                    request_error_type = "invalid_request_error"
+                if request_state.error_param_override is None:
+                    request_error_param = "input"
             if index == last_index:
                 try:
                     _facade()._maybe_dump_oversized_response_create_request(

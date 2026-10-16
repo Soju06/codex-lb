@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import inspect
 import json
 import logging
@@ -38,6 +40,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
+from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.clock import REAL_SCHEDULER, Scheduler, clock_for, scheduler_for
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -71,11 +74,13 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import _await_task_deferring_cancellation, wait_on_shared_future
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    Account,
     AccountStatus,
     DashboardSettings,
     StickySessionKind,
@@ -136,6 +141,7 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _call_with_supported_optional_kwargs,
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
@@ -741,6 +747,231 @@ def _http_bridge_eventless_timeout_message(unmatched_upstream_liveness_count: in
     return _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE
 
 
+# Inline-image bridge contract (default ON; see the
+# allow-bounded-inline-images-on-bridge openspec change). One inline
+# ``input_image`` may ride the bridge when its DECODED payload is at most
+# this many bytes, inclusive. The budget is on decoded bytes because that is
+# the quantity the operator reasons about (and the upstream re-encodes), not
+# the base64 wire form.
+_HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES: Final = 5_000_000
+# Pre-decode fast path: encoding 5,000,000 bytes takes at most
+# ceil(5,000,000 / 3) * 4 = 6,666,668 base64 characters, so a longer segment
+# ALWAYS decodes above the budget and is rejected without the multi-MiB
+# slice/decode. At or below this bound the strict decode runs anyway (syntax
+# proof) and its exact decoded length decides; padding means a
+# 6,666,668-character segment decodes to at most 5,000,001 bytes, which the
+# exact check rejects.
+_HTTP_BRIDGE_INLINE_IMAGE_MAX_ENCODED_FAST_PATH_BYTES: Final = -(-5_000_000 // 3) * 4
+# The only media types admitted. Narrow by design: the production shape is a
+# pasted PNG/JPEG screenshot; every other media type keeps the bypass.
+_HTTP_BRIDGE_INLINE_IMAGE_DATA_PREFIXES: Final = ("data:image/jpeg;base64,", "data:image/png;base64,")
+_HTTP_BRIDGE_INLINE_IMAGE_DATA_PREFIX_MAX_BYTES: Final = max(
+    len(prefix) for prefix in _HTTP_BRIDGE_INLINE_IMAGE_DATA_PREFIXES
+)
+# Complete-frame budget for image-bearing bridge requests: the COMPLETE
+# serialized ``response.create`` frame sent on the bridge upstream websocket —
+# envelope, ``type``, ``client_metadata``, bridge operation id, thread-cache
+# identity and account installation metadata included — must stay at or below
+# this many bytes, exactly enforced at the final send. This is a local bound
+# permitting several legal images plus history, not an upstream acceptance
+# guarantee: an upstream close 1009 is terminal ``payload_too_large`` without
+# retry.
+_HTTP_BRIDGE_IMAGE_REQUEST_MAX_FRAME_BYTES: Final = 64 * 1024 * 1024
+# Admission verdicts for the routing gate. ``unsupported`` keeps the blanket
+# image bypass (fail-closed shapes and the explicit rollback);
+# ``image_too_large`` is shape-valid but over the per-image decoded budget
+# and MUST surface the explicit client error instead of any bypass;
+# ``admitted`` rides the bridge subject to the complete-frame budget.
+_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED: Final = "unsupported"
+_HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE: Final = "image_too_large"
+_HTTP_BRIDGE_INLINE_IMAGE_ADMITTED: Final = "admitted"
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeInlineImageAdmission:
+    """One request's inline-image verdict plus its worst decoded image."""
+
+    verdict: str
+    # Largest decoded byte count among shape-valid inline images (0 when
+    # none), so the per-image rejection can name the real number.
+    max_decoded_image_bytes: int = 0
+
+
+def _http_bridge_image_request_max_frame_bytes() -> int:
+    """Complete-frame budget for image-bearing bridge requests (call time).
+
+    Read through the module attribute so tests can exercise exact boundary
+    behavior (at-cap / cap+1) without building 64 MiB payloads.
+    """
+    return int(_HTTP_BRIDGE_IMAGE_REQUEST_MAX_FRAME_BYTES)
+
+
+def _http_bridge_upstream_max_message_bytes() -> int | None:
+    # Text-opened bridge sockets must also support a later admitted image turn.
+    if not getattr(_service_get_settings(), "http_responses_session_bridge_inline_images_enabled", True):
+        return None
+    return _http_bridge_image_request_max_frame_bytes()
+
+
+async def _open_http_bridge_upstream_with_budget(
+    service: _HTTPBridgeServiceProtocol,
+    account: Account,
+    headers: dict[str, str],
+    *,
+    request_state: _WebSocketRequestState,
+    timeout_seconds: float,
+) -> UpstreamWebSocket:
+    return await _call_with_supported_optional_kwargs(
+        service._open_upstream_websocket_with_budget,
+        account,
+        headers,
+        timeout_seconds=timeout_seconds,
+        optional_kwargs={
+            "request_state": request_state,
+            "max_message_bytes": _http_bridge_upstream_max_message_bytes(),
+        },
+    )
+
+
+def _inline_image_too_large_error_envelope(max_decoded_image_bytes: int) -> OpenAIErrorEnvelope:
+    """Explicit per-image oversize rejection (HTTP 400, non-retryable)."""
+    payload = openai_error(
+        "payload_too_large",
+        (
+            "inline input_image is too large for the upstream websocket "
+            f"({max_decoded_image_bytes} decoded bytes > "
+            f"{_HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES} bytes). "
+            "Reduce the image size below the per-image budget."
+        ),
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "input"
+    return payload
+
+
+def _inline_data_image_url_verdict(image_url: object) -> tuple[str, int]:
+    """Classify one ``input_image`` ``image_url`` for bridge admission.
+
+    Returns ``(verdict, decoded_bytes)`` where ``decoded_bytes`` is the decoded
+    size for a shape-valid inline data URL (0 otherwise). Fail-closed for
+    shapes: anything but a syntactically valid inline
+    ``data:image/(jpeg|png);base64,`` URL is ``unsupported`` and keeps the
+    blanket image bypass. The encoded-length fast path runs before the
+    slice/decode, so a clearly over-budget URL is rejected without copying its
+    whole body. Strict base64 validation rejects whitespace and bad padding —
+    wire syntax only, never a promise the upstream accepts the decoded image.
+    """
+    if not isinstance(image_url, str):
+        return _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0
+    header = image_url[:_HTTP_BRIDGE_INLINE_IMAGE_DATA_PREFIX_MAX_BYTES].lower()
+    prefix = next((p for p in _HTTP_BRIDGE_INLINE_IMAGE_DATA_PREFIXES if header.startswith(p)), None)
+    if prefix is None:
+        return _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0
+    # Length check before the slice: rejecting an over-bound (or empty)
+    # segment must not first copy it (base64 segments are multi-MiB).
+    encoded_length = len(image_url) - len(prefix)
+    if encoded_length <= 0:
+        return _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0
+    if encoded_length > _HTTP_BRIDGE_INLINE_IMAGE_MAX_ENCODED_FAST_PATH_BYTES:
+        return _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE, encoded_length * 3 // 4
+    try:
+        decoded = base64.b64decode(image_url[len(prefix) :], validate=True)
+    except (binascii.Error, ValueError):
+        return _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0
+    decoded_length = len(decoded)
+    if decoded_length > _HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES:
+        return _HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE, decoded_length
+    return _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED, decoded_length
+
+
+def _inline_data_image_url_is_bridge_admissible(image_url: object) -> bool:
+    """Whether one inline ``input_image`` is admissible (shape AND size)."""
+    return _inline_data_image_url_verdict(image_url)[0] == _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED
+
+
+def _json_value_inline_image_verdict(
+    value: JsonValue,
+    *,
+    any_unsupported: bool = False,
+    max_decoded_image_bytes: int = 0,
+) -> _HTTPBridgeInlineImageAdmission:
+    """Fail-closed recursive verdict over every ``input_image`` part.
+
+    Walks the same whole-input surface the transport predicate walks (message
+    ``content`` arrays, ``function_call_output`` output arrays, any nesting).
+    A part with an admissible URL does NOT short-circuit the walk: its
+    remaining child values are still visited, so an unsupported
+    ``input_image`` hidden in a sibling field of a valid image part cannot
+    ride in behind it. Aggregation precedence: any unsupported shape anywhere
+    wins (the whole request keeps the blanket image bypass — external URLs
+    genuinely need the raw path); otherwise any over-budget image makes the
+    request ``image_too_large`` (the explicit 400, never a size-driven
+    bypass).
+    """
+    unsupported = any_unsupported
+    largest = max_decoded_image_bytes
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            verdict, decoded_bytes = _inline_data_image_url_verdict(value.get("image_url"))
+            if verdict == _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED:
+                unsupported = True
+            else:
+                largest = max(largest, decoded_bytes)
+        children: Iterable[JsonValue] = value.values()
+    elif isinstance(value, list):
+        children = value
+    else:
+        return _HTTPBridgeInlineImageAdmission(
+            _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED if unsupported else _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED,
+            largest,
+        )
+    for child in children:
+        child_result = _json_value_inline_image_verdict(
+            child, any_unsupported=unsupported, max_decoded_image_bytes=largest
+        )
+        unsupported = unsupported or child_result.verdict == _HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED
+        largest = max(largest, child_result.max_decoded_image_bytes)
+    if unsupported:
+        return _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, largest)
+    if largest > _HTTP_BRIDGE_INLINE_IMAGE_MAX_DECODED_BYTES:
+        return _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_IMAGE_TOO_LARGE, largest)
+    return _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_ADMITTED, largest)
+
+
+def _json_value_contains_input_image(value: JsonValue) -> bool:
+    """Whether any ``input_image`` part exists anywhere in ``value``."""
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            return True
+        return any(_json_value_contains_input_image(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_json_value_contains_input_image(item) for item in value)
+    return False
+
+
+def _inline_input_image_request_admission(payload: ResponsesRequest) -> _HTTPBridgeInlineImageAdmission:
+    """Classify a request's inline images for bridge admission (default on).
+
+    The input must be a list carrying at least one ``input_image`` part;
+    every part anywhere in the input is then classified by
+    ``_json_value_inline_image_verdict``. The frame budget is deliberately
+    NOT consulted here: the routing gate needs the shape/size verdict alone so
+    an over-budget image request can fail with the explicit
+    ``payload_too_large`` error instead of silently bypassing to raw HTTP,
+    while an unsupported shape keeps the bypass regardless of size. The walk
+    is one pass over the input plus a strict decode of every at-bound segment
+    (a transient allocation bounded by the largest segment, ~5 MB at a time);
+    the payload itself is bounded by the 128 MiB HTTP ingress, so the walk is
+    O(payload) CPU once per bridged image request.
+    """
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0)
+    if not any(_json_value_contains_input_image(item) for item in input_value):
+        return _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0)
+    return _json_value_inline_image_verdict(input_value)
+
+
 @dataclass(frozen=True, slots=True)
 class _HTTPBridgeRuntimeConfig:
     enabled: bool
@@ -750,6 +981,12 @@ class _HTTPBridgeRuntimeConfig:
     queue_limit: int
     prompt_cache_idle_ttl_seconds: float
     gateway_safe_mode: bool
+    # Inline-image bridge contract (default on; see the
+    # allow-bounded-inline-images-on-bridge openspec change). Defaults True
+    # so every existing construction site gets the contract; the explicit
+    # rollback is a runtime config with False, which restores the blanket
+    # image bypass for every image request.
+    inline_images_enabled: bool = True
 
 
 def _service_module() -> Any:
@@ -3683,6 +3920,7 @@ def _http_bridge_runtime_config(
             dashboard_settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds,
         ),
         gateway_safe_mode=dashboard_settings.http_responses_session_bridge_gateway_safe_mode,
+        inline_images_enabled=app_settings.http_responses_session_bridge_inline_images_enabled,
     )
 
 

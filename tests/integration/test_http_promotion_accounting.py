@@ -17,6 +17,7 @@ from tests.integration.test_http_responses_bridge import (
     _cleanup_http_bridge_sessions as cleanup_http_bridge_sessions,  # noqa: F401
 )
 from tests.integration.test_http_responses_bridge import (
+    _install_proxy_settings,
     _make_app_settings,
     _promotion_history,
 )
@@ -120,8 +121,16 @@ async def test_promoted_oversized_payload_bypass_is_counted_and_pins_http(
 async def test_promoted_image_bypass_is_counted_without_pinning_http(async_client, promotion_transport, monkeypatch):
     # Regression for #2363: the image bypass frees bridge pending slots, and it
     # must keep doing that, but an inline ``data:`` image below the frame budget
-    # must no longer drag the request onto the upstream HTTP transport.
-    upstreams, raw_calls, _ = promotion_transport
+    # must no longer drag the request onto the upstream HTTP transport. Since
+    # allow-bounded-inline-images-on-bridge the blanket bypass is the documented
+    # explicit-false ROLLBACK path (the default admits inline images onto the
+    # bridge), so pin it here to keep exercising the bypass observability.
+    upstreams, raw_calls, dashboard = promotion_transport
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=_make_app_settings(enabled=True, inline_images_enabled=False),
+        dashboard_settings=dashboard,
+    )
     routing_counter = Mock()
     monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
     history = _image_history("data:image/png;base64,aGVsbG8=")
@@ -137,13 +146,16 @@ async def test_promoted_image_bypass_is_counted_without_pinning_http(async_clien
 async def test_historical_image_does_not_pin_later_turns_to_http(async_client, promotion_transport):
     # The reported production shape: Codex keeps earlier screenshots in the
     # input, so before #2363 one historical image pinned every later turn of the
-    # thread to the degraded upstream HTTP path.
+    # thread to the degraded upstream HTTP path. Under the default-on
+    # inline-image contract the valid inline image now rides the bridge
+    # websocket itself — the strongest form of "not pinned to HTTP".
     upstreams, raw_calls, _ = promotion_transport
     history = _image_history("data:image/png;base64,aGVsbG8=", position=0)
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
-    assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert len(upstreams) == 1
+    assert upstreams[0].sent_text, "the inline-image turn must be served by the bridge websocket"
+    assert raw_calls == []
 
 
 @pytest.mark.asyncio
@@ -236,7 +248,9 @@ async def test_external_image_url_scheme_match_is_case_insensitive(async_client,
 async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client, promotion_transport):
     # The counterpart that makes the clause above narrow rather than a
     # reinstatement of the old blanket pin: an inline image nested just as
-    # deeply is carried by the websocket unchanged, so it must not pin.
+    # deeply is carried by the websocket unchanged, so it must not pin. Under
+    # the default-on inline-image contract the tool-output-nested image is
+    # admitted onto the bridge websocket (no raw path, no HTTP pin).
     upstreams, raw_calls, _ = promotion_transport
     history = _promotion_history()
     history[-1] = {
@@ -246,8 +260,9 @@ async def test_inline_image_inside_a_tool_output_does_not_pin_http(async_client,
     }
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
-    assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert len(upstreams) == 1
+    assert upstreams[0].sent_text, "the tool-output-nested inline image must be served by the bridge websocket"
+    assert raw_calls == []
 
 
 @pytest.mark.asyncio

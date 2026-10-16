@@ -695,6 +695,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _serialize_websocket_error_event,  # noqa: F401
     _trim_websocket_previous_response_input_items,  # noqa: F401
     _upstream_websocket_disconnect_message,  # noqa: F401
+    _upstream_websocket_payload_too_large_message,  # noqa: F401
     _websocket_auth_failure_permanent_code,  # noqa: F401
     _websocket_auth_failure_requires_reauth,  # noqa: F401
     _websocket_auth_request_can_switch_account,  # noqa: F401

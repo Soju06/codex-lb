@@ -7,6 +7,7 @@ import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useDialogState } from "@/hooks/use-dialog-state";
+import { AccountDistributionCharts } from "@/features/accounts/components/account-distribution-charts";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
@@ -135,6 +136,7 @@ export function AccountsPage() {
     testEndpointMutation.isPending;
 
   const mutationError =
+    getErrorMessageOrNull(accountsQuery.error) ||
     getErrorMessageOrNull(importMutation.error) ||
     getErrorMessageOrNull(pauseMutation.error) ||
     getErrorMessageOrNull(resumeMutation.error) ||
@@ -164,6 +166,8 @@ export function AccountsPage() {
       {mutationError ? (
         <AlertMessage variant="error">{mutationError}</AlertMessage>
       ) : null}
+
+      {accountsQuery.data ? <AccountDistributionCharts accounts={accounts} /> : null}
 
       {!accountsQuery.data ? (
         <AccountsSkeleton />

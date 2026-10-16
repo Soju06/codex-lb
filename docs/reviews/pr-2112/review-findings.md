@@ -17,3 +17,7 @@ Scope: [HTTP phase timing contract](../../../openspec/specs/proxy-runtime-observ
 ## Round 4 (coderabbit, dcf1d85a)
 
 - [Exclude header-identified keepalives](https://github.com/Soju06/codex-lb/pull/2112#discussion_r4298575101) · upstream observation eligibility · app/modules/proxy/_service/streaming/helpers.py · Keepalives must not establish upstream phase timestamps regardless of whether their type is in the SSE header or JSON payload. Fixed at `_HTTPPhaseLatencies.parse_event`: the guard reads the effective SSE event field without changing payload classification; the existing route/persistence/metrics regression and framing property fail before the repair and pass afterward.
+
+## Round 5 (local-primary, a525d810)
+
+- [Observe the first eligible token after a keepalive](https://github.com/Soju06/codex-lb/pull/2112#issuecomment-6223644765) · upstream observation eligibility · app/modules/proxy/_service/streaming/mixin.py · Verbatim relay must not bypass an unobserved upstream phase merely because payload classification has already established TTFT. Valid.

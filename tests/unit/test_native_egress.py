@@ -21,6 +21,7 @@ from app.core.clients.native_egress import (
     NativeWebSocketRequest,
     NativeWebSocketRoutingMetadata,
     SubprocessNativeEgressClient,
+    _websocket_error_from_event,
     close_discovered_native_egress_client,
     discover_native_egress_client,
 )
@@ -51,6 +52,7 @@ print(json.dumps({
         "websocket",
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
+        "websocket_close_frame_provenance_v1",
         "websocket_send_ack",
     ],
 }), flush=True)
@@ -66,6 +68,22 @@ def _write_helper(path: Path, source: str) -> None:
         )
     path.write_text(source, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def test_native_websocket_protocol_event_preserves_protocol_error_type() -> None:
+    error = _websocket_error_from_event(
+        {
+            "message": "native websocket protocol failed",
+            "failure_phase": "protocol",
+            "retryable_same_contract": False,
+            "is_tls_verification_failure": False,
+            "status": None,
+            "headers": [],
+            "body": None,
+        }
+    )
+
+    assert isinstance(error, NativeEgressProtocolError)
 
 
 def _echo_helper_source() -> str:
@@ -157,6 +175,36 @@ sys.stdin.read()
     client = SubprocessNativeEgressClient(helper)
 
     with pytest.raises(NativeEgressProtocolError, match="unsupported protocol version"):
+        await client.request(NativeEgressRequest(method="GET", url="https://example.test", headers={}))
+
+    assert client._process is None
+
+
+@pytest.mark.asyncio
+async def test_subprocess_native_egress_treats_missing_capability_as_unavailable(tmp_path: Path) -> None:
+    helper = tmp_path / "native-helper"
+    helper.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "server_hello",
+    "protocol_version": 1,
+    "capabilities": [
+        "failure_provenance_v1", "http", "http2_profile_v1",
+        "websocket", "websocket_send_ack",
+    ],
+}), flush=True)
+sys.stdin.read()
+""",
+        encoding="utf-8",
+    )
+    helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+    client = SubprocessNativeEgressClient(helper)
+
+    with pytest.raises(NativeEgressUnavailable, match="websocket_close_frame_provenance_v1"):
         await client.request(NativeEgressRequest(method="GET", url="https://example.test", headers={}))
 
     assert client._process is None
@@ -611,6 +659,7 @@ for line in sys.stdin:
         print(json.dumps({
             "type": "websocket_close", "request_id": request_id,
             "code": command["code"], "reason": command["reason"],
+            "close_frame_received": False,
         }), flush=True)
     elif kind == "cancel":
         print(json.dumps({"type": "cancelled", "request_id": request_id}), flush=True)
@@ -643,7 +692,12 @@ async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path
 
     process = client._process
     await websocket.close(code=1000, reason="done")
-    assert await websocket.receive() == NativeWebSocketMessage(kind="close", close_code=1000, close_reason="done")
+    assert await websocket.receive() == NativeWebSocketMessage(
+        kind="close",
+        close_code=1000,
+        close_reason="done",
+        close_frame_received=False,
+    )
     with pytest.raises(NativeEgressTransportError, match="closed"):
         await asyncio.wait_for(websocket.receive(), timeout=0.1)
     assert client._process is process
@@ -757,6 +811,7 @@ for line in sys.stdin:
         print(json.dumps({
             "type": "websocket_close", "request_id": request_id,
             "code": 1000, "reason": "peer done",
+            "close_frame_received": True,
         }), flush=True)
     elif command["type"] == "websocket_close":
         print(json.dumps({
@@ -785,6 +840,7 @@ for line in sys.stdin:
         kind="close",
         close_code=1000,
         close_reason="peer done",
+        close_frame_received=True,
     )
     await websocket.close()
     await websocket.close()
@@ -1025,7 +1081,7 @@ async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path,
     helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
     client = SubprocessNativeEgressClient(helper)
     try:
-        with pytest.raises(NativeEgressProtocolError, match=capability):
+        with pytest.raises(NativeEgressUnavailable, match=capability):
             await client.request(NativeEgressRequest("GET", "https://example.test", {}, sse=NativeSseOptions(1, 1024)))
         assert client._process is None
         assert not client._streams

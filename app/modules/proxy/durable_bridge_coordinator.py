@@ -663,6 +663,8 @@ class DurableBridgeSessionCoordinator:
         recovery_attempt_owner_epoch: int | None = None,
         recovery_attempt_fingerprint: str | None = None,
         recovery_attempt_consumed: bool = False,
+        allow_admitted_initial: bool = False,
+        expected_rebind_dispatch_generation: int | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).record_operation(
@@ -680,6 +682,8 @@ class DurableBridgeSessionCoordinator:
                 recovery_attempt_owner_epoch=recovery_attempt_owner_epoch,
                 recovery_attempt_fingerprint=recovery_attempt_fingerprint,
                 recovery_attempt_consumed=recovery_attempt_consumed,
+                allow_admitted_initial=allow_admitted_initial,
+                expected_rebind_dispatch_generation=expected_rebind_dispatch_generation,
             )
 
     async def get_operation_events(self, *, operation_id: str) -> list[str]:
@@ -753,6 +757,8 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
+        expected_response_id: str | None = None,
         event_text: str,
         max_bytes: int,
     ) -> bool:
@@ -762,6 +768,8 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
+                expected_response_id=expected_response_id,
                 event_text=event_text,
                 max_bytes=max_bytes,
             )
@@ -773,6 +781,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         event_text: str,
         max_bytes: int,
         state: str,
@@ -786,6 +795,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
@@ -825,6 +835,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         event_text: str,
         max_bytes: int,
         state: str,
@@ -838,6 +849,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
@@ -853,6 +865,8 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
+        expected_response_id: str | None = None,
         expected_state: str | None = None,
     ) -> bool:
         async with self._session() as session:
@@ -861,6 +875,8 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
+                expected_response_id=expected_response_id,
                 expected_state=expected_state,
             )
 
@@ -871,6 +887,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         state: str,
         expected_response_id: str | None,
         expected_recovery_dispatch_count: int | None = None,
@@ -883,6 +900,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 state=state,
                 expected_response_id=expected_response_id,
                 expected_recovery_dispatch_count=expected_recovery_dispatch_count,
@@ -897,15 +915,27 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         state: str,
         response_id: str | None = None,
     ) -> bool:
         async with self._session() as session:
+            if state == "unknown":
+                if response_id is not None:
+                    return False
+                return await DurableBridgeRepository(session).mark_operation_unknown(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    expected_dispatch_generation=expected_dispatch_generation,
+                )
             return await DurableBridgeRepository(session).update_operation(
                 operation_id=operation_id,
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 state=state,
                 response_id=response_id,
             )
@@ -914,6 +944,32 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation(operation_id=operation_id)
 
+    async def claim_operation_dispatch(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        expected_dispatch_generation: int | None,
+        allow_admitted_initial: bool = False,
+        dispatch_account_id: str | None = None,
+        allow_account_rebind: bool = False,
+        expected_response_id: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).claim_operation_dispatch(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
+                allow_admitted_initial=allow_admitted_initial,
+                dispatch_account_id=dispatch_account_id,
+                allow_account_rebind=allow_account_rebind,
+                expected_response_id=expected_response_id,
+            )
+
     async def reset_operation_event_spool(
         self,
         *,
@@ -921,13 +977,15 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
-    ) -> bool:
+        expected_dispatch_generation: int | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).reset_operation_event_spool(
                 operation_id=operation_id,
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
             )
 
     async def claim_unknown_operation_for_recovery(
@@ -937,14 +995,16 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         max_recovery_dispatches: int | None = None,
-    ) -> bool:
+    ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).claim_unknown_operation_for_recovery(
                 operation_id=operation_id,
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 max_recovery_dispatches=max_recovery_dispatches,
             )
 
@@ -955,7 +1015,9 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         restore_recovery_dispatch_claim: bool = False,
+        expected_recovery_dispatch_count: int | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_operation_unknown(
@@ -963,7 +1025,9 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 restore_recovery_dispatch_claim=restore_recovery_dispatch_claim,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
             )
 
     async def rollback_operation_before_dispatch(
@@ -973,6 +1037,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_dispatch_generation: int | None = None,
         restore_rebound: bool = False,
         rebound_from_session_id: str | None = None,
         rebound_from_account_id: str | None = None,
@@ -985,6 +1050,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_dispatch_generation=expected_dispatch_generation,
                 restore_rebound=restore_rebound,
                 rebound_from_session_id=rebound_from_session_id,
                 rebound_from_account_id=rebound_from_account_id,

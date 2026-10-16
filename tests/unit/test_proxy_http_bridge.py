@@ -385,6 +385,7 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
         created=False,
         event_spool_complete=False,
         response_id=None,
+        dispatch_generation=1,
     )
     # Model a recovery checkpoint that was journaled for this request before
     # the operation ledger revealed the abandoned row.
@@ -401,6 +402,7 @@ async def test_submit_abandoned_operation_returns_full_history_recovery_without_
             record_operation=AsyncMock(return_value=abandoned),
             claim_unknown_operation_for_recovery=claim_unknown,
             rollback_recovery_attempt_before_dispatch=rollback_recovery_attempt,
+            claim_operation_dispatch=AsyncMock(return_value=SimpleNamespace(dispatch_generation=1)),
         ),
     )
     monkeypatch.setattr(
@@ -905,6 +907,7 @@ def test_verified_stale_anchor_replay_requires_complete_durable_operation_fence(
         started_at=0.0,
         operation_registered=True,
         operation_id="op-verified-stale-operation-fence",
+        operation_dispatch_generation=1,
     )
 
     assert http_bridge_streaming_module._http_bridge_verified_stale_anchor_replay_is_operation_fenced(
@@ -1302,6 +1305,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     process_text.assert_awaited_once_with(
         session,
         '{"type":"response.completed"}',
+        upstream_source=session.upstream,
         message=UpstreamWebSocketMessage(kind="text", text='{"type":"response.completed"}'),
         scheduler=service._scheduler,
         clock=service._clock,
@@ -7415,6 +7419,209 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_operation_response_id_binding_precedes_alias_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-operation-bind-before-alias",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-bind-before-alias"
+    session = _make_bridge_session(
+        key_value="operation-bind-before-alias",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-bind-before-alias"
+    session.durable_owner_epoch = 3
+    order: list[str] = []
+
+    async def update_operation(**kwargs: Any) -> bool:
+        order.append(f"operation:{kwargs['state']}")
+        assert kwargs["response_id"] == "resp-bind-before-alias"
+        return True
+
+    async def register_alias(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        assert request_state.operation_persisted_response_id == "resp-bind-before-alias"
+        order.append("alias")
+        return True
+
+    service._durable_bridge = cast(Any, SimpleNamespace(update_operation=update_operation))
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_alias)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_persist_http_bridge_operation_event", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp-bind-before-alias", "object": "response", "status": "in_progress"},
+            }
+        ),
+    )
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-bind-before-alias",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert order == ["operation:acknowledged", "operation:acknowledged", "alias", "operation:completed"]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_operation_response_id_binding_retry_failure_withholds_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-operation-bind-failure",
+        response_id="resp-operation-bind-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-bind-failure"
+    session = _make_bridge_session(
+        key_value="operation-bind-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-bind-failure"
+    session.durable_owner_epoch = 5
+    update_operation = AsyncMock(return_value=False)
+    register_alias = AsyncMock(return_value=True)
+    service._durable_bridge = cast(Any, SimpleNamespace(update_operation=update_operation))
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_alias)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_persist_http_bridge_operation_event", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-operation-bind-failure",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert update_operation.await_count == 3
+    assert [call.kwargs["state"] for call in update_operation.await_args_list] == [
+        "acknowledged",
+        "acknowledged",
+        "acknowledged",
+    ]
+    register_alias.assert_not_awaited()
+    assert request_state.operation_persisted_response_id is None
+    assert request_state.error_http_status_override == 502
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    assert request_state.event_queue is not None
+    event_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert isinstance(event_block, str)
+    failed = proxy_service.parse_sse_data_json(event_block)
+    assert failed is not None
+    assert failed["type"] == "response.failed"
+    failed_response = failed["response"]
+    assert isinstance(failed_response, dict)
+    failed_error = failed_response["error"]
+    assert isinstance(failed_error, dict)
+    assert failed_error["code"] == "bridge_continuity_persistence_failed"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_alias_persistence_failure_retains_acknowledged_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-alias-failure-retains-operation",
+        response_id="resp-alias-failure-retains-operation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-alias-failure-retains-operation"
+    session = _make_bridge_session(
+        key=_make_account_neutral_replay_session_key("alias-failure-retains-operation"),
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-alias-failure-retains-operation"
+    session.durable_owner_epoch = 7
+    update_operation = AsyncMock(return_value=True)
+    register_alias = AsyncMock(return_value=False)
+    persist_operation_event = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace(update_operation=update_operation))
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_alias)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_persist_http_bridge_operation_event",
+        persist_operation_event,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-alias-failure-retains-operation",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    register_alias.assert_awaited_once()
+    assert request_state.operation_persisted_response_id == "resp-alias-failure-retains-operation"
+    assert [call.kwargs["state"] for call in update_operation.await_args_list] == ["acknowledged"]
+    persist_operation_event.assert_awaited_once()
+    assert persist_operation_event.await_args is not None
+    assert persist_operation_event.await_args.kwargs["terminal_state"] == "acknowledged"
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_incomplete_event_terminalizes_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7527,6 +7734,7 @@ async def test_terminal_append_failure_retains_last_persisted_response_id_after_
         request_id="req-terminal-retry-reset",
         response_id="resp-before-retry",
         replay_downstream_response_id=None,
+        operation_dispatch_generation=1,
     )
     session = _make_bridge_session(key_value="terminal-retry-reset")
     session.durable_session_id = "durable-terminal-retry-reset"
@@ -25643,6 +25851,7 @@ async def test_submit_anchored_turn_rolls_back_operation_before_retiring_session
             state="submitted",
             response_id=None,
             event_spool_complete=False,
+            dispatch_generation=1,
         )
     )
     rollback_operation = AsyncMock(return_value=True)
@@ -25653,6 +25862,7 @@ async def test_submit_anchored_turn_rolls_back_operation_before_retiring_session
             get_operation=AsyncMock(return_value=None),
             record_operation=record_operation,
             rollback_operation_before_dispatch=rollback_operation,
+            claim_operation_dispatch=AsyncMock(return_value=SimpleNamespace(dispatch_generation=1)),
         ),
     )
     monkeypatch.setattr(
@@ -25682,6 +25892,7 @@ async def test_submit_anchored_turn_rolls_back_operation_before_retiring_session
     assert rollback_call is not None
     rollback_kwargs = rollback_call.kwargs
     assert rollback_kwargs == {
+        "expected_dispatch_generation": 1,
         "operation_id": "operation-unsent",
         "session_id": "durable-hard-turn-unsent-operation",
         "instance_id": "instance-hard-turn-unsent-operation",
@@ -29985,6 +30196,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     process_text.assert_awaited_once_with(
         session,
         "late response",
+        upstream_source=session.upstream,
         message=UpstreamWebSocketMessage(kind="text", text="late response"),
         scheduler=service._scheduler,
         clock=service._clock,
@@ -34055,6 +34267,7 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
         transport="http",
         operation_id="op-eventless-sibling",
         response_event_count=0,
+        operation_dispatch_generation=1,
     )
     streamed = proxy_service._WebSocketRequestState(
         request_id="req-streamed-sibling",
@@ -34066,6 +34279,7 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
         transport="http",
         operation_id="op-streamed-sibling",
         response_event_count=1,
+        operation_dispatch_generation=1,
     )
     session = _make_bridge_session(
         key_value="per-operation-close-classification",
@@ -34075,7 +34289,8 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
     event_order: list[str] = []
     update_operation = AsyncMock()
 
-    async def discard_operation(*, operation_id: str) -> None:
+    async def discard_operation(*, operation_id: str, expected_dispatch_generation: int | None = None) -> None:
+        assert expected_dispatch_generation == 1
         event_order.append(f"discard:{operation_id}")
 
     update_operation.side_effect = lambda *args, **kwargs: event_order.append(f"update:{kwargs['state']}")
@@ -34497,6 +34712,7 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
             previous_response_id=request_payload.previous_response_id,
             operation_registered=True,
             operation_id="op-terse-recovery",
+            operation_dispatch_generation=1,
         )
         request_states.append(request_state)
         return request_state, '{"type":"response.create"}'
@@ -34602,6 +34818,7 @@ async def test_stream_via_http_bridge_recovers_terse_previous_response_rejection
     assert request_states
     assert ordered_events == ["reset", "retire"]
     reset_operation_event_spool.assert_awaited_once_with(
+        expected_dispatch_generation=1,
         operation_id="op-terse-recovery",
         session_id="durable-terse-recovery",
         instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
@@ -34732,6 +34949,7 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
             operation_registered=True,
             operation_fingerprint="fingerprint-soft-owner-replay",
             transport="http",
+            operation_dispatch_generation=1,
         )
         return request_state, text_data
 
@@ -34773,7 +34991,11 @@ async def test_stream_via_http_bridge_same_owner_fresh_replay_pins_owner_without
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=lookup))
-    monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "reset_operation_event_spool",
+        AsyncMock(return_value=SimpleNamespace(dispatch_generation=2)),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -37216,11 +37438,31 @@ async def test_stale_operation_maintenance_protects_canonical_detached_and_batch
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     canonical = _make_bridge_session(
         key_value="stale-operation-canonical",
-        pending_requests=cast(Any, deque([SimpleNamespace(operation_id="op-canonical")])),
+        pending_requests=cast(
+            Any,
+            deque(
+                [
+                    SimpleNamespace(
+                        operation_id="op-canonical",
+                        operation_dispatch_generation=1,
+                    )
+                ]
+            ),
+        ),
     )
     detached = _make_bridge_session(
         key_value="stale-operation-detached",
-        pending_requests=cast(Any, deque([SimpleNamespace(operation_id="op-detached")])),
+        pending_requests=cast(
+            Any,
+            deque(
+                [
+                    SimpleNamespace(
+                        operation_id="op-detached",
+                        operation_dispatch_generation=1,
+                    )
+                ]
+            ),
+        ),
     )
     service._http_bridge_sessions[canonical.key] = canonical
     service._http_bridge_detached_sessions[id(detached)] = detached

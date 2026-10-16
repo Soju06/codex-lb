@@ -99,7 +99,7 @@ async def _populate_test_registry() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/v1/models", "/backend-api/codex/models"])
+@pytest.mark.parametrize("path", ["/v1/models", "/v1/models/gpt-5.2", "/backend-api/codex/models"])
 async def test_models_routes_release_reservation_when_catalog_read_fails(async_client, monkeypatch, path):
     """Both public model routes settle their reservation on a catalog failure."""
     released: list[str] = []
@@ -512,6 +512,111 @@ async def test_v1_models_filters_source_models_by_exact_allowlist(async_client):
     assert canonical_response.status_code == 200
     canonical_ids = {item["id"] for item in canonical_response.json()["data"]}
     assert "gpt-5-high" not in canonical_ids
+
+
+async def _enable_api_key_auth(async_client) -> None:
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_matches_list_entry(async_client, monkeypatch):
+    await _populate_test_registry()
+    # Each catalog read stamps `created` from time.time(); pin it so the two reads compare equal.
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    listed = await async_client.get("/v1/models")
+    assert listed.status_code == 200
+    entry = next(item for item in listed.json()["data"] if item["id"] == "gpt-5.2")
+
+    response = await async_client.get("/v1/models/gpt-5.2")
+    assert response.status_code == 200
+    assert response.json() == entry
+    assert response.json()["object"] == "model"
+
+    # client_version does not switch the single-model route to the Codex catalog.
+    with_version = await async_client.get("/v1/models/gpt-5.2", params={"client_version": "0.99.0"})
+    assert with_version.status_code == 200
+    assert with_version.json() == entry
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_unknown_model_returns_404(async_client):
+    await _populate_test_registry()
+    response = await async_client.get("/v1/models/does-not-exist")
+    assert response.status_code == 404
+    error = response.json()["error"]
+    assert error["code"] == "model_not_found"
+    assert error["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_respects_api_key_allowlist(async_client):
+    await _populate_test_registry()
+    await _enable_api_key_auth(async_client)
+
+    restricted = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "retrieve-restricted", "allowedModels": ["gpt-5.2"]},
+    )
+    assert restricted.status_code == 200
+    unrestricted = await async_client.post("/api/api-keys/", json={"name": "retrieve-open"})
+    assert unrestricted.status_code == 200
+
+    allowed = await async_client.get(
+        "/v1/models/gpt-5.2",
+        headers={"Authorization": f"Bearer {restricted.json()['key']}"},
+    )
+    assert allowed.status_code == 200
+    assert allowed.json()["id"] == "gpt-5.2"
+
+    excluded = await async_client.get(
+        "/v1/models/gpt-5.3-codex",
+        headers={"Authorization": f"Bearer {restricted.json()['key']}"},
+    )
+    assert excluded.status_code == 404
+    assert excluded.json()["error"]["code"] == "model_not_found"
+
+    open_response = await async_client.get(
+        "/v1/models/gpt-5.3-codex",
+        headers={"Authorization": f"Bearer {unrestricted.json()['key']}"},
+    )
+    assert open_response.status_code == 200
+    assert open_response.json()["id"] == "gpt-5.3-codex"
+
+
+@pytest.mark.asyncio
+async def test_v1_model_retrieve_filters_sources_by_api_key_assignment(async_client, monkeypatch):
+    monkeypatch.setattr("time.time", lambda: 1_790_000_000.0)
+    first_source_id = await _create_model_source(async_client, name="retrieve-first", model="org/visible-model")
+    await _create_model_source(async_client, name="retrieve-second", model="org/hidden-model")
+    await _enable_api_key_auth(async_client)
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "retrieve-source-scoped", "assignedSourceIds": [first_source_id]},
+    )
+    assert created.status_code == 200
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+
+    listed = await async_client.get("/v1/models", headers=headers)
+    assert listed.status_code == 200
+    entry = next(item for item in listed.json()["data"] if item["id"] == "org/visible-model")
+
+    visible = await async_client.get("/v1/models/org/visible-model", headers=headers)
+    assert visible.status_code == 200
+    assert visible.json() == entry
+
+    hidden = await async_client.get("/v1/models/org/hidden-model", headers=headers)
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "model_not_found"
 
 
 @pytest.mark.asyncio

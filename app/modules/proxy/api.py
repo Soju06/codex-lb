@@ -9012,8 +9012,7 @@ async def _normalize_public_responses_stream(
     forward_unparseable_data: bool = False,
     preserve_native_failure_lifecycle: bool = False,
 ) -> AsyncIterator[str]:
-    stream = _normalize_reasoning_summary_stream(stream)
-    """Normalize the upstream SSE event stream for the public /v1 surface.
+    """Normalize upstream SSE for public-contract and native Codex clients.
 
     Args:
         stream: the upstream SSE event blocks (post-error-conversion).
@@ -9022,11 +9021,13 @@ async def _normalize_public_responses_stream(
             outside response.* and error, backfill terminal output from streamed
             item events, and synthesize a leading response.created event
             when the upstream stream's first standard event is not
-            response.created. When False (used for /backend-api/codex/*,
-            which feeds the Codex CLI), all events including vendor events are
-            forwarded verbatim and no synthesis happens — the Codex CLI
-            relies on the upstream's native event shape.
+            response.created. OpenAI-shaped /backend-api/codex/responses
+            requests can also enable this contract. When False (native Codex
+            requests), retain vendor events and skip public-only synthesis
+            and terminal output backfill. Shared normalization can still
+            rewrite reasoning, error, and terminal response payloads.
     """
+    stream = _normalize_reasoning_summary_stream(stream)
     terminal_seen = False
     done_seen = False
     unparseable_forwarded = False

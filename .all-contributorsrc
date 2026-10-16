@@ -1549,7 +1549,9 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
       "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
       "contributions": [
-        "code"
+        "code",
+        "test",
+        "doc"
       ]
     }
   ],

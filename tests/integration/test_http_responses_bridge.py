@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -39,6 +40,7 @@ from app.db.models import (
     Account,
     AccountStatus,
     DashboardSettings,
+    HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
     RequestLog,
@@ -17077,6 +17079,143 @@ class _DeniesAnchoredTurnUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
                 ),
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+@pytest.mark.parametrize("fence", ["tombstone", "poison"])
+@pytest.mark.parametrize("request_kind", ["full", "cached-miss", "delta", "explicit", "sibling", "other-scope"])
+@pytest.mark.parametrize("identity", ["thread", "legacy-session"])
+async def test_http_bridge_split_turn_state_row_honors_thread_anchor_fence(
+    async_client, app_instance, monkeypatch, path, fence, request_kind, identity
+):
+    dashboard = _make_dashboard_settings()
+    dashboard.api_key_auth_enabled = True
+    _install_proxy_settings(monkeypatch, app_settings=_make_app_settings(enabled=True), dashboard_settings=dashboard)
+    key_response = await async_client.post("/api/api-keys/", json={"name": "split-anchor"})
+    assert key_response.status_code == 200
+    auth = {
+        "Authorization": f"Bearer {key_response.json()['key']}",
+        "User-Agent": "codex-tui/0.163.0 (Ubuntu 24.4.0; x86_64)",
+        "originator": "codex_cli_rs",
+    }
+    owner_id = await _import_account(async_client, "acc_split_anchor", "split-anchor@example.com")
+    owner = await _get_account(owner_id)
+    upstreams: list[_FakeBridgeUpstreamWebSocket] = []
+
+    async def fresh_account(self, target, *, force=False, timeout_seconds):
+        return target
+
+    async def connect(headers, access_token, account_id_header, *, base_url=None, session=None):
+        assert account_id_header == owner.chatgpt_account_id
+        upstream = _FakeBridgeUpstreamWebSocket(f"resp_split_{len(upstreams)}")
+        upstreams.append(upstream)
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh_account)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    headers = {**auth, "session_id": "split-process", "thread-id": "split-thread"}
+    if identity == "legacy-session":
+        del headers["thread-id"]
+    historical_input = [{"role": "user", "content": "original question"}]
+    body = {"model": "gpt-5.1", "instructions": "Return exactly OK.", "stream": True}
+    first, first_headers = await _collect_sse_events_with_headers(
+        async_client, path, json_body={**body, "input": historical_input}, headers=headers
+    )
+    turn_state = first_headers["x-codex-turn-state"]
+    response_id = first[-1]["response"]["id"]
+    headers["x-codex-turn-state"] = turn_state
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        original = next(iter(service._http_bridge_sessions.values()))
+    await service._close_http_bridge_session(original)
+
+    # Historical layout observed in production: an exact turn-state alias
+    # points to an older same-account row retaining an anchor, while local
+    # acquisition falls back to the thread key whose anchor was abandoned.
+    async with SessionLocal() as db:
+        current = (await db.execute(select(HttpBridgeSessionRecord))).scalar_one()
+        stale = HttpBridgeSessionRecord(
+            id="split-stale-row",
+            session_key_kind="turn_state_header",
+            session_key_value=turn_state,
+            session_key_hash=sha256(turn_state.encode()).hexdigest(),
+            api_key_scope=current.api_key_scope,
+            account_id=owner_id,
+            model="gpt-5.1",
+            state=HttpBridgeSessionState.CLOSED,
+            latest_turn_state=turn_state,
+            latest_response_id=response_id,
+            latest_input_item_count=len(historical_input),
+            latest_input_full_fingerprint=proxy_module._fingerprint_input_items(historical_input),
+        )
+        db.add(stale)
+        await db.flush()
+        await db.execute(
+            update(HttpBridgeSessionAlias)
+            .where(HttpBridgeSessionAlias.alias_kind == "turn_state")
+            .values(session_id=stale.id)
+        )
+        current.latest_response_id = None
+        current.latest_input_item_count = None
+        current.latest_input_full_fingerprint = None
+        await db.commit()
+
+    fence_key = original.key
+    if request_kind == "other-scope":
+        other_key_response = await async_client.post("/api/api-keys/", json={"name": "other-scope"})
+        assert other_key_response.status_code == 200
+        fence_key = replace(fence_key, api_key_id=other_key_response.json()["id"])
+    if request_kind == "sibling":
+        headers["thread-id" if identity == "thread" else "session_id"] = "sibling-thread"
+    await service._durable_bridge.persist_retry_circuit(
+        session_key_kind=fence_key.affinity_kind,
+        session_key_value=fence_key.affinity_key,
+        api_key_id=fence_key.api_key_id,
+        consecutive_failures=0 if fence == "tombstone" else 2,
+        cooldown_until_epoch=0.0,
+        last_detail="anchor_abandoned" if fence == "tombstone" else "stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    # A prior failed submit already loaded this key's fence in the observed
+    # reconnect loop. Keep the separate planning-cache race out of this
+    # regression: the bug is ignoring a known fence under the fallback key.
+    if request_kind not in {"other-scope", "cached-miss"}:
+        assert await service._load_http_bridge_retry_circuit(original)
+    full_input = [*historical_input, {"role": "user", "content": "continue"}]
+    retry_body = {**body, "input": full_input}
+    if request_kind == "delta":
+        retry_body["input"] = "continue"
+    elif request_kind == "explicit":
+        retry_body["previous_response_id"] = response_id
+    async with _client_reporting_committed_stream_failures(app_instance) as client:
+        if request_kind == "cached-miss":
+            # A fence written after the planning cache's confirmed miss is
+            # first learned at submit. That first refusal must not loop:
+            # the very next full resend sees it through the fallback key.
+            first_refusal = await client.post(path, json=retry_body, headers=headers)
+            assert first_refusal.status_code == 404, first_refusal.text
+            assert all(not upstream.sent_text for upstream in upstreams[1:])
+        retry = await client.post(path, json=retry_body, headers=headers)
+    if request_kind == "delta":
+        assert retry.status_code == 404, retry.text
+        assert retry.json()["error"]["code"] == "bridge_previous_response_not_found"
+        assert all(not upstream.sent_text for upstream in upstreams[1:])
+        return
+    assert retry.status_code == 200, retry.text
+    assert "response.completed" in retry.text
+    forwarded = json.loads(upstreams[-1].sent_text[0])
+    if request_kind in {"full", "cached-miss"}:
+        assert "previous_response_id" not in forwarded
+        assert forwarded["input"] == full_input
+    else:
+        assert forwarded["previous_response_id"] == response_id
+    if request_kind in {"full", "cached-miss"}:
+        headers["x-codex-turn-state"] = retry.headers["x-codex-turn-state"]
+        later = await _collect_sse_events(
+            async_client, path, json_body={**body, "input": "one more turn"}, headers=headers
+        )
+        assert later[-1]["type"] == "response.completed"
 
 
 @pytest.mark.asyncio

@@ -328,3 +328,20 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Poisoned generated-turn-state fallback
+
+An exact turn-state alias can refer to an older same-account durable record
+while session acquisition falls back to the native thread key (or a legacy
+session key). The retry circuit's poison quarantine or abandonment tombstone
+on that destination must participate in full-resend anchor planning. Otherwise
+planning trims a complete client history against the old anchor and submission
+rejects it on the destination, causing the next full resend to repeat the loop.
+
+For example, old turn-state row T retains a 240-item prefix while thread B has
+abandoned that anchor. A 244-item full resend must reach the original account
+with all 244 items, without an injected anchor. A delta still needs its prior
+context; explicit client anchors, sibling keys, and other API-key scopes retain
+their existing behavior. The submit-time fence still handles evidence that
+arrives after planning, including a recently cached miss; this change does not
+remove that final race check or merge historical durable records.

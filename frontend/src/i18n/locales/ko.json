@@ -57,6 +57,7 @@
   "accounts.sort.name_desc": "이름 (Z-A)",
   "accounts.sort.reset_latest": "reset 늦은 순",
   "accounts.sort.reset_soonest": "reset 빠른 순",
+  "accounts.listItem.resetExpiringSoon": "3일 이내 만료되는 리셋 크레딧",
   "accounts.listItem.noAttempts": "시도 없음",
   "accounts.listItem.quotaRemainingAria": "{{label}} quota 남음",
   "accounts.listItem.resetAt": "{{label}} reset",

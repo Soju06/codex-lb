@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ export type AccountListProps = {
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
   showResetCreditBadges?: boolean;
+  showResetCreditExpiryBadge?: boolean;
   readOnly?: boolean;
 };
 
@@ -48,6 +49,7 @@ export function AccountList({
   sortMode,
   onSortModeChange,
   showResetCreditBadges = true,
+  showResetCreditExpiryBadge = true,
   readOnly = false,
 }: AccountListProps) {
   const { t } = useTranslation();
@@ -57,6 +59,12 @@ export function AccountList({
   const [chooserOpen, setChooserOpen] = useState(false);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const activeSortMode = sortMode ?? DEFAULT_ACCOUNT_SORT_MODE;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!showResetCreditBadges || !showResetCreditExpiryBadge) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [showResetCreditBadges, showResetCreditExpiryBadge]);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -174,6 +182,11 @@ export function AccountList({
               selected={account.accountId === selectedAccountId}
               showAccountId={account.isEmailDuplicate === true}
               showResetCreditBadge={showResetCreditBadges}
+              resetCreditExpiresSoon={
+                showResetCreditExpiryBadge &&
+                Date.parse(account.resetCreditNearestExpiresAt ?? "") > now &&
+                Date.parse(account.resetCreditNearestExpiresAt ?? "") - now <= 3 * 86_400_000
+              }
               onSelect={onSelect}
             />
           ))

@@ -13,3 +13,7 @@ Scope: [HTTP phase timing contract](../../../openspec/specs/proxy-runtime-observ
 ## Round 3 (ci, 58c86d05)
 
 - [Keep review records out of the public docs](https://github.com/Soju06/codex-lb/pull/2112#issuecomment-6223011502) · documentation publication · mkdocs.yml · Repository review records must not enter the published documentation tree. Fixed at MkDocs `exclude_docs`: the strict build succeeds and its output contains no review records; public-page validation stays enabled.
+
+## Round 4 (coderabbit, dcf1d85a)
+
+- [Exclude header-identified keepalives](https://github.com/Soju06/codex-lb/pull/2112#discussion_r4298575101) · upstream observation eligibility · app/modules/proxy/_service/streaming/helpers.py · Keepalives must not establish upstream phase timestamps regardless of whether their type is in the SSE header or JSON payload. Fixed at `_HTTPPhaseLatencies.parse_event`: the guard reads the effective SSE event field without changing payload classification; the existing route/persistence/metrics regression and framing property fail before the repair and pass afterward.

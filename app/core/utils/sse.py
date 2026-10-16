@@ -248,6 +248,16 @@ def parse_sse_data_json(event_block: str) -> dict[str, JsonValue] | None:
     return None
 
 
+def extract_sse_event_type(event_block: str) -> str | None:
+    """Read the effective event field using SSE line and field-value rules."""
+    event_type = None
+    for raw_line in _SSE_LINE_BOUNDARY.split(event_block):
+        field, value = _parse_sse_field(raw_line)
+        if field == "event":
+            event_type = value
+    return event_type
+
+
 def extract_sse_data(event_block: str) -> str | None:
     data_lines = _extract_sse_data_lines(event_block)
     if data_lines is None:

@@ -67,7 +67,7 @@ from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteErr
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import ParsedSseBlock, format_sse_event, parse_sse_data_json
+from app.core.utils.sse import ParsedSseBlock, extract_sse_event_type, format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
@@ -456,6 +456,7 @@ class _HTTPPhaseLatencies:
                 self.first_upstream_event_ms is None
                 or (self.response_created_ms is None and event_type == "response.created")
             )
+            and extract_sse_event_type(line) != "codex.keepalive"
         ):
             elapsed_ms = max(0, int((observed_at() - started_at) * 1000))
             if self.first_upstream_event_ms is None:

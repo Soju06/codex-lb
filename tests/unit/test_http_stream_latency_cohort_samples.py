@@ -14,9 +14,15 @@ import json
 from typing import AsyncIterator
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from app.core.openai.parsing import classify_event_type
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
+from app.core.utils.sse import ParsedSseBlock
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.streaming.helpers import _HTTPPhaseLatencies
 from tests.unit.test_streaming_retry_virtual_time import _make_account, _RequestLogsRecorder, _virtual_service
 
 pytestmark = pytest.mark.unit
@@ -24,6 +30,42 @@ pytestmark = pytest.mark.unit
 
 def _sse(event: dict[str, object]) -> str:
     return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+
+@given(
+    boundary=st.sampled_from(["\r", "\n", "\r\n"]),
+    space=st.sampled_from(["", " "]),
+    event_after_data=st.booleans(),
+    representation=st.sampled_from(["header", "payload", "both", "conflicting_created"]),
+    parsed_carrier=st.booleans(),
+)
+@settings(max_examples=40, deadline=None)
+def test_http_phase_observation_ignores_equivalent_keepalives(
+    boundary: str, space: str, event_after_data: bool, representation: str, parsed_carrier: bool
+) -> None:
+    payload: dict[str, JsonValue] = {}
+    if representation in {"payload", "both"}:
+        payload["type"] = "codex.keepalive"
+    elif representation == "conflicting_created":
+        payload["type"] = "response.created"
+    header = "response.in_progress" if representation == "payload" else "codex.keepalive"
+    fields = [f"event:{space}{header}", f"data:{space}{json.dumps(payload)}"]
+    if event_after_data:
+        fields.reverse()
+    # A later event field replaces an earlier one, independently of data order.
+    block = boundary.join(["event: ignored", *fields, "", ""])
+    if parsed_carrier:
+        block = ParsedSseBlock(block, payload)
+    phases = _HTTPPhaseLatencies()
+
+    def unexpected_clock() -> float:
+        pytest.fail("Keepalives must not observe the phase clock")
+
+    assert phases.parse_event(block, 1.0, unexpected_clock) == (payload, classify_event_type(payload))
+    assert phases.first_upstream_event_ms is None
+    assert phases.response_created_ms is None
+    phases.parse_event(_sse({"type": "response.created"}), 1.0, lambda: 3.0)
+    assert phases.first_upstream_event_ms == phases.response_created_ms == 2000
 
 
 @pytest.mark.asyncio

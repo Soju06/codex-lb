@@ -111,6 +111,13 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
             (1.0, created),
         ]
         expected_created = 500
+        if case == "distinct_phases":
+            blocks[:0] = [
+                (0.55, "event: codex.keepalive\ndata: {}\n\n"),
+                (0.575, "event:codex.keepalive\ndata: {}\n\n"),
+                (0.6, "event: codex.keepalive\r\ndata: {}\r\n\r\n"),
+                (0.625, "data: {}\nevent: codex.keepalive\n\n"),
+            ]
         if case == "retry":
             blocks = [(offset + 1.0, block) for offset, block in blocks]
             expected_first, expected_created, expected_ttft = 500, 750, 1250

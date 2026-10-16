@@ -531,7 +531,12 @@ def _stream_iterator_after_capacity_admission(
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
-def _should_penalize_stream_error(code: str | None, message: str | None = None) -> bool:
+def _should_penalize_stream_error(
+    code: str | None,
+    message: str | None = None,
+    *,
+    failover_replay: bool = False,
+) -> bool:
     """Whether this stream failure owes the account a health write.
 
     ``message`` is the sentence the failure carried, and every caller that
@@ -559,6 +564,7 @@ def _should_penalize_stream_error(code: str | None, message: str | None = None) 
         code=code,
         http_status=None,
         message=message,
+        failover_replay=failover_replay,
     ):
         _facade().logger.info(
             "Skipped account error penalty for account-neutral request rejection code=%s request_id=%s",
@@ -1076,6 +1082,7 @@ def _is_account_neutral_request_rejection(
     code: str,
     http_status: int | None,
     message: str | None,
+    failover_replay: bool = False,
 ) -> bool:
     """Return whether upstream rejected the request payload, not the account.
 
@@ -1090,10 +1097,20 @@ def _is_account_neutral_request_rejection(
     ``_is_model_scoped_rejection`` below, which likewise keeps the account's
     health untouched but still lets failover try accounts whose entitlements
     may differ.
+
+    Encrypted-content and reasoning-replay 400s are account-neutral only for a
+    failover replay (``failover_replay``): there the payload was proven bad on
+    its source account and is replayed onto this one, so the rejection reflects
+    the cross-account replay. Outside a failover replay they keep the account's
+    health write.
     """
     if http_status is not None and http_status != 400:
         return False
     if is_account_neutral_safety_policy_rejection(code=code, http_status=http_status, message=message):
+        return True
+    if failover_replay and code == "invalid_encrypted_content":
+        return True
+    if failover_replay and _is_reasoning_replay_rejection(code=code, http_status=http_status, message=message):
         return True
     return code == "invalid_request_error" and bool(_facade()._is_missing_tool_output_message(message))
 
@@ -1156,6 +1173,7 @@ async def _handle_stream_error(
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
     upstream_http_status: int | None = None,
+    failover_replay: bool = False,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1191,6 +1209,7 @@ async def _handle_stream_error(
         code=code,
         http_status=http_status,
         message=error.get("message"),
+        failover_replay=failover_replay,
     ):
         _facade().logger.info(
             "Skipped account error penalty for account-neutral request rejection account_id=%s request_id=%s code=%s",

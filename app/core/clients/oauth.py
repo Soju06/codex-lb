@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
 import secrets
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -37,6 +40,17 @@ logger = logging.getLogger(__name__)
 # authorization-code path); fixed since issue #1340 / PRINCIPLES.md P2. Callers
 # may still pass an explicit ``timeout_seconds``.
 OAUTH_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Direct-egress OAuth posts (authorization-code exchange, device-code request,
+# device-token poll) can fail before any response arrives: the auth host is
+# unreachable, the connection is refused, the configured proxy egress fails, or
+# the exchange times out. aiohttp raises a bare ``ClientError``/``TimeoutError``
+# for those, which escaped the account-add flows as unhandled 500s (#2601), so
+# they are mapped to this error code. The message is deliberately fixed: aiohttp
+# exception text can embed the request URL and any proxy credentials it carries,
+# and the client must never echo those back.
+OAUTH_TRANSPORT_ERROR_CODE: Final[str] = "transport_error"
+OAUTH_TRANSPORT_ERROR_MESSAGE: Final[str] = "Could not reach the OpenAI auth server; check network/proxy egress"
 
 
 @dataclass(frozen=True)
@@ -151,7 +165,8 @@ async def exchange_authorization_code(
             raise _oauth_error_from_payload(payload, status)
         return _parse_tokens(payload)
     async with lease_http_session(session) as client_session:
-        async with client_session.post(
+        async with _post_auth_request(
+            client_session,
             url,
             data=encoded,
             headers=headers,
@@ -229,7 +244,7 @@ async def request_device_code(
         payload_data = _validate_device_code_payload(data)
     else:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            async with _post_auth_request(client_session, url, json=payload, headers=headers, timeout=timeout) as resp:
                 data = await _safe_json(resp)
                 if resp.status >= 400:
                     if resp.status == 404:
@@ -319,7 +334,7 @@ async def exchange_device_token(
             return None
     else:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            async with _post_auth_request(client_session, url, json=payload, headers=headers, timeout=timeout) as resp:
                 data = await _safe_json(resp)
                 payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")
                 if resp.status in (403, 404):
@@ -369,6 +384,33 @@ def _parse_tokens(payload: OAuthTokenPayload) -> OAuthTokens:
         refresh_token=payload.refresh_token,
         id_token=payload.id_token,
     )
+
+
+@asynccontextmanager
+async def _post_auth_request(
+    client_session: aiohttp.ClientSession,
+    url: str,
+    **kwargs: Any,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """Post to the auth server, translating transport failures into ``OAuthError``.
+
+    The single boundary every direct-egress OAuth exchange passes through, so a
+    connection, proxy, TLS, read, or timeout failure becomes a mapped OAuth
+    failure (with a credential-free message) instead of an unhandled 500.
+    Mirrors ``_codex_post`` for the routed path.
+    """
+
+    try:
+        async with client_session.post(url, **kwargs) as resp:
+            yield resp
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        # Class name only: aiohttp transport messages embed the target URL.
+        logger.warning(
+            "OAuth transport failure request_id=%s exception_type=%s",
+            get_request_id(),
+            type(exc).__name__,
+        )
+        raise OAuthError(OAUTH_TRANSPORT_ERROR_CODE, OAUTH_TRANSPORT_ERROR_MESSAGE) from exc
 
 
 async def _codex_post(

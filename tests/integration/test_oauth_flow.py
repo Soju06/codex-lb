@@ -6,18 +6,22 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import pytest
 from aiohttp import ClientSession, web
+from aiohttp.client_reqrep import ConnectionKey
 from fastapi.responses import JSONResponse
 
 import app.modules.oauth.service as oauth_module
 from app.core.auth import generate_unique_account_id
+from app.core.clients import oauth as oauth_client_module
 from app.core.clients.oauth import DeviceCode, OAuthError, OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import UpstreamProxyRouteError
@@ -2837,3 +2841,211 @@ async def test_loser_browser_callback_honors_durable_success_not_error(monkeypat
     async with SessionLocal() as session:
         record = await OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
     assert record is not None and record.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# Outbound transport failures (issue #2601)
+#
+# Both account-add flows call the auth server through the OAuth client's own
+# direct-egress POST. An unreachable host, refused connection, failing proxy
+# egress, or timeout used to escape as a bare ``aiohttp.ClientError``: the
+# dashboard ``/start`` endpoint answered 500 and the loopback callback server
+# answered aiohttp's default error page while the flow stayed ``pending``
+# forever. These tests patch ONLY that outbound boundary, so the real client
+# functions, error mapping, and route handlers run as shipped.
+# ---------------------------------------------------------------------------
+
+
+def _oauth_transport_failure() -> aiohttp.ClientConnectorError:
+    """The failure aiohttp raises when the auth host cannot be reached."""
+
+    return aiohttp.ClientConnectorError(
+        ConnectionKey(
+            host="auth.openai.com",
+            port=443,
+            is_ssl=True,
+            ssl=None,
+            proxy=None,
+            proxy_auth=None,
+            proxy_headers_hash=None,
+            server_hostname=None,
+        ),
+        OSError("Connection refused"),
+    )
+
+
+class _RaisingOAuthPost:
+    """Stand-in for ``ClientSession.post`` when the transport cannot connect.
+
+    aiohttp performs the connection when the request context is entered, so the
+    failure is raised there rather than by ``post()`` itself.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self) -> Any:
+        raise self._exc
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+
+class _JsonOAuthPost:
+    """Minimal successful response object: enough for ``_safe_json`` callers."""
+
+    def __init__(self, payload: dict[str, Any], status: int = 200) -> None:
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self) -> "_JsonOAuthPost":
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+    async def json(self, **_kwargs: Any) -> dict[str, Any]:
+        return self._payload
+
+
+def _install_oauth_http_boundary(monkeypatch, respond: Callable[[str], Any]) -> None:
+    """Replace only the OAuth client's leased outbound session.
+
+    ``respond(url)`` returns what that request's context manager should be; no
+    real socket is opened and no real token ever exists in these tests.
+    """
+
+    class _BoundarySession:
+        def post(self, url: str, **_kwargs: Any) -> Any:
+            return respond(url)
+
+    @contextlib.asynccontextmanager
+    async def _lease(_session: Any = None) -> AsyncIterator[_BoundarySession]:
+        yield _BoundarySession()
+
+    monkeypatch.setattr(oauth_client_module, "lease_http_session", _lease)
+
+
+@pytest.mark.asyncio
+async def test_browser_callback_transport_failure_finalizes_error_page(monkeypatch, caplog):
+    """A browser callback whose token exchange cannot reach the auth server must
+    render the callback error page (not aiohttp's 500 page), finalize the flow as
+    ``error`` so ``/api/oauth/status`` stops the dashboard polling, and leak
+    neither the authorization code nor the state token into the page or logs.
+    """
+
+    from aiohttp.test_utils import make_mocked_request
+
+    caplog.set_level(logging.WARNING)
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    _install_oauth_http_boundary(monkeypatch, lambda _url: _RaisingOAuthPost(_oauth_transport_failure()))
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "")
+    code = "transport-failure-code"
+
+    request = make_mocked_request("GET", f"/auth/callback?code={code}&state={state_token}")
+    response = await replica._handle_callback(request)
+
+    assert response.status == 200
+    assert response.text is not None
+    assert "Login failed" in response.text
+    assert oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE in response.text
+
+    # The flow is terminal, so the callback server and dashboard polling stop.
+    status = await replica.oauth_status(start.flow_id)
+    assert status.status == "error"
+    assert status.error_message == oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE
+
+    assert code not in response.text
+    assert state_token not in response.text
+    assert code not in caplog.text
+    assert state_token not in caplog.text
+    # The class name is logged; the aiohttp message (which embeds the URL) is not.
+    assert "ClientConnectorError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_oauth_start_device_transport_failure_returns_dashboard_error(async_client, monkeypatch):
+    """``POST /api/oauth/start`` with ``forceMethod=device`` must answer with the
+    repo's dashboard error envelope when the device-code request cannot reach the
+    auth server, not the generic 500 handler.
+    """
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    _install_oauth_http_boundary(monkeypatch, lambda _url: _RaisingOAuthPost(_oauth_transport_failure()))
+
+    response = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": {
+            "code": oauth_client_module.OAUTH_TRANSPORT_ERROR_CODE,
+            "message": oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE,
+        }
+    }
+
+    status = await async_client.get("/api/oauth/status")
+    assert status.json() == {"status": "error", "errorMessage": oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE}
+
+
+@pytest.mark.asyncio
+async def test_device_poll_transport_failure_finalizes_error_status(async_client, monkeypatch, caplog):
+    """The device-token poll has the same gap: a transport failure during polling
+    must finalize the flow as ``error`` instead of killing the poll task and
+    leaving the dashboard polling a flow that can never complete.
+    """
+
+    caplog.set_level(logging.WARNING)
+
+    async def fake_oauth_route():
+        return None
+
+    def respond(url: str) -> Any:
+        # The device-code request succeeds; the token poll that follows cannot
+        # reach the auth server.
+        if url.endswith("/api/accounts/deviceauth/usercode"):
+            return _JsonOAuthPost(
+                {
+                    "device_auth_id": "dev-transport",
+                    "user_code": "TRANSPORT-CODE",
+                    "interval": 1,
+                    "expires_in": 30,
+                }
+            )
+        return _RaisingOAuthPost(_oauth_transport_failure())
+
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    _install_oauth_http_boundary(monkeypatch, respond)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device"})
+    assert start.status_code == 200
+    assert start.json()["userCode"] == "TRANSPORT-CODE"
+    flow_id = start.json()["flowId"]
+
+    payload = start.json()
+    for _ in range(20):
+        status = await async_client.get("/api/oauth/status", params={"flowId": flow_id})
+        payload = status.json()
+        if payload["status"] == "error":
+            break
+        await asyncio.sleep(0.05)
+
+    assert payload == {
+        "status": "error",
+        "errorMessage": oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE,
+    }
+    assert "ClientConnectorError" in caplog.text

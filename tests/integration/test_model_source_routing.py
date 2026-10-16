@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from tempfile import SpooledTemporaryFile
 from typing import cast
 
@@ -4323,3 +4323,222 @@ async def test_direct_source_routing_forwards_only_constructed_headers(async_cli
     assert_source_saw_only_constructed_headers(seen_headers[0], source_token="token-header-proof")
     assert "client_metadata" not in seen_bodies[0]
     assert "stream_options" not in seen_bodies[0]
+
+
+def _compaction_refusal_source_upstream() -> tuple[list[str], Callable[[web.Request], Awaitable[web.StreamResponse]]]:
+    """Stub source that records every hit and answers a minimal Responses SSE stream."""
+    hits: list[str] = []
+    frames = b'data: {"type":"response.completed","response":{"id":"resp_source","status":"completed"}}\n\n'
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        hits.append(request.path)
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(frames)
+        await response.write_eof()
+        return response
+
+    return hits, handler
+
+
+def _forbid_subscription_account_selection(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Fail the test if the subscription compact flow ever selects an account."""
+    import app.modules.proxy.service as proxy_module
+
+    selections: list[dict[str, object]] = []
+
+    async def fake_select_account(self: object, deadline: float, **kwargs: object) -> object:
+        del self, deadline
+        selections.append(kwargs)
+        pytest.fail("subscription account selection must not run for a source-owned compaction")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    return selections
+
+
+async def _assert_no_request_log_rows(model: str) -> None:
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_source_model_compaction_trigger_is_refused_before_account_selection(
+    async_client, source_upstream, monkeypatch
+):
+    """A source-owned model has no remote compaction path; refuse it up front.
+
+    Live defect: Codex CLI on ``openrouter/auto`` sent its compaction turn as an
+    ordinary ``/backend-api/codex/responses`` request ending in a terminal
+    ``compaction_trigger``. The Codex-only source-route exclusion handed it to
+    the subscription compact flow, which answered ``usage_limit_reached`` for a
+    model that never touches a ChatGPT account, and the client kept retrying.
+    """
+    hits, handler = _compaction_refusal_source_upstream()
+    base_url = await source_upstream(handler)
+    model = "compaction-refused-source-model"
+    await _create_model_source(
+        async_client,
+        name="compaction-refused",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    _forbid_subscription_account_selection(monkeypatch)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "compaction_unsupported"
+    assert error["type"] == "invalid_request_error"
+    assert model in error["message"]
+    assert hits == []
+    await _assert_no_request_log_rows(model)
+
+    # Negative control: the same model without a trigger still streams
+    # through the source.
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": True,
+        },
+    ) as streamed:
+        assert streamed.status_code == 200
+        async for _ in streamed.aiter_bytes():
+            pass
+    assert len(hits) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+async def test_source_model_standalone_compact_is_refused_before_account_selection(
+    async_client, source_upstream, monkeypatch, path
+):
+    hits, handler = _compaction_refusal_source_upstream()
+    base_url = await source_upstream(handler)
+    model = "compaction-refused-standalone-model"
+    await _create_model_source(
+        async_client,
+        name="compaction-refused-standalone",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    _forbid_subscription_account_selection(monkeypatch)
+
+    response = await async_client.post(
+        path,
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "compaction_unsupported"
+    assert error["type"] == "invalid_request_error"
+    assert hits == []
+    await _assert_no_request_log_rows(model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "input_items"),
+    [
+        ("/backend-api/codex/responses", [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}]),
+        ("/backend-api/codex/responses/compact", [{"role": "user", "content": "hello"}]),
+        ("/v1/responses/compact", [{"role": "user", "content": "hello"}]),
+    ],
+)
+async def test_disabled_source_model_compaction_is_refused_as_disabled(
+    async_client, source_upstream, monkeypatch, path, input_items
+):
+    """A disabled source still owns its slug: compaction gets the 503, not an account."""
+    hits, handler = _compaction_refusal_source_upstream()
+    base_url = await source_upstream(handler)
+    model = "compaction-disabled-source-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="compaction-disabled-source",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    _forbid_subscription_account_selection(monkeypatch)
+
+    response = await async_client.post(
+        path,
+        json={"model": model, "instructions": "hi", "input": input_items, "stream": True},
+    )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "model_source_disabled"
+    assert model in error["message"]
+    assert hits == []
+    await _assert_no_request_log_rows(model)
+
+
+@pytest.mark.asyncio
+async def test_subscription_model_compaction_keeps_the_compact_flow_despite_a_shadowing_source(
+    async_client, source_upstream, monkeypatch
+):
+    """Negative control: subscription slugs keep winning over source rows.
+
+    An unscoped key never source-routes a slug the subscription registry
+    serves, so an enabled source that happens to list that slug must not
+    start refusing subscription compaction.
+    """
+    import app.modules.proxy.service as proxy_module
+    from app.core.openai.model_registry import get_model_registry
+
+    model = "gpt-5.6-sol"
+    assert model in get_model_registry().get_models_with_fallback()
+    hits, handler = _compaction_refusal_source_upstream()
+    base_url = await source_upstream(handler)
+    await _create_model_source(
+        async_client,
+        name="compaction-shadow-source",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+
+    selections: list[dict[str, object]] = []
+
+    async def fake_select_account(self: object, deadline: float, **kwargs: object) -> proxy_module.AccountSelection:
+        del self, deadline
+        selections.append(kwargs)
+        return proxy_module.AccountSelection(account=None, error_message="no accounts", error_code="no_accounts")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        },
+    )
+
+    assert len(selections) == 1
+    assert b"compaction_unsupported" not in response.content
+    assert hits == []

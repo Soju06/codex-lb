@@ -191,8 +191,7 @@ logger = logging.getLogger(__name__)
 # other; a sibling row only proves a *later* fetch (one that no longer
 # reported the stale window) when it is newer by more than this margin.
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
-# Largest per-request lease estimate (see ``_estimated_lease_tokens_from_request_usage_budget``);
-# one lease of this size adds exactly ``lease_token_weight`` percentage points of pressure.
+# Largest per-request lease estimate (see ``_estimated_lease_tokens_from_request_usage_budget``).
 MAX_LEASE_ESTIMATE_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET + API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS
 
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
@@ -1866,6 +1865,12 @@ class LoadBalancer:
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
             )
+            # Repository teardown rolls back ORM rows; keep loaded snapshots for post-session normalization.
+            account = _clone_account(account)
+            primary_entry = clone_row(primary_entry) if primary_entry is not None else None
+            effective_secondary_entry = (
+                clone_row(effective_secondary_entry) if effective_secondary_entry is not None else None
+            )
             now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(
                 account=account,
@@ -2552,16 +2557,12 @@ def _state_from_account(
         soft_drain_enabled=soft_drain_enabled,
     )
 
-    inflight_pressure_pct = (
-        runtime.inflight_response_creates + runtime.inflight_streams
-    ) * tunables.inflight_penalty_pct
-    # Pressure terms are percentage points: one maximum-size lease adds exactly
-    # ``lease_token_weight`` points on every plan (no plan-capacity scaling).
+    inflight_pressure_pct = runtime.inflight_response_creates + runtime.inflight_streams
+    inflight_pressure_pct *= tunables.inflight_penalty_pct
+    # Percentage points: one max-size lease adds exactly ``lease_token_weight`` points (no plan-capacity scaling).
     leased_token_pressure_pct = tunables.lease_token_weight * runtime.leased_tokens / MAX_LEASE_ESTIMATE_TOKENS
-    long_window_key = "secondary"
-    if effective_secondary_entry is not None and effective_secondary_entry.window == "monthly":
-        long_window_key = "monthly"
-    capacity_credits = usage_core.capacity_for_plan(account.plan_type, long_window_key) or 0.0
+    is_monthly = effective_secondary_entry is not None and effective_secondary_entry.window == "monthly"
+    capacity_credits = usage_core.capacity_for_plan(account.plan_type, "monthly" if is_monthly else "secondary") or 0.0
     pressure_pct = inflight_pressure_pct + leased_token_pressure_pct
     effective_used_percent = apply_runtime_pressure(used_percent, pressure_pct)
     effective_secondary_used_percent = apply_runtime_pressure(secondary_used, pressure_pct)

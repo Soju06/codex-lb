@@ -51060,6 +51060,8 @@ async def test_retry_http_bridge_precreated_request_keeps_account_bound_body_on_
 @pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_keeps_operation_id_on_owner(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    claim_operation_dispatch = AsyncMock(return_value=SimpleNamespace(dispatch_generation=1))
+    service._durable_bridge = SimpleNamespace(claim_operation_dispatch=claim_operation_dispatch)
     account = _make_account("acc_bridge_operation_owner")
     request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"portable user input"}'
     request_state = proxy_service._WebSocketRequestState(
@@ -51091,6 +51093,8 @@ async def test_retry_http_bridge_precreated_request_keeps_operation_id_on_owner(
         queued_request_count=1,
         last_used_at=0.0,
         idle_ttl_seconds=30.0,
+        durable_session_id="durable-bridge-operation-owner",
+        durable_owner_epoch=1,
     )
     reconnect = AsyncMock(return_value=None)
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
@@ -51105,6 +51109,8 @@ async def test_retry_http_bridge_precreated_request_keeps_operation_id_on_owner(
     )
     assert request_state.excluded_account_ids == set()
     assert request_state.operation_id == "op_bridge_owner"
+    assert request_state.operation_dispatch_generation == 1
+    claim_operation_dispatch.assert_awaited_once()
     upstream.send_text.assert_awaited_once()
     send_args = upstream.send_text.await_args
     assert send_args is not None
@@ -52535,6 +52541,7 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
     events: list[str] = []
     service._durable_bridge = SimpleNamespace(
+        claim_operation_dispatch=AsyncMock(return_value=SimpleNamespace(dispatch_generation=1)),
         mark_operation_unknown=AsyncMock(side_effect=lambda **_kwargs: events.append("mark") or True),
     )
     proxy_service._initialize_http_bridge_retry_circuit(service)
@@ -52596,6 +52603,7 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
 
     assert events == ["mark", "cleanup"]
     service._durable_bridge.mark_operation_unknown.assert_awaited_once()
+    assert service._durable_bridge.mark_operation_unknown.await_args.kwargs["expected_dispatch_generation"] == 1
 
 
 @pytest.mark.asyncio

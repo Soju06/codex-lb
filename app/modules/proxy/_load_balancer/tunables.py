@@ -31,6 +31,22 @@ DEFAULT_ERROR_RATE_WEIGHTING_ENABLED = True
 DEFAULT_INFLIGHT_PENALTY_PCT = 2.5
 DEFAULT_LEASE_TOKEN_WEIGHT = 1.0
 DEFAULT_LEASE_TTL_SECONDS = 900.0
+# Runtime pressure may lift a window with persisted usage below 100 only up to this ceiling.
+RUNTIME_PRESSURE_USED_PERCENT_CEILING = 99.0
+
+
+def apply_runtime_pressure(persisted: float | None, pressure_pct: float) -> float | None:
+    """Add in-flight pressure (percentage points) without letting it exhaust a window by itself.
+
+    An unexhausted window (persisted below 100) never reaches 100: pressure lifts it at most to
+    the ceiling, and a window already at or above the ceiling keeps its persisted value. Persisted
+    exhaustion (100) is preserved.
+    """
+    if persisted is None:
+        return None
+    if persisted >= 100.0:
+        return min(100.0, persisted + pressure_pct)
+    return min(persisted + pressure_pct, max(persisted, RUNTIME_PRESSURE_USED_PERCENT_CEILING))
 
 
 @dataclass(frozen=True, slots=True)

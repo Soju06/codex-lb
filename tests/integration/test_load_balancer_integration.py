@@ -3,18 +3,25 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._load_balancer.tunables import RUNTIME_PRESSURE_USED_PERCENT_CEILING
 from app.modules.proxy.account_cache import get_account_selection_cache
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.load_balancer import (
+    MAX_LEASE_ESTIMATE_TOKENS,
+    LoadBalancer,
+    _state_from_account,
+)
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -751,3 +758,152 @@ async def test_load_balancer_fill_first_cycles_through_accounts(db_setup):
     third = await balancer.select_account(routing_strategy="fill_first")
     assert third.account is not None
     assert third.account.id == accounts[1].id
+
+
+# Health tiers read persisted usage only; turning soft drain off isolates the lease-pressure path.
+_NO_SOFT_DRAIN = SimpleNamespace(soft_drain_enabled=False)
+
+
+async def _seed_plus_accounts_with_weekly_usage(
+    weekly_used: dict[str, float],
+) -> list[Account]:
+    """Persist Plus accounts with low 5h usage and the given weekly usage, similar resets."""
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    accounts: list[Account] = []
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        for index, (account_id, secondary_used) in enumerate(weekly_used.items()):
+            account = Account(
+                id=account_id,
+                email=f"{account_id}@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt(f"access-{account_id}"),
+                refresh_token_encrypted=encryptor.encrypt(f"refresh-{account_id}"),
+                id_token_encrypted=encryptor.encrypt(f"id-{account_id}"),
+                last_refresh=now,
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+            await accounts_repo.upsert(account)
+            accounts.append(account)
+            await usage_repo.add_entry(
+                account_id=account_id,
+                used_percent=10.0,
+                window="primary",
+                reset_at=now_epoch + 3600,
+                window_minutes=300,
+                recorded_at=now,
+            )
+            await usage_repo.add_entry(
+                account_id=account_id,
+                used_percent=secondary_used,
+                window="secondary",
+                reset_at=now_epoch + 3 * 24 * 3600 + index * 60,
+                window_minutes=10080,
+                recorded_at=now,
+            )
+    return accounts
+
+
+@pytest.mark.asyncio
+async def test_open_stream_leases_keep_relative_availability_ranked_by_persisted_usage(db_setup):
+    await _seed_plus_accounts_with_weekly_usage({"acc_lease_heavy": 95.0, "acc_lease_light": 38.0})
+    balancer = LoadBalancer(_repo_factory)
+
+    for account_id in ("acc_lease_heavy", "acc_lease_light"):
+        lease = await balancer.acquire_account_lease(
+            account_id, kind="stream", estimated_tokens=float(MAX_LEASE_ESTIMATE_TOKENS)
+        )
+        assert lease is not None
+
+    for _ in range(5):
+        selection = await balancer.select_account(
+            routing_strategy="relative_availability", dashboard_settings=_NO_SOFT_DRAIN
+        )
+        assert selection.account is not None
+        assert selection.account.id == "acc_lease_light"
+
+
+@pytest.mark.asyncio
+async def test_open_stream_leases_let_sticky_reallocation_leave_exhausted_account(db_setup):
+    await _seed_plus_accounts_with_weekly_usage({"acc_sticky_heavy": 95.0, "acc_sticky_light": 38.0})
+    raw_session = "thread-lease-pressure"
+    sticky_key = _codex_session_selection_key(raw_session)
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            sticky_key, "acc_sticky_heavy", kind=StickySessionKind.CODEX_SESSION
+        )
+    balancer = LoadBalancer(_repo_factory)
+
+    for account_id in ("acc_sticky_heavy", "acc_sticky_light"):
+        lease = await balancer.acquire_account_lease(
+            account_id, kind="stream", estimated_tokens=float(MAX_LEASE_ESTIMATE_TOKENS)
+        )
+        assert lease is not None
+
+    selection = await balancer.select_account(
+        sticky_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        reallocate_sticky=False,
+        routing_strategy="relative_availability",
+        secondary_budget_threshold_pct=95.0,
+        dashboard_settings=_NO_SOFT_DRAIN,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == "acc_sticky_light"
+    async with SessionLocal() as session:
+        entry = await StickySessionsRepository(session).get_entry(sticky_key, kind=StickySessionKind.CODEX_SESSION)
+    assert entry is not None
+    assert entry.account_id == "acc_sticky_light"
+
+
+@pytest.mark.asyncio
+async def test_max_lease_adds_weight_points_and_never_crosses_ceiling(db_setup):
+    await _seed_plus_accounts_with_weekly_usage(
+        {
+            "acc_pressure_mid": 38.0,
+            "acc_pressure_high": 98.9,
+            "acc_pressure_at_ceiling": 99.0,
+            "acc_pressure_above_ceiling": 99.5,
+            "acc_pressure_full": 100.0,
+        }
+    )
+    balancer = LoadBalancer(_repo_factory)
+    async with SessionLocal() as session:
+        accounts = {a.id: a for a in await AccountsRepository(session).list_accounts()}
+        secondary = await UsageRepository(session).latest_by_account("secondary")
+        primary = await UsageRepository(session).latest_by_account("primary")
+
+    for account_id in accounts:
+        lease = await balancer.acquire_account_lease(
+            account_id, kind="response_create", estimated_tokens=float(MAX_LEASE_ESTIMATE_TOKENS)
+        )
+        assert lease is not None
+
+    def state_for(account_id: str):
+        return _state_from_account(
+            account=accounts[account_id],
+            primary_entry=primary[account_id],
+            secondary_entry=secondary[account_id],
+            runtime=balancer._runtime[account_id],
+        )
+
+    tunables = balancer.current_routing_tunables()
+    expected_points = tunables.lease_token_weight + tunables.inflight_penalty_pct
+    mid = state_for("acc_pressure_mid")
+    assert mid.persisted_secondary_used_percent == 38.0
+    assert mid.secondary_used_percent == pytest.approx(38.0 + expected_points)
+    # Isolate the lease term: weight 1.0 default -> exactly one point for a max lease.
+    assert tunables.lease_token_weight == 1.0
+    assert state_for("acc_pressure_high").secondary_used_percent == RUNTIME_PRESSURE_USED_PERCENT_CEILING
+    assert RUNTIME_PRESSURE_USED_PERCENT_CEILING == 99.0
+    # An unexhausted window at or above the ceiling keeps its persisted value: pressure never reaches 100.
+    assert state_for("acc_pressure_at_ceiling").secondary_used_percent == 99.0
+    assert state_for("acc_pressure_above_ceiling").secondary_used_percent == 99.5
+    assert state_for("acc_pressure_full").secondary_used_percent == 100.0

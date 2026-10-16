@@ -122,6 +122,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
+    _turn_keys,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
@@ -1767,8 +1768,30 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
+            anchor_planning_keys = {bridge_session_key}
+            if (
+                payload_looks_like_full_resend
+                and incoming_turn_state_header is not None
+                and incoming_turn_state_header.startswith("http_turn_")
+                and not is_http_bridge_account_neutral_replay(
+                    kind=bridge_session_key.affinity_kind, key=bridge_session_key.affinity_key
+                )
+            ):
+                # Acquisition can resolve an absent local turn-state alias to
+                # the thread/session fallback, even when durable lookup found
+                # an older turn-state row. Honor that destination's fence
+                # before injecting and trimming against the older anchor.
+                _, fallback_key = _turn_keys(headers, api_key, bridge_session_key, session_header_fallback_key)
+                if fallback_key is not None and fallback_key not in anchor_planning_keys:
+                    await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                        fallback_key, request_model=payload.model
+                    )
+                    anchor_planning_keys.add(fallback_key)
+            fresh_reattach_anchor_quarantined = payload_looks_like_full_resend and any(
+                _http_bridge_session_key_quarantined(self, key) for key in anchor_planning_keys
+            )
             fresh_reattach_anchor_tombstoned = False
-            if payload_looks_like_full_resend and not _http_bridge_session_key_quarantined(self, bridge_session_key):
+            if payload_looks_like_full_resend and not fresh_reattach_anchor_quarantined:
                 # A transitional abandonment tombstone fences the stored
                 # anchor the same way a quarantine does: a crash between a
                 # poison settle and its registration leaves the old
@@ -1776,13 +1799,13 @@ class _HTTPBridgeStreamingMixin:
                 # arms no quarantine, and injecting it here would defeat
                 # the crash-safe settle-to-registration transition.
                 async with self._http_bridge_retry_circuit_lock:
-                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
-                fresh_reattach_anchor_tombstoned = bool(
-                    tombstone_state is not None
-                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                )
+                    fresh_reattach_anchor_tombstoned = any(
+                        (state := self._http_bridge_retry_circuits.get(key)) is not None
+                        and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        for key in anchor_planning_keys
+                    )
             if payload_looks_like_full_resend and (
-                _http_bridge_session_key_quarantined(self, bridge_session_key) or fresh_reattach_anchor_tombstoned
+                fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned
             ):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full

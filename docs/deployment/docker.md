@@ -55,6 +55,34 @@ docker compose -f docker-compose.prod.yml up -d
 
 For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
 
+## Persistent debug logs
+
+`docker logs` output lives in the container's own log file and is deleted when
+the container is recreated. To keep logs across redeploys, write them to the
+data volume with the server's log flags. In Compose, extend the server
+`command:`:
+
+```yaml
+    command:
+      - python
+      - -m
+      - app.cli
+      - --host
+      - 0.0.0.0
+      - --port
+      - "2455"
+      - --log-level
+      - info
+      - --log-file
+      - /var/lib/codex-lb/logs/codex-lb.log
+```
+
+Use `debug` only while diagnosing; it raises codex-lb's own loggers, never uvicorn's. The file rotates at 50 MiB with 10 backups, as one rotation sequence. Docker's own json-file log is separate and unrotated by default; bound it with `logging: {driver: json-file, options: {max-size: "50m", max-file: "5"}}` on the service. With the default named volume it is
+on the host under the volume's mountpoint
+(`docker volume inspect codex-lb-data --format '{{.Mountpoint}}'`). Keep it
+private: see [Server log flags](../reference/settings.md#server-log-flags-not-settings)
+for what is and is not redacted.
+
 ## Auth mode examples
 
 **Authelia / trusted header**
@@ -84,4 +112,4 @@ For Helm, pass the same values through `extraEnv`. What these modes mean and whe
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability)*

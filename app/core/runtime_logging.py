@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import unquote_plus
 
@@ -441,7 +442,59 @@ type LogConfigValue = str | bool | None | dict[str, "LogConfigValue"]
 type LogConfig = dict[str, LogConfigValue]
 
 
-def build_log_config() -> LogConfig:
+# Rotation keeps a DEBUG log on the data volume from filling the disk that
+# also holds the database: at most (1 + backups) x max bytes, about 550 MiB.
+LOG_FILE_MAX_BYTES = 50 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 10
+
+
+_TEXT_DEFAULT_FMT = "%(asctime)s %(levelprefix)s %(name)s %(message)s"
+_TEXT_ACCESS_FMT = '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+_TEXT_DATEFMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def uvicorn_log_level(level: str) -> str:
+    """Level for uvicorn's own loggers: ``level`` if stricter than info, else info.
+
+    ``--log-level debug`` is for codex-lb's own records. uvicorn's DEBUG output
+    is protocol-level tracing (WebSocket handshakes and frames), not codex-lb
+    diagnostics, so it never goes below info.
+    """
+    return level if logging.getLevelNamesMapping()[level.upper()] > logging.INFO else "info"
+
+
+class FileLogFormatter(logging.Formatter):
+    """One formatter for the single rotating file handler.
+
+    Access records and application records need different formatters; giving
+    each its own handler on the same path made rotation have two owners, so
+    this dispatches per record instead. Colors are always off.
+    """
+
+    def __init__(self, log_format: str = "text") -> None:
+        super().__init__()
+        self._default: logging.Formatter
+        self._access: logging.Formatter
+        if log_format == "json":
+            self._default = JsonFormatter()
+            self._access = JsonAccessFormatter()
+        else:
+            self._default = UtcDefaultFormatter(fmt=_TEXT_DEFAULT_FMT, datefmt=_TEXT_DATEFMT, use_colors=False)
+            self._access = UtcAccessFormatter(fmt=_TEXT_ACCESS_FMT, datefmt=_TEXT_DATEFMT, use_colors=False)
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatter = self._access if record.name == "uvicorn.access" else self._default
+        return formatter.format(record)
+
+
+def build_log_config(level: str = "info", log_file: Path | None = None) -> LogConfig:
+    """Build the server log config.
+
+    ``level`` applies to codex-lb's ``app.*`` loggers; uvicorn and libraries
+    stay at info or stricter (see ``uvicorn_log_level``). ``log_file``
+    additionally writes everything the stream handlers print to one rotated
+    file, rendered by the same redacting formatters.
+    """
     from app.core.config.settings import get_settings
 
     config = copy.deepcopy(LOGGING_CONFIG)
@@ -456,8 +509,8 @@ def build_log_config() -> LogConfig:
     else:
         formatters["default"] = {
             "()": "app.core.runtime_logging.UtcDefaultFormatter",
-            "fmt": "%(asctime)s %(levelprefix)s %(name)s %(message)s",
-            "datefmt": "%Y-%m-%dT%H:%M:%SZ",
+            "fmt": _TEXT_DEFAULT_FMT,
+            "datefmt": _TEXT_DATEFMT,
             "use_colors": None,
         }
 
@@ -468,8 +521,8 @@ def build_log_config() -> LogConfig:
     else:
         formatters["access"] = {
             "()": "app.core.runtime_logging.UtcAccessFormatter",
-            "fmt": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
-            "datefmt": "%Y-%m-%dT%H:%M:%SZ",
+            "fmt": _TEXT_ACCESS_FMT,
+            "datefmt": _TEXT_DATEFMT,
             "use_colors": None,
         }
 
@@ -479,10 +532,36 @@ def build_log_config() -> LogConfig:
     handlers.setdefault(
         "default", {"class": "logging.StreamHandler", "formatter": "default", "stream": "ext://sys.stderr"}
     )
+    level_name = level.upper()
+    # ``level`` targets codex-lb's own loggers only. uvicorn and libraries stay
+    # at INFO (or stricter when ``level`` is stricter): at DEBUG they emit
+    # protocol and driver tracing (uvicorn's WebSocket frames, aiosqlite's every
+    # cursor operation) that would bury the application's records.
+    root_level = uvicorn_log_level(level).upper()
     config["root"] = {
         "handlers": ["default"],
-        "level": "INFO",
+        "level": root_level,
     }
+    loggers = config.setdefault("loggers", {})
+    loggers["app"] = {"level": level_name}
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        loggers.setdefault(name, {})["level"] = root_level
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        formatters["file"] = {"()": "app.core.runtime_logging.FileLogFormatter", "log_format": settings.log_format}
+        # One handler, so exactly one owner rotates the file.
+        handlers["file"] = {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "file",
+            "filename": str(log_file),
+            "maxBytes": LOG_FILE_MAX_BYTES,
+            "backupCount": LOG_FILE_BACKUP_COUNT,
+            "encoding": "utf-8",
+        }
+        config["root"]["handlers"].append("file")
+        loggers["uvicorn"].setdefault("handlers", []).append("file")
+        loggers["uvicorn.access"].setdefault("handlers", []).append("file")
     return cast(LogConfig, config)
 
 

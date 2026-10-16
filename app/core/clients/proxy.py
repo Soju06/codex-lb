@@ -2367,6 +2367,9 @@ def _finalize_responses_lite_reasoning_context(
 ) -> None:
     if not responses_lite:
         return
+    # Lite requires both all-turns reasoning and serialized tool calls.
+    # Apply this only after the existing body/trusted-marker classification.
+    payload["parallel_tool_calls"] = False
     raw_reasoning = payload.get("reasoning")
     if raw_reasoning is not None and not is_json_mapping(raw_reasoning):
         return

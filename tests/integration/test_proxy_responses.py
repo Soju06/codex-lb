@@ -205,6 +205,9 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     if case == "oversized":
         event = _extract_first_event(response.text.splitlines())
         assert event["response"]["error"]["code"] == "stream_event_too_large"
+        # is_local synthetic failures must not stamp first-upstream phase (outside
+        # SYNTHETIC_TRANSPORT_FAILURE_CODES; only is_local protects the metric).
+        assert row.latency_first_upstream_event_ms is None
     if expected_ttft is not None:
         assert response is not None
         assert response.status_code == 200

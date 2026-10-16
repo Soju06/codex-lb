@@ -50,6 +50,7 @@ pytestmark = pytest.mark.integration
     "case",
     [
         "distinct_phases",
+        "retry",
         "zero_created",
         "missing_created",
         "empty",
@@ -80,10 +81,18 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     service._clock = clock
     admission = service._get_work_admission()
     acquire = admission.acquire_response_create
+    calls = 0
+
+    if case == "retry":
+        retry_auth = _make_auth_json("phase-retry-account", "phase-retry@example.com")
+        imported = await async_client.post(
+            "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(retry_auth), "application/json")}
+        )
+        assert imported.status_code == 200
 
     async def timed_admission(*args, **kwargs):
         lease = await acquire(*args, **kwargs)
-        clock.step_to(started_at + 0.5)
+        clock.step_to(started_at + 0.5 + (0.75 * calls if case == "retry" else 0))
         return lease
 
     monkeypatch.setattr(admission, "acquire_response_create", timed_admission)
@@ -96,12 +105,15 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     )
     blocks = [(1.5, delta), (1.75, fast_delta), (2.0, completed)]
     expected_first, expected_created, expected_ttft = 250, None, 1000
-    if case == "distinct_phases":
+    if case in {"distinct_phases", "retry"}:
         blocks[:0] = [
             (0.75, 'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n'),
             (1.0, created),
         ]
         expected_created = 500
+        if case == "retry":
+            blocks = [(offset + 1.0, block) for offset, block in blocks]
+            expected_first, expected_created, expected_ttft = 500, 750, 1250
     elif case == "zero_created":
         blocks[:0] = [(0.5, created), (0.75, created)]
         expected_first = expected_created = 0
@@ -131,15 +143,20 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
         expected_ttft = None
 
     class ScriptedContent:
+        def __init__(self, response_blocks: list[tuple[float, str]]) -> None:
+            self._blocks = response_blocks
+
         async def iter_chunked(self, _size):
-            for offset, block in blocks:
+            for offset, block in self._blocks:
                 clock.step_to(started_at + offset)
                 yield block.encode()
 
     class ScriptedResponse:
         status = 200
         headers = {"content-type": "text/event-stream"}
-        content = ScriptedContent()
+
+        def __init__(self, response_blocks: list[tuple[float, str]]) -> None:
+            self.content = ScriptedContent(response_blocks)
 
         async def __aenter__(self):
             return self
@@ -147,14 +164,24 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
         async def __aexit__(self, *_args):
             return False
 
-    calls = 0
-
     def scripted_post(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         if case == "no_headers":
             raise proxy_client_module.aiohttp.SocketTimeoutError("Timeout on reading data from socket")
-        return ScriptedResponse()
+        if case == "retry" and calls == 1:
+            return ScriptedResponse(
+                [
+                    (
+                        0.75,
+                        'event: response.failed\ndata: {"type":"response.failed","response":'
+                        '{"id":"resp_http_phase_failed","error":{"code":"usage_limit_reached",'
+                        '"message":"You have hit your ChatGPT usage limit. Try again later.",'
+                        '"type":"server_error"}}}\n\n',
+                    )
+                ]
+            )
+        return ScriptedResponse(blocks)
 
     monkeypatch.setattr(get_http_client().session, "post", scripted_post)
     parsed_lines: list[str] = []
@@ -192,13 +219,23 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
         )
 
     response = await request()
-    assert calls == 1
+    assert calls == (2 if case == "retry" else 1)
     assert await service.drain_persistence_tasks(timeout_seconds=5)
     async with SessionLocal() as session:
-        rows = (await session.execute(select(RequestLog).where(RequestLog.account_id.is_not(None)))).scalars().all()
-    assert len(rows) == 1
-    row = rows[0]
-    assert row.latency_queue_ms == 500
+        statement = select(RequestLog).where(RequestLog.account_id.is_not(None)).order_by(RequestLog.latency_queue_ms)
+        rows = (await session.execute(statement)).scalars().all()
+    assert len(rows) == calls
+    if case == "retry":
+        failed = rows[0]
+        assert failed.status == "error"
+        assert failed.error_code == "usage_limit_reached"
+        assert failed.latency_queue_ms == 500
+        assert failed.latency_first_upstream_event_ms == 250
+        assert failed.latency_response_created_ms is None
+        assert failed.latency_first_token_ms is None
+        assert failed.account_id != rows[1].account_id
+    row = rows[-1]
+    assert row.latency_queue_ms == (1250 if case == "retry" else 500)
     assert row.latency_first_token_ms == expected_ttft
     assert row.latency_first_upstream_event_ms == expected_first
     assert row.latency_response_created_ms == expected_created
@@ -216,11 +253,14 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     after_metrics = phase_samples()
     if request_log_module.PROMETHEUS_AVAILABLE:
         for phase, expected in (("first_upstream_event", expected_first), ("response_created", expected_created)):
+            observations = [expected] if expected is not None else []
+            if case == "retry" and phase == "first_upstream_event":
+                observations.append(250)
             count_key = ("codex_lb_proxy_phase_latency_seconds_count", phase)
             sum_key = ("codex_lb_proxy_phase_latency_seconds_sum", phase)
-            assert after_metrics.get(count_key, 0) - before_metrics.get(count_key, 0) == (expected is not None)
+            assert after_metrics.get(count_key, 0) - before_metrics.get(count_key, 0) == len(observations)
             assert after_metrics.get(sum_key, 0) - before_metrics.get(sum_key, 0) == pytest.approx(
-                (expected or 0) / 1000
+                sum(observations) / 1000
             )
 
 

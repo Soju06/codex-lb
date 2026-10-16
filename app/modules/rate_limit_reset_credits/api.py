@@ -43,6 +43,7 @@ from app.core.exceptions import (
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -74,7 +75,7 @@ router = APIRouter(
 
 FetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
-RefreshUsageFn = Callable[[Account], Awaitable[None]]
+RefreshUsageFn = Callable[[Account, float | None], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
 _NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
@@ -408,6 +409,7 @@ async def _redeem_soonest_reset_credit_locked(
     except ConsumeResetCreditError as exc:
         raise _translate_consume_error(exc) from exc
 
+    upstream_reset_confirmed_at = naive_utc_to_epoch(utcnow())
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
     await store.invalidate(account.id)
@@ -415,7 +417,10 @@ async def _redeem_soonest_reset_credit_locked(
 
     if refresh_usage is not None:
         try:
-            await refresh_usage(redeem_account)
+            await refresh_usage(
+                redeem_account,
+                upstream_reset_confirmed_at if result.code == "reset" and result.windows_reset > 0 else None,
+            )
         except Exception:
             logger.warning(
                 "Reset credit consume succeeded but usage refresh failed account_id=%s",
@@ -460,8 +465,11 @@ def _build_refresh_usage_callback(context: AccountsContext) -> RefreshUsageFn | 
     if usage_updater is None:
         return None
 
-    async def refresh_usage(account: Account) -> None:
-        refreshed = await usage_updater.force_refresh(account)
+    async def refresh_usage(account: Account, upstream_reset_confirmed_at: float | None) -> None:
+        refreshed = await usage_updater.force_refresh(
+            account,
+            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+        )
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()

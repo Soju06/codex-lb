@@ -402,9 +402,14 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
+        upstream_reset_confirmed_at: float | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
-        result = await self.force_refresh_result(account, access_token_override=access_token_override)
+        result = await self.force_refresh_result(
+            account,
+            access_token_override=access_token_override,
+            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+        )
         return result.usage_written
 
     async def force_refresh_result(
@@ -412,6 +417,7 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
+        upstream_reset_confirmed_at: float | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -423,6 +429,7 @@ class UsageUpdater:
                     account,
                     usage_account_id=account.chatgpt_account_id,
                     access_token_override=access_token_override,
+                    upstream_reset_confirmed_at=upstream_reset_confirmed_at,
                 ),
                 join_existing=False,
             )
@@ -591,6 +598,7 @@ class UsageUpdater:
         *,
         usage_account_id: str | None,
         access_token_override: str | None = None,
+        upstream_reset_confirmed_at: float | None = None,
     ) -> AccountRefreshResult:
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
@@ -792,7 +800,13 @@ class UsageUpdater:
             snapshot_windows,
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
+        await self._recover_quota_status_from_usage(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
+            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+        )
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
@@ -879,6 +893,7 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
         monthly: UsageWindow | None = None,
+        upstream_reset_confirmed_at: float | None = None,
     ) -> None:
         if not self._auth_manager:
             return
@@ -891,14 +906,19 @@ class UsageUpdater:
                 # account back to ACTIVE — erasing reset_at that peer replicas
                 # rely on — while the upstream cooldown is still running.
                 # Fresh usage showing quota is not evidence the 429 window
-                # ended: throttles are not always quota-based. Rows without
-                # blocked_at are stale window-derived markings and keep the
-                # fresh-usage recovery below.
+                # ended: throttles are not always quota-based. A successful
+                # upstream reset-credit redemption completed after this block
+                # is that evidence, so it lifts the cooldown; the availability
+                # checks below still keep a still-exhausted window blocked.
+                # Rows without blocked_at are stale window-derived markings and
+                # keep the fresh-usage recovery below.
                 now = time.time()
                 cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
                     float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
-                if now < cooldown_deadline:
+                if now < cooldown_deadline and not (
+                    upstream_reset_confirmed_at is not None and upstream_reset_confirmed_at > account.blocked_at
+                ):
                     return
             long_window = monthly or secondary
             if primary is None and monthly is None:

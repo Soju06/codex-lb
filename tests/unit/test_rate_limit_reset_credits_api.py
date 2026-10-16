@@ -833,8 +833,9 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
             }
         )
 
-    async def refresh_usage(account: Account) -> None:
+    async def refresh_usage(account: Account, upstream_reset_confirmed_at: float | None) -> None:
         refreshed.append(account.id)
+        assert upstream_reset_confirmed_at is not None
 
     result = await _redeem_soonest_reset_credit(
         account=_account(),
@@ -898,7 +899,8 @@ async def test_redeem_restores_snapshot_when_usage_refresh_fails() -> None:
             }
         )
 
-    async def refresh_usage(account: Account) -> None:
+    async def refresh_usage(account: Account, upstream_reset_confirmed_at: float | None) -> None:
+        assert upstream_reset_confirmed_at is not None
         raise RuntimeError("usage refresh failed")
 
     await _redeem_soonest_reset_credit(
@@ -946,8 +948,9 @@ async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
         )
 
     class _UsageUpdater:
-        async def force_refresh(self, account: Account) -> bool:
+        async def force_refresh(self, account: Account, *, upstream_reset_confirmed_at: float | None = None) -> bool:
             assert account.id == "acc_1"
+            assert upstream_reset_confirmed_at is not None
             return False
 
     class _SelectionCache:

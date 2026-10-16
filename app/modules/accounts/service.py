@@ -345,12 +345,20 @@ class AccountsService:
         upstream_response, account = await self._consume_usage_reset_credit(
             account, redeem_request_id=redeem_request_id
         )
+        upstream_reset_confirmed_at = naive_utc_to_epoch(utcnow())
         if upstream_response.code in ("reset", "already_redeemed", "no_credit", "nothing_to_reset"):
             await get_rate_limit_reset_credits_store().invalidate(account_id)
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account)
+            usage_written = await self._usage_updater.force_refresh(
+                account,
+                upstream_reset_confirmed_at=(
+                    upstream_reset_confirmed_at
+                    if upstream_response.code == "reset" and upstream_response.windows_reset > 0
+                    else None
+                ),
+            )
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account

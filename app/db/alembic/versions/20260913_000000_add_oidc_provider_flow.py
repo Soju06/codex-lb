@@ -21,6 +21,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.dialect_sql import is_mysql
 from app.modules.auth_providers.seed import seed_default_auth_providers
 
 revision = "20260913_000000_add_oidc_provider_flow"
@@ -129,6 +130,17 @@ def downgrade() -> None:
     present = _existing_columns(inspector, _PROVIDERS)
     to_drop = [name for name in _PROOF_COLUMNS if name in present]
     if to_drop:
+        foreign_keys = (
+            {foreign_key["name"] for foreign_key in inspector.get_foreign_keys(_PROVIDERS)}
+            if inspector.has_table(_PROVIDERS)
+            else set()
+        )
         with op.batch_alter_table(_PROVIDERS) as batch_op:
+            if _PROOF_FK in foreign_keys and is_mysql(bind):
+                # MySQL refuses to drop a column an FK still references (error
+                # 1828), so the named constraint goes first. PostgreSQL drops
+                # the dependent constraint with the column, and SQLite's batch
+                # mode rebuilds the table without either.
+                batch_op.drop_constraint(_PROOF_FK, type_="foreignkey")
             for name in to_drop:
                 batch_op.drop_column(name)

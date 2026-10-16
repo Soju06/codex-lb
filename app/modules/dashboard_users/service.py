@@ -444,8 +444,6 @@ class DashboardUsersService:
             profile_changed = await self._apply_profile(user, payload, fields)
             if new_username is not None:
                 user.username = new_username
-            if new_status == DashboardUserStatus.DISABLED.value:
-                key_hashes = await self._repo.deactivate_owned_keys(user.id)
             if overridden_source is not None or designation_after:
                 # Taken over by hand (or designated): no later re-evaluation
                 # moves this role again -- which is what makes the mapping
@@ -475,6 +473,15 @@ class DashboardUsersService:
                 user.role_id = role_id_after
                 user.status = status_after
                 user.is_break_glass = designation_after
+            if new_status == DashboardUserStatus.DISABLED.value:
+                # Owner status first, key cascade second. Both writes are already
+                # in this transaction; the ORM path only reaches the database at
+                # flush time, so push it out before cascading. The cascade has to
+                # be ordered *after* the flip, otherwise a key activated in that
+                # window survives it and a disabled owner keeps a working key
+                # (measured on InnoDB).
+                await self._repo.flush()
+                key_hashes = await self._repo.deactivate_owned_keys(user.id)
             bump = new_role is not None or new_status == DashboardUserStatus.DISABLED.value
             user = await self._repo.commit_user(user.id, bump_generation=bump)
         except IntegrityError as exc:
@@ -686,6 +693,10 @@ class DashboardUsersService:
                 "designate another admin with two-factor first"
             )
         await self._repo.commit_user(user_id, bump_generation=True)
+        # Owner status first, key cascade second: the guarded UPDATE above is
+        # already in this transaction, so the cascade now runs after the flip. A
+        # cascade ordered the other way can miss a key activated in the window
+        # and leave a disabled owner holding a working key (measured on InnoDB).
         await self._invalidate_users()
         await self._invalidate_api_keys(key_hashes)
         AuditService.log_async(

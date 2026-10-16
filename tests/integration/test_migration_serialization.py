@@ -48,6 +48,10 @@ def _is_postgresql_database_url(url: str) -> bool:
     return url.startswith("postgresql+")
 
 
+def _is_mysql_database_url(url: str) -> bool:
+    return url.startswith("mysql+") or url.startswith("mariadb+")
+
+
 def _sqlite_alembic_revisions(db_path: Path) -> list[str]:
     with sqlite3.connect(str(db_path)) as connection:
         rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
@@ -178,6 +182,83 @@ def test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held() -> None:
     message = str(excinfo.value)
     assert "migration lock" in message
     assert "database_migration_lock_timeout_seconds" in message
+
+
+@pytest.mark.skipif(
+    not _is_mysql_database_url(_DATABASE_URL),
+    reason="MySQL-only named migration lock test",
+)
+def test_mysql_run_upgrade_times_out_when_named_lock_is_held() -> None:
+    sync_url = to_sync_database_url(_DATABASE_URL)
+    with migration_lock(sync_url, timeout_seconds=_LOCK_HOLD_TIMEOUT_SECONDS):
+        with pytest.raises(TimeoutError) as excinfo:
+            run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True, lock_timeout_seconds=0.5)
+
+    message = str(excinfo.value)
+    assert "migration lock" in message
+    assert "database_migration_lock_timeout_seconds" in message
+
+
+@pytest.mark.skipif(
+    not _is_mysql_database_url(_DATABASE_URL),
+    reason="MySQL-only named migration lock test",
+)
+def test_mysql_migration_lock_excludes_a_second_holder() -> None:
+    """``GET_LOCK`` is held for the whole ``with`` body and excludes peers.
+
+    A second acquisition from another connection (which is what a second
+    replica is) must not succeed while the first holds the name.
+    """
+
+    sync_url = to_sync_database_url(_DATABASE_URL)
+    with migration_lock(sync_url, timeout_seconds=_LOCK_HOLD_TIMEOUT_SECONDS):
+        with pytest.raises(TimeoutError):
+            with migration_lock(sync_url, timeout_seconds=0.5):
+                pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_mysql_database_url(_DATABASE_URL),
+    reason="MySQL-only concurrent migration test",
+)
+async def test_concurrent_upgrades_on_fresh_mysql_database_apply_head_exactly_once(db_setup) -> None:
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        await session.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+        table_names = [
+            str(name)
+            for name in (
+                await session.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'"
+                    )
+                )
+            ).scalars()
+        ]
+        for name in table_names:
+            await session.execute(text(f"DROP TABLE IF EXISTS `{name}`"))
+        await session.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+        await session.commit()
+
+    barrier = threading.Barrier(2)
+
+    def _upgrade() -> migrate_module.MigrationRunResult:
+        # Align both "replicas" right before run_upgrade so they race the full
+        # inspect -> bootstrap -> upgrade sequence, as two containers booting
+        # simultaneously against one shared MySQL server would.
+        barrier.wait(timeout=30)
+        return run_upgrade(_DATABASE_URL, "head", bootstrap_legacy=True)
+
+    results = await asyncio.gather(asyncio.to_thread(_upgrade), asyncio.to_thread(_upgrade))
+    assert [result.current_revision for result in results] == [_HEAD_REVISION, _HEAD_REVISION]
+
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
+        assert revisions == [_HEAD_REVISION]
 
 
 def test_migration_lock_is_noop_for_in_memory_sqlite() -> None:

@@ -24,6 +24,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
+from app.db.dialect_sql import is_mysql
 from app.db.models import FileAccountPin, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
@@ -631,7 +632,9 @@ async def test_file_account_pin_claim_refreshes_a_stale_successful_insert_expiry
         RETURNING account_id
         """
     )
-    monkeypatch.setattr(file_pin_repository_module, "_SQLITE_CLAIM", stale_insert)
+    # The claim statements live in one per-dialect table, resolved at call time,
+    # so the seam to swap one out is that table's entry.
+    monkeypatch.setitem(file_pin_repository_module._CLAIMS, "sqlite", stale_insert)
 
     async with SessionLocal() as session:
         await FileAccountPinRepository(session).claim(
@@ -654,20 +657,21 @@ async def test_file_account_pin_claim_rolls_back_when_post_claim_refresh_does_no
     monkeypatch,
 ):
     del async_client
-    monkeypatch.setattr(
-        file_pin_repository_module,
-        "_SQLITE_REFRESH",
-        text(
-            """
-            UPDATE file_account_pins
-            SET expires_at = expires_at
-            WHERE file_id = :file_id
-              AND account_id = :account_id
-              AND 0 = 1
-            RETURNING account_id
-            """
-        ),
+    # Stub the refresh statement of the dialect *under test*. Patching only the
+    # sqlite entry left MySQL's real statement in place, so the refresh succeeded
+    # and the rollback this test exists for never happened -- a blind spot the
+    # sweep found by running this file on MySQL.
+    stubbed_refresh = (
+        "UPDATE file_account_pins SET expires_at = expires_at "
+        "WHERE file_id = :file_id AND account_id = :account_id AND 0 = 1"
     )
+    async with SessionLocal() as session:
+        dialect_name = session.get_bind().dialect.name
+    key = "mysql" if is_mysql(dialect_name) else dialect_name
+    if key != "mysql":
+        # MySQL has no ``RETURNING``: its refresh reports matched rows instead.
+        stubbed_refresh += " RETURNING account_id"
+    monkeypatch.setitem(file_pin_repository_module._REFRESHES, key, text(stubbed_refresh))
 
     async with SessionLocal() as session:
         with pytest.raises(RuntimeError, match="Failed to refresh file account pin after claim"):

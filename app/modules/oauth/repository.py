@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import to_utc_naive, utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import OAuthDeviceFlowSlot, OAuthFlowState
 
 _TERMINAL_OAUTH_STATUSES = {"error", "success"}
@@ -194,18 +196,29 @@ class OAuthFlowRepository:
             insert_stmt = pg_insert(OAuthDeviceFlowSlot)
         elif dialect == "sqlite":
             insert_stmt = sqlite_insert(OAuthDeviceFlowSlot)
-        else:  # pragma: no cover - only sqlite/postgres are supported backends
+        elif is_mysql(dialect):
+            insert_stmt = mysql_insert(OAuthDeviceFlowSlot)
+        else:  # pragma: no cover - sqlite/postgres/mysql are the supported backends
             raise RuntimeError(f"device-flow slot unsupported for dialect={dialect!r}")
-        statement = insert_stmt.values(
-            slot_key=DEVICE_FLOW_SLOT_KEY, flow_id=flow_id, generation=1, updated_at=now
-        ).on_conflict_do_update(
-            index_elements=[OAuthDeviceFlowSlot.slot_key],
-            set_={
-                "flow_id": flow_id,
-                "generation": OAuthDeviceFlowSlot.generation + 1,
-                "updated_at": now,
-            },
-        )
+        values = dict(slot_key=DEVICE_FLOW_SLOT_KEY, flow_id=flow_id, generation=1, updated_at=now)
+        statement = insert_stmt.values(**values)
+        if is_mysql(dialect):
+            # MySQL targets the slot_key primary key directly; the generation
+            # bump uses the existing row's value, mirroring the ON CONFLICT form.
+            statement = statement.on_duplicate_key_update(
+                flow_id=flow_id,
+                generation=OAuthDeviceFlowSlot.generation + 1,
+                updated_at=now,
+            )
+        else:
+            statement = statement.on_conflict_do_update(
+                index_elements=[OAuthDeviceFlowSlot.slot_key],
+                set_={
+                    "flow_id": flow_id,
+                    "generation": OAuthDeviceFlowSlot.generation + 1,
+                    "updated_at": now,
+                },
+            )
         await self._session.execute(statement)
         await self._session.commit()
 

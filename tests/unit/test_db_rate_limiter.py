@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -11,7 +13,7 @@ from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.exceptions import DashboardRateLimitError
-from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter
+from app.core.rate_limiter.db_rate_limiter import DatabaseRateLimiter, _mysql_lock_sentinel_name
 from app.db.models import Base, RateLimitAttempt
 
 pytestmark = pytest.mark.unit
@@ -187,3 +189,64 @@ async def test_record_failure_only_counts_failures(
 
         # Should NOT be blocked (only 1 failure since last success)
         await limiter.check("ip:failure-test", session)
+
+
+class _RecordingSession:
+    """Session double: records the statements the limiter issues, in order."""
+
+    def __init__(self, dialect: str, *, rowcount: int = 1) -> None:
+        self.dialect_name = dialect
+        self.statements: list[str] = []
+        self.parameters: list[dict[str, Any] | None] = []
+        self._rowcount = rowcount
+
+    def get_bind(self) -> Any:
+        return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
+
+    async def execute(self, statement: Any, parameters: dict[str, Any] | None = None) -> Any:
+        self.statements.append(str(statement))
+        self.parameters.append(parameters)
+        return SimpleNamespace(rowcount=self._rowcount)
+
+    async def commit(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_mysql_admission_takes_the_sentinel_row_lock_before_the_guarded_insert() -> None:
+    """MySQL has no advisory lock: admission serializes on a sentinel row."""
+
+    session = _RecordingSession("mysql")
+    limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+
+    await limiter.check_and_increment("user:alice", session)  # type: ignore[arg-type]
+
+    assert len(session.statements) == 2
+    assert "runtime_sentinels" in session.statements[0]
+    assert "ON DUPLICATE KEY UPDATE" in session.statements[0]
+    assert session.parameters[0] == {"name": _mysql_lock_sentinel_name("password", "user:alice")}
+    assert session.statements[1].lstrip().upper().startswith("INSERT INTO RATE_LIMIT_ATTEMPTS")
+
+
+@pytest.mark.asyncio
+async def test_sqlite_admission_issues_no_sentinel_lock() -> None:
+    """The single-writer backends keep their one-statement admission path."""
+
+    session = _RecordingSession("sqlite")
+    limiter = DatabaseRateLimiter(max_attempts=8, window_seconds=60, type="password")
+
+    await limiter.check_and_increment("user:alice", session)  # type: ignore[arg-type]
+
+    assert len(session.statements) == 1
+    assert "runtime_sentinels" not in session.statements[0]
+
+
+def test_mysql_lock_sentinel_name_is_bounded_and_keyed() -> None:
+    """Names stay inside ``runtime_sentinels.name`` (String(64)) and within
+    the bucket ring, and equal keys share one bucket."""
+
+    name = _mysql_lock_sentinel_name("password", "u" * 5000)
+    assert name.startswith("rate_limit_lock:")
+    assert len(name) <= 64
+    assert name == _mysql_lock_sentinel_name("password", "u" * 5000)
+    assert int(name.rsplit(":", 1)[1]) < 64

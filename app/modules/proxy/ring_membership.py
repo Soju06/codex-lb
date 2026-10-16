@@ -9,11 +9,13 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import BridgeRingMember
 from app.db.session import close_session
 
@@ -81,6 +83,24 @@ class RingMembershipService:
                         },
                     )
                 )
+            elif is_mysql(dialect):
+                # MySQL spells the upsert ON DUPLICATE KEY UPDATE, which targets
+                # the unique instance_id directly.
+                stmt = (
+                    mysql_insert(BridgeRingMember)
+                    .values(
+                        id=str(uuid.uuid4()),
+                        instance_id=instance_id,
+                        registered_at=utcnow(),
+                        last_heartbeat_at=utcnow(),
+                        metadata_json=metadata_json,
+                    )
+                    .on_duplicate_key_update(
+                        last_heartbeat_at=utcnow(),
+                        registered_at=utcnow(),
+                        metadata_json=metadata_json,
+                    )
+                )
             else:
                 raise RuntimeError(f"RingMembershipService unsupported for dialect={dialect!r}")
             await session.execute(stmt)
@@ -121,6 +141,18 @@ class RingMembershipService:
                         index_elements=["instance_id"],
                         set_={"last_heartbeat_at": now, "metadata_json": metadata_json},
                     )
+                )
+            elif is_mysql(dialect):
+                stmt = (
+                    mysql_insert(BridgeRingMember)
+                    .values(
+                        id=str(uuid.uuid4()),
+                        instance_id=instance_id,
+                        registered_at=now,
+                        last_heartbeat_at=now,
+                        metadata_json=metadata_json,
+                    )
+                    .on_duplicate_key_update(last_heartbeat_at=now, metadata_json=metadata_json)
                 )
             else:
                 stmt = (

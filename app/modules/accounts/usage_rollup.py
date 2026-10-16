@@ -6,11 +6,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from sqlalchemy import Select, func, select, true, update
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import is_mysql
 from app.db.models import Account, AccountUsageRollup, AccountUsageRollupState, ApiKey, ApiKeyUsageRollup, RequestLog
 from app.db.session import get_background_session, sqlite_writer_section
 
@@ -160,6 +162,10 @@ def _add_rollup_sums_stmt(session: AsyncSession, model, key_field: str, key_valu
         cached_input_tokens=sums.cached_input_tokens,
         total_cost_usd=sums.total_cost_usd,
     )
+    if is_mysql(session):
+        return stmt.on_duplicate_key_update(
+            **{column: getattr(model, column) + getattr(stmt.inserted, column) for column in _SUM_COLUMNS}
+        )
     return stmt.on_conflict_do_update(
         index_elements=[getattr(model, key_field)],
         set_={column: getattr(model, column) + getattr(stmt.excluded, column) for column in _SUM_COLUMNS},
@@ -315,6 +321,8 @@ def _insert_fn(session: AsyncSession):
         return pg_insert
     if dialect == "sqlite":
         return sqlite_insert
+    if is_mysql(dialect):
+        return mysql_insert
     raise RuntimeError(f"AccountUsageRollup upsert unsupported for dialect={dialect!r}")
 
 
@@ -328,6 +336,10 @@ def _state_bootstrap_stmt(session: AsyncSession):
         folded_through=_EPOCH,
         upgrade_repair_from=None,
     )
+    if is_mysql(session):
+        # MySQL has no DO NOTHING; rewriting the primary key to its inserted
+        # value is the equivalent no-op upsert.
+        return stmt.on_duplicate_key_update(id=stmt.inserted.id)
     return stmt.on_conflict_do_nothing(index_elements=[AccountUsageRollupState.id])
 
 
@@ -385,23 +397,58 @@ async def _fold_next_slice(session: AsyncSession, target: datetime) -> tuple[_Fo
         # if the ACCOUNT aggregate sees it (non-warmup, live, account
         # attached) or the API-KEY aggregate sees it (non-warmup, key
         # attached — soft-deleted rows included), so take the least of both.
-        account_earliest = (
+        # Both aggregates scan: the warmup exclusion is a ``NOT IN`` over a
+        # non-leading column, so no index can narrow it (measured 6.6 s for the
+        # account variant on 1.45 M rows). The earliest index-reachable row is a
+        # dive on ``(requested_at, id)``, and it is the answer whenever it also
+        # satisfies the aggregate's other predicates, so probe first and fall back
+        # to the aggregate only when it does not.
+        account_probe = (
             await session.execute(
-                select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.deleted_at.is_(None),
-                    RequestLog.account_id.is_not(None),
-                )
+                select(RequestLog.requested_at, RequestLog.request_kind, RequestLog.account_id)
+                .where(RequestLog.deleted_at.is_(None))
+                .order_by(RequestLog.requested_at.asc())
+                .limit(1)
             )
-        ).scalar_one_or_none()
-        key_earliest = (
+        ).first()
+        if (
+            account_probe is not None
+            and account_probe[1] not in _EXCLUDED_REQUEST_KINDS
+            and account_probe[2] is not None
+        ):
+            account_earliest = account_probe[0]
+        else:
+            account_earliest = (
+                await session.execute(
+                    select(func.min(RequestLog.requested_at)).where(
+                        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                        RequestLog.deleted_at.is_(None),
+                        RequestLog.account_id.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        key_probe = (
             await session.execute(
-                select(func.min(RequestLog.requested_at)).where(
-                    RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-                    RequestLog.api_key_id.is_not(None),
-                )
+                select(RequestLog.requested_at, RequestLog.request_kind, RequestLog.api_key_id)
+                .order_by(RequestLog.requested_at.asc())
+                .limit(1)
             )
-        ).scalar_one_or_none()
+        ).first()
+        if (
+            key_probe is not None
+            and key_probe[1] not in _EXCLUDED_REQUEST_KINDS
+            and key_probe[2] is not None
+        ):
+            key_earliest = key_probe[0]
+        else:
+            key_earliest = (
+                await session.execute(
+                    select(func.min(RequestLog.requested_at)).where(
+                        RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
+                        RequestLog.api_key_id.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
         candidates = [value for value in (account_earliest, key_earliest) if value is not None]
         earliest = min(candidates) if candidates else None
         if earliest is None:

@@ -89,7 +89,7 @@ Remote clients need an [API key](https://soju06.github.io/codex-lb/api-keys/) cr
 
 Environment variables with `CODEX_LB_` prefix or `.env.local` — see [`.env.example`](.env.example) and the
 [configuration guide](https://soju06.github.io/codex-lb/configuration/). SQLite is the default database backend;
-PostgreSQL is optional via `CODEX_LB_DATABASE_URL`.
+PostgreSQL and MySQL are optional via `CODEX_LB_DATABASE_URL`.
 
 ## Data
 
@@ -110,7 +110,7 @@ Full docs live at **<https://soju06.github.io/codex-lb/>**:
 - [Authentication](https://soju06.github.io/codex-lb/authentication/) — dashboard auth modes
 - [API keys](https://soju06.github.io/codex-lb/api-keys/) — protecting proxy routes
 - [Routing](https://soju06.github.io/codex-lb/routing/) — strategy guide
-- [Database](https://soju06.github.io/codex-lb/database/) — SQLite / PostgreSQL, Postgres 16 → 18 upgrade
+- [Database](https://soju06.github.io/codex-lb/database/) — SQLite / PostgreSQL / MySQL, Postgres 16 → 18 upgrade
 - [Deployment](https://soju06.github.io/codex-lb/deployment/docker/) — [Docker](https://soju06.github.io/codex-lb/deployment/docker/), [Kubernetes](https://soju06.github.io/codex-lb/deployment/kubernetes/), [remote access](https://soju06.github.io/codex-lb/deployment/remote/)
 - [Troubleshooting](https://soju06.github.io/codex-lb/troubleshooting/)
 

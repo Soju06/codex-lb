@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.db.dialect_sql import delete_returning
 from app.db.models import DashboardOidcLoginFlow
 
 #: Short-lived, path-scoped, and ``SameSite=Lax`` rather than ``Strict``: the
@@ -160,21 +161,24 @@ class OidcFlowRepository:
         """
 
         statement = delete(DashboardOidcLoginFlow).where(DashboardOidcLoginFlow.state_hash == state_hash)
-        result = await self._session.execute(
-            statement.returning(
-                DashboardOidcLoginFlow.state_hash,
-                DashboardOidcLoginFlow.provider_id,
-                DashboardOidcLoginFlow.nonce_hash,
-                DashboardOidcLoginFlow.code_verifier_encrypted,
-                DashboardOidcLoginFlow.purpose,
-                DashboardOidcLoginFlow.acting_user_id,
-                DashboardOidcLoginFlow.redirect_uri,
-                DashboardOidcLoginFlow.config_fingerprint,
-                DashboardOidcLoginFlow.created_at,
-                DashboardOidcLoginFlow.expires_at,
-            ).execution_options(synchronize_session=False)
+        # ``delete_returning`` runs the DELETE with RETURNING on PostgreSQL and
+        # SQLite, and selects-then-deletes on MySQL (which has no RETURNING), so
+        # exactly one racing callback still wins.
+        rows = await delete_returning(
+            self._session,
+            statement.execution_options(synchronize_session=False),
+            DashboardOidcLoginFlow.state_hash,
+            DashboardOidcLoginFlow.provider_id,
+            DashboardOidcLoginFlow.nonce_hash,
+            DashboardOidcLoginFlow.code_verifier_encrypted,
+            DashboardOidcLoginFlow.purpose,
+            DashboardOidcLoginFlow.acting_user_id,
+            DashboardOidcLoginFlow.redirect_uri,
+            DashboardOidcLoginFlow.config_fingerprint,
+            DashboardOidcLoginFlow.created_at,
+            DashboardOidcLoginFlow.expires_at,
         )
-        row = result.first()
+        row = rows[0] if rows else None
         await self._session.commit()
         if row is None:
             return None

@@ -23,9 +23,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 
+from app.db.dialect_sql import dialect_upsert, is_mysql
 from app.db.models import ResetCreditRedeemClaim, ResetCreditRedeemRequest
 from app.db.session import SessionLocal, close_session
 
@@ -61,10 +62,40 @@ async def try_acquire_redeem_claim(
     now = datetime.now(UTC)
     session = SessionLocal()
     try:
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        if is_mysql(session):
+            # MySQL has no ON CONFLICT ... WHERE ... RETURNING: take over an
+            # expired lease with a guarded UPDATE, otherwise insert first-wins
+            # (a duplicate-key error means another holder already owns the slot).
+            from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+            taken = await session.execute(
+                update(ResetCreditRedeemClaim)
+                .where(ResetCreditRedeemClaim.account_id == account_id)
+                .where(ResetCreditRedeemClaim.expires_at < now)
+                .values(holder_id=holder_id, expires_at=lease_expires_at)
+            )
+            if (taken.rowcount or 0) > 0:
+                await session.commit()
+                return True
+            try:
+                await session.execute(
+                    mysql_insert(ResetCreditRedeemClaim).values(
+                        account_id=account_id,
+                        holder_id=holder_id,
+                        expires_at=lease_expires_at,
+                    )
+                )
+            except IntegrityError:
+                await session.rollback()
+                return False
+            await session.commit()
+            return True
+
         insert_stmt = sqlite_insert(ResetCreditRedeemClaim).values(
             account_id=account_id,
             holder_id=holder_id,
-            expires_at=now + timedelta(seconds=lease_seconds),
+            expires_at=lease_expires_at,
         )
         stmt = insert_stmt.on_conflict_do_update(
             index_elements=[ResetCreditRedeemClaim.account_id],
@@ -120,10 +151,9 @@ async def renew_redeem_claim(
                 ResetCreditRedeemClaim.holder_id == holder_id,
             )
             .values(expires_at=now + timedelta(seconds=lease_seconds))
-            .returning(ResetCreditRedeemClaim.account_id)
         )
         await session.commit()
-        return result.scalar_one_or_none() is not None
+        return (result.rowcount or 0) > 0
     finally:
         await close_session(session)
 
@@ -239,29 +269,18 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
                 ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
             )
         )
-        dialect = session.get_bind().dialect.name
-        if dialect == "postgresql":
-            await session.execute(
-                pg_insert(ResetCreditRedeemRequest)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        ResetCreditRedeemRequest.account_id,
-                        ResetCreditRedeemRequest.redeem_request_id,
-                    ]
-                )
+        # Insert-if-absent on every backend. MySQL used to fall into the sqlite
+        # branch, so its compiler was handed a SQLite ``ON CONFLICT`` and raised
+        # ``UnsupportedCompilationError``: seven reset-credit replica-safety tests
+        # failed there while SQLite and PostgreSQL passed.
+        await session.execute(
+            dialect_upsert(
+                session,
+                ResetCreditRedeemRequest,
+                values,
+                conflict_columns=["account_id", "redeem_request_id"],
             )
-        else:
-            await session.execute(
-                sqlite_insert(ResetCreditRedeemRequest)
-                .values(**values)
-                .on_conflict_do_nothing(
-                    index_elements=[
-                        ResetCreditRedeemRequest.account_id,
-                        ResetCreditRedeemRequest.redeem_request_id,
-                    ]
-                )
-            )
+        )
         await session.commit()
         stored = await session.scalar(
             select(ResetCreditRedeemRequest.credit_id).where(

@@ -64,6 +64,8 @@ from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidatio
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import dialect_name as db_dialect_name
+from app.db.dialect_sql import same_table_subquery
 from app.db.models import (
     Account,
     AccountStatus,
@@ -302,11 +304,10 @@ async def _pending_state(session: AsyncSession, account_id: str) -> tuple[bool, 
             )
         )
     assignment_rows = await session.execute(
-        delete(ApiKeyAccountAssignment)
-        .where(ApiKeyAccountAssignment.account_id == account_id)
-        .returning(ApiKeyAccountAssignment.account_id)
+        delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id)
     )
-    if assignment_rows.scalars().first() is not None:
+    # rowcount is the dialect-neutral row count (MySQL has no RETURNING).
+    if (assignment_rows.rowcount or 0) > 0:
         drift_repaired = True
     return bool(row[1]), drift_repaired
 
@@ -388,19 +389,23 @@ def _request_logs_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
 
 
 async def _usage_history_chunk(session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int) -> int:
-    batch = _usage_history_batch(account_id, batch_size).scalar_subquery()
-    result = await session.execute(delete(UsageHistory).where(UsageHistory.id.in_(batch)).returning(UsageHistory.id))
-    return len(result.scalars().all())
+    batch = same_table_subquery(
+        _usage_history_batch(account_id, batch_size), UsageHistory.id, dialect=db_dialect_name(session)
+    )
+    result = await session.execute(delete(UsageHistory).where(UsageHistory.id.in_(batch)))
+    return int(result.rowcount or 0)
 
 
 async def _additional_usage_history_chunk(
     session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int
 ) -> int:
-    batch = _additional_usage_history_batch(account_id, batch_size).scalar_subquery()
-    result = await session.execute(
-        delete(AdditionalUsageHistory).where(AdditionalUsageHistory.id.in_(batch)).returning(AdditionalUsageHistory.id)
+    batch = same_table_subquery(
+        _additional_usage_history_batch(account_id, batch_size),
+        AdditionalUsageHistory.id,
+        dialect=db_dialect_name(session),
     )
-    return len(result.scalars().all())
+    result = await session.execute(delete(AdditionalUsageHistory).where(AdditionalUsageHistory.id.in_(batch)))
+    return int(result.rowcount or 0)
 
 
 async def _request_logs_chunk(session: AsyncSession, account_id: str, *, delete_history: bool, batch_size: int) -> int:
@@ -409,17 +414,16 @@ async def _request_logs_chunk(session: AsyncSession, account_id: str, *, delete_
     Deliberately NOT fold-state-locked and NOT mirrored: see the module
     docstring for why interleaved fold slices converge at finalization.
     """
-    batch = _request_logs_batch(account_id, batch_size).scalar_subquery()
+    batch = same_table_subquery(
+        _request_logs_batch(account_id, batch_size), RequestLog.id, dialect=db_dialect_name(session)
+    )
     if delete_history:
-        result = await session.execute(delete(RequestLog).where(RequestLog.id.in_(batch)).returning(RequestLog.id))
+        result = await session.execute(delete(RequestLog).where(RequestLog.id.in_(batch)))
     else:
         result = await session.execute(
-            update(RequestLog)
-            .where(RequestLog.id.in_(batch))
-            .values(account_id=None, deleted_at=utcnow())
-            .returning(RequestLog.id)
+            update(RequestLog).where(RequestLog.id.in_(batch)).values(account_id=None, deleted_at=utcnow())
         )
-    return len(result.scalars().all())
+    return int(result.rowcount or 0)
 
 
 async def _invalidate_account_caches() -> None:

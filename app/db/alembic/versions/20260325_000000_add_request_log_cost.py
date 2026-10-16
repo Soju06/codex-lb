@@ -104,6 +104,18 @@ def _apply_cost_backfill_batch(
         )
         return
 
+    if bind.dialect.name in ("mysql", "mariadb"):
+        # MySQL/MariaDB have no ``UPDATE ... FROM``: the join form is the
+        # equivalent (MariaDB still reports the ``mysql`` dialect name).
+        bind.execute(
+            sa.text(
+                f"UPDATE request_logs JOIN {_TEMP_COST_TABLE_NAME} AS tmp "
+                "ON tmp.id = request_logs.id "
+                "SET request_logs.cost_usd = tmp.cost_usd"
+            )
+        )
+        return
+
     bind.execute(
         sa.text(
             f"""

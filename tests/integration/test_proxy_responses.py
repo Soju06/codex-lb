@@ -609,12 +609,13 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
 
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
-    # The plain developer message is still hoisted into instructions, while the
-    # typed directive is forwarded upstream byte-identical (including keys the
-    # interleaved-reasoning sanitizer strips from message items).
-    assert seen_payload["instructions"] == "follow the directive"
+    # The plain developer message stays in input, and the typed directive is
+    # forwarded upstream byte-identical (including keys the interleaved-reasoning
+    # sanitizer strips from message items).
+    assert seen_payload["instructions"] == ""
     assert seen_payload["input"] == [
         developer_directive,
+        {"type": "message", "role": "developer", "content": "follow the directive"},
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
     ]
 

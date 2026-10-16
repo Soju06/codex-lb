@@ -1554,6 +1554,12 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    limit_warmup_auto_enable_new_accounts: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     limit_warmup_windows: Mapped[str] = mapped_column(
         String,
         default="both",

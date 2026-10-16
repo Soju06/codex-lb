@@ -122,6 +122,7 @@ class DashboardSettingsResponse(DashboardModel):
     api_key_auth_enabled: bool
     hide_upstream_quota_from_api_keys: bool
     limit_warmup_enabled: bool
+    limit_warmup_auto_enable_new_accounts: bool
     limit_warmup_windows: str = Field(pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str = Field(min_length=1, max_length=128)
     limit_warmup_prompt: str = Field(min_length=1, max_length=512)
@@ -294,6 +295,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     api_key_auth_enabled: bool | None = None
     hide_upstream_quota_from_api_keys: bool | None = None
     limit_warmup_enabled: bool | None = None
+    limit_warmup_auto_enable_new_accounts: bool | None = None
     limit_warmup_windows: str | None = Field(default=None, pattern=r"^(primary|secondary|both)$")
     limit_warmup_model: str | None = Field(default=None, min_length=1, max_length=128)
     limit_warmup_prompt: str | None = Field(default=None, min_length=1, max_length=512)

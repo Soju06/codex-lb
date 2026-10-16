@@ -103,6 +103,7 @@ class SettingsRepository:
             sticky_reallocation_secondary_budget_threshold_pct=100.0,
             additional_quota_routing_policies_json="{}",
             limit_warmup_enabled=False,
+            limit_warmup_auto_enable_new_accounts=False,
             limit_warmup_windows="both",
             limit_warmup_model="auto",
             limit_warmup_prompt="Say OK.",
@@ -198,6 +199,7 @@ class SettingsRepository:
         api_key_auth_enabled: bool | None = None,
         hide_upstream_quota_from_api_keys: bool | None = None,
         limit_warmup_enabled: bool | None = None,
+        limit_warmup_auto_enable_new_accounts: bool | None = None,
         limit_warmup_windows: str | None = None,
         limit_warmup_model: str | None = None,
         limit_warmup_prompt: str | None = None,
@@ -395,6 +397,8 @@ class SettingsRepository:
             settings.hide_upstream_quota_from_api_keys = hide_upstream_quota_from_api_keys
         if limit_warmup_enabled is not None:
             settings.limit_warmup_enabled = limit_warmup_enabled
+        if limit_warmup_auto_enable_new_accounts is not None:
+            settings.limit_warmup_auto_enable_new_accounts = limit_warmup_auto_enable_new_accounts
         if limit_warmup_windows is not None:
             settings.limit_warmup_windows = limit_warmup_windows
         if limit_warmup_model is not None:

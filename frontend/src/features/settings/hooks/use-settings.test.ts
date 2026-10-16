@@ -27,6 +27,19 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useSettings", () => {
+  it("retains disabled new-account warm-up enrollment after save and refetch", async () => {
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useSettings(), { wrapper: createWrapper(queryClient) });
+    await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
+    expect(result.current.settingsQuery.data?.limitWarmupAutoEnableNewAccounts).toBe(false);
+
+    await result.current.updateSettingsMutation.mutateAsync({ limitWarmupAutoEnableNewAccounts: true });
+    await result.current.updateSettingsMutation.mutateAsync({ limitWarmupAutoEnableNewAccounts: false });
+    await result.current.settingsQuery.refetch();
+    await waitFor(() => expect(result.current.settingsQuery.data?.limitWarmupAutoEnableNewAccounts).toBe(false));
+    expect(result.current.settingsQuery.data?.limitWarmupEnabled).toBe(false);
+  });
+
   it("loads settings and invalidates cache on update", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

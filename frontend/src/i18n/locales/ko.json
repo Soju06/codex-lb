@@ -2027,5 +2027,7 @@
   "organisation.automaticAccounts.secret.description": "“{{label}}”의 자격 증명입니다.",
   "organisation.automaticAccounts.secret.warning": "지금 복사하세요. 한 번만 표시되고 다시 볼 수 없습니다. 잃어버렸다면 자격 증명을 교체하세요.",
   "organisation.automaticAccounts.secret.copy": "자격 증명 복사",
-  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다."
+  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다.",
+  "settings.routing.limitWarmup.newAccounts.label": "새 계정의 워밍업 자동 활성화",
+  "settings.routing.limitWarmup.newAccounts.description": "새 OAuth 로그인 및 auth.json 가져오기에 적용됩니다. 기존 계정 설정은 유지됩니다. 요청을 보내려면 전역 워밍업도 활성화해야 합니다."
 }

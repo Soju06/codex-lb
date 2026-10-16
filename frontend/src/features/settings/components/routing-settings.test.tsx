@@ -670,6 +670,7 @@ describe("RoutingSettings", () => {
     );
 
     expect(screen.getByRole("switch", { name: "Enable limit warm-up" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Automatically enable warm-up for new accounts" })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: "Enable staggered idle warm-up" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Prefer earlier reset accounts" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reset preference window" })).toBeInTheDocument();
@@ -679,6 +680,30 @@ describe("RoutingSettings", () => {
     expect(screen.getByLabelText("Model")).toHaveAttribute("maxLength", "128");
     expect(screen.getByLabelText("Min usage percent")).toHaveAttribute("max", "100");
     expect(screen.getByLabelText("Warm-up prompt")).toHaveAttribute("maxLength", "512");
+  });
+
+  it.each([false, true])("saves the new-account default from %s while global warm-up is off", async (enabled) => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{ ...BASE_SETTINGS, limitWarmupAutoEnableNewAccounts: enabled }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.click(screen.getByRole("switch", { name: "Automatically enable warm-up for new accounts" }));
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      limitWarmupAutoEnableNewAccounts: !enabled,
+      limitWarmupEnabled: false,
+    });
+  });
+
+  it("disables the new-account warm-up switch while settings cannot be edited", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy onSave={vi.fn()} />);
+    expect(screen.getByRole("switch", { name: "Automatically enable warm-up for new accounts" })).toBeDisabled();
   });
 
   it("saves weekly pace working-day changes", async () => {

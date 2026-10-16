@@ -2027,5 +2027,7 @@
   "organisation.automaticAccounts.secret.description": "This is the credential for “{{label}}”.",
   "organisation.automaticAccounts.secret.warning": "Copy it now. It is shown once and cannot be read again; if you lose it, replace the credential.",
   "organisation.automaticAccounts.secret.copy": "Copy credential",
-  "organisation.errors.scim_token_not_found": "That credential no longer exists."
+  "organisation.errors.scim_token_not_found": "That credential no longer exists.",
+  "settings.routing.limitWarmup.newAccounts.label": "Automatically enable warm-up for new accounts",
+  "settings.routing.limitWarmup.newAccounts.description": "Applies to new OAuth logins and auth.json imports. Existing account choices stay unchanged. Requests still require global warm-up to be enabled."
 }

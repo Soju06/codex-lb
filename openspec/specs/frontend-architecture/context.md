@@ -80,3 +80,7 @@ The product-boundary regression renders the real `/dashboard` App route with the
 ## Add apis list view unused filter
 
 The optional List view allows operators to scan and sort API keys while the original Detail view remains the default. Usage means a non-null last-use timestamp or a positive lifetime request count, so delayed summary loading does not label an already-used key as unused. Existing read and write permissions apply to both layouts and the detail dialog. For example, a read-only operator can inspect an unused key but cannot create, edit, regenerate or delete keys.
+
+## Import multiple auth files
+
+Sequential imports reuse the existing single-file request and refresh hook. A batch of A, B, C that fails on B retains B and C for retry and never resubmits A. Selection and submission are disabled while a request is in flight. The API and OAuth flows remain unchanged.

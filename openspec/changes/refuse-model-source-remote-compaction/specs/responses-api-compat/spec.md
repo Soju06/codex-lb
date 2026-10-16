@@ -111,9 +111,13 @@ MUST be refused at the same boundary with the existing HTTP 503
 `model_source_disabled` response, so a compaction request never hands a
 source-owned slug to a subscription account.
 
-The 400 status is deliberate: the Codex CLI treats `invalid_request_error` as
-non-retryable and falls back to local compaction, whereas a 429 or 5xx invites
-retries against a path that can never succeed.
+The 400 status is deliberate: Codex maps request-shaped failures such as
+`CodexErrorDetails::InvalidRequest` to non-retryable in
+`codex-rs/protocol/src/error.rs` (`CodexErr::is_retryable`), so a client error
+of type `invalid_request_error` is the intended signal to stop remote compact
+retries and compact locally, whereas a 429 or 5xx invites retries against a
+path that can never succeed. See
+https://github.com/openai/codex/blob/main/codex-rs/protocol/src/error.rs.
 
 #### Scenario: Standalone compact request for a source model is refused
 

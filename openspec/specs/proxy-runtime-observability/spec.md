@@ -73,7 +73,7 @@ The proxy MUST provide an opt-in durable archive of Codex-to-upstream conversati
 
 #### Scenario: operator views archived traffic
 
-- **GIVEN** conversation archive files exist as `.jsonl.gz` or legacy `.jsonl`
+- **GIVEN** conversation archive files exist as `.jsonl.gz`, `.jsonl.zst` or legacy `.jsonl`
 - **WHEN** an authenticated dashboard admin opens an existing request log detail
 - **THEN** the dashboard can find matching archive records by request id across archive files and display payload plus metadata for that request
 

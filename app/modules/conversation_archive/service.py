@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
+
+import zstandard
 
 from app.core.config.settings import get_settings
+from app.core.conversation_archive import zstd_is_prefix_of_gzip
 
 _JSONL_SUFFIX = ".jsonl"
 _GZIP_JSONL_SUFFIX = ".jsonl.gz"
+_ZSTD_JSONL_SUFFIX = ".jsonl.zst"
+_ARCHIVE_SUFFIXES = (_JSONL_SUFFIX, _GZIP_JSONL_SUFFIX, _ZSTD_JSONL_SUFFIX)
 
 
 @dataclass(frozen=True)
@@ -77,10 +83,12 @@ def _archive_paths_for_lookup(
         return [_resolve_archive_file(filename)]
     directory = _archive_dir()
     if requested_at is None:
-        return list(_iter_archive_paths(directory))
+        return _one_archive_per_hour(list(_iter_archive_paths(directory)))
 
     if request_id is not None:
-        return sorted(path for path in _iter_archive_paths(directory) if path.exists() and path.is_file())
+        return _one_archive_per_hour(
+            sorted(path for path in _iter_archive_paths(directory) if path.exists() and path.is_file())
+        )
 
     requested_at_utc = requested_at.astimezone(UTC)
     hourly_stems = [(requested_at_utc + timedelta(hours=delta)).strftime("%Y-%m-%dT%H") for delta in (-1, 0, 1)]
@@ -91,20 +99,36 @@ def _archive_paths_for_lookup(
     }
     candidates: list[Path] = []
     for stem in hourly_stems:
-        candidates.extend(
-            (
-                directory / f"{stem}{_GZIP_JSONL_SUFFIX}",
-                directory / f"{stem}{_JSONL_SUFFIX}",
-            )
-        )
+        candidates.extend(directory / f"{stem}{suffix}" for suffix in _ARCHIVE_SUFFIXES)
     for stem in daily_stems:
-        candidates.extend(
-            (
-                directory / f"{stem}{_GZIP_JSONL_SUFFIX}",
-                directory / f"{stem}{_JSONL_SUFFIX}",
-            )
-        )
-    return [path for path in candidates if path.exists() and path.is_file()]
+        candidates.extend(directory / f"{stem}{suffix}" for suffix in _ARCHIVE_SUFFIXES)
+    return _one_archive_per_hour([path for path in candidates if path.exists() and path.is_file()])
+
+
+def _one_archive_per_hour(paths: list[Path]) -> list[Path]:
+    """Never serve one hour's records twice while a gzip -> zstd switch is pending.
+
+    Both ``X.jsonl.gz`` and ``X.jsonl.zst`` exist after an interrupted seal (the
+    gzip still holds everything the zstd holds): read the gzip only. If the zstd
+    is not a prefix of the gzip (late appends recreated the gzip after sealing),
+    the files hold different records and both are read. Unreadable files keep
+    both listed, so nothing is ever hidden. The sealer removes the redundant
+    file on its next pass.
+    """
+    present = set(paths)
+    superseded: set[Path] = set()
+    for path in paths:
+        if not path.name.endswith(_ZSTD_JSONL_SUFFIX):
+            continue
+        gzip_path = path.with_name(path.name.removesuffix(_ZSTD_JSONL_SUFFIX) + _GZIP_JSONL_SUFFIX)
+        if gzip_path not in present:
+            continue
+        try:
+            if zstd_is_prefix_of_gzip(gzip_path, path):
+                superseded.add(path)
+        except (OSError, EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
+            continue
+    return [path for path in paths if path not in superseded]
 
 
 def _archive_dir() -> Path:
@@ -112,14 +136,12 @@ def _archive_dir() -> Path:
 
 
 def _iter_archive_paths(directory: Path) -> Iterator[Path]:
-    yield from directory.glob(f"*{_JSONL_SUFFIX}")
-    yield from directory.glob(f"*{_GZIP_JSONL_SUFFIX}")
+    for suffix in _ARCHIVE_SUFFIXES:
+        yield from directory.glob(f"*{suffix}")
 
 
 def _resolve_archive_file(filename: str) -> Path:
-    if Path(filename).name != filename or not (
-        filename.endswith(_JSONL_SUFFIX) or filename.endswith(_GZIP_JSONL_SUFFIX)
-    ):
+    if Path(filename).name != filename or not filename.endswith(_ARCHIVE_SUFFIXES):
         raise ConversationArchiveInvalidFileError("Invalid conversation archive file name")
 
     path = _archive_dir() / filename
@@ -129,9 +151,8 @@ def _resolve_archive_file(filename: str) -> Path:
 
 
 def _iter_records(path: Path) -> Iterator[dict[str, Any]]:
-    opener = gzip.open if path.name.endswith(_GZIP_JSONL_SUFFIX) else Path.open
     try:
-        with opener(path, "rt", encoding="utf-8") as fh:
+        with _open_text(path) as fh:
             for line in fh:
                 stripped = line.strip()
                 if not stripped:
@@ -142,8 +163,18 @@ def _iter_records(path: Path) -> Iterator[dict[str, Any]]:
                     continue
                 if isinstance(parsed, dict):
                     yield parsed
-    except (EOFError, gzip.BadGzipFile, zlib.error):
+    except (EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
         return
+
+
+def _open_text(path: Path) -> IO[str]:
+    if path.name.endswith(_ZSTD_JSONL_SUFFIX):
+        raw = path.open("rb")
+        reader = zstandard.ZstdDecompressor().stream_reader(raw, read_across_frames=True, closefd=True)
+        return io.TextIOWrapper(reader, encoding="utf-8")
+    if path.name.endswith(_GZIP_JSONL_SUFFIX):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open(encoding="utf-8")
 
 
 def _record_matches(

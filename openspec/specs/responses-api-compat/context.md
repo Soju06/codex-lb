@@ -307,6 +307,47 @@ accepted or delivery-ambiguous owner forwards retain their settlement owner.
 Context bindings do not span yields because startup probes and consumers may
 advance the stream from different tasks.
 
+### Image-bypass requirement history
+
+Provenance of `Requirement: Responses input images bypass the HTTP bridge`,
+kept with the image-bypass description above. Each step narrowed or clarified
+the clause. None reversed an earlier one. The bypass trigger itself has changed
+only once, in `keep-replayed-history-images-on-http-bridge` (#2503).
+
+| Date | Commit | Change to `Requirement: Responses input images bypass the HTTP bridge` | Cause |
+|---|---|---|---|
+| 2026-06-03 | `bcd63c827` (#903) | Added: bypass for "any `input_image` part in top-level input items, nested message content, or tool output content", "over the raw HTTP Responses stream path" | Live beta: an invalid inline PNG held a bridge pending slot until timeout |
+| 2026-06-05 | `fb8800f46` (#930) | Code only: the bypass condition gains `image_generation_request` | Restore Codex image-generation tool |
+| 2026-07-13 | `07c6babe4` (#1252) | Synced into the main spec unchanged | Bulk archive |
+| 2026-09-11 | `cb21daaed` (#2386) | "raw HTTP" became "raw (non-bridge)"; added "MUST NOT by itself pin the upstream stream transport". The bypass trigger was unchanged | #2363: image threads pinned to upstream HTTP |
+| 2026-09-26 | `keep-replayed-history-images-on-http-bridge` (#2503) | Bypass trigger narrowed: external URL anywhere, any image in the current turn, or `image_generation` | Replayed history keeps a session off the bridge permanently; #2425 |
+
+Example: turn N of a full-history client. The screenshot came from a tool
+several turns ago:
+
+```json
+{"model": "gpt-6-luna", "prompt_cache_key": "k", "input": [
+  {"role": "user", "content": "look at the page"},
+  {"type": "function_call", "call_id": "c1", "name": "screenshot", "arguments": "{}"},
+  {"type": "function_call_output", "call_id": "c1",
+   "output": [{"type": "input_image", "image_url": "data:image/png;base64,iVBOR..."}]},
+  {"role": "assistant", "content": [{"type": "output_text", "text": "I see a form."}]},
+  {"role": "user", "content": "now submit it"}
+]}
+```
+
+- Before: `bypass reason=image`, raw path, and `upstream_transport='auto'` in
+  the request log. This repeats on every later turn.
+- After: the current turn is the final user message and holds no image, so the
+  request stays on the bridge. If the tool output with the screenshot were the
+  last item, that one request would bypass. The next turn would not.
+
+Failure modes kept with the clause: a client that sends new images without any
+model-output item before them (single-shot) still bypasses; this is the #903
+behavior. An external URL in history bypasses forever. This is intended: the
+upstream WebSocket does not accept it, and the bridge guard does not see nested
+URLs.
+
 ## HTTP response ownership before delivery
 
 An HTTP response can expose its upstream ID before the detached request-log write finishes. The stream now publishes each authoritative lifecycle ID to the existing bounded process cache before delivering that event, beginning with `response.created` when present. An immediate follow-up can resolve the selected account while the original stream or its log write is still pending. This is same-process owner readiness; it does not promise that an unfinished response is already usable by the upstream provider.

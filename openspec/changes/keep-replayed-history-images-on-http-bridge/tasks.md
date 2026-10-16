@@ -30,13 +30,21 @@
 
 ## 3. Spec hygiene
 
-- [ ] 3.1 Before this change is archived, archive (or rebase)
+- [x] 3.1 Before this change is archived, archive (or rebase)
   `narrow-input-image-upstream-transport-pin` so that its stale `MODIFIED`
   delta of the same requirement cannot sync the old "any `input_image`" trigger
-  back. Record the order in the PR body.
-- [ ] 3.2 On sync, replace the requirement in place in
+  back. Record the order here and in `context.md`:
+  `narrow-input-image-upstream-transport-pin` is archived first (2026-10-16, as
+  `openspec/changes/archive/2026-10-16-narrow-input-image-upstream-transport-pin`),
+  this change's requirement sync second. A PR-body note is proposed wording for
+  the maintainer; the fixing agent cannot edit PR bodies.
+- [x] 3.2 On sync, replace the requirement in place in
   `openspec/specs/responses-api-compat/spec.md`. Do not append a dated
   correction. Move the stable part of `context.md` into the capability
-  `context.md` section that already describes the image bypass.
-- [ ] 3.3 `npx --yes @fission-ai/openspec@1.11.0 validate keep-replayed-history-images-on-http-bridge --strict`
-  and `… validate --specs`.
+  `context.md` section that already describes the image bypass. Done in this
+  change: the requirement is replaced in place, and the stable provenance
+  (requirement history, example, failure modes) now lives under
+  "Image-bypass requirement history" in `openspec/specs/responses-api-compat/context.md`.
+- [x] 3.3 `npx --yes @fission-ai/openspec@1.11.0 validate keep-replayed-history-images-on-http-bridge --strict`
+  and `… validate --specs`. Both pass: "Change is valid";
+  `validate --specs` reports 67 passed, 0 failed.

@@ -11,10 +11,10 @@
   "commitConvention": "angular",
   "contributors": [
     {
-      "login": "ngallodev",
-      "name": "ngallodev",
-      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
-      "profile": "https://github.com/ngallodev",
+      "login": "solid-pixel",
+      "name": "Alessandro Benassi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/18260178?v=4",
+      "profile": "https://github.com/solid-pixel",
       "contributions": [
         "code"
       ]
@@ -101,7 +101,7 @@
     },
     {
       "login": "dwnmf",
-      "name": "LYA⚚CAP⚚OCEAN",
+      "name": "LYA\u269aCAP\u269aOCEAN",
       "avatar_url": "https://avatars.githubusercontent.com/u/56194792?v=4",
       "profile": "https://github.com/dwnmf",
       "contributions": [
@@ -634,7 +634,7 @@
     },
     {
       "login": "mahirozdin",
-      "name": "Mahir Taha Özdin",
+      "name": "Mahir Taha \u00d6zdin",
       "avatar_url": "https://avatars.githubusercontent.com/u/9491185?v=4",
       "profile": "https://www.linkedin.com/in/mahir-ozdin/",
       "contributions": [
@@ -691,7 +691,7 @@
     },
     {
       "login": "diogenesc",
-      "name": "Diógenes Castro",
+      "name": "Di\u00f3genes Castro",
       "avatar_url": "https://avatars.githubusercontent.com/u/22321454?v=4",
       "profile": "https://github.com/diogenesc",
       "contributions": [
@@ -799,7 +799,7 @@
     },
     {
       "login": "rupebac",
-      "name": "Rubén Pérez Bachiller",
+      "name": "Rub\u00e9n P\u00e9rez Bachiller",
       "avatar_url": "https://avatars.githubusercontent.com/u/452231?v=4",
       "profile": "https://github.com/rupebac",
       "contributions": [
@@ -820,7 +820,7 @@
     },
     {
       "login": "ellentane",
-      "name": "Jonáš Sivek",
+      "name": "Jon\u00e1\u0161 Sivek",
       "avatar_url": "https://avatars.githubusercontent.com/u/70338266?v=4",
       "profile": "https://github.com/ellentane",
       "contributions": [
@@ -830,7 +830,7 @@
     },
     {
       "login": "LuoYe17",
-      "name": "落叶",
+      "name": "\u843d\u53f6",
       "avatar_url": "https://avatars.githubusercontent.com/u/191728117?v=4",
       "profile": "https://github.com/LuoYe17",
       "contributions": [
@@ -1037,7 +1037,7 @@
     },
     {
       "login": "fozbek",
-      "name": "Fatih Özbek",
+      "name": "Fatih \u00d6zbek",
       "avatar_url": "https://avatars.githubusercontent.com/u/17993880?v=4",
       "profile": "https://github.com/fozbek",
       "contributions": [
@@ -1145,7 +1145,7 @@
     },
     {
       "login": "yeongjun-cigro",
-      "name": "유영준",
+      "name": "\uc720\uc601\uc900",
       "avatar_url": "https://avatars.githubusercontent.com/u/260819931?v=4",
       "profile": "https://github.com/yeongjun-cigro",
       "contributions": [
@@ -1522,7 +1522,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
     },
     {
       "login": "nhdong1993",
@@ -1538,6 +1539,35 @@
       "name": "Vincent Dev",
       "avatar_url": "https://avatars.githubusercontent.com/u/246649517?v=4",
       "profile": "https://github.com/tubededentifrice-dev",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "drakeo338",
+      "name": "Younes Beriane",
+      "avatar_url": "https://avatars.githubusercontent.com/u/328244157?v=4",
+      "profile": "https://github.com/drakeo338",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "TheFoolThatDoesntBelongToThisEra",
+      "name": "\u20df",
+      "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
+      "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "ngallodev",
+      "name": "ngallodev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
+      "profile": "https://github.com/ngallodev",
       "contributions": [
         "code"
       ]

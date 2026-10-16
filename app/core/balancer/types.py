@@ -9,7 +9,7 @@ class UpstreamError(TypedDict, total=False):
     resets_in_seconds: int | float
 
 
-FailureClass = Literal["rate_limit", "quota", "retryable_transient", "non_retryable"]
+FailureClass = Literal["rate_limit", "quota", "retryable_transient", "account_unavailable", "non_retryable"]
 FailurePhase = Literal["connect", "first_event", "mid_stream"]
 
 

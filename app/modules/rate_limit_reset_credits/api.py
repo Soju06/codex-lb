@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -43,7 +44,6 @@ from app.core.exceptions import (
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
-from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -409,7 +409,7 @@ async def _redeem_soonest_reset_credit_locked(
     except ConsumeResetCreditError as exc:
         raise _translate_consume_error(exc) from exc
 
-    upstream_reset_confirmed_at = naive_utc_to_epoch(utcnow())
+    upstream_reset_confirmed_at = time.time()
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
     await store.invalidate(account.id)

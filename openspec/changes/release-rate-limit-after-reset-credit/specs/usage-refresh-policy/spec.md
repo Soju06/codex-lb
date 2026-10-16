@@ -12,6 +12,14 @@ A forced usage refresh triggered by an upstream reset-credit redemption MUST rec
 - **THEN** the account becomes `ACTIVE`
 - **AND** its `reset_at` and `blocked_at` markers are cleared
 
+#### Scenario: Automatic pre-expiry redemption releases a rate-limited account
+
+- **GIVEN** a `RATE_LIMITED` account has a future persisted weekly reset deadline and a `blocked_at` marker
+- **AND** automatic reset-credit redemption before expiry is enabled and a credit is inside the redemption window
+- **WHEN** the scheduler redeems the credit and upstream returns `code="reset"` and `windows_reset > 0`
+- **AND** the forced usage refresh reports available quota
+- **THEN** the account becomes `ACTIVE`
+
 #### Scenario: Unconfirmed reset credit does not bypass the cooldown
 
 - **GIVEN** a `RATE_LIMITED` account has a future persisted reset deadline

@@ -27,6 +27,10 @@ Scope: [HTTP phase timing contract](../../../openspec/specs/proxy-runtime-observ
 - [Observe an eligible frame before relay](https://github.com/Soju06/codex-lb/pull/2112#pullrequestreview-5553223205) · upstream observation eligibility · app/modules/proxy/_service/streaming/mixin.py · TTFT alone must not authorize skipping a pending upstream phase. Fixed by the same total phase owner as round 5; this repeated report is part of that design pass.
 - [Provide repository source links](https://github.com/Soju06/codex-lb/pull/2112#discussion_r4298947925) · review navigation · docs/reviews/pr-2112/proposals/round-5.md · Readers must be able to navigate from the saved review evidence to the referenced repository source. Fixed with repository source links pinned to the reviewed commit; the original verbatim report remains available in its prior commit.
 
+## Round 7 (coderabbit, eab1cb23)
+
+- [Cite the complete parse-spy test](https://github.com/Soju06/codex-lb/pull/2112#discussion_r4299433141) · review evidence precision · docs/reviews/pr-2112/proposals/round-5-build-check.md · A coverage reference must identify the test and assertions supporting the report. Fixed at the coordinator citation correction, which links the full test range while preserving the fresh report verbatim. This is unrelated to round 6's workstation-link portability defect; the original target was within the correct repository test. No executable behavior changed.
+
 ## Design passes
 
 - After round 5, including its repeated finding in round 6 · proposal: [round-5.md](proposals/round-5.md); final check: [round-5-build-check.md](proposals/round-5-build-check.md).

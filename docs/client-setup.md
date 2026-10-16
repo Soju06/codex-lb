@@ -31,6 +31,26 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Collaboration through a Model Source
+
+A custom Model Source needs Responses, streaming and tool support to run Codex
+subagents. Preserve its upstream capability metadata when importing models,
+including `tool_mode` and `multi_agent_version`. A nonblank string
+`multi_agent_version` declares support for namespace tools, so codex-lb forwards
+the client's complete collaboration namespace and matching tool choices.
+Sources without that declaration still need an explicit `namespace` entry in
+`experimental_supported_tools`; unsupported tool types remain filtered.
+
+If the client uses a pinned `model_catalog_json` file, refresh it from the source's
+Codex catalog and start a new session. Collaboration support does not imply
+WebSocket or Responses Lite support: keep those settings aligned with the
+backend's capabilities. Use Codex's own collaboration schema rather than a
+hand-written replacement for its reserved tools.
+
+The owning contracts are
+[Responses compatibility](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/spec.md)
+and [model catalog compatibility](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/model-catalog-compat/spec.md).
+
 ### Opting into the 872k context window
 
 GPT-5.6 ships a 272,000-token default input budget with an 872,000-token

@@ -219,9 +219,10 @@ def source_model_request_overrides(source: ModelSource, model: str) -> dict[str,
 def source_model_supported_tool_types(source: ModelSource, model: str) -> frozenset[str]:
     """Non-function Responses tool types the source model declares support for.
 
-    Function tools are always forwarded to OpenAI-compatible sources; hosted
-    tool types are dropped unless the model opts in via
-    ``"supports_search_tool": true`` (web search) or lists the tool type in
+    Function tools are always forwarded to OpenAI-compatible sources;
+    other tool types are dropped unless the model opts in via
+    ``"supports_search_tool": true`` (web search), a nonblank
+    ``"multi_agent_version"`` string (namespaces), or lists the tool type in
     ``"experimental_supported_tools"`` in ``raw_metadata_json``.
     """
     entry = next(
@@ -234,6 +235,9 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     supported: set[str] = set()
     if raw.get("supports_search_tool") is True:
         supported |= _SEARCH_TOOL_TYPES
+    multi_agent_version = raw.get("multi_agent_version")
+    if isinstance(multi_agent_version, str) and multi_agent_version.strip():
+        supported.add("namespace")
     experimental = raw.get("experimental_supported_tools")
     if is_json_list(experimental):
         supported.update(item for item in experimental if isinstance(item, str))

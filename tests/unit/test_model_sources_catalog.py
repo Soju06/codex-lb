@@ -181,6 +181,43 @@ def test_source_model_supported_tool_types_includes_experimental_tools() -> None
     assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset({"custom"})
 
 
+@pytest.mark.parametrize("version", ["v1", "v2", " v2 ", "future-version"])
+def test_source_model_collaboration_version_enables_namespace_tools(version: str) -> None:
+    source = _overrides_source({"multi_agent_version": version})
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset({"namespace"})
+    assert source_model_supported_tool_types(source, "unknown-model") == frozenset()
+    source.models[0].is_enabled = False
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset()
+
+
+@pytest.mark.parametrize("version", [None, "", " \t\n", 1, True, [], ["v2"], {"version": "v2"}])
+def test_source_model_invalid_collaboration_version_does_not_enable_namespaces(version: object) -> None:
+    source = _overrides_source({"multi_agent_version": version})
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset()
+
+
+def test_source_model_explicit_namespace_support_does_not_require_collaboration_version() -> None:
+    source = _overrides_source({"experimental_supported_tools": ["namespace"]})
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset({"namespace"})
+
+
+def test_source_model_collaboration_preserves_other_tool_opt_ins() -> None:
+    source = _overrides_source(
+        {
+            "multi_agent_version": "v2",
+            "supports_search_tool": True,
+            "experimental_supported_tools": ["custom", "namespace"],
+        }
+    )
+
+    assert source_model_supported_tool_types(source, "llama3.1:8b") == frozenset(
+        {"namespace", "web_search", "web_search_preview", "custom"}
+    )
+
+
 def test_source_models_to_upstream_models_skips_disabled_sources_and_models() -> None:
     disabled_source = ModelSource(
         id="src_disabled",

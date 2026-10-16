@@ -24,6 +24,17 @@ account locally; it does not globally de-route it or move owner-bound continuity
 to another account. At known expiry, selection and bridge reuse reject the
 account before upstream I/O.
 
+An ordinary freshness preflight can also discover the refresh warning itself.
+For an explicit refresh-credential-only error, it re-reads the persisted warning
+and known access-token expiry and may try the same upstream request using the
+remaining access-token lifetime. For example, a stale imported credential with
+an unexpired access token need not lose its first Responses request merely
+because the refresh token is invalidated. This recovery is caller-local:
+forced refresh after an upstream rejection still fails, even if it shared the
+exchange with an ordinary caller. Session invalidation, unknown/elapsed expiry,
+and transient failures do not qualify. No extra probe or quota-consuming warmup
+is made; the resource endpoint still decides whether the access token is valid.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:

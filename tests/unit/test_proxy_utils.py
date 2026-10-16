@@ -27172,6 +27172,39 @@ def test_websocket_client_previous_response_full_resend_retry_requires_matching_
     )
 
 
+def test_websocket_client_previous_response_full_resend_retry_rejects_delta_chained_to_empty_prewarm() -> None:
+    prewarm_input: list[JsonValue] = [
+        {"type": "additional_tools", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]},
+        {"role": "developer", "content": [{"type": "input_text", "text": "workspace rules"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        empty_prewarm_response_id="resp_prewarm",
+        empty_prewarm_input_count=len(prewarm_input),
+        empty_prewarm_input_fingerprint=proxy_service._fingerprint_input_items(prewarm_input),
+    )
+    turn_delta: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "environment context"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "summarize the notes"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=turn_delta,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_prewarm",
+            input_value=[*prewarm_input, *turn_delta],
+            continuity_state=continuity_state,
+        )
+        is True
+    )
+
+
 def test_websocket_client_previous_response_full_resend_retry_rejects_tool_output_delta() -> None:
     tool_output_delta: list[JsonValue] = [
         {"type": "function_call_output", "call_id": "call_a", "output": "ok"},
@@ -30456,6 +30489,55 @@ async def test_finalize_websocket_empty_prewarm_does_not_store_continuity_anchor
     assert continuity_state.last_completed_response_id == "resp_existing"
     assert continuity_state.last_completed_input_count == 2
     assert continuity_state.last_completed_input_prefix_fingerprint == "existing-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_finalize_replayed_websocket_empty_prewarm_records_client_visible_id(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_prewarm_replayed")
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock())
+
+    payload: dict[str, JsonValue] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_ws_prewarm_hidden",
+            "usage": {"input_tokens": 9, "output_tokens": 0, "total_tokens": 9},
+        },
+    }
+    continuity_state = proxy_service._WebSocketContinuityState()
+    # The replay's upstream id stays hidden: every downstream event is rewritten
+    # to the id the client received first, so the next turn chains to that id.
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prewarm_replayed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_kind="prewarm",
+        input_item_count=1,
+        input_full_fingerprint="prewarm-fingerprint",
+        response_id="resp_ws_prewarm_hidden",
+        replay_count=1,
+        replay_downstream_response_id="resp_ws_prewarm_visible",
+    )
+
+    await service._process_upstream_websocket_text(
+        json.dumps(payload),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        continuity_state=continuity_state,
+    )
+
+    assert continuity_state.empty_prewarm_response_id == "resp_ws_prewarm_visible"
+    assert continuity_state.empty_prewarm_input_count == 1
+    assert continuity_state.empty_prewarm_input_fingerprint == "prewarm-fingerprint"
 
 
 @pytest.mark.asyncio

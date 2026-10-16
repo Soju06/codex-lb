@@ -1,0 +1,3 @@
+- [x] 1.1 Add the two reported CCodex originators and their User-Agent prefixes to the fingerprint-specific native Codex allowlist.
+- [x] 1.2 Add regression coverage for HTTP and WebSocket fingerprint builders, including unlisted `ccodex` identifiers that must still be normalized and no transport-selection change.
+- [x] 1.3 Run the focused regression tests and strict OpenSpec validation.

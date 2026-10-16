@@ -282,6 +282,12 @@ _NATIVE_CODEX_ORIGINATORS = frozenset(
         "codex_vscode",
     }
 )
+_CCODEX_NATIVE_FINGERPRINT_ORIGINATORS = frozenset(
+    {
+        "ccodex-handoff-worker",
+        "ccodex-internal",
+    }
+)
 _NATIVE_CODEX_STREAM_HEADER_KEYS = frozenset(
     {
         "x-codex-turn-state",
@@ -809,6 +815,8 @@ def apply_codex_installation_headers(
 
 
 _NATIVE_CODEX_USER_AGENT_PREFIXES: tuple[str, ...] = (
+    "ccodex-handoff-worker/",
+    "ccodex-internal/",
     "codex_cli_rs",
     "codex-tui",
     "codex_exec",
@@ -883,7 +891,9 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
             originator = value
     if _is_native_codex_user_agent(user_agent):
         return True
-    return _is_native_codex_originator(originator)
+    if _is_native_codex_originator(originator):
+        return True
+    return originator is not None and originator.strip() in _CCODEX_NATIVE_FINGERPRINT_ORIGINATORS
 
 
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:

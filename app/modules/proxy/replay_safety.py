@@ -422,6 +422,16 @@ def responses_input_suffix_matches_pending_tool_calls(
         and _fresh_developer_interleave_is_bounded(suffix, index=1)
     ):
         suffix = [suffix[0], suffix[2]]
+    # A goal restart or steer can append user input after a fully settled
+    # prior-response tool batch. Prove that batch independently: new input
+    # must not stand in for a missing parallel call or interrupt its results.
+    first_followup = next(
+        (index for index, item in enumerate(suffix) if isinstance(item, dict) and _is_fresh_followup_input(item)),
+        len(suffix),
+    )
+    if not all(isinstance(item, dict) and _is_fresh_followup_input(item) for item in suffix[first_followup:]):
+        return False
+    suffix = suffix[:first_followup]
     if not all(
         isinstance(item, dict)
         and isinstance(item.get("type"), str)
@@ -612,6 +622,12 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
+    if item.get("id") not in (None, ""):
+        return False
+    if not _internal_chat_message_metadata_is_account_neutral(item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)):
+        return False
+    if not _input_item_has_only_known_fields(item, item_type if isinstance(item_type, str) else None):
+        return False
     if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
         return _input_content_part_is_self_contained(item, allow_output=False)
     return (

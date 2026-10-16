@@ -26,6 +26,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260717_000000_optimize_dashboard_hot_path_indexes"
 down_revision = "20260717_000000_merge_retention_and_reset_credit_display_heads"
 branch_labels = None
@@ -98,6 +100,21 @@ def upgrade() -> None:
                     """
                 )
             )
+    elif is_mysql(bind):
+        # MySQL has no partial indexes: the predicate is dropped and the full
+        # index is created (it still serves the same lookups).
+        create_mysql_index(
+            bind,
+            index_name=_COVERING_INDEX_NAME,
+            table_name="request_logs",
+            columns_sql="`requested_at`",
+        )
+        create_mysql_index(
+            bind,
+            index_name=_LABELS_INDEX_NAME,
+            table_name="additional_usage_history",
+            columns_sql="`account_id`, `quota_key`, `limit_name`, `metered_feature`",
+        )
     else:
         op.execute(
             sa.text(

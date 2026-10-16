@@ -66,6 +66,8 @@ from sqlalchemy.sql.elements import SQLCoreOperations
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
+from app.db.dialect_sql import binary_collated, is_mysql, whitespace_trim
+from app.db.dialect_sql import epoch_seconds as sql_epoch_seconds
 from app.db.models import (
     AccountUsageRollupState,
     RequestConversationHourlyRollup,
@@ -150,7 +152,10 @@ def normalized_thread_key_expr(column: SQLCoreOperations[str | None]) -> ColumnE
     variant would silently split one conversation into two. It is reused for
     ``session_id`` so a session-keyed thread normalizes identically.
     """
-    trimmed = func.ltrim(func.rtrim(column, CONVERSATION_WHITESPACE), CONVERSATION_WHITESPACE)
+    # Dialect-aware whitespace trim: SQLite/PostgreSQL keep the two-argument
+    # ltrim/rtrim form, MySQL gets an anchored regexp (its LTRIM/RTRIM take a
+    # single argument).
+    trimmed = whitespace_trim(column, CONVERSATION_WHITESPACE)
     return func.nullif(trimmed, "")
 
 
@@ -189,10 +194,15 @@ def from_dimension(value: str) -> str | None:
 
 def _dimension_expr(column) -> ColumnElement[str]:
     """SQL mirror of :func:`to_dimension` for the fold INSERT..SELECTs."""
-    return case(
-        (column.is_(None), DIMENSION_SENTINEL),
-        (func.substr(column, 1, 1) == DIMENSION_SENTINEL, DIMENSION_SENTINEL + column),
-        else_=column,
+    return binary_collated(
+        case(
+            (column.is_(None), DIMENSION_SENTINEL),
+            (
+                binary_collated(func.substr(column, 1, 1)) == DIMENSION_SENTINEL,
+                DIMENSION_SENTINEL + column,
+            ),
+            else_=column,
+        )
     )
 
 
@@ -327,6 +337,12 @@ def _add_rows_stmt(
 ):
     measure_columns = columns[len(key_columns) :]
     stmt = _insert_fn(session)(model).values([dict(zip(columns, astuple(row), strict=True)) for row in rows])
+    if is_mysql(session):
+        # MySQL has no ``excluded`` namespace; the would-be inserted values are
+        # read through the dialect's ``inserted`` accessor (VALUES(col)).
+        return stmt.on_duplicate_key_update(
+            **{column: getattr(model, column) + getattr(stmt.inserted, column) for column in measure_columns}
+        )
     return stmt.on_conflict_do_update(
         index_elements=[getattr(model, column) for column in key_columns],
         set_={column: getattr(model, column) + getattr(stmt.excluded, column) for column in measure_columns},
@@ -495,7 +511,16 @@ def _requested_at_epoch_bucket_expr(session: AsyncSession, bucket_seconds: int) 
             func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds,
             BigInteger,
         )
-    epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+    if is_mysql(dialect):
+        # MySQL's CAST(<decimal> AS SIGNED) ROUNDS instead of truncating, so
+        # the division must be floored explicitly or rows at :30+ minutes land
+        # in the next hour bucket (SQLite and PostgreSQL integer-divide and
+        # truncate here).
+        return cast(
+            func.floor(cast(sql_epoch_seconds(RequestLog.requested_at), Integer) / bucket_seconds) * bucket_seconds,
+            BigInteger,
+        )
+    epoch_col = cast(sql_epoch_seconds(RequestLog.requested_at), Integer)
     return cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
 
 
@@ -512,8 +537,8 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
     # value UNclamped, otherwise clamp to [0, input]. SQLite's two-argument
     # min()/max() scalar functions are its least()/greatest().
     dialect = session.get_bind().dialect.name
-    least = func.least if dialect == "postgresql" else func.min
-    greatest = func.greatest if dialect == "postgresql" else func.max
+    least = func.least if (dialect == "postgresql" or is_mysql(dialect)) else func.min
+    greatest = func.greatest if (dialect == "postgresql" or is_mysql(dialect)) else func.max
     cached_clamped = case(
         (RequestLog.cached_input_tokens.is_(None), 0),
         (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),

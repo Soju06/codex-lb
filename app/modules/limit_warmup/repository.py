@@ -6,6 +6,7 @@ from sqlalchemy import func, insert, literal, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.dialect_sql import is_mysql
 from app.db.models import AccountLimitWarmup
 from app.db.session import sqlite_writer_section
 
@@ -79,20 +80,16 @@ class LimitWarmupRepository:
                 select(AccountLimitWarmup.id).where(AccountLimitWarmup.account_id == account_id).exists()
             )
             insert_conditions.append(~prior_account_attempt)
-        insert_stmt = (
-            insert(AccountLimitWarmup)
-            .from_select(
-                ["account_id", "window", "reset_at", "status", "model", "attempted_at"],
-                select(
-                    literal(account_id, type_=table.c.account_id.type),
-                    literal(window, type_=table.c.window.type),
-                    literal(reset_at, type_=table.c.reset_at.type),
-                    literal(status, type_=table.c.status.type),
-                    literal(model, type_=table.c.model.type),
-                    literal(attempted_at, type_=table.c.attempted_at.type),
-                ).where(*insert_conditions),
-            )
-            .returning(AccountLimitWarmup.id)
+        insert_stmt = insert(AccountLimitWarmup).from_select(
+            ["account_id", "window", "reset_at", "status", "model", "attempted_at"],
+            select(
+                literal(account_id, type_=table.c.account_id.type),
+                literal(window, type_=table.c.window.type),
+                literal(reset_at, type_=table.c.reset_at.type),
+                literal(status, type_=table.c.status.type),
+                literal(model, type_=table.c.model.type),
+                literal(attempted_at, type_=table.c.attempted_at.type),
+            ).where(*insert_conditions),
         )
         try:
             async with sqlite_writer_section():
@@ -112,7 +109,48 @@ class LimitWarmupRepository:
                             text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
                             {"key": f"limit_warmup:{account_id}:{lock_window}"},
                         )
-                inserted_id = await self._session.scalar(insert_stmt)
+                if is_mysql(self._dialect_name()):
+                    # MySQL has no transaction-scoped advisory lock; per-account
+                    # sentinel rows (created on demand, in the same fixed order)
+                    # serialize the tolerance dedup and the account-wide
+                    # initial-attempt guard exactly like the advisory locks
+                    # above — the no-op upsert holds an exclusive row lock until
+                    # this transaction commits.
+                    lock_keys = (
+                        (
+                            account_id,
+                            *(f"{account_id}:{w}" for w in ("monthly", "primary", "primary_idle", "secondary")),
+                        )
+                        if require_no_prior_attempt
+                        else (account_id,)
+                    )
+                    for lock_key in lock_keys:
+                        await self._session.execute(
+                            text(
+                                "INSERT INTO runtime_sentinels (name, value) "
+                                "VALUES (:name, '') "
+                                "ON DUPLICATE KEY UPDATE value = value"
+                            ),
+                            {"name": f"limit_warmup:{lock_key}"[:64]},
+                        )
+                if is_mysql(self._dialect_name()):
+                    # MySQL has no INSERT ... RETURNING, and an INSERT ... SELECT
+                    # does not carry a usable lastrowid: the affected-row count
+                    # is the verdict, and the unique (account, window, reset_at)
+                    # tuple resolves the row that was just written.
+                    insert_result = await self._session.execute(insert_stmt)
+                    if (insert_result.rowcount or 0) > 0:
+                        inserted_id = await self._session.scalar(
+                            select(AccountLimitWarmup.id).where(
+                                AccountLimitWarmup.account_id == account_id,
+                                AccountLimitWarmup.window == window,
+                                AccountLimitWarmup.reset_at == reset_at,
+                            )
+                        )
+                    else:
+                        inserted_id = None
+                else:
+                    inserted_id = await self._session.scalar(insert_stmt.returning(AccountLimitWarmup.id))
                 await self._session.commit()
         except IntegrityError:
             # Backstop: the exact-tuple unique constraint
@@ -146,12 +184,13 @@ class LimitWarmupRepository:
                 error_message=error_message,
                 updated_at=completed_at,
             )
-            .returning(AccountLimitWarmup.id)
         )
         async with sqlite_writer_section():
             result = await self._session.execute(stmt)
             await self._session.commit()
-        if result.scalar_one_or_none() is None:
+        # rowcount carries the same verdict as the RETURNING row did, and works
+        # on MySQL too.
+        if (result.rowcount or 0) == 0:
             return None
         row = await self._session.get(AccountLimitWarmup, attempt_id)
         if row is not None:

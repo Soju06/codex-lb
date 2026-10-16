@@ -77,15 +77,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
     )
-    op.execute(
-        sa.text(
-            f"""
-            INSERT INTO {_TEMP_TABLE_NAME} (key, kind, account_id, created_at, updated_at)
-            SELECT key, kind, account_id, created_at, updated_at
-            FROM {_TABLE_NAME}
-            """
-        )
-    )
+    # Dialect-safe row copy: ``key`` is a reserved word on MySQL, so build the
+    # statement with SQLAlchemy so each dialect quotes identifiers correctly.
+    copy_columns = ["key", "kind", "account_id", "created_at", "updated_at"]
+    source = sa.table(_TABLE_NAME, *(sa.column(column) for column in copy_columns))
+    target = sa.table(_TEMP_TABLE_NAME, *(sa.column(column) for column in copy_columns))
+    op.execute(target.insert().from_select(copy_columns, sa.select(*(source.c[column] for column in copy_columns))))
     op.drop_table(_TABLE_NAME)
     op.rename_table(_TEMP_TABLE_NAME, _TABLE_NAME)
     op.create_index("idx_sticky_account", _TABLE_NAME, ["account_id"], unique=False)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from app.db.migration_indexes import create_mysql_index, is_mysql
+
 revision = "20260911_000000_model_source_pins_kind_expires_index"
 down_revision = "20260910_020000_add_dashboard_role_mappings"
 branch_labels = None
@@ -15,6 +17,16 @@ _COLUMNS = "(kind, expires_at)"
 
 
 def upgrade() -> None:
+    _bind = op.get_bind()
+    if is_mysql(_bind):
+        create_mysql_index(
+            _bind,
+            index_name=_NAME,
+            table_name="model_source_pins",
+            columns_sql="`kind`, `expires_at`",
+        )
+        return
+
     if op.get_bind().dialect.name == "postgresql":
         with op.get_context().autocommit_block():
             invalid = (

@@ -45,3 +45,15 @@ For example, a native rollback may finish while the loop is blocked across the i
 Warnings distinguish observed completion, attempted reclamation and failed cleanup. Elapsed time at the initial bound is not an event-loop lag measurement, and a failed invalidation does not prove a permanent writer hold. No database migration, pool change or operator setting is required. The [owning requirement](spec.md#requirement-a-completed-sqlite-teardown-is-never-reclaimed) defines the completion and cleanup contract.
 
 The invalidation warning covers exceptions raised by `connection.invalidate()`. SQLAlchemy 2.0.52 catches ordinary driver-close exceptions inside `Pool._close_connection` and logs them at ERROR, so those failures retain the pool's diagnostic owner. Finalization can also run for a task already terminal during grace; its message reports completion without claiming that the task finished after reclamation.
+
+## Cancelled SQLite statements retained by tracebacks
+
+A cancellation during a write with RETURNING can leave its unfinished sqlite3 cursor reachable from the cancellation traceback. Closing the connection alone can leave that statement holding the writer lock until cursor collection. This was reproduced with Python 3.14 and SQLAlchemy 2.0.52 and 2.1.4, including through both real bridge terminal transcript formats. It explains a reachable persistent lock failure; it does not identify the exact cursor held in an already-running incident process.
+
+File-backed main and background engines use a connection factory that weakly tracks SQLAlchemy-created cursors and explicitly closes them before raw connection close. Cleanup stays on aiosqlite's worker thread. Weak tracking avoids retaining otherwise dead cursors. Memory SQLite and PostgreSQL engine configuration are unchanged. Raising busy_timeout or pinning either tested SQLAlchemy version alone cannot release this stranded statement.
+
+An ordinary cursor-close exception does not stop cleanup of the remaining cursors. Teardown attempts every cursor and the base connection close, then propagates the first cleanup exception. A cursor whose native finalization itself fails cannot be assumed released; the remaining cursors still get their cleanup opportunity.
+
+For example, a terminal transcript write can hit its persistence deadline while an INSERT RETURNING is executing. After cancellation unwinds and teardown completes, fenced settlement and scheduler lease writes can proceed even while the cancellation traceback remains referenced. A worker still actively blocked is subject to the existing teardown/interruption bounds; cursor finalization takes effect when the queued close runs.
+
+The fix needs no migration or new setting. Restart with the patched build to replace existing connections, then verify real bridge writes and leader renewals; a healthy HTTP endpoint alone does not demonstrate recovery. See the [cleanup requirement](spec.md#requirement-cancelled-sqlite-writes-release-statement-locks-during-connection-teardown).

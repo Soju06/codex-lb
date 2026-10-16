@@ -289,6 +289,7 @@ def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> N
 
 
 def test_sqlite_file_engine_kwargs_use_nullpool_without_pool_controls(monkeypatch) -> None:
+    """File SQLite uses cursor-finalizing connections without pooled-backend settings."""
     monkeypatch.setattr(
         session_module,
         "_settings",
@@ -302,7 +303,7 @@ def test_sqlite_file_engine_kwargs_use_nullpool_without_pool_controls(monkeypatc
     kwargs = session_module._sqlite_file_async_engine_kwargs()
 
     assert kwargs["poolclass"] is NullPool
-    assert kwargs["connect_args"] == {"timeout": 30.0}
+    assert kwargs["connect_args"] == {"timeout": 30.0, "factory": session_module.FinalizingSQLiteConnection}
     assert "pool_size" not in kwargs
     assert "max_overflow" not in kwargs
     assert "pool_timeout" not in kwargs

@@ -1,14 +1,112 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from typing import cast
 
+import aiohttp
 import pytest
+from aiohttp import RequestInfo
 from starlette.requests import Request
 
-from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
+from app.core.clients.proxy import (
+    ProxyResponseError,
+    _error_event_from_response,
+    _error_payload_from_response,
+    _error_payload_from_websocket_handshake_error,
+    _infer_websocket_handshake_error_code,
+)
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
+from app.modules.proxy.helpers import is_upstream_usage_limit_rejection
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("status", [429, 403, None])
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The wording the fixtures across this repository observe upstream send.
+        "The usage limit has been reached",
+        "You've hit your usage limit.",
+        "Usage limit reached.",
+        "You have exceeded your usage limit.",
+    ],
+)
+def test_websocket_handshake_usage_limit_is_coded_from_the_message(status, message):
+    # The handshake carries the rejection as free text, so the inferred code is
+    # the only place the usage limit can still be read off it.
+    assert _infer_websocket_handshake_error_code(status, message) == "usage_limit_reached"
+
+
+# One sentence that reads both ways: the account-scoped usage limit, and the
+# generic throttling substring that rides along with almost every 429 wording.
+_HANDSHAKE_USAGE_LIMIT_WITH_THROTTLING_TEXT = "You've hit your usage limit. Your rate limit resets in 4 hours."
+
+
+@pytest.mark.parametrize("status", [429, 403, None])
+@pytest.mark.parametrize(
+    "message",
+    [
+        _HANDSHAKE_USAGE_LIMIT_WITH_THROTTLING_TEXT,
+        "Rate limit reached. The usage limit has been reached for this account.",
+    ],
+)
+def test_websocket_handshake_usage_limit_outranks_the_generic_throttling_hint(status, message):
+    # Throttling says "arrive slower"; the usage limit says "this account is
+    # spent". When upstream says both, only the second is true of the account,
+    # and the inferred code is where that survives: every consumer downstream
+    # reads the code, not the sentence it was read from.
+    code = _infer_websocket_handshake_error_code(status, message)
+
+    assert code == "usage_limit_reached"
+    assert is_upstream_usage_limit_rejection(error_code=code, message=None) is True
+
+
+@pytest.mark.parametrize("status", [403, 503, None])
+def test_websocket_handshake_throttling_hint_survives_a_non_429_status(status):
+    # Nothing here asserts the usage limit, so the generic reading is the right
+    # one -- and the status cannot stand in for it. A handshake rejected
+    # without a 429 has only its message to be read from.
+    code = _infer_websocket_handshake_error_code(status, "Rate limit exceeded. Please slow down.")
+
+    assert code == "rate_limit_exceeded"
+    assert is_upstream_usage_limit_rejection(error_code=code, message=None) is False
+
+
+def test_websocket_handshake_payload_carries_the_inferred_reading_to_the_client():
+    request_info = cast(RequestInfo, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
+
+    exhausted = _error_payload_from_websocket_handshake_error(
+        aiohttp.WSServerHandshakeError(
+            request_info, (), status=429, message=_HANDSHAKE_USAGE_LIMIT_WITH_THROTTLING_TEXT
+        )
+    )
+    throttled = _error_payload_from_websocket_handshake_error(
+        aiohttp.WSServerHandshakeError(request_info, (), status=403, message="Rate limit exceeded. Please slow down.")
+    )
+
+    assert exhausted["error"]["code"] == "usage_limit_reached"
+    assert throttled["error"]["code"] == "rate_limit_exceeded"
+    assert throttled["error"]["type"] == "rate_limit_error"
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (403, "This account has been deactivated", "account_deactivated"),
+        (403, "Usage not included in your plan", "usage_not_included"),
+        (429, "Insufficient quota for this request", "insufficient_quota"),
+        (429, "Quota exceeded for this organization", "quota_exceeded"),
+        (429, "Rate limit exceeded, try again shortly", "rate_limit_exceeded"),
+        (401, "Unauthorized", "invalid_api_key"),
+        (404, "Not found", "not_found"),
+        (429, "Too many requests", "rate_limit_exceeded"),
+        (503, "Upstream unavailable", "upstream_error"),
+    ],
+)
+def test_websocket_handshake_error_codes_keep_their_hints(status, message, expected):
+    assert _infer_websocket_handshake_error_code(status, message) == expected
 
 
 def test_logged_error_json_response_preserves_upstream_diagnostic_markers():

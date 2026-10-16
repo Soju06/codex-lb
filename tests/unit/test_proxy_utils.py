@@ -621,6 +621,41 @@ async def test_usage_limit_stream_error_requests_tracked_usage_refresh(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_message_derived_usage_limit_requests_the_same_usage_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An envelope whose usage limit is proven by its message records the same evidence a coded
+    one does: the refresh is gated on what the rejection means, not on the literal error code
+    upstream happened to attach."""
+    load_balancer = _stream_error_load_balancer()
+    schedule = MagicMock()
+    proxy = SimpleNamespace(_load_balancer=load_balancer, _schedule_cancel_safe_cleanup=schedule)
+    requested: list[str] = []
+    refresh = _sentinel_usage_refresh()
+
+    def fake_request_refresh(account_id: str):
+        requested.append(account_id)
+        return refresh
+
+    monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(fake_request_refresh), raising=False)
+    try:
+        classified = await streaming_helpers_module._handle_stream_error(
+            proxy,
+            cast(Account, SimpleNamespace(id="acc-message-usage-limit")),
+            {"message": "The usage limit has been reached"},
+            "upstream_error",
+            429,
+        )
+    finally:
+        refresh.close()
+
+    assert classified["failure_class"] == "rate_limit"
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    assert requested == ["acc-message-usage-limit"]
+    schedule.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_code_less_usage_limit_frame_requests_the_same_usage_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -734,6 +769,10 @@ async def test_usage_limit_stream_error_tolerates_proxy_without_cleanup_schedule
         # Quota codes already pin used_percent=100 in runtime state.
         ("insufficient_quota", 429, "You exceeded your current quota"),
         ("quota_exceeded", 429, "quota exceeded"),
+        # A quota code that repeats the usage-limit sentence stays a quota
+        # rejection: the refresh follows the classification, and widening it to
+        # the message alone would widen it to the quota class it excludes.
+        ("insufficient_quota", 429, "The usage limit has been reached"),
         # Account-neutral and model-scoped rejections never touch account health.
         ("invalid_request_error", 400, "No tool output found for function call call_abc."),
         (
@@ -16170,6 +16209,286 @@ async def test_stream_usage_limit_frame_after_a_visible_event_still_records_acco
     assert health_writes == [_TERMINAL_FRAME_SPENT_ACCOUNT_ID]
 
 
+# An HTTP 500 never reaches the pre-visible classification: both transports take
+# it straight to the same-account transient retries, so the exhaustion behind
+# those retries is the only place left to decide whether the account stays in
+# this request's walk. These two messages are the two answers: the first names
+# the requested model, which the sibling cannot serve either; the second says
+# nothing about the model, so the sibling is worth trying.
+_CAPACITY_500_MESSAGE = "Selected model is at capacity. Please try a different model."
+_ORDINARY_500_MESSAGE = "Internal server error"
+_WALK_500_SATURATED_ACCOUNT_ID = "acc_500_walk_saturated"
+_WALK_500_SIBLING_ACCOUNT_ID = "acc_500_walk_sibling"
+
+
+def _http_500_rejection(message: str) -> proxy_module.ProxyResponseError:
+    return proxy_module.ProxyResponseError(
+        500,
+        proxy_module.openai_error("server_error", message, error_type="server_error"),
+        failure_phase="status",
+    )
+
+
+def _install_500_walk_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    service: proxy_service.ProxyService,
+    saturated: Account,
+    sibling: Account,
+    selection_exclusions: list[set[str]],
+) -> None:
+    """Offer the sibling the moment the saturated account leaves the walk.
+
+    The exclusion set is what selection is actually told, so it -- not account
+    health, which penalizes the failing account either way -- is what separates
+    "moved off this account" from "kept it".
+    """
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        account = sibling if saturated.id in excluded else saturated
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+
+
+async def _run_stream_500_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    rejection_factory: Any = _http_500_rejection,
+) -> tuple[list[set[str]], list[str], list[dict[str, Any]]]:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(
+        _repo_factory(_RequestLogsRecorder()),
+        scheduler=_RecordingSleepScheduler(),
+    )
+    saturated = _make_account(_WALK_500_SATURATED_ACCOUNT_ID)
+    sibling = _make_account(_WALK_500_SIBLING_ACCOUNT_ID)
+    selection_exclusions: list[set[str]] = []
+    stream_accounts: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    _install_500_walk_selection(monkeypatch, service, saturated, sibling, selection_exclusions)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_accounts.append(account.id)
+        if account.id == saturated.id:
+            raise rejection_factory(message)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_500_walk_sibling"}}\n\n'
+
+    monkeypatch.setattr(
+        service,
+        "_ensure_fresh_with_budget",
+        AsyncMock(side_effect=lambda account, **_kwargs: account),
+    )
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-500-walk"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+    events = [json.loads(chunk.split("data: ", 1)[1]) for chunk in chunks]
+    return selection_exclusions, stream_accounts, events
+
+
+async def _run_compact_500_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> tuple[list[set[str]], list[str], CompactResponsePayload | proxy_module.ProxyResponseError]:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    saturated = _make_account(_WALK_500_SATURATED_ACCOUNT_ID)
+    sibling = _make_account(_WALK_500_SIBLING_ACCOUNT_ID)
+    selection_exclusions: list[set[str]] = []
+    compact_accounts: list[str] = []
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    # One upstream call per account: the same-account backoff is not what is
+    # under test, and skipping it keeps this test off the wall clock.
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    _install_500_walk_selection(monkeypatch, service, saturated, sibling, selection_exclusions)
+
+    async def fake_compact(_payload: object, _headers: object, _token: object, account_id: str) -> object:
+        compact_accounts.append(account_id)
+        if account_id == saturated.chatgpt_account_id:
+            raise _http_500_rejection(message)
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_kwargs: account))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **_kwargs: account))
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    try:
+        outcome: CompactResponsePayload | proxy_module.ProxyResponseError = await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-500-walk"},
+        )
+    except proxy_module.ProxyResponseError as exc:
+        outcome = exc
+    return selection_exclusions, compact_accounts, outcome
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keeps_the_account_after_a_500_capacity_rejection(monkeypatch):
+    """The pool is not walked for a condition no account in it can serve.
+
+    The sibling is selectable throughout and would have succeeded; reaching it
+    would mean the request had rotated onto an account that is at capacity for
+    the same model.
+    """
+    selection_exclusions, stream_accounts, events = await _run_stream_500_walk(monkeypatch, _CAPACITY_500_MESSAGE)
+
+    assert selection_exclusions
+    assert all(_WALK_500_SATURATED_ACCOUNT_ID not in excluded for excluded in selection_exclusions)
+    assert set(stream_accounts) == {_WALK_500_SATURATED_ACCOUNT_ID}
+    assert [event for event in events if event.get("type") == "response.completed"] == []
+    assert events[-1]["type"] == "response.failed"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_excludes_the_account_after_an_ordinary_500(monkeypatch):
+    """The carve-out is exactly the capacity case: every other 500 still leaves the account behind."""
+    selection_exclusions, stream_accounts, events = await _run_stream_500_walk(monkeypatch, _ORDINARY_500_MESSAGE)
+
+    assert selection_exclusions[-1] == {_WALK_500_SATURATED_ACCOUNT_ID}
+    assert stream_accounts[-1] == _WALK_500_SIBLING_ACCOUNT_ID
+    assert events[-1]["type"] == "response.completed"
+
+
+def _http_429_rejection(message: str) -> proxy_module.ProxyResponseError:
+    return proxy_module.ProxyResponseError(
+        429,
+        proxy_module.openai_error("rate_limit_exceeded", message, error_type="rate_limit_exceeded"),
+        failure_phase="status",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_excludes_the_account_after_a_429_capacity_rate_limit(monkeypatch, caplog):
+    """A genuine 429 is a different decision than the 500 carve-out.
+
+    The model-capacity message under ``rate_limit_exceeded`` classifies as
+    ``rate_limit``, not ``retryable_transient``, so the keep-account carve-out
+    does not apply: the failing account leaves the walk and the sibling serves.
+    """
+    caplog.set_level(logging.INFO)
+    selection_exclusions, stream_accounts, events = await _run_stream_500_walk(
+        monkeypatch, _CAPACITY_500_MESSAGE, rejection_factory=_http_429_rejection
+    )
+
+    assert "failure_class=rate_limit" in caplog.text
+    assert selection_exclusions[-1] == {_WALK_500_SATURATED_ACCOUNT_ID}
+    assert stream_accounts[-1] == _WALK_500_SIBLING_ACCOUNT_ID
+    assert events[-1]["type"] == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_capacity_exhaustion_keeps_the_owner_selectable(monkeypatch):
+    """Capacity continuing past the post-refresh same-account retries must not walk
+    the pool even though another account remains: the sibling cannot serve the
+    model either, so the owner stays selectable throughout."""
+    settings = _make_proxy_settings()
+    scheduler = _RecordingSleepScheduler()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()), scheduler=scheduler)
+    owner = _make_account("acc_post_refresh_capacity_owner")
+    sibling = _make_account("acc_post_refresh_capacity_sibling")
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    selection_exclusions: list[set[str]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        return AccountSelection(account=sibling if owner.id in excluded else owner, error_message=None)
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda target, **_k: target))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    stream_accounts: list[str] = []
+    stream_once_calls = 0
+
+    async def fake_stream_once(streamed: Account, *_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        stream_accounts.append(streamed.id)
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise _http_500_rejection(_CAPACITY_500_MESSAGE)
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    try:
+        events = [
+            json.loads(chunk.split("data: ", 1)[1])
+            async for chunk in service._stream_with_retry(
+                _burst_payload(_BURST_OWNER_BOUND_INPUT),
+                {"session_id": "sid-post-refresh-capacity"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+        assert events[-1]["type"] == "response.failed"
+    except proxy_module.ProxyResponseError:
+        pass  # the propagated surface is fine; the walk decision is what is under test
+
+    assert selection_exclusions
+    assert all(owner.id not in excluded for excluded in selection_exclusions)
+    assert set(stream_accounts) == {owner.id}
+    assert stream_once_calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_compact_keeps_the_account_after_a_500_capacity_rejection(monkeypatch):
+    """Compact decides this at the same point in its own loop, and must decide it the same way."""
+    selection_exclusions, compact_accounts, outcome = await _run_compact_500_walk(monkeypatch, _CAPACITY_500_MESSAGE)
+
+    assert selection_exclusions
+    assert all(_WALK_500_SATURATED_ACCOUNT_ID not in excluded for excluded in selection_exclusions)
+    assert set(compact_accounts) == {_WALK_500_SATURATED_ACCOUNT_ID}
+    assert isinstance(outcome, proxy_module.ProxyResponseError)
+    assert outcome.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_compact_excludes_the_account_after_an_ordinary_500(monkeypatch):
+    selection_exclusions, compact_accounts, outcome = await _run_compact_500_walk(monkeypatch, _ORDINARY_500_MESSAGE)
+
+    assert selection_exclusions[-1] == {_WALK_500_SATURATED_ACCOUNT_ID}
+    assert compact_accounts[-1] == _WALK_500_SIBLING_ACCOUNT_ID
+    assert isinstance(outcome, CompactResponsePayload)
+
+
 @pytest.mark.asyncio
 async def test_stream_with_retry_preserves_account_model_rejection_without_replacement(monkeypatch):
     settings = _make_proxy_settings()
@@ -18137,13 +18456,17 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
 
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
         if account.id == account_a.id:
+            # The deferred flush under test happens when the request settles on
+            # the sibling, so this rejection has to be one the request moves
+            # away from: a model-capacity message keeps the account in the walk
+            # instead, and the request never reaches ``account_b``.
             raise proxy_service._TransientStreamError(
-                "invalid_request_error",
+                "server_error",
                 cast(
                     UpstreamError,
                     {
-                        "message": "Selected model is at capacity. Please try a different model.",
-                        "code": "invalid_request_error",
+                        "message": "An error occurred while processing your request.",
+                        "code": "server_error",
                     },
                 ),
             )
@@ -18199,7 +18522,7 @@ async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not
     assert extra_error_total == 2
     assert settlement_order == [
         "settle",
-        f"health:{account_a.id}:invalid_request_error",
+        f"health:{account_a.id}:server_error",
         "extra:2",
     ]
     release_unsettled.assert_not_awaited()
@@ -19138,13 +19461,17 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
         stream_account_ids.append(account.id)
         if account.id == account_a.id:
+            # Settlement is what this test orders against, and it happens on the
+            # sibling, so the rejection has to be one the request moves away
+            # from: a model-capacity message keeps the account in the walk
+            # instead, and the request never reaches ``account_b``.
             raise proxy_service._TransientStreamError(
-                "invalid_request_error",
+                "server_error",
                 cast(
                     UpstreamError,
                     {
-                        "message": "Selected model is at capacity. Please try a different model.",
-                        "code": "invalid_request_error",
+                        "message": "An error occurred while processing your request.",
+                        "code": "server_error",
                     },
                 ),
             )
@@ -19191,7 +19518,7 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
     assert settlement_wait_flags == [True]
     assert settlement_order == [
         "settle",
-        f"health:{account_a.id}:invalid_request_error",
+        f"health:{account_a.id}:server_error",
         "extra:2",
     ]
     release_unsettled.assert_not_awaited()
@@ -56345,6 +56672,96 @@ async def test_stream_with_retry_post_refresh_owner_bound_burst_429_surfaces_wit
     assert excinfo.value.retry_after_seconds == 5
     assert stream_once_calls == 2
     assert scheduler.sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_post_refresh_message_only_usage_limit_429_surfaces_with_retry_after(
+    monkeypatch, caplog
+):
+    """The post-refresh surface owes the same hint as the pre-visible one.
+
+    A 429 whose usage limit is proven only by its message is not a burst, so it
+    skips the same-account backoff that would otherwise have stamped the hint --
+    and its envelope carries neither an upstream ``Retry-After`` nor a
+    ``resets_at``. Reading the limit off the message must not leave this client
+    with nothing to wait on.
+    """
+    settings = _make_proxy_settings()
+    scheduler = _RecordingSleepScheduler()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()), scheduler=scheduler)
+    account = _make_account("acc_post_refresh_usage_limit_owner")
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    fallback = _make_account("acc_post_refresh_usage_limit_fallback")
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        # This path reuses the bound owner directly instead of re-selecting, so
+        # only a foreign owner preference rotates onto the distinct fallback:
+        # unintended rotation then fails the stream-account assertions below
+        # explicitly instead of silently reusing one fake account.
+        preference = kwargs.get("preferred_account_id")
+        if preference is not None and preference != account.id:
+            return AccountSelection(account=fallback, error_message=None)
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda target, **_k: target))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    stream_once_calls = 0
+    stream_account_ids: list[str] = []
+
+    async def fake_stream_once(streamed: Account, *_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_account_ids.append(streamed.id)
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_module.ProxyResponseError(
+            429,
+            cast(Any, {"error": {"message": "The usage limit has been reached"}}),
+            failure_phase="status",
+        )
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+
+    with pytest.raises(proxy_module.ProxyResponseError) as excinfo:
+        [
+            chunk
+            async for chunk in service._stream_with_retry(
+                _burst_payload(_BURST_OWNER_BOUND_INPUT),
+                {"session_id": "sid-post-refresh-usage-limit-owner"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.payload == {"error": {"message": "The usage limit has been reached"}}
+    assert excinfo.value.retry_after_seconds == 5
+    assert stream_once_calls == 2
+    assert "phase=post_refresh failure_class=rate_limit action=surface" in caplog.text
+    # Out of quota: no same-account backoff was spent waiting on this account.
+    assert scheduler.sleeps == []
+    # Owner binding survives the post-refresh retry: every selection that ran
+    # asked for this owner (or asked for no preference, which this path answers
+    # by reusing the bound owner), and both stream attempts used it.
+    assert selection_kwargs
+    assert all(call.get("preferred_account_id") in (None, account.id) for call in selection_kwargs)
+    assert stream_account_ids == [account.id, account.id]
 
 
 @pytest.mark.asyncio

@@ -746,7 +746,7 @@ async def test_select_account_reports_missing_security_work_authorized_before_ex
 
 
 @pytest.mark.asyncio
-async def test_select_account_reports_missing_security_work_when_authorized_accounts_are_excluded() -> None:
+async def test_select_account_reports_security_work_exclusion_exhaustion() -> None:
     authorized = _make_account("acc-cyber", "cyber@example.com")
     authorized.security_work_authorized = True
 
@@ -761,7 +761,8 @@ async def test_select_account_reports_missing_security_work_when_authorized_acco
     )
 
     assert selection.account is None
-    assert selection.error_code == "no_security_work_authorized_accounts"
+    assert selection.error_code == load_balancer_module.SECURITY_WORK_AUTHORIZED_ACCOUNTS_EXHAUSTED
+    assert selection.error_message == "All accounts marked as authorized for security work were excluded"
 
 
 @pytest.mark.asyncio

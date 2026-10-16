@@ -135,6 +135,8 @@ _USAGE_LIMIT_MESSAGE_MARKERS = (
     "exceeded your usage limit",
 )
 _MESSAGE_WORD_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_CODE = "previous_response_owner_unavailable"
+PREVIOUS_RESPONSE_OWNER_UNAVAILABLE_MESSAGE = "Previous response owner account is unavailable; retry later."
 
 
 def openai_error(

@@ -455,6 +455,9 @@ class _ApiKeyUsageMixin:
                         get_request_id(),
                         exc_info=True,
                     )
+
+                    # The durable reservation stays accounted for until stale
+                    # reclamation. Do not retain an endless task per failed request.
                 raise ProxyResponseError(
                     502,
                     openai_error(

@@ -11,6 +11,7 @@ account selection and was rejected upstream.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 from app.core.openai.model_registry import get_model_registry
 from app.db.models import ModelSource
@@ -19,6 +20,14 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.repository import ModelSourcesRepository
 
 logger = logging.getLogger(__name__)
+
+
+class ResponsesModelSourceOwnership(Enum):
+    """Result of a WebSocket model-source ownership lookup."""
+
+    SOURCE_OWNED = "source_owned"
+    NOT_SOURCE_OWNED = "not_source_owned"
+    LOOKUP_UNAVAILABLE = "lookup_unavailable"
 
 
 def allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -86,16 +95,18 @@ def effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str
     return api_key.enforced_model
 
 
-async def responses_model_is_source_owned(
+async def resolve_responses_model_source_ownership(
     model: str | None,
     api_key: ApiKeyData | None,
     *,
     raw_model: str | None = None,
-) -> bool:
-    """True when ``model`` is served by a Responses-capable source, even a disabled one.
+) -> ResponsesModelSourceOwnership:
+    """Resolve model-source ownership without hiding catalog failures.
 
-    Used by the WebSocket path, which cannot forward to a model source and must
-    fail the session so the client falls back to the HTTP transport.
+    Used by the WebSocket path, which cannot forward to a model source: a
+    resolved source-owned model fails the session so the client falls back to
+    HTTP, while an unavailable catalog preserves the pre-guard subscription
+    path.
 
     Disabled-source ownership counts as ownership here: the WebSocket transport
     cannot serve a source-owned model regardless of the source's enabled state,
@@ -120,47 +131,62 @@ async def responses_model_is_source_owned(
     that predate preparation, e.g. replayed turns), the raw candidate is
     derived from ``enforced_model``/``model`` as before.
 
-    Resolution failures fail open to ``False``. This helper only gates the
-    WebSocket transport, where the alternative is worse: the lookup runs after
-    the turn's usage reservation is acquired but before it is registered for
-    cleanup, so a propagating database error tears the whole session down and
-    strands the reservation until the stale reaper runs. Failing open degrades
-    to the pre-guard behaviour (the subscription upstream rejects the model),
-    and source forwarding could not have worked anyway — it needs the same
-    database for the source's credentials. The HTTP handlers deliberately do
-    not use this helper: they call ``select_responses_model_source`` directly
-    and must keep surfacing resolution errors rather than silently routing
-    source traffic to a subscription account.
+    Lookup failures return ``LOOKUP_UNAVAILABLE`` so the WebSocket caller can
+    preserve the pre-guard subscription-selection behavior. The HTTP handlers
+    deliberately do not use this helper: they call
+    ``select_responses_model_source`` directly and continue surfacing catalog
+    errors rather than silently routing source traffic to a subscription
+    account.
     """
     raw = raw_model if raw_model is not None else effective_model_for_api_key(api_key, model)
     if not model and not raw:
-        return False
+        return ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
     try:
-        if (
+        is_source_owned = (
             await select_responses_model_source(
                 model or raw or "",
                 api_key,
                 raw_model=raw,
                 require_streaming=True,
-            )
-            is not None
-        ):
-            return True
-        return (
-            await select_responses_model_source(
-                model or raw or "",
-                api_key,
-                raw_model=raw,
-                require_streaming=True,
-                only_disabled=True,
             )
             is not None
         )
+        if not is_source_owned:
+            is_source_owned = (
+                await select_responses_model_source(
+                    model or raw or "",
+                    api_key,
+                    raw_model=raw,
+                    require_streaming=True,
+                    only_disabled=True,
+                )
+                is not None
+            )
     except Exception:
         logger.warning(
-            "model_source_resolution_failed_open model=%s raw_model=%s",
+            "model_source_resolution_unavailable model=%s raw_model=%s",
             model,
             raw,
             exc_info=True,
         )
-        return False
+        return ResponsesModelSourceOwnership.LOOKUP_UNAVAILABLE
+    return (
+        ResponsesModelSourceOwnership.SOURCE_OWNED
+        if is_source_owned
+        else ResponsesModelSourceOwnership.NOT_SOURCE_OWNED
+    )
+
+
+async def responses_model_is_source_owned(
+    model: str | None,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+) -> bool:
+    """True when ``model`` is source-owned, failing open on lookup errors."""
+    ownership = await resolve_responses_model_source_ownership(
+        model,
+        api_key,
+        raw_model=raw_model,
+    )
+    return ownership is ResponsesModelSourceOwnership.SOURCE_OWNED

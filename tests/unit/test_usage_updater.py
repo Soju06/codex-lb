@@ -2140,6 +2140,43 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_canonicalizes_business_prolite_alias_without_workspace(monkeypatch) -> None:
+    """The upstream Business Premium identifier is the existing Prolite tier."""
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        del access_token, account_id
+        return UsagePayload.model_validate(
+            {
+                "plan_type": "self_serve_business_prolite",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1736208000,
+                        "limit_window_seconds": 5 * 60 * 60,
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    account = _make_account("acc_business_prolite_alias", "upstream_user", email="same@example.com")
+    account.workspace_id = None
+    account.plan_type = "team"
+    accounts_repo.accounts_by_id[account.id] = account
+
+    await updater.refresh_accounts([account], latest_usage={})
+
+    assert usage_repo.entries != []
+    assert account.plan_type == "prolite"
+    assert accounts_repo.metadata_updates[0]["plan_type"] == "prolite"
+    assert account.workspace_id is None
+
+
+@pytest.mark.asyncio
 async def test_usage_refresh_hydrates_unknown_plan_without_workspace(monkeypatch) -> None:
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:

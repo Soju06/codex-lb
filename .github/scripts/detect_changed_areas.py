@@ -33,6 +33,7 @@ FILTERS = {
         "Makefile",
         ".github/workflows/ci.yml",
         "docs/reference/settings.md",
+        "docs/examples/**",
         ".env.example",
         ".github/simplicity-budgets.toml",
         "Cargo.toml",

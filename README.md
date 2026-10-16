@@ -63,7 +63,7 @@ see [Getting started](https://soju06.github.io/codex-lb/getting-started/).
 Point any OpenAI-compatible client at codex-lb. For Codex CLI, `~/.codex/config.toml`:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 

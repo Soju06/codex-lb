@@ -1,6 +1,6 @@
 # Machine-local Codex configuration: ~/.codex/config.toml
 # The default provider remains ordinary codex-lb traffic.
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_provider = "codex-lb"
 

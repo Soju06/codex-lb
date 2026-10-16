@@ -881,7 +881,7 @@ def test_codex_provider_profiles_route_before_first_account_attempt(
     normalized_provider_headers = {name.lower(): value for name, value in provider_headers.items()}
 
     assert provider_id == expected_provider_id
-    assert model == "gpt-5.6-sol"
+    assert model == "gpt-6-astra"
     assert provider["name"] == "openai"
     assert provider["base_url"].endswith("/backend-api/codex")
     assert provider["wire_api"] == "responses"

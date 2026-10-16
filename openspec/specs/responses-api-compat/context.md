@@ -47,6 +47,22 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - A DRAINING durable row with a live lease is still owned. Foreign `claim_live_session` and local session create must not steal it, including when forced recovery would otherwise run because the owner endpoint is missing; expired or ownerless DRAINING rows remain recoverable.
 - Hard-affinity retry-circuit evidence is request-lifecycle evidence: retirement counts only while the bridge still owns an eventless pending request. Idle no-pending retirement remains observable but neutral, so routine socket churn cannot manufacture the first strike for a later real timeout.
 
+## Retry health and reset evidence
+
+HTTP bridge and direct WebSocket retry health use the same parsed reset
+evidence as terminal settlement. A keyed request retains that evidence in its
+deferred penalty until reservation settlement completes. See `spec.md`,
+"Retry health preserves upstream quota reset evidence", for the contract.
+
+For example, a five-day usage-limit reset must not become the 30-second
+metadata-free fallback: owner retirement compares the recorded horizon with
+the next request's recovery budget. The real deadline lets a later eligible
+request use the existing replacement path. Client anchors, file pins, replay
+proof requirements, transient-backoff policy, and automatic-reviewer session
+recovery remain separate constraints. Missing or invalid metadata, including
+JSON booleans, retains the established fallback. No setting or migration is
+required for this change.
+
 ## Fast Mode and Service Tiers
 
 codex-lb accepts the OpenAI/Codex `service_tier` field on Responses and Chat

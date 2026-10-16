@@ -45976,6 +45976,11 @@ async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_sett
     penalty = request_state.deferred_keyed_stream_health[0]
     assert penalty.account is session.account
     assert penalty.code == "usage_limit_reached"
+    assert penalty.error == {
+        "message": "The usage limit has been reached",
+        "resets_at": 1_778_790_595,
+        "resets_in_seconds": 14_555,
+    }
     assert getattr(request_state, "account_health_error_handled", False) is True
 
 

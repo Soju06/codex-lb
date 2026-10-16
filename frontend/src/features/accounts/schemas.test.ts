@@ -4,6 +4,7 @@ import {
   AccountAuthExportResponseSchema,
   AccountProbeResponseSchema,
   AccountSummarySchema,
+  AccountUsageLimitUpdateRequestSchema,
   ConsumeRateLimitResetCreditResponseSchema,
   ImportStateSchema,
   OAuthStateSchema,
@@ -71,6 +72,39 @@ describe("AccountSummarySchema", () => {
     });
 
     expect(parsed.routingPolicy).toBe("preserve");
+  });
+
+  it("parses account usage limit configuration and evaluated state", () => {
+    const parsed = AccountSummarySchema.parse({
+      accountId: "acc-1",
+      email: "user@example.com",
+      displayName: "User",
+      planType: "pro",
+      status: "active",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "reached",
+    });
+
+    expect(parsed.usageLimitEnabled).toBe(true);
+    expect(parsed.usageLimitPercent).toBe(10);
+    expect(parsed.usageLimitState).toBe("reached");
+  });
+
+  it("rejects enabling with every threshold explicitly removed", () => {
+    expect(() => AccountUsageLimitUpdateRequestSchema.parse({
+      enabled: true, percent: null, percent5H: null, percentWeekly: null,
+    })).toThrow();
+  });
+
+  it("distinguishes an omitted retained percentage from explicit removal", () => {
+    expect(AccountUsageLimitUpdateRequestSchema.parse({ enabled: true })).toEqual({ enabled: true });
+    expect(
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: false }),
+    ).toEqual({ enabled: false });
+    expect(
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: false, percent: null }),
+    ).toEqual({ enabled: false, percent: null });
   });
 });
 

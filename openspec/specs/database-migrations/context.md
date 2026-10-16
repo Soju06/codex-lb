@@ -72,3 +72,18 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Usage-limit history convergence
+
+The usage-limit branch and September upstream history converge at
+`20261002_000000_merge_usage_limits_and_main_heads`. Their existing revision
+identifiers and parentage remain intact, so databases that already applied
+either branch can upgrade normally. For example, a database with an enabled
+10% policy and a disabled saved 20% policy keeps both values while applying
+upstream migrations; an upstream-only database gains disabled policy fields.
+
+The topology guard accepts a parallel branch only when the checkout joins its
+lineage with every upstream head and retains one canonical head. Joining an
+older upstream revision while omitting a later head still fails. Both upgrade
+paths and this incomplete-convergence case are covered by the
+[local review](../../changes/archive/2026-10-02-review-account-usage-limit-boundaries/context.md).

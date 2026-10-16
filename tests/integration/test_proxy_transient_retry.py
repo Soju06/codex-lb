@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from sqlalchemy import select
 
 import app.modules.proxy.account_cache as account_cache_module
 import app.modules.proxy.api as proxy_api_module
@@ -388,14 +389,14 @@ async def test_stream_serialized_usage_limit_frame_without_a_code_walks_the_pool
     does or does not carry is in no transport retry list, so the sentence is the only evidence
     there is -- reading it is what keeps the two forms on one answer instead of surfacing the
     first account's error while the body form rotates."""
-    account_a_id = await _import_account(async_client, "acc_stream_frame_limit_a", "streamframelimita@example.com")
+    await _import_account(async_client, "acc_stream_frame_limit_a", "streamframelimita@example.com")
     await _import_account(async_client, "acc_stream_frame_limit_b", "streamframelimitb@example.com")
 
     seen_account_ids: list[str | None] = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_stream_frame_limit_a":
+        if account_id == seen_account_ids[0]:
             yield _sse_event({"type": "response.failed", "response": {"error": frame_error}})
             return
         yield _success_sse_event("resp_stream_frame_limit_ok")
@@ -410,10 +411,12 @@ async def test_stream_serialized_usage_limit_frame_without_a_code_walks_the_pool
     events = _extract_events(lines)
     assert [event for event in events if event.get("type") == "response.failed"] == []
     assert len([event for event in events if event.get("type") == "response.completed"]) == 1
-    assert seen_account_ids[:2] == ["acc_stream_frame_limit_a", "acc_stream_frame_limit_b"]
+    assert set(seen_account_ids[:2]) == {"acc_stream_frame_limit_a", "acc_stream_frame_limit_b"}
 
     async with SessionLocal() as session:
-        exhausted_account = await session.get(Account, account_a_id)
+        exhausted_account = await session.scalar(
+            select(Account).where(Account.chatgpt_account_id == seen_account_ids[0])
+        )
         assert exhausted_account is not None
         assert exhausted_account.status == AccountStatus.RATE_LIMITED
 
@@ -683,7 +686,7 @@ async def test_stream_server_error_does_not_fail_over_after_accepted_terminal_ev
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_trans_fo_a":
+        if account_id == seen_account_ids[0]:
             yield _server_error_sse_event()
             return
         yield _success_sse_event()
@@ -699,7 +702,8 @@ async def test_stream_server_error_does_not_fail_over_after_accepted_terminal_ev
     failed = [event for event in events if event.get("type") == "response.failed"]
     assert len(failed) == 1
     assert failed[0]["response"]["error"]["code"] == "server_error"
-    assert seen_account_ids == ["acc_trans_fo_a"]
+    assert len(seen_account_ids) == 1
+    assert seen_account_ids[0] in {"acc_trans_fo_a", "acc_trans_fo_b"}
 
 
 @pytest.mark.asyncio
@@ -804,7 +808,7 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_h5fo_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 500,
                 openai_error("server_error", "Internal server error"),
@@ -823,23 +827,22 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
     completed = [e for e in events if e.get("type") == "response.completed"]
     assert len(completed) == 1
 
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_h5fo_b"]
-    assert len(a_calls) == 3
-    assert len(b_calls) >= 1
+    assert len(seen_account_ids) == 4
+    assert seen_account_ids[:3] == [seen_account_ids[0]] * 3
+    assert set(seen_account_ids) == {"acc_h5fo_a", "acc_h5fo_b"}
 
 
 @pytest.mark.asyncio
 async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
-    account_a_id = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
     seen_account_ids: list[str | None] = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_stream_429_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 429,
                 openai_error("usage_limit_reached", "usage limit reached"),
@@ -859,10 +862,12 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     failed = [e for e in events if e.get("type") == "response.failed"]
     assert len(completed) == 1
     assert len(failed) == 0
-    assert seen_account_ids[:2] == ["acc_stream_429_a", "acc_stream_429_b"]
+    assert set(seen_account_ids[:2]) == {"acc_stream_429_a", "acc_stream_429_b"}
 
     async with SessionLocal() as session:
-        exhausted_account = await session.get(Account, account_a_id)
+        exhausted_account = await session.scalar(
+            select(Account).where(Account.chatgpt_account_id == seen_account_ids[0])
+        )
         assert exhausted_account is not None
         assert exhausted_account.status == AccountStatus.RATE_LIMITED
 
@@ -1049,7 +1054,7 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_h502_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 502,
                 openai_error("bad_gateway", "Bad gateway"),
@@ -1067,7 +1072,7 @@ async def test_stream_http_502_unknown_code_fails_over_to_second_account(async_c
     events = _extract_events(lines)
     completed = [e for e in events if e.get("type") == "response.completed"]
     assert len(completed) == 1
-    assert seen_account_ids[:2] == ["acc_h502_a", "acc_h502_b"]
+    assert set(seen_account_ids[:2]) == {"acc_h502_a", "acc_h502_b"}
 
 
 # ===========================================================================
@@ -1338,7 +1343,7 @@ async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_midstream_a":
+        if len(seen_account_ids) == 1:
             yield _sse_event({"type": "response.in_progress", "response": {"id": "resp_midstream"}})
             yield _sse_event(
                 {
@@ -1362,7 +1367,8 @@ async def test_stream_mid_stream_error_is_surfaced_without_failover(async_client
     assert len(failed) == 1
     assert failed[0].get("response", {}).get("error", {}).get("code") == "rate_limit_exceeded"
     assert len(completed) == 0
-    assert seen_account_ids == ["acc_midstream_a"]
+    assert len(seen_account_ids) == 1
+    assert seen_account_ids[0] in {"acc_midstream_a", "acc_midstream_b"}
 
 
 @pytest.mark.asyncio
@@ -1410,7 +1416,7 @@ async def test_stream_http_429_after_text_is_surfaced_without_account_failover(a
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
-        if account_id == "acc_midtext_429_a":
+        if len(seen_account_ids) == 1:
             yield _sse_event({"type": "response.output_text.delta", "delta": "visible"})
             raise ProxyResponseError(
                 429,
@@ -1434,7 +1440,8 @@ async def test_stream_http_429_after_text_is_surfaced_without_account_failover(a
     assert len(failed) == 1
     assert failed[0].get("response", {}).get("error", {}).get("code") == "usage_limit_reached"
     assert completed == []
-    assert seen_account_ids == ["acc_midtext_429_a"]
+    assert len(seen_account_ids) == 1
+    assert seen_account_ids[0] in {"acc_midtext_429_a", "acc_midtext_429_b"}
 
 
 @pytest.mark.asyncio
@@ -1545,7 +1552,7 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
 
     async def fake_compact(payload, headers, access_token, account_id):
         seen_account_ids.append(account_id)
-        if account_id == "acc_cfo_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 500,
                 openai_error("server_error", "server error"),
@@ -1560,10 +1567,9 @@ async def test_compact_500_exhausts_retries_then_failover(async_client, monkeypa
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
 
-    a_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_a"]
-    b_calls = [aid for aid in seen_account_ids if aid == "acc_cfo_b"]
-    assert len(a_calls) == 3
-    assert len(b_calls) >= 1
+    assert len(seen_account_ids) == 4
+    assert seen_account_ids[:3] == [seen_account_ids[0]] * 3
+    assert set(seen_account_ids) == {"acc_cfo_a", "acc_cfo_b"}
 
 
 @pytest.mark.asyncio
@@ -1576,7 +1582,7 @@ async def test_compact_quota_exceeded_transparent_failover(async_client, monkeyp
 
     async def fake_compact(payload, headers, access_token, account_id):
         seen_account_ids.append(account_id)
-        if account_id == "acc_compact_quota_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 429,
                 openai_error("quota_exceeded", "quota exceeded"),
@@ -1590,11 +1596,10 @@ async def test_compact_quota_exceeded_transparent_failover(async_client, monkeyp
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
-    assert seen_account_ids[:2] == ["acc_compact_quota_a", "acc_compact_quota_b"]
+    assert set(seen_account_ids[:2]) == {"acc_compact_quota_a", "acc_compact_quota_b"}
 
     async with SessionLocal() as session:
-        account_id = generate_unique_account_id("acc_compact_quota_a", "compactquotaa@example.com")
-        account_a = await session.get(Account, account_id)
+        account_a = await session.scalar(select(Account).where(Account.chatgpt_account_id == seen_account_ids[0]))
         assert account_a is not None
         await session.refresh(account_a)
         assert account_a.status == AccountStatus.QUOTA_EXCEEDED
@@ -1688,7 +1693,7 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
 
     async def fake_compact(payload, headers, access_token, account_id):
         seen_account_ids.append(account_id)
-        if account_id == "acc_sticky_503_a":
+        if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 503,
                 openai_error("bad_gateway", "Bad gateway"),
@@ -1706,7 +1711,7 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     )
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
-    assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]
+    assert set(seen_account_ids[:2]) == {"acc_sticky_503_a", "acc_sticky_503_b"}
 
 
 # ===========================================================================
@@ -1750,6 +1755,14 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
     fetched: list[str | None] = []
     fetch_started = asyncio.Event()
     release_fetch = asyncio.Event()
+    refresh_finished = asyncio.Event()
+    run_refresh = usage_updater_module._run_requested_refresh
+
+    async def tracked_refresh(account_id):
+        await run_refresh(account_id)
+        refresh_finished.set()
+
+    monkeypatch.setattr(usage_updater_module, "_run_requested_refresh", tracked_refresh)
 
     async def fake_fetch_usage(*, access_token, account_id, route=None, allow_direct_egress=True):
         fetched.append(account_id)
@@ -1794,21 +1807,12 @@ async def test_stream_usage_limit_requests_immediate_refresh_so_pool_reports_exh
         stale_generation = selection_cache.generation
 
         release_fetch.set()
-        # The refresh is a tracked background task: poll briefly for its row instead of a
-        # scheduler tick (USAGE_REFRESH_INTERVAL_SECONDS).
-        latest = None
-        deadline = time.monotonic() + 5.0
-        while latest is None and time.monotonic() < deadline:
-            latest = await latest_primary_row()
-            if latest is None:
-                await asyncio.sleep(0.02)
+        await asyncio.wait_for(refresh_finished.wait(), timeout=5)
+        latest = await latest_primary_row()
         assert latest is not None, "a streamed usage_limit_reached must request an immediate usage refresh"
         assert latest.used_percent == 100.0
         assert latest.reset_at == reset_at
 
-        deadline = time.monotonic() + 5.0
-        while selection_cache.generation == stale_generation and time.monotonic() < deadline:
-            await asyncio.sleep(0.02)
         assert selection_cache.generation > stale_generation, "the written row must invalidate the selection cache"
         assert selection_cache._cache == {}
 

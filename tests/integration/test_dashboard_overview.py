@@ -91,12 +91,14 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
             "acc_dash",
             20.0,
             window="primary",
+            window_minutes=300,
             recorded_at=primary_time,
         )
         await usage_repo.add_entry(
             "acc_dash",
             40.0,
             window="secondary",
+            window_minutes=10080,
             recorded_at=secondary_time,
         )
         await logs_repo.add_log(

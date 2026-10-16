@@ -1,0 +1,21 @@
+# Tasks
+
+- [x] 1. Add OpenSpec proposal, design, tasks, and account-routing delta requirements.
+- [x] 2. Add the reusable standard-usage limit evaluator and unit coverage.
+- [x] 3. Add account persistence fields and a reversible Alembic migration with migration tests.
+- [x] 4. Add account schemas, repository/service update path, API endpoint, summary mapping, and backend tests.
+- [x] 5. Carry standard quota rows into account selection and enforce one canonical hard gate across normal, sticky, additional-quota, opportunistic, fair-share, continuity-pinned HTTP/WebSocket, and synthetic-warmup paths.
+- [x] 6. Add dashboard schemas, client mutation, account controls, main-card status presentation, mocks, and frontend tests while preserving API-valid percentage precision.
+- [x] 7. Document configuring and interpreting per-account usage limits in the routing guide.
+- [x] 8. Run focused backend/frontend, migration, precision, telemetry-freshness, error-precedence, continuity, and warmup regressions plus lint, formatting, type, architecture, and OpenSpec checks.
+- [x] 9. Resolve final review findings for warmup spec ownership, opportunistic error precedence, dashboard blocked-state display, and accessible percentage validation.
+- [x] 10. Make disable-retain atomic across the account API and dashboard, with stale-client regressions.
+- [x] 11. Preserve throttled selection invalidation for uncapped live telemetry.
+- [x] 12. Preserve caller exhaustion controls when every account is locally blocked.
+- [x] 13. Close WebSocket dispatch races across admission and authorization waits.
+- [x] 14. Keep HTTP bridge authorization waits outside pending-response locks and preserve typed failures.
+- [x] 15. Remove redundant frontend validation and misleading mock policy states.
+- [x] 16. Verify the audited change with backend, frontend, migration, and OpenSpec checks.
+- [x] 17. Preserve telemetry precision when deduplicating observations across a cap.
+- [x] 18. Reload owner-authorization snapshots invalidated while being read.
+- [x] 19. Enable saved limits atomically without overwriting newer values from stale tabs.

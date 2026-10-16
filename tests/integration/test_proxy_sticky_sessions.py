@@ -909,7 +909,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_c1"]
+    assert stream_seen == ["acc_c1"], response.text
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -3221,3 +3221,65 @@ async def test_cleanup_retires_derived_prompt_cache_rows_and_keeps_client_sticky
 
     assert set(client_thread_keys) <= remaining, "a client-supplied sticky_thread row was swept by key prefix"
     assert not set(derived_prompt_cache_keys) & remaining, "derived prompt_cache rows should expire at the TTL"
+
+
+@pytest.mark.asyncio
+async def test_v1_prompt_cache_key_survives_generation_bump_during_sticky_persist(async_client, monkeypatch):
+    """A generation bump landing between sticky persistence and the
+    post-persistence fence must retry against fresh inputs, not fail the
+    request: the committed owner is re-authorized and upstream is called
+    exactly once."""
+    from app.modules.proxy.account_cache import get_account_selection_cache
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    acc_id = await _import_account(async_client, "acc_gen_bump", "gen_bump@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(
+            account_id=acc_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    real_upsert = StickySessionsRepository.upsert
+    bumps = 0
+
+    async def bump_once(self, key, account_id, *, kind):
+        nonlocal bumps
+        result = await real_upsert(self, key, account_id, kind=kind)
+        if bumps == 0:
+            bumps += 1
+            # Same non-propagating invalidation the CacheInvalidationPoller
+            # account-selection callback issues on an ambient bump.
+            get_account_selection_cache().invalidate(propagate=False)
+        return result
+
+    monkeypatch.setattr(StickySessionsRepository, "upsert", bump_once)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": "thread_gen_bump",
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert response.status_code == 200
+    assert bumps == 1
+    # The retry re-authorizes the committed owner: exactly one upstream call.
+    # (Upstream routing uses the requested account name; the import returns
+    # the DB row id with a random suffix.)
+    assert seen == ["acc_gen_bump"]

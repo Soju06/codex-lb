@@ -6,6 +6,8 @@ from typing import Literal
 AccountLeaseKind = Literal["response_create", "stream"]
 
 MAX_SELECTION_ATTEMPTS = 4
+SELECTION_STATE_CHANGED = "selection_state_changed"
+SELECTION_STATE_CHANGED_MESSAGE = "Account selection state changed during admission; retry the request"
 
 
 @dataclass

@@ -83,6 +83,7 @@ function mockAccountsQuery(accounts: AccountSummary[]) {
     setAliasMutation: idleMutation(),
     limitWarmupMutation: idleMutation(),
     routingPolicyMutation: idleMutation(),
+    usageLimitMutation: idleMutation(),
     updateMutation: idleMutation(),
   } as unknown as ReturnType<typeof useAccounts>);
 }
@@ -91,6 +92,7 @@ function idleMutation() {
   return {
     isPending: false,
     error: null,
+    mutate: vi.fn(),
     mutateAsync: vi.fn(),
   };
 }
@@ -102,6 +104,9 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     displayName: "Default",
     planType: "plus",
     status: "active",
+    usageLimitEnabled: false,
+    usageLimitPercent: null,
+    usageLimitState: "disabled",
     additionalQuotas: [],
     limitWarmupEnabled: false,
     ...overrides,
@@ -239,6 +244,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      usageLimitMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -281,6 +287,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      usageLimitMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -327,6 +334,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      usageLimitMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -384,6 +392,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      usageLimitMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -447,6 +456,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      usageLimitMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);

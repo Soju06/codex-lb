@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -15,16 +17,35 @@ from app.core.crypto import TokenEncryptor
 from app.core.openai.requests import ResponsesRequest
 from app.core.usage import live_hub
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy.account_cache import AccountSelectionCache
+from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage import live_ingest
 from app.modules.usage import repository as usage_repository_module
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
+
+
+@asynccontextmanager
+async def _proxy_repositories() -> AsyncIterator[ProxyRepositories]:
+    async with SessionLocal() as session:
+        yield ProxyRepositories(
+            accounts=AccountsRepository(session),
+            usage=UsageRepository(session),
+            request_logs=RequestLogsRepository(session),
+            sticky_sessions=StickySessionsRepository(session),
+            api_keys=ApiKeysRepository(session),
+            additional_usage=AdditionalUsageRepository(session),
+        )
 
 
 def _make_account(account_id: str, email: str, *, chatgpt_account_id: str | None = None) -> Account:
@@ -43,7 +64,7 @@ def _make_account(account_id: str, email: str, *, chatgpt_account_id: str | None
 
 
 def _snapshot() -> LiveRateLimitSnapshot:
-    now_epoch = int(utcnow().timestamp())
+    now_epoch = naive_utc_to_epoch(utcnow())
     return LiveRateLimitSnapshot(
         primary=LiveUsageWindow(used_percent=33.0, window_minutes=300, reset_at=now_epoch + 300),
         secondary=LiveUsageWindow(used_percent=44.0, window_minutes=10080, reset_at=now_epoch + 5 * 24 * 3600),
@@ -147,6 +168,121 @@ async def test_live_ingestor_invalidates_rate_limit_header_cache(monkeypatch, db
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_coalesces_queued_exact_duplicates_for_enabled_policy(db_setup) -> None:
+    del db_setup
+    account_id = "acc_live_limited_duplicates"
+    account = _make_account(account_id, "live-limited-duplicates@example.com")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    snapshot = _snapshot()
+    ingestor.publish(snapshot, account_id=account_id)
+    ingestor.publish(snapshot, account_id=account_id)
+
+    await ingestor._ingest(ingestor._queue.get_nowait())
+    await ingestor._ingest(ingestor._queue.get_nowait())
+
+    rows = await _usage_rows_for(account_id)
+    assert [row.window for row in rows] == ["primary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    account_id = "acc_live_selection_public"
+    account = _make_account(account_id, "live-selection-public@example.com")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 10.002
+    now_epoch = naive_utc_to_epoch(utcnow())
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account_id,
+            10.001,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await UsageRepository(session).add_entry(
+            account_id,
+            10.001,
+            window="secondary",
+            reset_at=now_epoch + 7 * 24 * 3600,
+            window_minutes=10_080,
+        )
+
+    selection_cache = AccountSelectionCache(ttl_seconds=60)
+    header_invalidated = asyncio.Event()
+    header_invalidate = AsyncMock(side_effect=header_invalidated.set)
+    monkeypatch.setattr(live_ingest, "get_account_selection_cache", lambda: selection_cache)
+    monkeypatch.setattr(
+        live_ingest,
+        "get_rate_limit_headers_cache",
+        lambda: SimpleNamespace(invalidate=header_invalidate),
+    )
+    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 0.05)
+    balancer = LoadBalancer(_proxy_repositories)
+    balancer._selection_inputs_cache = selection_cache
+
+    admitted = await balancer.select_account(routing_strategy="usage_weighted")
+    assert admitted.account is not None
+    assert admitted.account.id == account_id
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    ingestor._last_cache_invalidation = live_ingest.time.monotonic()
+    try:
+        below_limit = LiveRateLimitSnapshot(
+            primary=LiveUsageWindow(
+                used_percent=10.001,
+                window_minutes=300,
+                reset_at=now_epoch + 3600,
+            ),
+            secondary=None,
+            credits_has=None,
+            credits_unlimited=None,
+            credits_balance=None,
+        )
+        ingestor._last_write[account_id] = (below_limit, live_ingest.time.monotonic())
+        ingestor.publish(
+            LiveRateLimitSnapshot(
+                primary=LiveUsageWindow(
+                    used_percent=10.003,
+                    window_minutes=300,
+                    reset_at=now_epoch + 3600,
+                ),
+                secondary=None,
+                credits_has=None,
+                credits_unlimited=None,
+                credits_balance=None,
+            ),
+            account_id=account_id,
+        )
+        await ingestor._ingest(ingestor._queue.get_nowait())
+
+        async with SessionLocal() as session:
+            latest_primary = await UsageRepository(session).latest_entry_for_account(
+                account_id,
+                window="primary",
+            )
+        assert latest_primary is not None
+        assert latest_primary.used_percent == pytest.approx(10.003)
+        assert selection_cache.generation >= 1
+        denied = await balancer.select_account(routing_strategy="usage_weighted")
+        assert denied.account is None
+        assert denied.error_code == "account_usage_limit_reached"
+        await asyncio.wait_for(header_invalidated.wait(), timeout=1.0)
+        header_invalidate.assert_awaited_once()
+    finally:
+        await ingestor.stop()
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_trailing_invalidation_covers_throttled_writes(monkeypatch, db_setup) -> None:
     del db_setup
     from app.modules.usage import live_ingest as live_ingest_module
@@ -189,7 +325,7 @@ async def test_live_ingestor_carries_credits_on_secondary_only_snapshots(db_setu
             _make_account("acc_live_secondary_only", "live-secondary-only@example.com")
         )
 
-    now_epoch = int(utcnow().timestamp())
+    now_epoch = naive_utc_to_epoch(utcnow())
     snapshot = LiveRateLimitSnapshot(
         primary=None,
         secondary=LiveUsageWindow(used_percent=44.0, window_minutes=10080, reset_at=now_epoch + 5 * 24 * 3600),
@@ -225,7 +361,7 @@ async def test_live_ingestor_normalizes_monthly_only_snapshots(db_setup) -> None
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(_make_account("acc_live_monthly", "live-monthly@example.com"))
 
-    now_epoch = int(utcnow().timestamp())
+    now_epoch = naive_utc_to_epoch(utcnow())
     # The monthly-only free-plan shape: a lone primary window with the
     # monthly duration must land in the monthly slot like the poller does.
     snapshot = LiveRateLimitSnapshot(
@@ -654,7 +790,7 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
 
     reconciliation_commit_started = asyncio.Event()
     release_reconciliation_commit = asyncio.Event()
-    settlement_local_lookup_started = asyncio.Event()
+    settlement_local_lookup_observed = asyncio.Event()
     settlement_session = SessionLocal()
     reconciliation_session = SessionLocal()
     settlement_task: asyncio.Task[None] | None = None
@@ -663,10 +799,13 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
     reconciliation_commit = reconciliation_session.commit
 
     async def _settlement_execute(statement: Any, *args: Any, **kwargs: Any):
+        result = await settlement_execute(statement, *args, **kwargs)
         sql = str(statement)
         if sql.startswith("SELECT accounts.id, accounts.chatgpt_account_id") and "WHERE accounts.id =" in sql:
-            settlement_local_lookup_started.set()
-        return await settlement_execute(statement, *args, **kwargs)
+            # The recovery identity must be observed before reconciliation
+            # commits; starting execute() does not establish an MVCC snapshot.
+            settlement_local_lookup_observed.set()
+        return result
 
     async def _reconciliation_commit() -> None:
         reconciliation_commit_started.set()
@@ -693,7 +832,7 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
         await asyncio.wait_for(reconciliation_commit_started.wait(), timeout=5.0)
 
         settlement_task = asyncio.create_task(ingestor._ingest(queued))
-        await asyncio.wait_for(settlement_local_lookup_started.wait(), timeout=5.0)
+        await asyncio.wait_for(settlement_local_lookup_observed.wait(), timeout=5.0)
         assert not settlement_task.done()
 
         release_reconciliation_commit.set()

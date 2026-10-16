@@ -107,4 +107,13 @@ describe("UsageDonuts", () => {
     expect(remaining).toEqual(["120", "7,331"]);
     expect(capacity).toEqual(["225", "7,560"]);
   });
+  it("keeps reserved quota out of the consumed segment", async () => {
+    render(<UsageDonuts
+      primaryItems={[{ ...item({ accountId: "reserve", label: "Account", value: 26, remainingPercent: 26, color: "#7bb661" }), reservedValue: 20 }]}
+      secondaryItems={[]} primaryTotal={100} secondaryTotal={0} primaryCenterValue={26}
+    />);
+    expect(await screen.findByRole("button", { name: "Reserved 20" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Used 54" })).toBeInTheDocument();
+    expect(screen.getByText("Center: usable credits. Hatched: reserved for direct use.")).toBeInTheDocument();
+  });
 });

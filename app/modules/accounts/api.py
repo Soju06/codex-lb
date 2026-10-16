@@ -18,13 +18,14 @@ from app.core.exceptions import (
     DashboardConflictError,
     DashboardNotFoundError,
     DashboardUpstreamError,
+    DashboardValidationError,
 )
 from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
 from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipart_form, read_bounded_upload
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
-from app.modules.accounts.repository import AccountIdentityConflictError
+from app.modules.accounts.repository import AccountIdentityConflictError, InvalidAccountUsageLimitError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
     AccountAliasResponse,
@@ -43,6 +44,8 @@ from app.modules.accounts.schemas import (
     AccountTrendsResponse,
     AccountUpdateRequest,
     AccountUpdateResponse,
+    AccountUsageLimitUpdateRequest,
+    AccountUsageLimitUpdateResponse,
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
@@ -403,6 +406,53 @@ async def update_account_routing_policy(
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     return AccountRoutingPolicyUpdateResponse(account_id=account_id, routing_policy=payload.routing_policy)
+
+
+@router.put("/{account_id}/usage-limit", response_model=AccountUsageLimitUpdateResponse)
+async def update_account_usage_limit(
+    request: Request,
+    account_id: str,
+    payload: AccountUsageLimitUpdateRequest,
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountUsageLimitUpdateResponse:
+    percent_was_provided = "percent" in payload.model_fields_set
+    try:
+        configuration = await context.service.set_usage_limit(
+            account_id,
+            enabled=payload.enabled,
+            percent=payload.percent,
+            update_percent=percent_was_provided,
+            percent_5h=payload.percent_5h,
+            percent_weekly=payload.percent_weekly,
+            update_5h="percent_5h" in payload.model_fields_set,
+            update_weekly="percent_weekly" in payload.model_fields_set,
+        )
+    except InvalidAccountUsageLimitError as exc:
+        raise DashboardValidationError(str(exc)) from exc
+    if configuration is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_usage_limit_updated",
+        actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
+        details={
+            "account_id": account_id,
+            "enabled": configuration.enabled,
+            "percent": configuration.percent,
+            "percent_5h": configuration.percent_5h,
+            "percent_weekly": configuration.percent_weekly,
+            "percent_was_provided": percent_was_provided,
+        },
+    )
+    return AccountUsageLimitUpdateResponse(
+        account_id=account_id,
+        enabled=configuration.enabled,
+        percent=configuration.percent,
+        percent_5h=configuration.percent_5h,
+        percent_weekly=configuration.percent_weekly,
+    )
 
 
 @router.delete("/{account_id}", response_model=AccountDeleteResponse)

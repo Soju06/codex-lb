@@ -1,0 +1,34 @@
+## MODIFIED Requirements
+
+### Requirement: Warmup mode semantics are deterministic
+
+The endpoint SHALL implement three warmup modes with deterministic behavior:
+
+- `normal`: submit warmup only for accounts that have a primary (5h) usage row, 100% remaining primary usage, and no blocking account usage limit.
+- `strict`: if any target account fails the same eligibility checks, reject the entire request and submit no warmups.
+- `force`: bypass the primary-window usage check, but not an enabled account usage limit in `reached` or `data_unavailable` state.
+
+An account SHALL be considered eligible for `normal` and `strict` only when:
+
+- a primary usage row exists,
+- `window_minutes=300`,
+- remaining usage is 100% (used percent is 0), and
+- its account usage limit is disabled or `available`.
+
+#### Scenario: Normal mode skips ineligible accounts
+
+- **WHEN** a `normal` warmup request includes eligible and ineligible accounts
+- **THEN** only eligible accounts are submitted and ineligible accounts are returned as skipped
+
+#### Scenario: All-or-none rejects mixed eligibility pool
+
+- **WHEN** a `strict` warmup request includes any ineligible account
+- **THEN** the system rejects the request and submits zero warmup upstream requests
+
+#### Scenario: Force bypasses usage eligibility
+
+- **GIVEN** a `force` request includes an account that fails the primary-window usage check
+- **AND** the account's enabled usage limit is `reached` or `data_unavailable`
+- **WHEN** warmup eligibility is evaluated
+- **THEN** the system bypasses the primary-window check but skips that account with reason `account_usage_limit_reached`
+- **AND** no warmup request is submitted for that account

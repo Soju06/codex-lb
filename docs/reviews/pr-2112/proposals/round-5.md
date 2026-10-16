@@ -1,4 +1,4 @@
-Produced by fresh subagent `/root/phase_owner_proposal`.
+Produced by fresh subagent `/root/phase_owner_proposal`. The [original verbatim report](https://github.com/Soju06/codex-lb/blob/db91d2dcce3dd76273fb8a833df1e6fdc7788995/docs/reviews/pr-2112/proposals/round-5.md) was committed before the source-link formatting correction below.
 
 At `92ce36efe86d6cb662cd5687a21cc14b3fbef60c`, the recurring flaw groups **rounds 4 and 5**. The repair needs a total per-frame runtime owner that observes upstream phases before allowing any relay bypass, using provenance preserved from the original upstream frame.
 
@@ -27,9 +27,9 @@ Those quantities are explicitly independent. A header-identified keepalive can l
 
 The exact edge is visible in:
 
-- [helpers.py:445](/Users/dpearson/repos/codex-lb/app/modules/proxy/_service/streaming/helpers.py:445): `parse_event` owns eligibility and phase writes.
-- [mixin.py:786](/Users/dpearson/repos/codex-lb/app/modules/proxy/_service/streaming/mixin.py:786): the verbatim branch runs before `parse_event` and can `continue`.
-- [support.py:347](/Users/dpearson/repos/codex-lb/app/modules/proxy/_service/support.py:347): `_verbatim_relay_event_type` knows TTFT and pending reasoning state, but knows nothing about pending upstream observation.
+- [helpers.py:445](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/modules/proxy/_service/streaming/helpers.py#L445): `parse_event` owns eligibility and phase writes.
+- [mixin.py:786](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/modules/proxy/_service/streaming/mixin.py#L786): the verbatim branch runs before `parse_event` and can `continue`.
+- [support.py:347](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/modules/proxy/_service/support.py#L347): `_verbatim_relay_event_type` knows TTFT and pending reasoning state, but knows nothing about pending upstream observation.
 
 A read-only execution of these production functions reproduced the state:
 
@@ -48,8 +48,8 @@ The existing independent reviewer’s route/persistence witness supplies the str
 
 The review folder has **no `Design passes` section and no saved proposal files**. There are therefore zero formally recorded remediation design passes to count. Two relevant OpenSpec designs explain the earlier decisions:
 
-- [Initial HTTP timing design](/Users/dpearson/repos/codex-lb/openspec/changes/archive/2026-09-05-observe-http-upstream-latency/design.md) put phase writes beside existing parsing and deliberately retained the later-token bypass. Its normal event sequence implicitly made settled TTFT imply a previously observed upstream event.
-- [Round 4 keepalive design](/Users/dpearson/repos/codex-lb/openspec/changes/archive/2026-10-16-fix-http-phase-keepalive-exclusion/design.md) called `parse_event` the “sole phase observation choke point,” but it was only the sole **writer**. It was not a point every frame passed through.
+- [Initial HTTP timing design](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/openspec/changes/archive/2026-09-05-observe-http-upstream-latency/design.md) put phase writes beside existing parsing and deliberately retained the later-token bypass. Its normal event sequence implicitly made settled TTFT imply a previously observed upstream event.
+- [Round 4 keepalive design](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/openspec/changes/archive/2026-10-16-fix-http-phase-keepalive-exclusion/design.md) called `parse_event` the “sole phase observation choke point,” but it was only the sole **writer**. It was not a point every frame passed through.
 
 Round 4 strengthened the observer’s predicate without checking the caller’s reason for skipping that predicate. Its property generator varied framing and `header`, `payload`, `both`, and `conflicting_created` representations, calling `parse_event` directly. It omitted both:
 
@@ -101,10 +101,10 @@ These are the relevant paths for the HTTP attempt’s original-frame eligibility
 
 | Role | Paths |
 |---|---|
-| Actual upstream ingress | `_iter_sse_events` in [proxy.py:1487](/Users/dpearson/repos/codex-lb/app/core/clients/proxy.py:1487); routed HTTP loop at `3999`; direct HTTP loop at `4157`; native framed events through `NativeEgressResponse.iter_sse_events`; upstream WebSocket-to-SSE adapters `_stream_websocket_events` and `_stream_codex_websocket_events`. All can feed `_stream_once`. |
-| Raw/cached payload and header interpretation | `parse_sse_data_json`, `extract_sse_data`, `extract_sse_event_type`, `sse_event_type_from_block` in [sse.py](/Users/dpearson/repos/codex-lb/app/core/utils/sse.py:163); `classify_event_type` in [parsing.py:37](/Users/dpearson/repos/codex-lb/app/core/openai/parsing.py:37). Payload classification and effective SSE event identity serve different contracts. |
+| Actual upstream ingress | `_iter_sse_events` in [proxy.py:1487](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/core/clients/proxy.py#L1487); routed HTTP loop at `3999`; direct HTTP loop at `4157`; native framed events through `NativeEgressResponse.iter_sse_events`; upstream WebSocket-to-SSE adapters `_stream_websocket_events` and `_stream_codex_websocket_events`. All can feed `_stream_once`. |
+| Raw/cached payload and header interpretation | `parse_sse_data_json`, `extract_sse_data`, `extract_sse_event_type`, `sse_event_type_from_block` in [sse.py](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/core/utils/sse.py#L163); `classify_event_type` in [parsing.py:37](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/core/openai/parsing.py#L37). Payload classification and effective SSE event identity serve different contracts. |
 | Provenance carriers | `ParsedSseBlock`, `format_local_sse_event`, `sse_block_with_payload`; `NativeResponsesEvent` and its native IPC reconstruction. `is_local` excludes locally generated blocks; `response_id_is_local` concerns response identity and must not itself exclude real upstream activity. |
-| Conversions before observation | `_normalize_sse_event_block`, `_normalize_multi_data_sse_block`, `_normalize_stream_payload_for_http_block`, `_normalize_stream_event_payload`, `_format_normalized_stream_event` in [proxy.py:2035](/Users/dpearson/repos/codex-lb/app/core/clients/proxy.py:2035); native Responses interpretation in [stream.rs:49](/Users/dpearson/repos/codex-lb/crates/codex-lb-responses/src/stream.rs:49). Error conversion is the demonstrated evidence-losing path. |
+| Conversions before observation | `_normalize_sse_event_block`, `_normalize_multi_data_sse_block`, `_normalize_stream_payload_for_http_block`, `_normalize_stream_event_payload`, `_format_normalized_stream_event` in [proxy.py:2035](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/app/core/clients/proxy.py#L2035); native Responses interpretation in [stream.rs:49](https://github.com/Soju06/codex-lb/blob/92ce36efe86d6cb662cd5687a21cc14b3fbef60c/crates/codex-lb-responses/src/stream.rs#L49). Error conversion is the demonstrated evidence-losing path. |
 | Local/synthetic source evidence | `format_local_sse_event` producers in the core client; the synthetic transport-failure marker written in `app/core/errors.py`. The phase guard currently consumes both local carrier provenance and the marker. Comments, sentinels, and non-object/invalid data produce no parsed payload and must not stamp phases. |
 | Attempt lifetime and anchor | The two `_stream_once` call sites in `streaming/retry.py:966` and `:2274`; fresh tracker creation in `mixin.py:522`; admission re-anchor at `:571`. These preserve attempt isolation. |
 | First-frame observation | Arrival captured at `mixin.py:598`; observation at `:636` before downstream payload rewriting; TTFT assigned independently at `:775`. |
@@ -116,3 +116,18 @@ These are the relevant paths for the HTTP attempt’s original-frame eligibility
 Separate bridge and native-WebSocket request-state writers share the persisted column names but do not consume `_HTTPPhaseLatencies` or this HTTP relay gate. They are not evidence of this recurrence and need no unrelated subsystem redesign.
 
 GitNexus was bound to the supplied external index at this head. Its function context and relay trace agreed with source. The class-level `_HTTPPhaseLatencies` context was excessively broad/truncated, so the writer/read/bypass inventory above comes from targeted source checks rather than an absent-caller inference.
+
+
+## Build
+
+The implementation keeps the chosen rung 2 owner, `_HTTPPhaseLatencies`, and expands its existing `parse_event` operation to return the relay decision as well as parsed data. Both service frame paths call it. It admits verbatim relay only after first-upstream is observed and the existing canonical-frame helper proves this frame cannot supply a pending lifecycle phase. TTFT remains independent; there is no caller-side copy of observation readiness. Retaining the existing method name does not change the proposed ownership.
+
+`ParsedSseBlock.is_upstream_keepalive` is read-only. The normalizer derives that source fact before rewriting and the carrier inherits it when wrapped. Error identity provenance remains separate. Native HTTP interpretation retains raw error text and sets `python_normalization`, so the same Python normalizer owns the demonstrated native conversion without changing Rust or IPC.
+
+Catch map: rounds 4, 5, and the identical timing finding in round 6 are covered by the combined owner. The existing route table now includes token-bearing keepalives in both first and later positions before an eligible token, plus a normalized keepalive error. The owner property uses real normalization for header/payload error cases, framing and carrier variations, settled/unsettled TTFT, first/later placement, optional/repeated created, and later relay. Existing zero, missing, retry, local-error, genuine-error, parse-spy and byte assertions remain the owning coverage for those contracts. No catch-map row is omitted.
+
+Verification: the token route failed before production edits with 1500 ms instead of 250 ms; the normalization route and property also failed before repair. After repair, 286 route/retry/SSE/native-fixture tests and 15 focused client/relay tests passed. Lint, format, types, package/wheel assets, CLI startup with HTTP 200 readiness, strict docs, and strict change validation passed. Main-spec sync and strict validation are recorded with the archived change.
+
+Deferred work: round 1 remains in [#2274](https://github.com/Soju06/codex-lb/issues/2274#issuecomment-5915901633). The ownership publisher is structurally identical on main and this implementation; the recorded real-path witness predates this timing-only repair, and nothing here changes its cache/anchor policy. The accepted PR outcome is: “This change records those observations from the upstream stream using the existing post-admission attempt clock, request-log persistence, and Prometheus exporter.” Response ownership is outside that outcome and was not requested as part of this timing correction. No other behavior or test finding is deferred.
+
+The round 6 navigation finding is fixed by replacing workstation-local Markdown targets with source links pinned to the reviewed repository commit. The original report remains verbatim in the linked prior commit; its proposal text and catch map are unchanged.

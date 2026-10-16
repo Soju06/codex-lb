@@ -171,6 +171,7 @@ class ParsedSseBlock(str):
     plain ``str`` and take the full parse path again. ``is_local`` records a
     producer-generated block without changing its wire payload or retry markers.
     ``response_id_is_local`` also covers a local ID added to a real upstream event.
+    ``is_upstream_keepalive`` preserves excluded source identity across rewrites.
     """
 
     # ``__slots__`` is not supported on ``str`` subclasses; the instance dict
@@ -178,6 +179,7 @@ class ParsedSseBlock(str):
     payload: dict[str, JsonValue] | None
     is_local: bool
     response_id_is_local: bool
+    _is_upstream_keepalive: bool
 
     def __new__(
         cls,
@@ -186,12 +188,20 @@ class ParsedSseBlock(str):
         *,
         is_local: bool = False,
         response_id_is_local: bool = False,
+        is_upstream_keepalive: bool = False,
     ) -> ParsedSseBlock:
         instance = super().__new__(cls, block)
         instance.payload = payload
         instance.is_local = is_local
         instance.response_id_is_local = response_id_is_local
+        instance._is_upstream_keepalive = is_upstream_keepalive or (
+            isinstance(block, ParsedSseBlock) and block.is_upstream_keepalive
+        )
         return instance
+
+    @property
+    def is_upstream_keepalive(self) -> bool:
+        return self._is_upstream_keepalive
 
 
 def format_local_sse_event(payload: dict[str, JsonValue] | ResponseFailedEvent) -> ParsedSseBlock:

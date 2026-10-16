@@ -309,6 +309,8 @@ from app.modules.proxy._service.support import (
     _RequestLogFailureMetadata,
     _signal_propagated_capacity_startup_ready,
     _StreamSettlement,
+    _TTFTReasoningDeltaState,
+    _verbatim_relay_event_type,
     _WebSocketRequestState,
 )
 from app.modules.proxy._service.support import (
@@ -443,14 +445,23 @@ class _HTTPPhaseLatencies:
     response_created_ms: int | None = None
 
     def parse_event(
-        self, line: str, started_at: float, observed_at: Callable[[], float]
-    ) -> tuple[dict[str, JsonValue] | None, str | None]:
+        self,
+        line: str,
+        started_at: float,
+        observed_at: Callable[[], float],
+        pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    ) -> tuple[dict[str, JsonValue] | None, str | None, bool]:
+        """Observe pending phases before authorizing a frame's verbatim relay."""
+        if self.first_upstream_event_ms is not None and (
+            verbatim_type := _verbatim_relay_event_type(line, self.first_token_ms, pending_reasoning_deltas)
+        ):
+            return None, verbatim_type, True
         payload = parse_sse_data_json(line)
         event_type = classify_event_type(payload)
         if (
             payload is not None
             and event_type != "codex.keepalive"
-            and not (isinstance(line, ParsedSseBlock) and line.is_local)
+            and not (isinstance(line, ParsedSseBlock) and (line.is_local or line.is_upstream_keepalive))
             and payload.get(SYNTHETIC_TRANSPORT_FAILURE_MARKER) is not True
             and (
                 self.first_upstream_event_ms is None
@@ -463,7 +474,7 @@ class _HTTPPhaseLatencies:
                 self.first_upstream_event_ms = elapsed_ms
             if self.response_created_ms is None and event_type == "response.created":
                 self.response_created_ms = elapsed_ms
-        return payload, event_type
+        return payload, event_type, False
 
     def log_fields(self) -> _HTTPPhaseLogFields:
         return {

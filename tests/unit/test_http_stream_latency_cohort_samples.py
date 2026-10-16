@@ -17,10 +17,11 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import app.core.clients.proxy as proxy_client_module
 from app.core.openai.parsing import classify_event_type
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
-from app.core.utils.sse import ParsedSseBlock
+from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.streaming.helpers import _HTTPPhaseLatencies
 from tests.unit.test_streaming_retry_virtual_time import _make_account, _RequestLogsRecorder, _virtual_service
@@ -36,19 +37,35 @@ def _sse(event: dict[str, object]) -> str:
     boundary=st.sampled_from(["\r", "\n", "\r\n"]),
     space=st.sampled_from(["", " "]),
     event_after_data=st.booleans(),
-    representation=st.sampled_from(["header", "payload", "both", "conflicting_created"]),
+    representation=st.sampled_from(
+        ["header", "payload", "both", "conflicting_created", "conflicting_token", "header_error", "payload_error"]
+    ),
     parsed_carrier=st.booleans(),
+    ttft_observed=st.booleans(),
+    later_frame=st.booleans(),
+    observe_created=st.booleans(),
 )
 @settings(max_examples=40, deadline=None)
 def test_http_phase_observation_ignores_equivalent_keepalives(
-    boundary: str, space: str, event_after_data: bool, representation: str, parsed_carrier: bool
+    boundary: str,
+    space: str,
+    event_after_data: bool,
+    representation: str,
+    parsed_carrier: bool,
+    ttft_observed: bool,
+    later_frame: bool,
+    observe_created: bool,
 ) -> None:
     payload: dict[str, JsonValue] = {}
-    if representation in {"payload", "both"}:
+    if representation in {"payload", "both", "payload_error"}:
         payload["type"] = "codex.keepalive"
     elif representation == "conflicting_created":
         payload["type"] = "response.created"
-    header = "response.in_progress" if representation == "payload" else "codex.keepalive"
+    elif representation == "conflicting_token":
+        payload.update(type="response.output_text.delta", delta="heartbeat")
+    if representation in {"header_error", "payload_error"}:
+        payload["error"] = {"code": "server_error", "message": "Upstream failure", "type": "server_error"}
+    header = "response.in_progress" if representation in {"payload", "payload_error"} else "codex.keepalive"
     fields = [f"event:{space}{header}", f"data:{space}{json.dumps(payload)}"]
     if event_after_data:
         fields.reverse()
@@ -56,16 +73,31 @@ def test_http_phase_observation_ignores_equivalent_keepalives(
     block = boundary.join(["event: ignored", *fields, "", ""])
     if parsed_carrier:
         block = ParsedSseBlock(block, payload)
-    phases = _HTTPPhaseLatencies()
+    block, _ = proxy_client_module._normalize_stream_payload_for_http_block(block)
+    normalized_payload = parse_sse_data_json(block)
+    phases = _HTTPPhaseLatencies(first_token_ms=125 if ttft_observed else None)
 
     def unexpected_clock() -> float:
-        pytest.fail("Keepalives must not observe the phase clock")
+        pytest.fail("Excluded or settled phases must not observe the clock")
 
-    assert phases.parse_event(block, 1.0, unexpected_clock) == (payload, classify_event_type(payload))
+    if later_frame:
+        assert phases.parse_event(": keepalive\n\n", 1.0, unexpected_clock, {}) == (None, None, False)
+    assert phases.parse_event(block, 1.0, unexpected_clock, {}) == (
+        normalized_payload,
+        classify_event_type(normalized_payload),
+        False,
+    )
     assert phases.first_upstream_event_ms is None
     assert phases.response_created_ms is None
-    phases.parse_event(_sse({"type": "response.created"}), 1.0, lambda: 3.0)
-    assert phases.first_upstream_event_ms == phases.response_created_ms == 2000
+    token = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+    assert phases.parse_event(token, 1.0, lambda: 1.25, {})[2] is False
+    assert phases.first_upstream_event_ms == 250
+    phases.first_token_ms = 250
+    if observe_created:
+        phases.parse_event(_sse({"type": "response.created"}), 1.0, lambda: 1.5, {})
+        phases.parse_event(_sse({"type": "response.created"}), 1.0, unexpected_clock, {})
+    assert phases.response_created_ms == (500 if observe_created else None)
+    assert phases.parse_event(token, 1.0, unexpected_clock, {}) == (None, "response.output_text.delta", True)
 
 
 @pytest.mark.asyncio

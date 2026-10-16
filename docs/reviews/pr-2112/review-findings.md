@@ -20,4 +20,13 @@ Scope: [HTTP phase timing contract](../../../openspec/specs/proxy-runtime-observ
 
 ## Round 5 (local-primary, a525d810)
 
-- [Observe the first eligible token after a keepalive](https://github.com/Soju06/codex-lb/pull/2112#issuecomment-6223644765) · upstream observation eligibility · app/modules/proxy/_service/streaming/mixin.py · Verbatim relay must not bypass an unobserved upstream phase merely because payload classification has already established TTFT. Valid.
+- [Observe the first eligible token after a keepalive](https://github.com/Soju06/codex-lb/pull/2112#issuecomment-6223644765) · upstream observation eligibility · app/modules/proxy/_service/streaming/mixin.py · Verbatim relay must not bypass an unobserved upstream phase merely because payload classification has already established TTFT. Fixed at the total `_HTTPPhaseLatencies.parse_event` operation, with source keepalive provenance retained through normalization; the route and generated owner sequence regressions pass.
+
+## Round 6 (coderabbit, db91d2dc)
+
+- [Observe an eligible frame before relay](https://github.com/Soju06/codex-lb/pull/2112#pullrequestreview-5553223205) · upstream observation eligibility · app/modules/proxy/_service/streaming/mixin.py · TTFT alone must not authorize skipping a pending upstream phase. Fixed by the same total phase owner as round 5; this repeated report is part of that design pass.
+- [Provide repository source links](https://github.com/Soju06/codex-lb/pull/2112#discussion_r4298947925) · review navigation · docs/reviews/pr-2112/proposals/round-5.md · Readers must be able to navigate from the saved review evidence to the referenced repository source. Fixed with repository source links pinned to the reviewed commit; the original verbatim report remains available in its prior commit.
+
+## Design passes
+
+- After round 5, including its repeated finding in round 6 · proposal: [round-5.md](proposals/round-5.md).

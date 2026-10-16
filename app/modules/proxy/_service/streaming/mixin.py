@@ -300,7 +300,6 @@ from app.modules.proxy._service.support import (
     _StreamSettlement,
     _TerminalStreamError,
     _ttft_event_latency_ms,
-    _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -507,8 +506,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         actual_service_tier: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
-        # Keep selection/failover waits out of latency and TTFT, record them as
-        # queue time, then re-anchor after this attempt's admission wait.
+        # Re-anchor after admission; selection and failover waits belong to queue time.
         attempt_started_at = start = clock.monotonic()
         latency_queue_ms = max(0, int((start - request_started_at) * 1000))
         status, error_code, error_message = "success", None, None
@@ -633,7 +631,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
-            first_payload, event_type = latencies.parse_event(first, attempt_started_at, lambda: first_observed_at)
+            frame = latencies.parse_event(first, attempt_started_at, lambda: first_observed_at, ttft_reasoning_deltas)
+            first_payload, event_type, _ = frame
             event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             _publish_http_response_owner(proxy, event, first_payload, first, account_id_value, api_key, session_id)
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
@@ -783,14 +782,15 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
-                if verbatim_type := _verbatim_relay_event_type(line, latencies.first_token_ms, ttft_reasoning_deltas):
+                frame = latencies.parse_event(line, attempt_started_at, clock.monotonic, ttft_reasoning_deltas)
+                event_payload, event_type, relay_verbatim = frame
+                if relay_verbatim:
                     await _touch_api_key_reservation()
-                    if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                    if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         saw_text_delta = settlement.downstream_text_visible = True
                     settlement.downstream_visible = True
                     yield line
                     continue
-                event_payload, event_type = latencies.parse_event(line, attempt_started_at, clock.monotonic)
                 event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 _publish_http_response_owner(proxy, event, event_payload, line, account_id_value, api_key, session_id)
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"

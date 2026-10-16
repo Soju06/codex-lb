@@ -53,11 +53,13 @@ pytestmark = pytest.mark.integration
         "retry",
         "zero_created",
         "missing_created",
+        "keepalive_token",
         "empty",
         "no_headers",
         "oversized",
         "upstream_error",
         "normalized_upstream_error",
+        "normalized_keepalive_error",
     ],
 )
 async def test_http_phase_timings_use_observed_upstream_events_and_persist(
@@ -124,9 +126,15 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     elif case == "zero_created":
         blocks[:0] = [(0.5, created), (0.75, created)]
         expected_first = expected_created = 0
-    elif case == "missing_created":
+    elif case in {"missing_created", "keepalive_token"}:
         blocks[0] = (0.75, delta)
         expected_ttft = 250
+        if case == "keepalive_token":
+            blocks[:0] = [
+                (0.625, 'event: codex.keepalive\ndata: {"type":"response.output_text.delta","delta":"heartbeat"}\n\n'),
+                (0.6875, 'event: codex.keepalive\ndata: {"type":"response.output_text.delta","delta":"heartbeat"}\n\n'),
+            ]
+            expected_ttft = 125
     elif case in {"empty", "no_headers"}:
         blocks = []
         expected_first = expected_ttft = None
@@ -134,11 +142,14 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
         monkeypatch.setattr(proxy_client_module, "MAX_SSE_EVENT_BYTES", 1024)
         blocks = [(0.75, 'data: {"type":"response.output_text.delta","delta":"' + "x" * 2048 + '"}\n\n')]
         expected_first = expected_ttft = None
-    elif case == "normalized_upstream_error":
+    elif case in {"normalized_upstream_error", "normalized_keepalive_error"}:
         blocks = [
             (0.75, 'data: {"error":{"code":"server_error","message":"Upstream failure","type":"server_error"}}\n\n')
         ]
         expected_ttft = None
+        if case == "normalized_keepalive_error":
+            blocks = [(offset, "event: codex.keepalive\n" + block) for offset, block in blocks]
+            expected_first = None
     else:
         blocks = [
             (
@@ -219,7 +230,7 @@ async def test_http_phase_timings_use_observed_upstream_events_and_persist(
     async def request():
         return await async_client.post(
             "/v1/responses"
-            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error"}
+            if case in {"empty", "no_headers", "oversized", "normalized_upstream_error", "normalized_keepalive_error"}
             else "/backend-api/codex/responses",
             json={"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True},
             headers={"user-agent": "codex_cli_rs/0.153.2", "x-request-id": "req_http_phase"},

@@ -121,7 +121,8 @@ def _success_consume(credit_id: str) -> ConsumeResetCreditResponse:
     )
 
 
-async def _noop_refresh(account) -> None:  # noqa: ANN001
+async def _noop_refresh(account, upstream_reset_confirmed_at=None) -> None:  # noqa: ANN001
+    del upstream_reset_confirmed_at
     return None
 
 

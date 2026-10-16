@@ -493,9 +493,12 @@ class _StreamingMixin(_StreamingRetryMixin):
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
         enforce_openai_sdk_contract: bool = True,
         thread_cache_identity: ThreadCacheIdentity | None = None,
+        resolved_upstream_transport: str | None = None,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         clock = clock_for(proxy)
+        if resolved_upstream_transport is None:
+            resolved_upstream_transport = upstream_stream_transport
         preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
@@ -893,10 +896,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                                     and not saw_text_delta
                                 )
                 elif preserve_raw_sse_line:
-                    _, raw_error_message, _, raw_error_code = _raw_error_fields(
-                        event_type,
-                        event_payload,
-                    )
+                    _, raw_error_message, _, raw_error_code = _raw_error_fields(event_type, event_payload)
                     _observe_terminal_stream_error_frame(raw_error_code, raw_error_message)
                     status = "error"
                     error_code = raw_error_code
@@ -1064,7 +1064,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 transport=request_transport,
-                upstream_transport=upstream_stream_transport,
+                upstream_transport=resolved_upstream_transport,
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,

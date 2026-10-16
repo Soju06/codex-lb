@@ -718,6 +718,32 @@ async def test_a_cross_site_push_with_a_bearer_is_served_on_its_merits(async_cli
 
 
 @pytest.mark.asyncio
+async def test_an_oversized_stream_stops_at_the_scim_body_limit(async_client: AsyncClient, app_instance) -> None:
+    await _setup_admin(async_client)
+    _, secret = await _issue_token(async_client)
+    consumed: list[int] = []
+
+    async def body() -> AsyncIterator[bytes]:
+        for index, chunk in enumerate((b" " * MAX_BODY_BYTES, b" ", b"unread tail")):
+            consumed.append(index)
+            yield chunk
+
+    async with _client(app_instance) as scim:
+        response = await scim.post(
+            USERS, content=body(), headers={**_auth(secret), "Content-Type": "application/scim+json"}
+        )
+
+    assert response.status_code == 413
+    assert response.headers["content-type"].startswith("application/scim+json")
+    assert response.json()["status"] == "413"
+    assert consumed == [0, 1]
+    async with SessionLocal() as session:
+        assert (
+            await session.execute(select(DashboardIdentity).where(DashboardIdentity.provider == "scim"))
+        ).scalars().first() is None
+
+
+@pytest.mark.asyncio
 async def test_an_oversized_body_is_refused_before_it_is_read(async_client: AsyncClient, app_instance) -> None:
     await _setup_admin(async_client)
     _, secret = await _issue_token(async_client)

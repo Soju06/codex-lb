@@ -80,3 +80,6 @@ The product-boundary regression renders the real `/dashboard` App route with the
 ## Add account distribution charts
 
 Inventory charts summarize all loaded accounts independently of the account list search and status filter. For example, filtering to active accounts keeps deactivated accounts in the status chart. Unknown statuses remain a separate category; the initial loading state does not claim an empty inventory. This upstream port uses the existing account management layout.
+## Import multiple auth files
+
+Sequential imports reuse the existing single-file request and refresh hook. A batch of A, B, C that fails on B retains B and C for retry and never resubmits A. Selection and submission are disabled while a request is in flight. The API and OAuth flows remain unchanged.

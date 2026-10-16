@@ -34,3 +34,11 @@ The Codex client-version fallback is also retained across restarts. Bundled pric
 ---
 
 *Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*
+
+## Paused Account Reset Credits
+
+Open a paused account in **Accounts** to read its current reset-credit count without resuming request routing. The read uses the account's existing credential refresh and proxy route. Reset actions remain disabled while the account is paused, including automatic redemption.
+
+List badges and expiry times reflect the last cached credit snapshot; background credit polling remains stopped while paused. After a restart, the badge can be absent until a snapshot is available, but the selected-account count can still be read. Weekly reset times likewise come from the last persisted usage sample. A failed count read shows unavailable when no earlier successful value is cached.
+
+*Spec: [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits)*

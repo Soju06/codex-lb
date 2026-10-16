@@ -8,9 +8,11 @@ from datetime import datetime
 import pytest
 
 from app.core.auth import DEFAULT_EMAIL, generate_unique_account_id
+from app.core.auth.refresh import RefreshError
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse, UsageFetchError
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -156,7 +158,8 @@ async def test_account_usage_reset_credits_defaults_missing_upstream_summary_to_
 
 
 @pytest.mark.asyncio
-async def test_account_usage_reset_credits_rejects_paused_account(async_client, monkeypatch):
+@pytest.mark.parametrize("read_case", ["success", "retry_401", "upstream_error", "route_error", "refresh_error"])
+async def test_account_usage_reset_credits_reads_paused_account_without_resuming(async_client, monkeypatch, read_case):
     email = "reset-credits-paused@example.com"
     raw_account_id = "acc_reset_credits_paused"
     payload = {
@@ -178,18 +181,71 @@ async def test_account_usage_reset_credits_rejects_paused_account(async_client, 
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    async def fail_fetch_usage(**_: object) -> UsagePayload:
-        raise AssertionError("paused account should not fetch upstream reset credits")
+    fetch_tokens: list[str] = []
+    refresh_calls: list[bool] = []
+    encryptor = TokenEncryptor()
 
-    monkeypatch.setattr("app.modules.accounts.service.fetch_usage", fail_fetch_usage)
+    class StubAuthManager:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+            assert account.status == AccountStatus.PAUSED
+            refresh_calls.append(force)
+            if read_case == "refresh_error":
+                raise RefreshError("temporary_failure", "Refresh temporarily unavailable", False)
+            if not force:
+                return account
+            refreshed = copy(account)
+            refreshed.access_token_encrypted = encryptor.encrypt("refreshed-paused-token")
+            return refreshed
+
+    async def fetch_paused_usage(**kwargs: object) -> UsagePayload:
+        assert kwargs["account_id"] == raw_account_id
+        fetch_tokens.append(str(kwargs["access_token"]))
+        if read_case == "upstream_error":
+            raise UsageFetchError(503, "Usage temporarily unavailable")
+        if read_case == "retry_401" and len(fetch_tokens) == 1:
+            raise UsageFetchError(401, "Expired access token")
+        return UsagePayload.model_validate({"rate_limit_reset_credits": {"available_count": 3}})
+
+    async def fail_route(*args: object, **kwargs: object):
+        assert kwargs["account_id"] == expected_account_id
+        raise UpstreamProxyRouteError("bound_pool_unavailable", account_id=expected_account_id)
+
+    monkeypatch.setattr("app.dependencies.AuthManager", StubAuthManager)
+    monkeypatch.setattr("app.modules.accounts.service.fetch_usage", fetch_paused_usage)
+    if read_case == "route_error":
+        monkeypatch.setattr("app.modules.accounts.service.resolve_upstream_route", fail_route)
 
     pause_response = await async_client.post(f"/api/accounts/{expected_account_id}/pause")
     assert pause_response.status_code == 200
 
     credits = await async_client.get(f"/api/accounts/{expected_account_id}/usage-reset-credits")
 
-    assert credits.status_code == 409
-    assert credits.json()["error"]["code"] == "account_usage_reset_credits_unavailable"
+    if read_case in {"success", "retry_401"}:
+        assert credits.status_code == 200, credits.text
+        assert credits.json()["rateLimitResetCredits"] == {"availableCount": 3}
+        assert refresh_calls == ([False, True] if read_case == "retry_401" else [False])
+        assert fetch_tokens == (
+            ["access-reset-credits-paused", "refreshed-paused-token"]
+            if read_case == "retry_401"
+            else ["access-reset-credits-paused"]
+        )
+    else:
+        assert credits.status_code >= 400
+        expected_code = {
+            "upstream_error": "usage_reset_credits_fetch_failed",
+            "route_error": "upstream_proxy_unavailable",
+            "refresh_error": "account_usage_reset_credits_unavailable",
+        }[read_case]
+        assert credits.json()["error"]["code"] == expected_code
+        assert "rateLimitResetCredits" not in credits.json()
+        if read_case in {"route_error", "refresh_error"}:
+            assert fetch_tokens == []
+    accounts = await async_client.get("/api/accounts")
+    account = next(item for item in accounts.json()["accounts"] if item["accountId"] == expected_account_id)
+    assert account["status"] == "paused"
 
 
 @pytest.mark.asyncio

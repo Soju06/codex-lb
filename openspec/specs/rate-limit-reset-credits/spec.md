@@ -81,10 +81,16 @@ The system SHALL store the most recent successful reset-credits response per acc
 
 #### Scenario: Dashboard read invalidates stale snapshots for ineligible accounts
 - **GIVEN** an account has a cached reset-credits snapshot
-- **AND** the account is now persisted as `paused`, `reauth_required`, `deactivated`, or no longer has a usable `chatgpt-account-id`
+- **AND** the account is now persisted as `reauth_required`, `deactivated`, or no longer has a usable `chatgpt-account-id`
 - **WHEN** the dashboard invokes `GET /api/accounts/{id}/rate-limit-reset-credits`
 - **THEN** the endpoint returns `null` without calling upstream
 - **AND** the cached snapshot for that account is invalidated
+
+#### Scenario: Paused account retains last observed reset credits
+- **GIVEN** a paused account has a usable ChatGPT account identity and a cached snapshot
+- **WHEN** the dashboard reads the cached endpoint or account summary
+- **THEN** the system SHALL return its cached count and expiry without invalidating it merely because the account is paused
+- **AND** the read SHALL NOT initiate upstream polling or redemption
 
 ### Requirement: Operators can redeem the soonest-expiring available credit
 
@@ -331,3 +337,23 @@ The dashboard setting `rate_limit_reset_credits_refresh_enabled` (a nullable `da
 - **WHEN** an operator sets `rate_limit_reset_credits_refresh_enabled` to `true` in the dashboard
 - **THEN** refresh cycles fetch again and `provenance.rate_limit_reset_credits_refresh_enabled.source` is `dashboard`
 
+### Requirement: Paused dashboard credit observation is independent of redemption
+
+The dashboard `GET /api/accounts/{account_id}/usage-reset-credits` SHALL allow an authorized account read for a paused account with usable credentials and ChatGPT account identity. It SHALL reuse existing credential refresh, upstream-401 retry, account visibility, and account-bound proxy routing controls. A successful read MUST NOT reactivate the account or consume a credit. Failed reads SHALL retain the existing dashboard error envelope rather than return a successful zero count. Deactivated account reads MUST remain rejected. Paused accounts MUST remain excluded from background reset-credit polling and manual and automatic redemption.
+
+#### Scenario: Inspect paused account without resuming it
+- **GIVEN** a paused account has usable credentials and a permitted upstream route
+- **WHEN** an authorized dashboard user requests its usage reset-credit count
+- **THEN** the system SHALL return the upstream available count
+- **AND** the account SHALL remain paused and no credit SHALL be consumed
+
+#### Scenario: Read failure does not masquerade as no credits
+- **GIVEN** a paused account's upstream usage request fails
+- **WHEN** the dashboard requests its reset-credit count
+- **THEN** the endpoint SHALL return the existing error envelope
+- **AND** it SHALL NOT return a successful zero count
+
+#### Scenario: Observation cannot bypass the account proxy route
+- **GIVEN** a paused account is bound to an unavailable proxy pool
+- **WHEN** the dashboard requests its reset-credit count
+- **THEN** the request MUST fail without direct upstream egress

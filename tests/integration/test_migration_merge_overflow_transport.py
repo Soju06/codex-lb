@@ -22,6 +22,9 @@ _OVERFLOW = "20260908_000000_add_subscription_overflow"
 _TRANSPORT = "20260908_000000_replace_upstream_stream_transport_default_sentinel"
 _PARENTS = (_OVERFLOW, _TRANSPORT)
 _MERGE = "20260908_020000_merge_overflow_transport_heads"
+_BUNDLE_MERGE = "20260908_010000_merge_account_bundle_and_subscription_overflow_heads"
+_BUNDLE_PARENT = "20260830_010000_merge_accounts_email_index_and_quota_warmup_heads"
+_EMAIL_INDEX = "20260828_010000_add_accounts_email_lower_index"
 
 
 @dataclass
@@ -216,7 +219,10 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # schema empty, so seed it in every starting state and the direct-downgrade
     # cases all run with retained settings and non-empty pins.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
-    assert _revisions(database.engine) == (_MERGE,)
+    # The email index branches off 20260828_000000 beside the common parent,
+    # so it is neither above the merge nor removed by stepping back to it and
+    # stays applied as a second head.
+    assert _revisions(database.engine) == tuple(sorted((_MERGE, _EMAIL_INDEX)))
     with database.engine.begin() as connection:
         _seed_overflow(connection)
     at_merge = _state(database.engine)
@@ -226,15 +232,16 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
 
     for parent in _PARENTS:
         command.downgrade(_build_alembic_config(database.url), parent)
-        # A direct downgrade to either immediate parent executes only the
-        # no-op merge downgrade. Alembic records both unmerged parent heads;
-        # it does not execute either parent's schema-removing downgrade.
-        assert _revisions(database.engine) == tuple(sorted(_PARENTS))
+        # Both direct downgrades execute only the no-op merge downgrade and
+        # leave the sibling parent applied alongside the dangling email index.
+        # Neither path executes either original parent's schema downgrade.
+        expected_heads = (*_PARENTS, _EMAIL_INDEX)
+        assert _revisions(database.engine) == tuple(sorted(expected_heads))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 
         command.upgrade(_build_alembic_config(database.url), _MERGE)
-        assert _revisions(database.engine) == (_MERGE,)
+        assert _revisions(database.engine) == tuple(sorted((_MERGE, _EMAIL_INDEX)))
         assert _state(database.engine) == at_merge
         assert check_schema_drift(database.url) == merge_drift
 

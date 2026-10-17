@@ -26,19 +26,17 @@ describe("useAccountQuotaDisplayStore", () => {
   });
 
   it("defaults to both", async () => {
-    const { getAccountQuotaDisplayPreference } = await import("@/hooks/use-account-quota-display");
+    const { useAccountQuotaDisplayStore } = await import("@/hooks/use-account-quota-display");
 
-    expect(getAccountQuotaDisplayPreference()).toBe("both");
+    expect(useAccountQuotaDisplayStore.getState().quotaDisplay).toBe("both");
   });
 
   it("persists updates to localStorage", async () => {
-    const { getAccountQuotaDisplayPreference, useAccountQuotaDisplayStore } = await import(
-      "@/hooks/use-account-quota-display"
-    );
+    const { useAccountQuotaDisplayStore } = await import("@/hooks/use-account-quota-display");
 
     useAccountQuotaDisplayStore.getState().setQuotaDisplay("weekly");
 
-    expect(getAccountQuotaDisplayPreference()).toBe("weekly");
+    expect(useAccountQuotaDisplayStore.getState().quotaDisplay).toBe("weekly");
     expect(window.localStorage.getItem("codex-lb-account-quota-display")).toBe("weekly");
   });
 });

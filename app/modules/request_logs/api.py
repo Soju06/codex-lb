@@ -4,16 +4,19 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core.auth.dashboard_access import DashboardPrincipal, DashboardRole
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
-    ensure_dashboard_admin_access,
-    require_dashboard_admin_access,
+    ensure_dashboard_permission,
+    require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
 from app.core.utils.time import to_utc_naive, utcnow
 from app.dependencies import RequestLogsContext, get_request_logs_context
-from app.modules.dashboard.timeframes import resolve_conversation_timeframe
+from app.modules.dashboard.timeframes import (
+    resolve_conversation_timeframe,
+    resolve_request_log_timeframe,
+)
 from app.modules.request_logs.schemas import (
     ConversationDetailsResponse,
     ConversationsResponse,
@@ -33,7 +36,10 @@ router = APIRouter(
 conversations_router = APIRouter(
     prefix="/api/conversations",
     tags=["dashboard"],
-    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
+    dependencies=[
+        Depends(require_dashboard_permission(Permission.CONVERSATIONS_READ)),
+        Depends(set_dashboard_error_format),
+    ],
 )
 
 _MODEL_OPTION_DELIMITER = ":::"
@@ -54,6 +60,17 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     return ServiceRequestLogModelOption(model=model, reasoning_effort=effort or None)
 
 
+def _resolve_request_log_since(
+    timeframe: str | None,
+    since: datetime | None,
+) -> tuple[datetime | None, str | None]:
+    if timeframe is not None and since is not None:
+        raise HTTPException(status_code=422, detail="timeframe and since cannot be supplied together")
+    if timeframe is None:
+        return since, None
+    return resolve_request_log_timeframe(timeframe), timeframe
+
+
 @router.get("", response_model=RequestLogsResponse)
 async def list_request_logs(
     limit: int = Query(50, ge=1, le=1000),
@@ -66,24 +83,26 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogsResponse:
     if conversation_id is not None:
-        ensure_dashboard_admin_access(principal)
+        ensure_dashboard_permission(principal, Permission.CONVERSATIONS_READ)
 
     parsed_options: list[ServiceRequestLogModelOption] | None = None
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
+    effective_since, cache_timeframe = _resolve_request_log_since(timeframe, since)
     page = await context.service.list_recent(
         limit=limit,
         offset=offset,
         search=search,
         conversation_id=conversation_id,
-        since=since,
+        since=effective_since,
         until=until,
         account_ids=account_id,
         api_key_ids=api_key_id,
@@ -91,7 +110,11 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
-        include_sensitive_metadata=principal.role == DashboardRole.ADMIN,
+        cache_mode="timeframe" if cache_timeframe is not None else "since",
+        timeframe=cache_timeframe,
+        include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),
+        include_account_identity=principal.has(Permission.ACCOUNTS_WRITE),
+        include_api_key_identity=principal.has(Permission.API_KEYS_READ),
     )
     return RequestLogsResponse(
         requests=page.requests,
@@ -109,8 +132,10 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: RequestLogsContext = Depends(get_request_logs_context),
 ) -> RequestLogFilterOptionsResponse:
     _ = status  # Keep input backward compatible but do not self-filter status facet.
@@ -118,8 +143,9 @@ async def list_request_log_filter_options(
     if model_option:
         parsed = [_parse_model_option(value) for value in model_option]
         parsed_options = [value for value in parsed if value is not None] or None
+    effective_since, _ = _resolve_request_log_since(timeframe, since)
     options = await context.service.list_filter_options(
-        since=since,
+        since=effective_since,
         until=until,
         account_ids=account_id,
         api_key_ids=api_key_id,
@@ -133,10 +159,13 @@ async def list_request_log_filter_options(
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options
         ],
+        # The API-key inventory (ids, names, prefixes) is an api_keys:read surface.
         api_keys=[
             RequestLogApiKeyOption(id=option.id, name=option.name, key_prefix=option.key_prefix)
             for option in options.api_keys
-        ],
+        ]
+        if principal.has(Permission.API_KEYS_READ)
+        else [],
         statuses=options.statuses,
     )
 

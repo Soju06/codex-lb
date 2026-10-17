@@ -7,7 +7,6 @@ import weakref
 from dataclasses import dataclass
 
 from app.core import usage as usage_core
-from app.core.config.settings import get_settings
 from app.core.usage.live_hub import register_live_usage_publisher
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
 from app.db.session import get_background_session
@@ -306,10 +305,6 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
     global, and the cyclic GC would then destroy its consumer task mid-await.
     """
     global _ingestor
-    settings = get_settings()
-    if not getattr(settings, "live_usage_ingestion_enabled", True):
-        register_live_usage_publisher(None)
-        return None
     ingestor = LiveUsageIngestor(
         queue_size=_QUEUE_SIZE,
         write_min_interval_seconds=_WRITE_MIN_INTERVAL_SECONDS,

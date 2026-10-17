@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.24.0-beta.3"
+version = "1.25.0-beta.9"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -35,6 +35,7 @@ classifiers = [
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.13.4",
+    "anyio>=4.14.0",
     "aiohttp-retry>=2.9.1",
     "alembic>=1.16.5",
     "aiosqlite>=0.22.1",
@@ -49,6 +50,12 @@ dependencies = [
     "pydantic>=2.12.5",
     "pydantic-settings>=2.12.0",
     "pygments>=2.20.0",
+    # 2.13.0 is the first release without an advisory against ``jwt.decode``
+    # itself: unknown ``crit`` header extensions accepted (< 2.12.0), unbounded
+    # Base64URL decoding of the unused payload segment and the public-key-as-HMAC
+    # -secret key confusion (both < 2.13.0). The ID token is the only thing this
+    # product verifies with it, so the floor has to exclude them.
+    "pyjwt[crypto]>=2.13.0",
     "python-socks[asyncio]>=2.7.2",
     "pyotp>=2.9.0",
     "python-dotenv>=1.2.2",
@@ -56,7 +63,7 @@ dependencies = [
     "psycopg[binary]>=3.2.12",
     "segno>=1.6.6",
     "sqlalchemy>=2.0.45",
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
     "uvicorn>=0.47.0",
     "websockets>=16.0",
     "zstandard>=0.25.0",
@@ -76,13 +83,14 @@ tracing = [
 
 [dependency-groups]
 dev = [
+    "h2>=4.3.0",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    "ty==0.0.72",
+    "ty==0.0.78",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
@@ -101,6 +109,7 @@ markers = [
     "e2e: end-to-end flow tests",
     "integration: tests that exercise multiple layers together",
     "unit: fast isolated tests",
+    "usage_refresh_request_path: keep UsageUpdater request-path refreshes live (see tests/conftest.py)",
 ]
 testpaths = ["tests"]
 filterwarnings = [

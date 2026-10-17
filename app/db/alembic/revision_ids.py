@@ -29,8 +29,6 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
     "20260525_000000_merge_routing_settings_security_heads": "20260513_000000_add_accounts_alias",
 }
 
-NEW_TO_OLD_REVISION_MAP: dict[str, str] = {new: old for old, new in OLD_TO_NEW_REVISION_MAP.items()}
-
 LEGACY_MIGRATION_TO_NEW_REVISION: dict[str, str] = {
     "001_normalize_account_plan_types": OLD_TO_NEW_REVISION_MAP["001_normalize_account_plan_types"],
     "002_add_request_logs_reasoning_effort": OLD_TO_NEW_REVISION_MAP["002_add_request_logs_reasoning_effort"],

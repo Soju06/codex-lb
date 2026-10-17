@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Container, Mapping
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
@@ -517,7 +517,7 @@ def _direct_tool_call_prefix_state(
                 pending_window_held_parallel_calls = False
             continue
         if pending_calls and (
-            (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
+            (item_type in (None, "message") and _is_one_of(item.get("role"), _ACCOUNT_NEUTRAL_MESSAGE_ROLES))
             or item_type in {"input_file", "input_image", "input_text"}
         ):
             return None
@@ -612,7 +612,7 @@ def _is_retained_response_message(item: Mapping[str, JsonValue]) -> bool:
 
 def _is_fresh_followup_input(item: Mapping[str, JsonValue]) -> bool:
     item_type = item.get("type")
-    if item_type in {"input_file", "input_image", "input_text"}:
+    if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
         return _input_content_part_is_self_contained(item, allow_output=False)
     return (
         item_type in (None, "message")
@@ -681,7 +681,7 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
     if isinstance(output, str):
         return True
     if item_type == "apply_patch_call_output":
-        return output is None and item.get("status") in {"completed", "failed"}
+        return output is None and _is_one_of(item.get("status"), {"completed", "failed"})
     return (
         isinstance(output, list)
         and bool(output)
@@ -694,6 +694,12 @@ def _tool_output_is_self_contained(item_type: str, item: Mapping[str, JsonValue]
 
 def _is_nonblank_string(value: JsonValue | None) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_one_of(value: JsonValue | None, options: Container[str]) -> bool:
+    """Membership for a JSON value: lists/objects in a string slot are never members (and never raise)."""
+
+    return isinstance(value, str) and value in options
 
 
 def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, JsonValue]) -> bool:
@@ -722,6 +728,10 @@ def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, Json
     elif isinstance(input_value, list):
         input_items = cast(list[JsonValue], input_value)
     else:
+        return False
+    # ``extract_input_file_ids`` tests item types by set membership; a list or
+    # object in the ``type`` slot is not a replayable item and must not raise.
+    if any(isinstance(item, dict) and "type" in item and not isinstance(item["type"], str) for item in input_items):
         return False
     if extract_input_file_ids(input_items):
         return False
@@ -761,7 +771,7 @@ def _text_controls_are_account_neutral(text: JsonValue | None) -> bool:
     if not isinstance(text, dict) or not set(text) <= {"format", "verbosity"}:
         return False
     verbosity = text.get("verbosity")
-    if verbosity is not None and verbosity not in {"low", "medium", "high"}:
+    if verbosity is not None and not _is_one_of(verbosity, {"low", "medium", "high"}):
         return False
     format_value = text.get("format")
     if format_value is None:
@@ -769,7 +779,7 @@ def _text_controls_are_account_neutral(text: JsonValue | None) -> bool:
     if not isinstance(format_value, dict):
         return False
     format_type = format_value.get("type")
-    if format_type in {"text", "json_object"}:
+    if _is_one_of(format_type, {"text", "json_object"}):
         return set(format_value) == {"type"}
     if format_type != "json_schema" or not set(format_value) <= {
         "description",
@@ -844,7 +854,9 @@ def _web_search_tool_options_are_account_neutral(
             return False
 
     search_context_size = tool.get("search_context_size")
-    if search_context_size is not None and search_context_size not in _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES:
+    if search_context_size is not None and not _is_one_of(
+        search_context_size, _ACCOUNT_NEUTRAL_WEB_SEARCH_CONTEXT_SIZES
+    ):
         return False
 
     user_location = tool.get("user_location")
@@ -868,16 +880,16 @@ def _tool_choice_is_account_neutral(tool_choice: JsonValue | None) -> bool:
     if not isinstance(tool_choice, dict) or _contains_account_scoped_tool_state(tool_choice):
         return False
     choice_type = tool_choice.get("type")
-    if choice_type in {"custom", "function"}:
+    if _is_one_of(choice_type, {"custom", "function"}):
         return set(tool_choice) <= {"name", "type"} and _is_nonblank_string(tool_choice.get("name"))
-    if choice_type in {"web_search", "web_search_preview"}:
+    if _is_one_of(choice_type, {"web_search", "web_search_preview"}):
         return set(tool_choice) == {"type"}
     if choice_type != "allowed_tools" or set(tool_choice) > {"mode", "tools", "type"}:
         return False
     mode = tool_choice.get("mode")
     allowed = tool_choice.get("tools")
     return (
-        mode in {"auto", "required"}
+        _is_one_of(mode, {"auto", "required"})
         and isinstance(allowed, list)
         and bool(allowed)
         and all(isinstance(tool, dict) and _tool_choice_reference_is_account_neutral(tool) for tool in allowed)
@@ -886,9 +898,9 @@ def _tool_choice_is_account_neutral(tool_choice: JsonValue | None) -> bool:
 
 def _tool_choice_reference_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
     tool_type = tool.get("type")
-    if tool_type in {"custom", "function"}:
+    if _is_one_of(tool_type, {"custom", "function"}):
         return set(tool) <= {"name", "type"} and _is_nonblank_string(tool.get("name"))
-    return tool_type in {"web_search", "web_search_preview"} and set(tool) == {"type"}
+    return _is_one_of(tool_type, {"web_search", "web_search_preview"}) and set(tool) == {"type"}
 
 
 def _custom_tool_format_is_account_neutral(format_value: JsonValue | None) -> bool:
@@ -902,7 +914,7 @@ def _custom_tool_format_is_account_neutral(format_value: JsonValue | None) -> bo
     return (
         format_type == "grammar"
         and set(format_value) == {"definition", "syntax", "type"}
-        and format_value.get("syntax") in {"lark", "regex"}
+        and _is_one_of(format_value.get("syntax"), {"lark", "regex"})
         and isinstance(format_value.get("definition"), str)
     )
 
@@ -929,7 +941,7 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
         if not isinstance(item, dict):
             return False
         item_type = item.get("type")
-        if item_type in {"input_file", "input_image", "input_text"}:
+        if _is_one_of(item_type, {"input_file", "input_image", "input_text"}):
             if not _input_content_part_is_self_contained(item, allow_output=False):
                 return False
             continue
@@ -946,10 +958,10 @@ def _input_items_have_valid_account_neutral_shape(input_items: list[JsonValue]) 
 
 def _message_has_valid_account_neutral_content(item: Mapping[str, JsonValue]) -> bool:
     role = item.get("role")
-    if role not in _ACCOUNT_NEUTRAL_MESSAGE_ROLES:
+    if not _is_one_of(role, _ACCOUNT_NEUTRAL_MESSAGE_ROLES):
         return False
     phase = item.get("phase")
-    if phase is not None and phase not in {"commentary", "final_answer"}:
+    if phase is not None and not _is_one_of(phase, {"commentary", "final_answer"}):
         return False
     content = item.get("content")
     if role != "assistant" and isinstance(content, str):
@@ -959,7 +971,7 @@ def _message_has_valid_account_neutral_content(item: Mapping[str, JsonValue]) ->
     if role == "assistant":
         return all(
             isinstance(part, dict)
-            and part.get("type") in {"output_text", "refusal"}
+            and _is_one_of(part.get("type"), {"output_text", "refusal"})
             and _input_content_part_is_self_contained(part, allow_output=True)
             for part in content
         )
@@ -974,7 +986,7 @@ def _input_content_part_is_self_contained(
     allow_output: bool,
 ) -> bool:
     part_type = part.get("type")
-    if part_type not in _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES:
+    if not _is_one_of(part_type, _ACCOUNT_NEUTRAL_MESSAGE_CONTENT_TYPES):
         return False
     if any(key not in _ACCOUNT_NEUTRAL_CONTENT_FIELDS[cast(str, part_type)] for key in part):
         return False

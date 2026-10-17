@@ -20,30 +20,83 @@ export function DashboardSkeleton() {
         ))}
       </div>
 
-      {/* Usage donuts */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        {Array.from({ length: 2 }).map((_, i) => (
-          <div key={i} className="rounded-xl border bg-card p-5">
-            <div className="mb-5 space-y-1">
-              <Skeleton className="h-4 w-36" />
-              <Skeleton className="h-3 w-20" />
-            </div>
-            <div className="flex items-center gap-6">
-              <Skeleton className="h-36 w-36 shrink-0 rounded-full" />
-              <div className="flex-1 space-y-2.5">
-                {Array.from({ length: 5 }).map((_, j) => (
-                  <div key={j} className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Skeleton className="h-2.5 w-2.5 rounded-full" />
-                      <Skeleton className="h-3 w-28" />
+      {/* Usage donuts + weekly runway card (mirrors the dashboard-page grid slot) */}
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
+        <div className="grid gap-4 lg:grid-cols-2">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div key={i} className="rounded-xl border bg-card p-5">
+              <div className="mb-5 space-y-1">
+                <Skeleton className="h-4 w-36" />
+                <Skeleton className="h-3 w-20" />
+              </div>
+              <div className="flex items-center gap-6">
+                <Skeleton className="h-36 w-36 shrink-0 rounded-full" />
+                <div className="flex-1 space-y-2.5">
+                  {Array.from({ length: 5 }).map((_, j) => (
+                    <div key={j} className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <Skeleton className="h-2.5 w-2.5 rounded-full" />
+                        <Skeleton className="h-3 w-28" />
+                      </div>
+                      <Skeleton className="h-3 w-10" />
                     </div>
-                    <Skeleton className="h-3 w-10" />
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Weekly runway card */}
+        <div className="rounded-xl border bg-card p-5">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-5 w-16 rounded-full" />
+          </div>
+          <div className="space-y-4">
+            <div className="min-h-16">
+              <div className="flex items-baseline gap-2">
+                <Skeleton className="h-8 w-16" />
+                <Skeleton className="h-3 w-28" />
+              </div>
+              <Skeleton className="mt-2 h-3 w-40" />
+            </div>
+            <div className="min-h-5">
+              <Skeleton className="h-3 w-48" />
+            </div>
+            <div>
+              <Skeleton className="h-1.5 w-full rounded-full" />
+              <div className="mt-1 flex items-center justify-between">
+                <Skeleton className="h-3 w-8" />
+                <Skeleton className="h-3 w-10" />
+              </div>
+            </div>
+            {/* Attribution + recommendations are conditional in the loaded
+                card; the skeleton reserves their footprint so the sections
+                below do not shift once the overview arrives. */}
+            <div>
+              <Skeleton className="h-3 w-28" />
+              <div className="mt-1.5 space-y-1">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="flex items-center justify-between gap-3">
+                    <Skeleton className="h-3 w-24" />
+                    <Skeleton className="h-3 w-36" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border px-3 py-2">
+              <Skeleton className="h-3 w-28" />
+              <div className="mt-2 space-y-1.5">
+                {Array.from({ length: 2 }).map((_, i) => (
+                  <div key={i} className="flex items-center justify-between gap-3">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-3 w-24" />
                   </div>
                 ))}
               </div>
             </div>
           </div>
-        ))}
+        </div>
       </div>
 
       {/* Accounts section */}

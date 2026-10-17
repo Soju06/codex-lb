@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "scenarios": {
+    "success": {
+      "strict_semantic_pass": true,
+      "attempt_counts": {"path_a": 1, "path_b": 1},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "success_terminal", "path_b_class": "success_terminal", "path_a_status": 200, "path_b_status": 200, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    },
+    "http_429": {
+      "strict_semantic_pass": true,
+      "attempt_counts": {"path_a": 1, "path_b": 1},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "http_rejection", "path_b_class": "http_rejection", "path_a_status": 429, "path_b_status": 429, "path_a_retry_after": "1", "path_b_retry_after": "1", "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    },
+    "http_503": {
+      "strict_semantic_pass": true,
+      "attempt_counts": {"path_a": 1, "path_b": 1},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "http_rejection", "path_b_class": "http_rejection", "path_a_status": 503, "path_b_status": 503, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    },
+    "http_timeout": {
+      "strict_semantic_pass": false,
+      "attempt_counts": {"path_a": 1, "path_b": 1},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "network_error", "path_b_class": "transport_incomplete", "path_a_status": null, "path_b_status": 200, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "failure_translation", "compatible": true}
+      ],
+      "final_relation": "failure_translation",
+      "final_compatible": true
+    },
+    "sse_incomplete": {
+      "strict_semantic_pass": false,
+      "attempt_counts": {"path_a": 1, "path_b": 1},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "transport_incomplete", "path_b_class": "transport_incomplete", "path_a_status": 200, "path_b_status": 200, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    },
+    "websocket_reject": {
+      "strict_semantic_pass": false,
+      "attempt_counts": {"path_a": 3, "path_b": 3},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "http_rejection", "path_b_class": "failure_terminal", "path_a_status": 403, "path_b_status": null, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "failure_translation", "compatible": true},
+        {"path_a_class": "http_rejection", "path_b_class": "failure_terminal", "path_a_status": 403, "path_b_status": null, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "failure_translation", "compatible": true},
+        {"path_a_class": "success_terminal", "path_b_class": "success_terminal", "path_a_status": 200, "path_b_status": 200, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    },
+    "websocket_incomplete": {
+      "strict_semantic_pass": false,
+      "attempt_counts": {"path_a": 3, "path_b": 3},
+      "ab_all_compatible": true,
+      "ab_turns": [
+        {"path_a_class": "transport_incomplete", "path_b_class": "transport_incomplete", "path_a_status": null, "path_b_status": null, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true},
+        {"path_a_class": "transport_incomplete", "path_b_class": "transport_incomplete", "path_a_status": null, "path_b_status": null, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true},
+        {"path_a_class": "success_terminal", "path_b_class": "success_terminal", "path_a_status": 200, "path_b_status": 200, "path_a_retry_after": null, "path_b_retry_after": null, "relation": "exact", "compatible": true}
+      ],
+      "final_relation": "exact",
+      "final_compatible": true
+    }
+  }
+}

@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import i18n, { normalizeSupportedLanguage } from "@/i18n";
+import en from "@/i18n/locales/en.json";
+import ko from "@/i18n/locales/ko.json";
+import zhCN from "@/i18n/locales/zh-CN.json";
+
+describe("locale key parity", () => {
+  it.each([
+    ["ko", ko],
+    ["zh-CN", zhCN],
+  ])("%s defines exactly the keys that en defines", (_locale, resource) => {
+    expect(Object.keys(resource).sort()).toEqual(Object.keys(en).sort());
+  });
+});
 
 describe("normalizeSupportedLanguage", () => {
   it("keeps exact supported locales", () => {

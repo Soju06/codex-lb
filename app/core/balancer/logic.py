@@ -23,13 +23,18 @@ PERMANENT_FAILURE_CODES = {
     # ``token_expired`` from the OAuth refresh endpoint means the refresh
     # request itself failed because the refresh token (or the session it
     # belonged to) is no longer usable -- access-token-only expiry would have
-    # returned a fresh token pair instead. Treat it as a permanent failure so
-    # the account stops being routed to until it is re-authenticated.
+    # returned a fresh token pair instead. Treat it as a permanent refresh
+    # failure while ordinary requests may continue with the stored access token.
     "token_expired": "Authentication token expired - re-login required",
     "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
     "account_auth_invalidated": "Authentication failed after token refresh - re-login required",
+    # The OAuth endpoint uses this code for an invalid/revoked refresh token.
+    # Keep it in the permanent set so the account is surfaced for re-auth
+    # instead of remaining active while every request retries the dead token.
+    "invalid_refresh_token": "Refresh token invalid - re-login required",
     "account_deactivated": "Account has been deactivated",
+    "deactivated_workspace": "Workspace has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
 }
@@ -45,6 +50,7 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "app_session_terminated",
         "account_session_expired",
         "account_auth_invalidated",
+        "invalid_refresh_token",
     }
 )
 
@@ -135,11 +141,17 @@ class AccountState:
     priority_reset_at: int | None = None
     priority_capacity_credits: float | None = None
     limit_scoped_usage: bool = False
+    access_token_expires_at: float | None = None
     inflight_response_creates: int = 0
     inflight_streams: int = 0
     leased_tokens: float = 0.0
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
+    # Multiplier applied to this candidate's draw weight by the weighted
+    # strategies (``capacity_weighted``, ``relative_availability``); ``1.0`` is
+    # neutral. The balancer derives it from the account's recent upstream
+    # error rate. Deterministic strategies ignore it.
+    selection_weight_multiplier: float = 1.0
 
 
 @dataclass
@@ -209,7 +221,6 @@ def pool_usage_exhaustion(
         and state.status
         not in (
             AccountStatus.PAUSED,
-            AccountStatus.REAUTH_REQUIRED,
             AccountStatus.DEACTIVATED,
         )
     ]
@@ -359,7 +370,7 @@ def _has_other_usable_foreground_capacity(
     for other in available:
         if other.account_id == candidate.account_id:
             continue
-        if other.status != AccountStatus.ACTIVE:
+        if other.status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
             if _preserve_allows_opportunistic_burn(other, current, preserve_count=preserve_count):
@@ -444,6 +455,15 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
+def _known_expired_reauth(state: AccountState, current: float) -> bool:
+    """Return whether a warning-state account has crossed known token expiry."""
+    return (
+        state.status == AccountStatus.REAUTH_REQUIRED
+        and state.access_token_expires_at is not None
+        and state.access_token_expires_at <= current
+    )
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -464,6 +484,7 @@ def select_account(
     primary_first_usage_weighted: bool = False,
     routing_costs: RoutingCostsByAccount | None = None,
     replica_salt: str | None = None,
+    selection_seed: str | None = None,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
@@ -517,6 +538,12 @@ def select_account(
             rank by primary-window pressure before secondary-window pressure.
         routing_costs: Optional request-scoped planner costs. Lower cost wins
             after hard eligibility, health tier, and reset-bucket filtering.
+        selection_seed: Optional seed making the pick stable for a given
+            seed value instead of load-proportional. Applied to the pool the
+            configured strategy has already narrowed to, so it decides only
+            which of the accounts the strategy was about to draw from is
+            taken. Drain strategies (``sequential_drain``, ``reset_drain``,
+            ``single_account``) have one correct answer and ignore it.
         replica_salt: Optional per-replica salt mixed into the final
             ``round_robin`` tie-break so peer replicas break exact ties toward
             different accounts. When ``None``, the process-wide salt configured
@@ -543,9 +570,11 @@ def select_account(
             or bypass_quota_exceeded
             or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
         )
-        if state.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
+            continue
+        if _known_expired_reauth(state, current):
             continue
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
@@ -593,13 +622,15 @@ def select_account(
     if not available:
         in_error_backoff_ids = {state.account_id for state in in_error_backoff}
         hard_blocked_exists = any(
-            state.status
-            in (
-                AccountStatus.PAUSED,
-                AccountStatus.REAUTH_REQUIRED,
-                AccountStatus.DEACTIVATED,
-                AccountStatus.RATE_LIMITED,
-                AccountStatus.QUOTA_EXCEEDED,
+            (
+                state.status
+                in (
+                    AccountStatus.PAUSED,
+                    AccountStatus.DEACTIVATED,
+                    AccountStatus.RATE_LIMITED,
+                    AccountStatus.QUOTA_EXCEEDED,
+                )
+                or _known_expired_reauth(state, current)
             )
             and state.account_id not in in_error_backoff_ids
             for state in all_states
@@ -626,24 +657,24 @@ def select_account(
                 )
                 if usage_exhaustion is not None:
                     return usage_exhaustion
-            reauth_required = [s for s in all_states if s.status == AccountStatus.REAUTH_REQUIRED]
+            expired_reauth = [state for state in all_states if _known_expired_reauth(state, current)]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
             rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
             quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
 
             if not rate_limited and not quota_exceeded:
-                if paused and reauth_required and deactivated:
+                if paused and expired_reauth and deactivated:
                     return SelectionResult(None, "All accounts are paused, deactivated, or require re-authentication")
-                if paused and reauth_required:
+                if paused and expired_reauth:
                     return SelectionResult(None, "All accounts are paused or require re-authentication")
                 if paused and deactivated:
                     return SelectionResult(None, "All accounts are paused or deactivated")
-                if reauth_required and deactivated:
+                if expired_reauth and deactivated:
                     return SelectionResult(None, "All accounts are deactivated or require re-authentication")
                 if paused:
                     return SelectionResult(None, "All accounts are paused")
-                if reauth_required:
+                if expired_reauth:
                     return SelectionResult(None, "All accounts require re-authentication")
                 if deactivated:
                     return SelectionResult(None, "All accounts are deactivated")
@@ -690,6 +721,16 @@ def select_account(
         secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
         return _planner_cost(state, routing_costs), secondary_used, primary_used, last_selected, account_id
 
+    def _seeded_pick(pool: list[AccountState], seed: str) -> AccountState:
+        """The strategy's draw, replaced by a stable per-seed choice.
+
+        Applied to the pool the strategy has already narrowed to -- its planner
+        cost and reset-preference filters run first -- so the seed decides only
+        *which* of the accounts the strategy was about to draw from is taken,
+        never whether an account it excluded becomes eligible.
+        """
+        return _seeded_account(pool, seed)
+
     round_robin_salt = _effective_replica_salt(replica_salt)
 
     def _round_robin_sort_key(state: AccountState) -> tuple[float, float, str]:
@@ -721,7 +762,19 @@ def select_account(
     # Recovery is a liveness admission inside the already-eligible pool. Pick
     # it before routing-policy preferences so burn/preserve policy cannot make
     # PROBING permanent, but never before quota/cooldown/security filtering.
-    due_probe = _oldest_due_probing_account(probing, current=current) if healthy or recovery_probe_only else None
+    # A seeded caller never carries the probe. The due probe is whichever
+    # probing account went quiet longest, so admitting one advances its clock
+    # and hands the next turn to a different sibling -- the rotation the seed
+    # exists to prevent, and the conversation fan-out the seed exists to stop.
+    # Probes ride on unbound traffic and on every other thread, so this exempts
+    # the handful of conversations being held warm through an isolation window
+    # rather than starving recovery. ``recovery_probe_only`` is the probe pass
+    # itself and is never seeded.
+    due_probe = (
+        _oldest_due_probing_account(probing, current=current)
+        if (healthy or recovery_probe_only) and selection_seed is None
+        else None
+    )
     if recovery_probe_only and due_probe is None:
         return SelectionResult(None, None)
     health_pool = [due_probe] if due_probe is not None else healthy or probing or draining or available
@@ -732,7 +785,11 @@ def select_account(
     effective_prefer_earlier_reset = prefer_earlier_reset and routing_strategy != "relative_availability"
 
     if routing_strategy == "round_robin":
-        selected = min(effective_pool, key=_round_robin_sort_key)
+        selected = (
+            _seeded_pick(_lowest_planner_cost_candidates(effective_pool, routing_costs), selection_seed)
+            if selection_seed is not None
+            else min(effective_pool, key=_round_robin_sort_key)
+        )
     elif routing_strategy == "capacity_weighted":
         candidate_pool = (
             _prefer_earlier_reset_candidates(effective_pool, current, prefer_earlier_reset_window)
@@ -743,7 +800,7 @@ def select_account(
             selected = min(candidate_pool, key=lambda state: _capacity_probe_sort_key_with_cost(state, routing_costs))
         else:
             candidate_pool = _lowest_planner_cost_candidates(candidate_pool, routing_costs)
-            selected = _select_capacity_weighted(candidate_pool)
+            selected = _select_capacity_weighted(candidate_pool, selection_seed=selection_seed)
     elif routing_strategy == "relative_availability":
         candidate_pool = _lowest_planner_cost_candidates(effective_pool, routing_costs)
         selected = _select_relative_availability(
@@ -752,6 +809,7 @@ def select_account(
             power=relative_availability_power,
             top_k=relative_availability_top_k,
             deterministic_probe=deterministic_probe,
+            selection_seed=selection_seed,
         )
     elif routing_strategy == "fill_first":
         candidate_pool = (
@@ -759,12 +817,27 @@ def select_account(
             if prefer_earlier_reset
             else effective_pool
         )
+        # ``fill_first`` deliberately ranks by *highest* usage to drain an
+        # account before opening the next, and that ranking is already stable
+        # across admissions, so the seed has nothing to add and would only
+        # scatter threads onto fresh accounts.
         selected = _select_fill_first(candidate_pool)
     else:
         effective_usage_weighted_order: UsageWeightedOrder = (
             "primary_first" if primary_first_usage_weighted else usage_weighted_order
         )
-        if effective_usage_weighted_order == "primary_first":
+        if selection_seed is not None:
+            # The sort keys this branch would otherwise use put reset bucket
+            # first and planner cost second, so the seed has to be spent below
+            # both: a thread must not be held on a 30-day-reset or high-cost
+            # account the ordering had already ruled out.
+            seeded_pool = (
+                _prefer_earlier_reset_candidates(effective_pool, current, prefer_earlier_reset_window)
+                if effective_prefer_earlier_reset
+                else effective_pool
+            )
+            selected = _seeded_pick(_lowest_planner_cost_candidates(seeded_pool, routing_costs), selection_seed)
+        elif effective_usage_weighted_order == "primary_first":
             selected = min(
                 effective_pool,
                 key=(
@@ -832,11 +905,6 @@ def _priority_secondary_used(state: AccountState, primary_used: float | None = N
     if value is not None:
         return value
     return primary_used if primary_used is not None else _priority_primary_used(state)
-
-
-def _capacity_probe_sort_key(state: AccountState) -> tuple[float, float, float, float, str]:
-    secondary_used, primary_used, last_selected, account_id = _usage_sort_key(state)
-    return (-_remaining_secondary_credits(state), secondary_used, primary_used, last_selected, account_id)
 
 
 def _relative_availability_divisor_seconds(state: AccountState, current: float) -> float:
@@ -913,6 +981,7 @@ def _relative_availability_weighted_candidates(
     current: float,
     power: float,
     top_k: int,
+    membership_seed: str | None = None,
 ) -> list[tuple[AccountState, float, float]]:
     raw_scores = [(state, _relative_availability_raw_score(state, current)) for state in available]
     _log_relative_availability_candidate_scores(raw_scores, current=current)
@@ -925,6 +994,9 @@ def _relative_availability_weighted_candidates(
     for state, raw_score in raw_scores:
         normalized_score = raw_score / best_raw_score
         weight = normalized_score**safe_power
+        # The floor is an eligibility bound, not a ranking, so it applies to a
+        # seeded caller too: a retained thread must not be parked on an account
+        # that has fallen far behind the best available one.
         if weight < RELATIVE_AVAILABILITY_MIN_WEIGHT_FRACTION:
             continue
         weighted.append((state, weight, raw_score))
@@ -932,14 +1004,24 @@ def _relative_availability_weighted_candidates(
     if not weighted:
         return []
 
-    weighted.sort(
-        key=lambda item: (
-            -item[1],
-            -item[2],
-            *_usage_sort_key(item[0]),
-        )
-    )
-    safe_top_k = max(1, top_k)
+    if membership_seed is not None:
+        # ``_usage_sort_key`` ends in ``last_selected_at``, so exact ties are
+        # broken by *recency*: each admitted turn advances the winner's
+        # timestamp and ejects it from the top-k on the next turn. Ordering by
+        # the caller's own seed instead is stable turn to turn, and keyed per
+        # thread rather than globally -- otherwise every retained conversation
+        # is handed the same k accounts and the rest of an equally scored pool
+        # never serves a turn.
+        weighted.sort(key=lambda item: _decorrelated_tie_breaker(item[0].account_id, membership_seed))
+    else:
+        weighted.sort(key=lambda item: (-item[1], -item[2], *_usage_sort_key(item[0])))
+    # The ``k`` cut is a *rank* cut over live availability, so a sibling can
+    # stay well within reach and still drop out of it when another account's
+    # usage refreshes. A seeded caller keeps every candidate above the minimum
+    # weight fraction instead: that floor moves only when an account genuinely
+    # falls away from the best, which is a change in the pool rather than a
+    # reshuffle of it.
+    safe_top_k = len(weighted) if membership_seed is not None else max(1, top_k)
     top_candidates = weighted[:safe_top_k]
     _log_relative_availability_top_k(top_candidates, current=current)
     return top_candidates
@@ -973,15 +1055,21 @@ def _select_relative_availability(
     power: float,
     top_k: int,
     deterministic_probe: bool,
+    selection_seed: str | None = None,
 ) -> AccountState:
     weighted_candidates = _relative_availability_weighted_candidates(
         available,
         current=current,
         power=power,
         top_k=top_k,
+        membership_seed=selection_seed,
     )
     if not weighted_candidates:
-        winner = min(available, key=_usage_sort_key)
+        winner = (
+            _seeded_least_used(available, selection_seed)
+            if selection_seed is not None
+            else min(available, key=_usage_sort_key)
+        )
         _log_relative_availability_winner(
             winner,
             current=current,
@@ -994,10 +1082,16 @@ def _select_relative_availability(
         _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
         return winner
     states = [state for state, _, _ in weighted_candidates]
-    weights = [weight for _, weight, _ in weighted_candidates]
+    # Top-k membership is decided by availability alone (above); the recent
+    # error rate only discounts the draw so a penalized account still competes.
+    weights = [weight * _selection_weight_multiplier(state) for state, weight, _ in weighted_candidates]
     total = sum(weights)
     if total <= 0.0:
-        winner = min(available, key=_usage_sort_key)
+        winner = (
+            _seeded_least_used(available, selection_seed)
+            if selection_seed is not None
+            else min(available, key=_usage_sort_key)
+        )
         _log_relative_availability_winner(
             winner,
             current=current,
@@ -1005,12 +1099,47 @@ def _select_relative_availability(
             raw_score=_relative_availability_raw_score(winner, current),
         )
         return winner
-    winner = random.choices(states, weights=weights, k=1)[0]
+    if selection_seed is not None:
+        # Inside the top-k the draw has already been narrowed by availability,
+        # and membership is stable for a seeded caller (see
+        # ``stable_membership``), so the seed picks uniformly among the
+        # survivors. Unlike the capacity draw, these weights are *normalized*
+        # against the current best score: they move whenever any account's
+        # availability moves, including the retained thread's own substitute as
+        # it serves. Weighting the pick by them would put every thread one
+        # admission away from flipping, which is the rotation the seed exists
+        # to prevent -- so here the narrowing carries the availability
+        # preference and the seed only chooses among what survived it.
+        # Zero-weight candidates are dropped as in the capacity draw.
+        winner = _seeded_account(
+            [state for state, weight in zip(states, weights, strict=True) if weight > 0.0],
+            selection_seed,
+        )
+    else:
+        winner = random.choices(states, weights=weights, k=1)[0]
     for state, weight, raw_score in weighted_candidates:
         if state.account_id == winner.account_id:
             _log_relative_availability_winner(winner, current=current, weight=weight, raw_score=raw_score)
             break
     return winner
+
+
+def _seeded_account(pool: list[AccountState], seed: str) -> AccountState:
+    """The seed's choice among candidates the strategy was about to draw from."""
+    return min(pool, key=lambda state: _decorrelated_tie_breaker(state.account_id, seed))
+
+
+def _seeded_least_used(available: list[AccountState], seed: str) -> AccountState:
+    """The exhausted-pool fallback, made stable for a seeded caller.
+
+    ``min(available, key=_usage_sort_key)`` ends in ``last_selected_at``, so
+    when every candidate is equally spent -- which is exactly when this
+    fallback runs -- being chosen is what loses you the next turn, and the
+    caller's thread rotates through the tied accounts. Seed the tie instead,
+    keeping the usage ordering that decides which accounts are tied at all.
+    """
+    least_used = min(_usage_sort_key(state)[:2] for state in available)
+    return _seeded_account([state for state in available if _usage_sort_key(state)[:2] == least_used], seed)
 
 
 def _stable_tie_breaker(account_id: str) -> str:
@@ -1152,14 +1281,46 @@ def _lowest_planner_cost_candidates(
     return [state for state in available if _planner_cost(state, routing_costs) == lowest_cost]
 
 
-def _select_capacity_weighted(available: list[AccountState]) -> AccountState:
+def _select_capacity_weighted(
+    available: list[AccountState],
+    *,
+    selection_seed: str | None = None,
+) -> AccountState:
     """Select an account with probability proportional to remaining secondary credits."""
-    weights = [_remaining_secondary_credits(s) for s in available]
+    weights = [_remaining_secondary_credits(s) * _selection_weight_multiplier(s) for s in available]
     total = sum(weights)
     if total <= 0.0:
         # All accounts exhausted — fall back to deterministic usage-weighted
+        if selection_seed is not None:
+            return _seeded_least_used(available, selection_seed)
         return min(available, key=_usage_sort_key)
+    if selection_seed is not None:
+        # A zero-weight account is one the draw could never have returned while
+        # a positive-weight sibling existed -- an account whose effective
+        # secondary credits are spent. The seed must not readmit it.
+        #
+        # The *magnitudes* are deliberately dropped here, and only here. They
+        # are live: a usage refresh, an elapsed reset, or an error-rate update
+        # moves them without anything about eligibility changing, so a pick
+        # weighted by them puts every seeded thread one refresh away from
+        # flipping -- which is the fan-out this seed exists to prevent. Ordinary
+        # (unseeded) traffic keeps the full weighted draw, so the pool-level
+        # capacity balance is unchanged; a retained thread simply lands
+        # uniformly among the accounts that draw had already accepted.
+        return _seeded_account(
+            [state for state, weight in zip(available, weights, strict=True) if weight > 0.0],
+            selection_seed,
+        )
     return random.choices(available, weights=weights, k=1)[0]
+
+
+def _selection_weight_multiplier(state: AccountState) -> float:
+    """Clamp the balancer-supplied draw multiplier so a bad value can never
+    negate or unbound a weight."""
+    multiplier = state.selection_weight_multiplier
+    if multiplier != multiplier or multiplier < 0.0:  # NaN or negative
+        return 1.0
+    return min(multiplier, 1.0)
 
 
 def _fill_first_sort_key(state: AccountState) -> tuple[float, float, str]:
@@ -1240,7 +1401,7 @@ QUOTA_EXCEEDED_COOLDOWN_SECONDS = 120.0
 # protects clients from waiting the worst-case persisted ``reset_at`` after
 # OpenAI-side reset events that propagate lazily through ``/wham/usage`` (see
 # https://github.com/Soju06/codex-lb/issues/676). codex-lb's background usage
-# refresh runs every ``usage_refresh_interval_seconds`` (default 60s) and the
+# refresh runs every ``USAGE_REFRESH_INTERVAL_SECONDS`` (60 s) and the
 # per-status cooldowns are 120s, so a 300s ceiling lets clients reattempt
 # inside the auto-recovery window. The underlying ``AccountState.reset_at``
 # and ``AccountState.cooldown_until`` fields are not clamped.
@@ -1281,7 +1442,33 @@ def account_status_for_permanent_failure(error_code: str) -> AccountStatus:
     return AccountStatus.DEACTIVATED
 
 
-FailoverAction = Literal["failover_next", "surface"]
+FailoverAction = Literal["failover_next", "retry_same_account", "surface"]
+
+# Owner-bound burst 429 (a code-less upstream HTTP 429 burst/concurrency
+# rejection on a request that cannot move to another account): bounded
+# same-account backoff before the original rejection is surfaced. Module
+# constants on purpose -- the Settings ratchet is full and this is a transport
+# invariant, not an operator knob. Waits are 1 s, 2 s, 4 s (upstream
+# ``Retry-After`` is a floor), never above ``BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS``.
+BURST_SAME_ACCOUNT_MAX_RETRIES = 3
+BURST_SAME_ACCOUNT_BASE_SECONDS = 1.0
+BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS = 10.0
+# ``Retry-After`` stamped on a surfaced burst 429 that carried none upstream;
+# matches ``app.core.resilience.overload.LOCAL_OVERLOAD_RETRY_AFTER_SECONDS``.
+BURST_SURFACE_RETRY_AFTER_SECONDS = 5
+
+
+def burst_same_account_backoff_seconds(retry_index: int, *, retry_after_seconds: float | None) -> float:
+    """Deterministic wait before same-account burst retry ``retry_index`` (1-based).
+
+    ``min(MAX_WAIT, max(retry_after_seconds or 0, BASE * 2 ** (retry_index - 1)))``:
+    exponential from ``BURST_SAME_ACCOUNT_BASE_SECONDS`` with the upstream
+    ``Retry-After`` (when present and positive) acting as a floor. No jitter, so
+    the caller's timing seam (``scheduler.sleep``) fully owns the wait.
+    """
+    exponential = BURST_SAME_ACCOUNT_BASE_SECONDS * (2 ** (max(retry_index, 1) - 1))
+    floor = float(retry_after_seconds) if retry_after_seconds is not None and retry_after_seconds > 0 else 0.0
+    return min(BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS, max(floor, exponential))
 
 
 def failover_decision(
@@ -1289,12 +1476,28 @@ def failover_decision(
     failure_class: FailureClass,
     downstream_visible: bool,
     candidates_remaining: int,
+    owner_bound: bool = False,
+    same_account_retry_available: bool = False,
 ) -> FailoverAction:
+    """Decide how a pre-visible upstream failure is handled.
+
+    ``owner_bound`` means the request cannot move to another account (dispatched
+    account-bound payload, required previous-response / turn-state / file
+    owner). Such a request never fails over -- ``failover_next`` would be a
+    lie -- so it either retries the same account (when the caller reports a
+    bounded same-account retry is still available) or surfaces the failure.
+    """
     if downstream_visible:
         return "surface"
+    if owner_bound:
+        return (
+            "retry_same_account"
+            if same_account_retry_available and failure_class != "account_unavailable"
+            else "surface"
+        )
     if candidates_remaining <= 0:
         return "surface"
-    if failure_class in ("rate_limit", "quota", "retryable_transient"):
+    if failure_class in ("rate_limit", "quota", "retryable_transient", "account_unavailable"):
         return "failover_next"
     return "surface"
 
@@ -1368,7 +1571,6 @@ def evaluate_health_tier(
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
-        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
     ):
         return state.health_tier

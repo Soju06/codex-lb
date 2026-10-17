@@ -131,6 +131,7 @@ describe("AccountProxyBinding", () => {
           port: 8080,
           username: "operator",
           isActive: true,
+          plaintextCredentials: true,
         },
         {
           id: "ep_secondary",
@@ -140,6 +141,7 @@ describe("AccountProxyBinding", () => {
           port: 8081,
           username: null,
           isActive: true,
+          plaintextCredentials: false,
         },
       ],
       pools: [

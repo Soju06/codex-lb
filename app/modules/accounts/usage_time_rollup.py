@@ -62,6 +62,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import SQLCoreOperations
 
 from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
@@ -141,15 +142,21 @@ _EXCLUDED_REQUEST_KINDS = WARMUP_REQUEST_KINDS
 CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 
 
-def conversation_id_expr() -> ColumnElement:
-    """Normalized conversation id: trimmed, with blank collapsed to NULL.
+def normalized_thread_key_expr(column: SQLCoreOperations[str | None]) -> ColumnElement:
+    """Trim a thread-identifying text column, collapsing blank to NULL.
 
     The single SQL definition shared by the conversation fold and every
     conversation reader (dashboard and reports repositories) — a drifted
-    variant would silently split one conversation into two.
+    variant would silently split one conversation into two. It is reused for
+    ``session_id`` so a session-keyed thread normalizes identically.
     """
-    trimmed = func.ltrim(func.rtrim(RequestLog.conversation_id, CONVERSATION_WHITESPACE), CONVERSATION_WHITESPACE)
+    trimmed = func.ltrim(func.rtrim(column, CONVERSATION_WHITESPACE), CONVERSATION_WHITESPACE)
     return func.nullif(trimmed, "")
+
+
+def conversation_id_expr() -> ColumnElement:
+    """Normalized conversation id."""
+    return normalized_thread_key_expr(RequestLog.conversation_id)
 
 
 # Stored stand-in for NULL account_id / api_key_id / service_tier /
@@ -998,10 +1005,18 @@ async def mirror_account_soft_delete_into_time_rollups(session: AsyncSession, ac
         return replace(row, account_id=DIMENSION_SENTINEL, is_deleted=True)
 
     await _rekey_account_rows(session, [account_id], _rekey)
+    from app.modules.reports.rollup import rekey_report_accounts
+
+    await rekey_report_accounts(session, [account_id], None)
 
 
 async def mirror_account_hard_delete_into_time_rollups(session: AsyncSession, account_id: str) -> None:
     """Mirror the history-deleting path (raw rows physically removed)."""
+    from app.db.models import RequestReportHourlyRollup
+
+    await session.execute(
+        delete(RequestReportHourlyRollup).where(RequestReportHourlyRollup.account_id == to_dimension(account_id))
+    )
     for model, *_rest in _ROLLUP_TABLES:
         await session.execute(delete(model).where(model.account_id == to_dimension(account_id)))
 
@@ -1015,5 +1030,8 @@ async def merge_time_rollups_into(session: AsyncSession, canonical_account_id: s
     """
     if not duplicate_ids:
         return
+    from app.modules.reports.rollup import rekey_report_accounts
+
+    await rekey_report_accounts(session, duplicate_ids, canonical_account_id)
     canonical_dimension = to_dimension(canonical_account_id)
     await _rekey_account_rows(session, duplicate_ids, lambda row: replace(row, account_id=canonical_dimension))

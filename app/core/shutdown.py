@@ -20,6 +20,7 @@ _lifespan_completed: bool = False
 _bridge_drain_active: bool = False
 _in_flight: int = 0
 _control_plane_task_admission_open: bool = True
+_post_drain_cleanup_timeout_seconds: float | None = None
 
 
 def _effective_drain_deadline() -> float | None:
@@ -38,6 +39,7 @@ def reset() -> None:
     global _shutdown_deadline_candidates
     global _server_start_pending, _lifespan_completed
     global _bridge_drain_active, _in_flight, _control_plane_task_admission_open
+    global _post_drain_cleanup_timeout_seconds
     _draining = False
     _drain_deadline = None
     _drain_started = False
@@ -48,6 +50,7 @@ def reset() -> None:
     _bridge_drain_active = False
     _in_flight = 0
     _control_plane_task_admission_open = True
+    _post_drain_cleanup_timeout_seconds = None
 
 
 def prepare_server_start() -> None:
@@ -226,6 +229,23 @@ def remaining_drain_timeout_seconds() -> float | None:
     if deadline is None:
         return None
     return max(deadline - time.monotonic(), 0.0)
+
+
+def set_post_drain_cleanup_timeout_seconds(timeout_seconds: float) -> None:
+    """Publish the fixed cleanup reserve belonging to the server shutdown."""
+
+    global _post_drain_cleanup_timeout_seconds
+    _post_drain_cleanup_timeout_seconds = max(float(timeout_seconds), 0.0)
+
+
+def remaining_post_drain_cleanup_timeout_seconds() -> float | None:
+    """Return the unused portion of the shared drain-plus-reserve deadline."""
+
+    deadline = _effective_drain_deadline()
+    reserve = _post_drain_cleanup_timeout_seconds
+    if deadline is None or reserve is None:
+        return None
+    return max(deadline + reserve - time.monotonic(), 0.0)
 
 
 def is_draining() -> bool:

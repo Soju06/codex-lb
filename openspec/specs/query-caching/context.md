@@ -13,6 +13,8 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
 - Proxy API-key auth caching is invalidation-driven: every key mutation bumps the `api_key` invalidation namespace and each instance's poller (0.5 s) clears the local cache, so the 60 s TTL is only a backstop for a broken poller. Sticky-session upserts persist and return the row in one `INSERT ... ON CONFLICT ... RETURNING` statement. Treat every `ProxyRepositories` bundle as one `AsyncSession` owner: multi-window reads for account selection, rate-limit headers, and `/api/codex/usage` complete primary, secondary, monthly, credit, and additional-limit operations sequentially instead of overlapping statements.
 - Serve account request-usage summaries from `account_usage_rollups` plus a live tail (`requested_at > folded_through`) instead of aggregating all `request_logs` history per read. A background fold job (15-min cadence, 24-hour safety lag, ≤7-day slices per transaction, leader-gated and serialized on the migration-seeded `account_usage_rollup_state` row lock) advances the watermark. Duplicate rows share an exact `requested_at`, so a `requested_at` boundary never splits a dedupe group; the 24 h lag must exceed the maximum request duration because log rows are written at stream end but dated at request start. Reads fetch sums + watermark in one statement to stay snapshot-consistent under READ COMMITTED; identity-merge consolidation transfers duplicates' rollup sums to the canonical account. Per-API-key lifetime summaries fold the same way into `api_key_usage_rollups` (API-key semantics: no dedupe, soft-deleted rows included), governed by the same watermark; identity consolidation takes the fold-state row lock before reassigning logs so folds cannot interleave.
 
+- Selection-cache entries (`AccountSelectionCache`) hold transient, column-only copies of `Account` and latest `UsageHistory`/`AdditionalUsageHistory` rows, and every cache read (hit or miss) hands the caller a fresh copy so per-request runtime-state sync (`account.status = ...`) never mutates the cached or session-owned rows. Copies are made with `app/db/snapshot.py::clone_row` (`ClassManager.new_instance()` plus an `instance_dict` copy of the mapped column attributes; expired or unset attributes fall back to `getattr`, so they resolve exactly as a direct read on the source would) rather than the mapped-class constructor: the constructor path fires per-attribute instrumentation for every column and cost ~30 us per row, i.e. ~6N ORM constructions per request at N accounts. The only observable delta is internal SQLAlchemy state: a `clone_row` copy starts with `inspect(row).modified is False` and an empty `committed_state` (loaded-row semantics) where the constructor recorded every column as a pending change; nothing reads either, and clones are never added to or merged into a session.
+
 ## Cross-Replica Cache Invalidation Bus
 
 - The bus is the `cache_invalidation` table (`namespace` TEXT PK, `version` INTEGER) plus one
@@ -25,18 +27,32 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
   - `account_routing` -> `RoutingAvailabilityCache.refresh_from_db` (snapshot of `accounts.id -> status`; no TTL — the snapshot is authoritative once seeded, degraded local-set semantics when unseeded)
   - `account_selection` -> `AccountSelectionCache.invalidate(propagate=False)` (fallback TTL 5s)
   - `settings` -> `SettingsCache.invalidate(propagate=False)` (fallback TTL 5s)
-- Two bump flavors: `await bump(namespace)` (durable before the mutation response; used by
-  security-bearing endpoints: settings/dashboard-auth mutations, account pause/reactivate/delete,
-  OAuth re-auth) and sync `request_bump(namespace)` (coalesced into a pending set flushed at the
-  start of each poll cycle; used on hot/scheduler paths). Coalescing bounds writes to <=1 per
-  namespace per poll interval; worst-case cross-replica convergence is flush (<=0.5s) + peer poll
-  (<=0.5s) ~= 1s for coalesced bumps and one poll interval for awaited bumps.
-- Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff); a
-  final failure logs ERROR and increments
-  `codex_lb_cache_invalidation_bump_failures_total{namespace}` but never fails the mutation —
-  peers then converge via the cache's fallback TTL. Failed coalesced flushes stay pending and
-  retry next cycle. Poll failures escalate to WARNING after 3 and ERROR after 10 consecutive
-  failures and increment `codex_lb_cache_invalidation_poll_failures_total`.
+- Two bump flavors share the existing pending set. `await bump(namespace)` attempts immediate
+  publication before the mutation response (settings/dashboard-auth mutations, account
+  pause/reactivate/delete, OAuth re-auth); sync `request_bump(namespace)` queues a coalesced
+  write for the next poll cycle (hot/scheduler paths). An immediate attempt consumes earlier
+  queued work before its first await, not after completion, so a marker requested during that
+  write survives. Coalescing bounds queued work to one marker per namespace, not the number
+  of concurrent immediate writes. Normal convergence is one peer poll after an immediate
+  success, or source flush plus peer poll (about 1s at defaults) for queued work; contention,
+  retry time, and callback latency can extend those intervals.
+- Failure semantics: `bump()` retries transient lock errors (3 attempts, 0.05s base backoff);
+  final failure logs ERROR, increments `codex_lb_cache_invalidation_bump_failures_total{namespace}`,
+  and returns false without failing the mutation. Both immediate and coalesced failures remain
+  pending for later poll cycles. Cancellation during a write, its session cleanup, or retry
+  backoff restores pending work and still propagates cancellation. An ambiguous accepted commit
+  may yield a duplicate version increment on retry; registered callbacks are idempotent.
+  Poll failures still escalate to WARNING after 3 and ERROR after 10 consecutive failures and
+  increment `codex_lb_cache_invalidation_poll_failures_total`.
+- Retention is process-local, not a durable outbox or shutdown-drain guarantee. Process exit
+  before publication or a poller that stops making progress can still lose or delay the signal;
+  existing per-cache recovery/backstop behavior applies, and caches without a TTL gain no new
+  process-loss guarantee. A failed `bump_local()` retries through ordinary publication and may
+  redundantly invalidate the source; successful local acknowledgement is unchanged.
+- Example: a key-disable PATCH commits on replica A, but all three notification writes hit
+  a database lock. The API succeeds and its local auth entry is cleared. A retains `api_key`;
+  once writes recover, the next source flush and peer poll clear B's cached active auth data,
+  and its next `/v1/usage` request returns 401 without waiting out the auth cache TTL.
 - Poller callbacks must be registered with non-propagating variants — a propagating callback
   would re-bump on every observed bump and loop.
 - Routing-unavailable derivation: an account is routing-unavailable when the snapshot says
@@ -46,6 +62,16 @@ The query-caching capability is broader than cache TTLs. It also owns the databa
   reuse. Bridge-session reuse checks stay pure in-memory: zero per-request DB reads.
 
 ## Operational Notes
+
+### SQLite request-log facet traversal
+
+SQLite's unfiltered request-log options query separates ordered facet traversal from visibility checks. Putting `deleted_at IS NULL` and the status predicate inside each recursive `MIN(facet)` can make the planner repeatedly scan the live-row index, especially without statistics. Instead, it enumerates indexed candidate values and uses an equality-constrained `EXISTS` to decide whether each candidate has an eligible row. Pair facets retain the leading-column equality while traversing the second column.
+
+For example, models that occur only in deleted rows may be visited as candidates, but cannot become returned options. This leaves work proportional to historical distinct values and the cost of proving eligibility; a large dead-only cohort can still make an absence check expensive. Live-row partial indexes complement the query shape.
+
+The September 2026 endpoint regression measures SQLite VM work across the real HTTP path on a synthetic corpus. It preserves NULL/empty pair values and excludes deleted-only and unsupported-status options. See [the archived diagnosis and verification](../../changes/archive/2026-09-09-sqlite-request-log-facets/context.md) for measurements and their limits.
+
+### Other query operations
 
 - Primary-window usage reads should normalize on `coalesce(window, 'primary')`.
 - Latest usage selection should be backed by a composite latest-row index, not by Python-side deduplication.

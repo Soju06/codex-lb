@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Protocol, TypeVar, cast
 
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.db.session import get_background_session
 from app.modules.telemetry.consent import TelemetryConsentStore
 from app.modules.telemetry.sender import TelemetrySender
@@ -18,17 +16,6 @@ logger = logging.getLogger(__name__)
 
 TELEMETRY_INTERVAL_SECONDS = 24 * 60 * 60
 TELEMETRY_FIELDS_DOCUMENTATION = "https://soju06.github.io/codex-lb/telemetry/"
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 @dataclass(slots=True)

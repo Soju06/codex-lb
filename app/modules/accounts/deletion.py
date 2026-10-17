@@ -52,17 +52,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol, TypeVar, cast
 
 from sqlalchemy import Select, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -106,17 +105,6 @@ DELETE_BATCH_SIZE = 1_000
 # transactions back-to-back.
 INTER_ROUND_PAUSE_RATIO = 0.25
 INTER_ROUND_PAUSE_CAP_SECONDS = 2.0
-
-_T = TypeVar("_T")
-
-
-class _LeaderElectionLike(Protocol):
-    async def run_if_leader(self, fn: Callable[[], Awaitable[_T]]) -> _T | None: ...
-
-
-def _get_leader_election() -> _LeaderElectionLike:
-    module = importlib.import_module("app.core.scheduling.leader_election")
-    return cast(_LeaderElectionLike, module.get_leader_election())
 
 
 async def run_account_deletion_pass(*, batch_size: int = DELETE_BATCH_SIZE) -> dict[str, str]:
@@ -475,6 +463,19 @@ class AccountDeletionScheduler:
         if not self._task:
             return
         self._stop.set()
+        # Release the interval wait without depending on cancellation delivery.
+        # The loop only clears ``_wake`` AFTER passing the ``_stop`` gate, so a
+        # wake set here is sticky: whatever the loop is doing, its next wait
+        # returns at once and the loop exits on the gate instead of parking for
+        # another ``interval_seconds``. ``cancel()`` alone is not enough — a
+        # tick body can absorb it. The tick's own session teardown does: when
+        # its ``SELECT`` fails, ``get_background_session`` runs
+        # ``_safe_rollback`` on this frame, and that helper discards a
+        # ``CancelledError`` landing inside it (dropped outright by the bounded
+        # SQLite wait, re-raised into ``except BaseException: return`` on the
+        # unbounded one). A swallowed cancel would otherwise hold shutdown for
+        # the full interval, well past the drain budget.
+        self._wake.set()
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task

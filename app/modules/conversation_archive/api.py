@@ -6,10 +6,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.concurrency import run_in_threadpool
 
-from app.core.auth.dependencies import require_dashboard_admin_access, set_dashboard_error_format
+from app.core.auth.dashboard_access import Permission
+from app.core.auth.dependencies import require_dashboard_permission, set_dashboard_error_format
 from app.modules.conversation_archive import service
 from app.modules.conversation_archive.schemas import (
-    ConversationArchiveFileResponse,
     ConversationArchiveRecordResponse,
     ConversationArchiveRecordsResponse,
 )
@@ -17,23 +17,11 @@ from app.modules.conversation_archive.schemas import (
 router = APIRouter(
     prefix="/api/conversation-archive",
     tags=["dashboard"],
-    dependencies=[Depends(require_dashboard_admin_access), Depends(set_dashboard_error_format)],
+    dependencies=[
+        Depends(require_dashboard_permission(Permission.CONVERSATIONS_READ)),
+        Depends(set_dashboard_error_format),
+    ],
 )
-
-
-@router.get("/files", response_model=list[ConversationArchiveFileResponse])
-def list_conversation_archive_files() -> list[ConversationArchiveFileResponse]:
-    files = service.list_archive_files()
-    return [
-        ConversationArchiveFileResponse(
-            name=file.name,
-            date=file.date,
-            size_bytes=file.size_bytes,
-            compressed=file.compressed,
-            modified_at=file.modified_at,
-        )
-        for file in files
-    ]
 
 
 @router.get("/records", response_model=ConversationArchiveRecordsResponse)

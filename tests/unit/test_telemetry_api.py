@@ -133,27 +133,43 @@ async def test_dashboard_active_to_inactive_transitions_each_send_exactly_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("env_value", "enabled", "expected_active"),
-    [("true", False, True), ("false", True, False)],
+    ("env_value", "enabled", "expected_state", "expected_opt_outs"),
+    [("true", False, "disabled", 1), ("false", True, "enabled", 0)],
 )
-async def test_environment_controlled_put_never_sends_opt_out(
+async def test_persisted_dashboard_decision_wins_over_environment(
     async_client,
     monkeypatch,
     opt_out_sender,
     env_value: str,
     enabled: bool,
-    expected_active: bool,
+    expected_state: str,
+    expected_opt_outs: int,
 ) -> None:
     monkeypatch.setenv("CODEX_LB_TELEMETRY_ENABLED", env_value)
     get_settings.cache_clear()
 
+    # While undecided the environment decides and is reported as the source.
+    before = await async_client.get("/api/settings/telemetry")
+    assert before.status_code == 200
+    assert before.json()["source"] == "env"
+    assert before.json()["active"] is (env_value == "true")
+
     response = await async_client.put("/api/settings/telemetry", json={"enabled": enabled})
 
     assert response.status_code == 200
-    assert response.json()["source"] == "env"
-    assert response.json()["active"] is expected_active
+    assert response.json()["state"] == expected_state
+    assert response.json()["source"] == "persisted"
+    assert response.json()["active"] is enabled
+    # The env value is still set; the saved decision must keep winning on read.
+    after = await async_client.get("/api/settings/telemetry")
+    assert after.status_code == 200
+    assert after.json()["state"] == expected_state
+    assert after.json()["source"] == "persisted"
+    assert after.json()["active"] is enabled
     await asyncio.sleep(0)
-    opt_out_sender.send_opt_out.assert_not_awaited()
+    # An env-active -> dashboard-disabled transition is a dashboard-driven
+    # opt-out and sends exactly one notice; enabling never does.
+    assert opt_out_sender.send_opt_out.await_count == expected_opt_outs
 
 
 @pytest.mark.asyncio

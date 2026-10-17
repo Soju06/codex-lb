@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import TypedDict
+
+from app.core.config.settings import get_settings
 
 _NORMALIZE_PATTERN = re.compile(r"[^a-z0-9]+")
 ADDITIONAL_QUOTA_ROUTING_POLICIES = frozenset({"inherit", "burn_first", "normal", "preserve"})
@@ -63,9 +64,9 @@ def _default_registry_path() -> Path:
 
 
 def _registry_path() -> Path:
-    configured = os.environ.get("CODEX_LB_ADDITIONAL_QUOTA_REGISTRY_FILE", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
+    configured = get_settings().additional_quota_registry_file
+    if configured is not None:
+        return configured.expanduser().resolve()
     return _default_registry_path()
 
 
@@ -306,32 +307,6 @@ def canonicalize_additional_quota_key(
     return _normalize_identifier(limit_name) or _normalize_identifier(metered_feature) or normalized_quota_key
 
 
-def get_additional_quota_lookup_keys(
-    *,
-    quota_key: str | None = None,
-    limit_name: str | None = None,
-    metered_feature: str | None = None,
-) -> frozenset[str] | None:
-    (
-        by_quota_key,
-        _model_to_quota_key,
-        _model_to_definition,
-        _alias_to_quota_key,
-        _quota_key_alias_to_quota_key,
-    ) = _definition_maps_for_path(str(_registry_path()))
-    resolved_key = canonicalize_additional_quota_key(
-        quota_key=quota_key,
-        limit_name=limit_name,
-        metered_feature=metered_feature,
-    )
-    if resolved_key is None:
-        return None
-    definition = by_quota_key.get(resolved_key)
-    if definition is None:
-        return frozenset({resolved_key})
-    return frozenset({resolved_key, *definition.quota_key_aliases})
-
-
 def get_additional_quota_key_for_model(model: str | None) -> str | None:
     return canonicalize_additional_quota_key(model=model)
 
@@ -350,6 +325,16 @@ def get_additional_quota_definition(quota_key: str | None) -> AdditionalQuotaDef
     if resolved_key is None:
         return None
     return by_quota_key.get(resolved_key)
+
+
+def normalize_additional_quota_key(raw_quota_key: str) -> str | None:
+    """Canonicalize a user-supplied quota key and require a registered definition."""
+    canonical_key = canonicalize_additional_quota_key(quota_key=raw_quota_key, limit_name=raw_quota_key)
+    if canonical_key is None:
+        return None
+    if get_additional_quota_definition(canonical_key) is None:
+        return None
+    return canonical_key
 
 
 def get_additional_quota_query_scope(
@@ -392,16 +377,3 @@ def get_additional_display_label_for_quota_key(quota_key: str | None) -> str | N
         return None
     definition = by_quota_key.get(resolved_key)
     return definition.display_label if definition is not None else None
-
-
-def get_additional_display_label(
-    *,
-    quota_key: str | None = None,
-    limit_name: str | None = None,
-    metered_feature: str | None = None,
-) -> str | None:
-    resolved_key = canonicalize_additional_quota_key(
-        limit_name=limit_name,
-        metered_feature=metered_feature,
-    )
-    return get_additional_display_label_for_quota_key(quota_key or resolved_key)

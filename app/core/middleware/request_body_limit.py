@@ -9,8 +9,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.core.config.settings import get_settings
-from app.core.errors import dashboard_error, openai_error
+from app.core.errors import SCIM_CONTENT_TYPE, dashboard_error, openai_error, scim_error
+from app.core.ingress_limits import MAX_DECOMPRESSED_BODY_BYTES, MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 from app.core.middleware.multipart_content_encoding import (
     is_route_owned_multipart_operation,
     multipart_content_encoding_gate_was_applied,
@@ -41,10 +41,9 @@ class _RequestBodyTooLarge(Exception):
 
 
 def request_body_limit_for_path(path: str) -> int:
-    settings = get_settings()
     if path.rstrip("/") in _RESPONSES_INGRESS_PATHS:
-        return max(settings.max_decompressed_body_bytes, settings.max_decompressed_responses_body_bytes)
-    return settings.max_decompressed_body_bytes
+        return max(MAX_DECOMPRESSED_BODY_BYTES, MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)
+    return MAX_DECOMPRESSED_BODY_BYTES
 
 
 def _path_belongs_to(path: str, prefix: str) -> bool:
@@ -55,6 +54,16 @@ def _uses_openai_ingress_errors(path: str) -> bool:
     return any(_path_belongs_to(path, prefix) for prefix in _OPENAI_INGRESS_PATH_PREFIXES)
 
 
+def _uses_scim_ingress_errors(path: str) -> bool:
+    """``/scim`` answers RFC 7644's envelope even before routing.
+
+    The ingress guard runs ahead of the router, so a refusal here would
+    otherwise be the dashboard's shape on a surface no dashboard client reads.
+    """
+
+    return _path_belongs_to(path, "/scim")
+
+
 def request_ingress_error_response(
     request: Request,
     *,
@@ -62,16 +71,29 @@ def request_ingress_error_response(
     code: str,
     message: str,
 ) -> JSONResponse:
-    uses_openai_errors = _uses_openai_ingress_errors(get_route_path(request.scope))
+    path = get_route_path(request.scope)
+    uses_openai_errors = _uses_openai_ingress_errors(path)
+    uses_scim_errors = _uses_scim_ingress_errors(path)
     response_code = "invalid_request_error" if uses_openai_errors and code == "invalid_request" else code
+    category = "dashboard_error_response"
+    if uses_openai_errors:
+        category = "openai_error_response"
+    elif uses_scim_errors:
+        category = "scim_error_response"
     log_error_response(
         logger,
         request,
         status_code,
         response_code,
         message,
-        category="openai_error_response" if uses_openai_errors else "dashboard_error_response",
+        category=category,
     )
+    if uses_scim_errors:
+        return JSONResponse(
+            status_code=status_code,
+            content=scim_error(status_code, message),
+            media_type=SCIM_CONTENT_TYPE,
+        )
     if uses_openai_errors:
         return JSONResponse(
             status_code=status_code,

@@ -16,12 +16,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount, RoutingStrategy
+from app.core.clock import REAL_CLOCK, Clock
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     _sticky_refresh_write_skippable,
 )
 from app.modules.proxy.load_balancer import LoadBalancer
+from tests.simulation.virtual_time import VirtualClock
 
 pytestmark = pytest.mark.unit
 
@@ -84,6 +86,7 @@ async def _invoke_stickiness(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+    clock: Clock = REAL_CLOCK,
 ):
     """Wrapper that calls production LoadBalancer._select_with_stickiness.
 
@@ -95,7 +98,7 @@ async def _invoke_stickiness(
     async def mock_repo_factory():
         yield AsyncMock()
 
-    lb = LoadBalancer(mock_repo_factory)
+    lb = LoadBalancer(mock_repo_factory, clock=clock)
     account_map = {s.account_id: cast(Account, AsyncMock()) for s in states}
 
     outcome = await lb._select_with_stickiness(
@@ -181,6 +184,24 @@ async def test_all_accounts_unavailable_does_not_overwrite_sticky():
     )
 
     assert result.account is None
+    repo.upsert.assert_not_called()
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_expired_reauth_sticky_owner_falls_back_without_rebinding_prompt_cache():
+    expired = AccountState(
+        "a",
+        AccountStatus.REAUTH_REQUIRED,
+        access_token_expires_at=time.time() - 1,
+    )
+    fallback = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness([expired, fallback], "key1", repo)
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
     repo.upsert.assert_not_called()
     repo.delete.assert_not_called()
 
@@ -552,6 +573,24 @@ async def test_grace_period_returns_pinned_when_reset_imminent():
 
 
 @pytest.mark.asyncio
+async def test_grace_period_uses_injected_selection_clock():
+    clock = VirtualClock(epoch_value=time.time() + 1_000_000.0)
+    acc_a = _rate_limited("a", reset_at=clock.time() + 5.0)
+    acc_b = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness(
+        [acc_a, acc_b],
+        "key-injected-clock",
+        repo,
+        clock=clock,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "a"
+
+
+@pytest.mark.asyncio
 async def test_grace_period_keeps_rate_limited_pinned_account_even_when_usage_is_100_pct():
     now = time.time()
     acc_a = _rate_limited("a", reset_at=now + 5, used_percent=100.0)
@@ -690,8 +729,8 @@ async def test_paused_pinned_account_persists_fallback():
 
 
 @pytest.mark.asyncio
-async def test_reauth_required_pinned_account_persists_fallback():
-    """REAUTH_REQUIRED is hard-blocked — same rebind behaviour as PAUSED."""
+async def test_reauth_required_pinned_account_preserves_owner():
+    """REAUTH_REQUIRED keeps the existing request-routable owner."""
     acc_a = AccountState("a", AccountStatus.REAUTH_REQUIRED, deactivation_reason="token expired")
     acc_b = _active("b")
     repo = _make_sticky_repo(existing_account_id="a")
@@ -704,8 +743,8 @@ async def test_reauth_required_pinned_account_persists_fallback():
     )
 
     assert result.account is not None
-    assert result.account.account_id == "b"
-    repo.upsert.assert_called_once_with("key1", "b", kind=StickySessionKind.PROMPT_CACHE)
+    assert result.account.account_id == "a"
+    repo.upsert.assert_called_once_with("key1", "a", kind=StickySessionKind.PROMPT_CACHE)
 
 
 # ---------------------------------------------------------------------------

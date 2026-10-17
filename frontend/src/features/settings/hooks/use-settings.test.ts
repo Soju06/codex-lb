@@ -3,7 +3,11 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { useSettings, useTelemetryConsent, useTelemetryPreview } from "@/features/settings/hooks/use-settings";
+import {
+  useSettings,
+  useTelemetryConsent,
+  useTelemetryPreview,
+} from "@/features/settings/hooks/use-settings";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({

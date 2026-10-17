@@ -5,7 +5,8 @@
 Give the project visibility into its install base (version distribution, deployment shapes,
 client ecosystem, feature usage) without collecting anything that identifies an operator,
 an account, or request content. Consent model is informed opt-out: active by default,
-one-time dialog with the exact payload, settings toggle, env kill switch.
+one-time dialog with the exact payload, settings toggle, env fallback for headless opt-out
+before the first dashboard decision.
 
 Decision record (2026-08-06, maintainer): default-on with first-run confirmation dialog for
 both new and existing users; settings toggle; expanded field set over the minimal version.
@@ -156,9 +157,10 @@ Field notes:
 
 ## Consent resolution precedence
 
-`CODEX_LB_TELEMETRY_ENABLED` env (when set) > persisted decision > default
-(`undecided` ⇒ active). The dialog is only shown while persisted state is `undecided` and
-no env override exists.
+persisted decision > `CODEX_LB_TELEMETRY_ENABLED` env (when set) > default
+(`undecided` ⇒ active). The env value only decides while the persisted state is `undecided`
+(headless opt-out before first boot); a saved dashboard decision always wins. The dialog is
+only shown while persisted state is `undecided` and no env value is set.
 
 ## Consent API and preview cost
 

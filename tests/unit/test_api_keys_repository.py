@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
-from app.db.models import LimitType, LimitWindow
+from app.db.models import ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 
 pytestmark = pytest.mark.unit
@@ -47,6 +47,41 @@ async def test_reset_expired_limits_counts_successful_updates_without_rowcount()
     assert "RETURNING api_key_limits.id" in executed_sql[1]
     assert "RETURNING api_key_limits.id" in executed_sql[2]
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upsert_limits_preserves_matched_usage_when_requested() -> None:
+    session = AsyncMock()
+    existing_reset_at = datetime(2026, 8, 22, 12, 0, 0)
+    existing = ApiKeyLimit(
+        id=101,
+        api_key_id="key_1",
+        limit_type=LimitType.TOTAL_TOKENS,
+        limit_window=LimitWindow.WEEKLY,
+        max_value=1_000,
+        current_value=725,
+        model_filter=None,
+        reset_at=existing_reset_at,
+    )
+    incoming = ApiKeyLimit(
+        api_key_id="key_1",
+        limit_type=LimitType.TOTAL_TOKENS,
+        limit_window=LimitWindow.WEEKLY,
+        max_value=2_000,
+        current_value=275,
+        model_filter=None,
+        reset_at=datetime(2026, 8, 29, 12, 0, 0),
+    )
+    session.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing]))
+    session.get.return_value = None
+    repo = ApiKeysRepository(session)
+
+    result = await repo.upsert_limits("key_1", [incoming], commit=False, preserve_matched_usage=True)
+
+    assert result == [existing]
+    assert existing.max_value == 2_000
+    assert existing.current_value == 725
+    assert existing.reset_at == existing_reset_at
 
 
 class TestUsage7dByAccount:

@@ -19,7 +19,9 @@ from sqlalchemy.sql.elements import ColumnElement
 from app import __version__
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.balancer.logic import RoutingStrategy
+from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.settings import Settings, get_settings
+from app.core.conversation_archive import resolve_archive_enabled
 from app.core.openai.model_registry import get_model_registry
 from app.core.usage.logs import NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
@@ -247,12 +249,17 @@ class TelemetrySnapshotBuilder:
             ),
             features=FeaturesSnapshot(
                 api_firewall=feature_counts.firewall_entries > 0,
-                quota_planner=(
-                    self._settings.quota_planner_scheduler_enabled and feature_counts.quota_planner_mode != "off"
-                ),
+                quota_planner=feature_counts.quota_planner_mode != "off",
                 sticky_sessions=dashboard_settings.sticky_threads_enabled,
-                conversation_archive=self._settings.conversation_archive_enabled,
-                automations=(self._settings.automations_scheduler_enabled and feature_counts.enabled_automations > 0),
+                # M5 conversation archive: dashboard column, else the env alias.
+                conversation_archive=resolve_archive_enabled(dashboard_settings, self._settings),
+                # M2 background jobs: the effective (dashboard-aware) toggle.
+                automations=(
+                    resolve_background_job_toggle(
+                        dashboard_settings, "automations_scheduler_enabled", startup_settings=self._settings
+                    )
+                    and feature_counts.enabled_automations > 0
+                ),
                 fleet=True,
                 model_sources_count=feature_counts.model_sources,
                 api_keys_bucket=count_bucket(feature_counts.api_keys),

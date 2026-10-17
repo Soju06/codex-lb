@@ -27,6 +27,10 @@ updates:
       day: "monday"
     open-pull-requests-limit: 10
     groups:
+      vitest:
+        patterns:
+          - "vitest"
+          - "@vitest/*"
       frontend-minor-patch:
         update-types:
           - "minor"

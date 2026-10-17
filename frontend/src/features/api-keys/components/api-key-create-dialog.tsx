@@ -149,10 +149,14 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(handleSubmit)}>
-        <div className="grid gap-x-6 sm:grid-cols-2">
-          <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2">
-            <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.general")}</h4>
+      <form className="flex min-h-0 flex-1 flex-col" onSubmit={form.handleSubmit(handleSubmit)}>
+        <div
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-4"
+          data-testid="api-key-create-scroll-region"
+        >
+          <div className="grid gap-x-6 sm:grid-cols-2">
+            <div className="space-y-3 pl-1 pr-2">
+              <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.general")}</h4>
 
             <FormField
               control={form.control}
@@ -309,13 +313,14 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
           </div>
 
-          <div className="max-h-[55vh] space-y-3 overflow-y-auto overscroll-contain pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
+            <div className="space-y-3 pl-1 pr-2 max-sm:mt-3 max-sm:border-t max-sm:pt-3">
             <h4 className="sticky top-0 bg-background pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("apiKeys.form.limits")}</h4>
             <LimitRulesEditor rules={draft.limitRules} onChange={(limitRules) => updateDraft({ limitRules })} />
           </div>
         </div>
+        </div>
 
-        <DialogFooter className="mt-4">
+        <DialogFooter className="border-t px-6 py-4">
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
             {t("common.actions.create")}
           </Button>
@@ -330,8 +335,8 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+          <DialogHeader className="px-6 pt-6 pr-12 pb-2">
             <DialogTitle>{t("apiKeys.createDialog.title")}</DialogTitle>
             <DialogDescription>{t("apiKeys.createDialog.description")}</DialogDescription>
           </DialogHeader>

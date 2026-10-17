@@ -13,9 +13,10 @@ from pydantic import Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
-    require_dashboard_write_access,
+    require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
@@ -41,6 +42,7 @@ from app.core.exceptions import (
     DashboardServiceUnavailableError,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -155,7 +157,7 @@ async def consume_rate_limit_reset_credit(
     request: Request,
     account_id: str,
     payload: AccountUsageResetConsumeRequest | None = None,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> ConsumeResetCreditResponseSchema:
     account = await context.repository.get_by_id(account_id)
@@ -193,6 +195,8 @@ async def consume_rate_limit_reset_credit(
     AuditService.log_async(
         "account_rate_limit_reset_credit_consumed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={
             "account_id": account_id,
             "consume_code": outcome.response.code,
@@ -280,10 +284,16 @@ async def serialize_reset_credit_redeem(
             try:
                 yield
             finally:
-                heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await heartbeat
-                await release_redeem_claim(account_id, holder_id)
+
+                async def cleanup_redeem_claim() -> None:
+                    heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat
+                    await release_redeem_claim(account_id, holder_id)
+
+                cancellation = await _await_cleanup_deferring_cancellation(cleanup_redeem_claim())
+                if cancellation is not None:
+                    raise cancellation
             return
 
     # Direct callers without a DB session keep the in-process lock.

@@ -1,7 +1,18 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.5 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.13.1 AS uv-bin
 
-FROM oven/bun:1.3.14-alpine AS frontend-build
+FROM rust:1.99.0-slim-bookworm AS native-egress-build
+
+WORKDIR /src
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
+    && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
+
+FROM oven/bun:1.4.3-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
@@ -40,8 +51,9 @@ WORKDIR /app
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
-        bsdutils libblkid1 libc-bin libc6 libcap2 libmount1 libsmartcols1 libssl3t64 \
-        libsystemd0 libudev1 libuuid1 openssl sed util-linux \
+        bsdutils gzip libblkid1 libc-bin libc6 libcap2 libmount1 libpcre2-8-0 \
+        libsmartcols1 libsqlite3-0 libssl3t64 \
+        libsystemd0 libudev1 libuuid1 openssl perl-base sed util-linux \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
     && rm -rf /var/lib/apt/lists/*
@@ -57,6 +69,7 @@ RUN adduser --disabled-password --gecos "" app \
     && chown -R app:app /var/lib/codex-lb
 
 COPY --from=python-build /opt/venv /opt/venv
+COPY --from=native-egress-build /tmp/codex-lb-native-egress /usr/local/bin/codex-lb-native-egress
 COPY --chown=app:app app app
 COPY --chown=app:app config config
 COPY --chown=app:app scripts scripts
@@ -65,6 +78,7 @@ COPY --chown=app:app --from=frontend-build /app/app/static app/static
 # The runtime image copies source files instead of installing the project, so
 # recreate the console-script entry point that pyproject would normally install.
 RUN chmod +x /app/scripts/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/codex-lb-native-egress \
     && printf '%s\n' '#!/bin/sh' 'exec python -m app.cli "$@"' > /usr/local/bin/codex-lb \
     && chmod +x /usr/local/bin/codex-lb
 

@@ -40,6 +40,27 @@ README and sample env stay slim without losing content.
   by `tests/unit/test_helm_replica_artifacts.py`.
 - **OpenSpec stays normative.** Docs pages carry footer links to their
   governing capability; they render behavior, they do not define it.
+- **Community companions stay separate.** Small operator tools that consume an
+  existing API can be maintained in independent repositories and linked from
+  the docs once they are public and tested. A listing keeps the tool
+  discoverable without adding its runtime, CI, release process, or support
+  surface to codex-lb. The first listings cover the independently published
+  [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) and the
+  read-only
+  [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar),
+  following the maintainer direction in
+  [PR #1233](https://github.com/Soju06/codex-lb/pull/1233#issuecomment-4988227303).
+  Listings also carry least-privilege guidance: guest access for monitoring
+  where the companion supports it, and admin access only for control features;
+  each companion remains responsible for documenting its current auth modes.
+  [Codex LB for Omarchy](https://github.com/janaki-sasidhar/omarchy-codex-lb) extends this pattern to Linux with a native Omarchy Quattro plugin using the same dashboard API. Its monitoring-only scope includes guest access, account quota and usage summaries, reset timing, and optional desktop notifications.
+  [Codex-LB Rates](https://github.com/uniskela/codex-lb-rates) extends this pattern to Home Assistant with pool and per-account remaining-% sensors via the same dashboard API, supporting guest and admin login for monitoring.
+  Placement: the listing renders as an appendix-level section at the end of
+  `docs/index.md` (below core usage and screenshots) and is kept
+  self-contained so it can move to a dedicated page once the list grows; a
+  short mirror lives in the README under the Documentation section (a
+  sub-heading, not a new top-level README section, per the simplicity
+  budgets).
 - **zh-CN README gets a canonical-English banner** rather than a parallel diet;
   full i18n (mkdocs-static-i18n) is a deferred follow-up.
 

@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 
+from app.core.auth import refresh as refresh_module
 from app.core.auth.refresh import RefreshError, TokenRefreshResult
+from app.core.balancer import AccountState, select_account
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountRefreshClaim, AccountStatus, StickySession, StickySessionKind
@@ -121,6 +126,68 @@ async def _commit_peer_reauth(account_id: str, *, refresh_token: str) -> None:
         account.status = AccountStatus.ACTIVE
         account.deactivation_reason = None
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_invalid_refresh_token_payload_requires_reauth_and_gates_routing_on_expiry(db_setup, monkeypatch):
+    """Exercise the OAuth payload, guarded DB downgrade, and expiry-gated routing together."""
+    account_id = "acc_invalid_refresh_token"
+    await _create_account(account_id)
+
+    class InvalidRefreshTokenResponse:
+        status = 400
+
+        async def json(self, *, content_type: object = None) -> dict[str, object]:
+            del content_type
+            return {
+                "error": {
+                    "code": "invalid_refresh_token",
+                    "message": "Refresh token invalid - re-login required.",
+                }
+            }
+
+        async def text(self) -> str:
+            return ""
+
+        async def __aenter__(self) -> InvalidRefreshTokenResponse:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class InvalidRefreshTokenSession:
+        def post(self, *_args: object, **_kwargs: object) -> InvalidRefreshTokenResponse:
+            return InvalidRefreshTokenResponse()
+
+    @asynccontextmanager
+    async def fake_lease_http_session(_session: object) -> AsyncIterator[InvalidRefreshTokenSession]:
+        yield InvalidRefreshTokenSession()
+
+    monkeypatch.setattr(refresh_module, "lease_http_session", fake_lease_http_session)
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        account = await repo.get_by_id(account_id)
+        assert account is not None
+        manager = AuthManager(repo, refresh_claims=RefreshClaimCoordinator(claimant_id="invalid-token-test"))
+
+        with pytest.raises(RefreshError) as exc_info:
+            await manager.refresh_account(account)
+
+    assert exc_info.value.code == "invalid_refresh_token"
+    assert exc_info.value.is_permanent is True
+    status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
+    assert status == AccountStatus.REAUTH_REQUIRED
+    assert stored_refresh_token == "refresh-old"
+    # Reauth-required accounts keep request-routable continuity until the
+    # stored access token's derived expiry passes (see keep-reauth-required-
+    # access-routable): sticky pins survive and routing only excludes the
+    # account once its access token is known-expired.
+    assert sticky_present is True
+    unexpired = AccountState(account_id=account_id, status=status)
+    assert select_account([unexpired]).account is not None
+    expired = AccountState(account_id=account_id, status=status, access_token_expires_at=time.time() - 1.0)
+    assert select_account([expired]).account is None
 
 
 @pytest.mark.asyncio
@@ -1024,10 +1091,10 @@ async def test_permanent_failure_cas_retries_when_same_plaintext_re_encrypted(db
 
     assert exc_info.value.code == "refresh_token_reused"
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
-    # The downgrade landed on retry: same (dead) plaintext, account de-routed.
+    # The downgrade lands on retry while request-routable continuity remains.
     assert status == AccountStatus.REAUTH_REQUIRED
     assert stored_refresh_token == "refresh-old"
-    assert sticky_present is False
+    assert sticky_present is True
 
 
 def _encode_jwt(payload: dict) -> str:

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import errno
+import hashlib
+import json
+import logging
 import socket
+from contextlib import asynccontextmanager
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.client_reqrep import ConnectionKey
+from aiohttp.test_utils import TestServer
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.codex import CodexClient, CodexRequestResult, CodexTransportError, CodexWebSocketResult
@@ -427,6 +434,73 @@ async def test_codex_control_request_uses_codex_client_when_route_is_resolved(ro
     assert client.calls[0]["url"] == "https://chatgpt.test/codex/sessions"
     assert client.calls[0]["route"] is route
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_agent", ["Codex Desktop/0.153.4", "OpenAI/Python 2.24.0"])
+@pytest.mark.parametrize("header_name", ["content-type", "Content-Type", "cOnTeNt-TyPe"])
+@pytest.mark.parametrize("media_type", ["application/json", "application/sdp"])
+@pytest.mark.parametrize("transport", ["direct", "routed"])
+async def test_codex_control_request_preserves_single_media_type(
+    route: ResolvedUpstreamRoute, user_agent: str, header_name: str, media_type: str, transport: str
+) -> None:
+    client = _CodexClient()
+    payload = b"opaque request bytes"
+
+    class DirectResponse:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        async def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    class DirectSession:
+        @asynccontextmanager
+        async def request(self, method: str, url: str, **kwargs: Any):
+            client.calls.append({"method": method, "url": url, **kwargs})
+            yield DirectResponse()
+
+    await codex_control_request(
+        "alpha/search" if media_type == "application/json" else "realtime/calls",
+        method="POST",
+        payload=payload,
+        query_params={},
+        headers={"user-agent": user_agent, header_name: media_type, "x-request-id": "media-type-test"},
+        access_token="access",
+        account_id="chatgpt_account",
+        base_url="https://chatgpt.test",
+        route=route if transport == "routed" else None,
+        session=cast(Any, DirectSession()),
+        codex_client=cast(Any, client),
+    )
+
+    headers = client.calls[0]["headers"]
+    assert [value for name, value in headers.items() if name.lower() == "content-type"] == [media_type]
+    assert client.calls[0]["data"] == payload
+    if user_agent.startswith("Codex Desktop"):
+        assert list(headers).index(header_name) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [None, b"{}"])
+async def test_codex_control_request_default_media_type_depends_on_body(
+    route: ResolvedUpstreamRoute, payload: bytes | None
+) -> None:
+    client = _CodexClient()
+    await codex_control_request(
+        "alpha/search",
+        method="POST" if payload is not None else "GET",
+        payload=payload,
+        query_params={},
+        headers={"user-agent": "Codex Desktop/0.153.4"},
+        access_token="access",
+        account_id=None,
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    media_types = [value for name, value in client.calls[0]["headers"].items() if name.lower() == "content-type"]
+    assert media_types == ([] if payload is None else ["application/json"])
 
 
 @pytest.mark.asyncio
@@ -1370,3 +1444,331 @@ async def test_responses_websocket_post_connect_network_failures_preserve_safe_c
     assert "user:pass" not in message.error
     assert rotate.await_count == 2
     assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)
+
+
+_SSE_CREATED_CHUNK = b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+_SSE_COMPLETED_CHUNK = b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+
+async def _noop() -> None:
+    return None
+
+
+class _HoldingStreamContent:
+    """Yield the given chunks, then hold the body open like an upstream keep-alive tunnel."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.drained = asyncio.Event()
+
+    async def iter_chunked(self, size: int):
+        del size
+        for chunk in self._chunks:
+            yield chunk
+        self.drained.set()
+        await asyncio.Event().wait()
+
+
+class _ReleasableStreamResponse:
+    """aiohttp-shaped: ``release()`` is synchronous and returns a non-suspending awaitable."""
+
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, order: list[str], chunks: list[bytes], *, status_code: int = 200) -> None:
+        self._order = order
+        self.status_code = status_code
+        self.content = _HoldingStreamContent(chunks)
+
+    def release(self) -> Any:
+        self._order.append("release")
+        return _noop()
+
+
+class _AcloseOnlyStreamResponse:
+    """Native-egress-shaped: only ``aclose()`` is available."""
+
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, order: list[str], chunks: list[bytes]) -> None:
+        self._order = order
+        self.content = _HoldingStreamContent(chunks)
+
+    async def aclose(self) -> None:
+        self._order.append("aclose")
+
+
+class _ReleasableErrorResponse:
+    status_code = 429
+    headers = {"content-type": "application/json"}
+    content = b'{"error":{"code":"rate_limit_exceeded","message":"slow down"}}'
+
+    def __init__(self, order: list[str]) -> None:
+        self._order = order
+
+    def json(self) -> dict[str, Any]:
+        return {"error": {"code": "rate_limit_exceeded", "message": "slow down"}}
+
+    def release(self) -> Any:
+        self._order.append("release")
+        return _noop()
+
+
+class _OwnedCodexClient(_RouteMetadataCodexClient):
+    def __init__(self, response: object, order: list[str]) -> None:
+        super().__init__(response)
+        self._order = order
+
+    async def close(self) -> None:
+        self._order.append("close")
+
+
+def _install_owned_codex_client(monkeypatch: pytest.MonkeyPatch, client: _OwnedCodexClient) -> None:
+    # No codex_client is passed, so the routed branch builds and owns its own
+    # per-stream client exactly like production does.
+    monkeypatch.setattr(proxy_module, "create_codex_session", lambda: None)
+    monkeypatch.setattr(proxy_module, "CodexClient", lambda session, *, native_egress_client=None: client)
+
+
+def _routed_stream(route: ResolvedUpstreamRoute, *, raise_for_status: bool = False):
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+    return stream_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        raise_for_status=raise_for_status,
+        session=cast(Any, object()),
+        upstream_stream_transport_override="http",
+        route=route,
+        allow_direct_egress=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_terminal_event_releases_response_before_client_close(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    response = _ReleasableStreamResponse(order, [_SSE_CREATED_CHUNK, _SSE_COMPLETED_CHUNK])
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(response, order))
+
+    events = [event async for event in _routed_stream(route)]
+
+    assert events == [_SSE_CREATED_CHUNK.decode(), _SSE_COMPLETED_CHUNK.decode()]
+    assert order == ["release", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_downstream_disconnect_releases_response(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    response = _ReleasableStreamResponse(order, [_SSE_CREATED_CHUNK])
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(response, order))
+
+    stream = _routed_stream(route)
+    first = await stream.__anext__()
+    await stream.aclose()
+
+    assert first == _SSE_CREATED_CHUNK.decode()
+    assert order == ["release", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_cancellation_releases_response(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    response = _ReleasableStreamResponse(order, [_SSE_CREATED_CHUNK])
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(response, order))
+
+    async def _consume() -> list[str]:
+        return [event async for event in _routed_stream(route)]
+
+    task = asyncio.create_task(_consume())
+    await response.content.drained.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert order == ["release", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_idle_timeout_releases_response(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    response = _ReleasableStreamResponse(order, [_SSE_CREATED_CHUNK])
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(response, order))
+
+    with proxy_module.override_stream_timeouts(idle_timeout_seconds=0.01):
+        events = [event async for event in _routed_stream(route)]
+
+    assert events[0] == _SSE_CREATED_CHUNK.decode()
+    assert len(events) == 2
+    assert '"stream_idle_timeout"' in events[1]
+    assert order == ["release", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_error_status_releases_response(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(_ReleasableErrorResponse(order), order))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in _routed_stream(route, raise_for_status=True):
+            pass
+
+    assert exc_info.value.status_code == 429
+    assert order == ["release", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_closes_aclose_only_response(
+    route: ResolvedUpstreamRoute, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    response = _AcloseOnlyStreamResponse(order, [_SSE_CREATED_CHUNK, _SSE_COMPLETED_CHUNK])
+    _install_owned_codex_client(monkeypatch, _OwnedCodexClient(response, order))
+
+    events = [event async for event in _routed_stream(route)]
+
+    assert events == [_SSE_CREATED_CHUNK.decode(), _SSE_COMPLETED_CHUNK.decode()]
+    assert order == ["aclose", "close"]
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_tolerates_response_without_release(route: ResolvedUpstreamRoute) -> None:
+    # Plain duck-typed responses (buffered bodies, test fakes) expose neither
+    # release() nor aclose(); teardown must stay a no-op for them.
+    client = _CodexClient(_StreamResponse())
+    payload = ResponsesRequest(model="gpt-5.2", instructions="Reply.", input="hello", stream=True)
+
+    events = [
+        event
+        async for event in stream_responses(
+            payload,
+            {"user-agent": "codex"},
+            "access",
+            "chatgpt_account",
+            session=cast(Any, object()),
+            upstream_stream_transport_override="http",
+            route=route,
+            codex_client=cast(Any, client),
+        )
+    ]
+
+    assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "trace_payload", "image_generation", "expected_preparation_dumps"),
+    [("http", False, False, 0), ("http", True, False, 1), ("auto", False, False, 1), ("auto", False, True, 0)],
+    ids=["no-payload-consumer", "raw-payload-trace", "auto-size-budget", "auto-image-generation"],
+)
+async def test_stream_responses_python_http_prepares_only_consumed_json(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    transport: str,
+    trace_payload: bool,
+    image_generation: bool,
+    expected_preparation_dumps: int,
+) -> None:
+    # Representative full-history tool output from the Responses request shape;
+    # large non-ASCII content makes both unused whole-body encodes observable.
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "Summarize the repository inspection.",
+            "stream": True,
+            "input": [
+                {"role": "user", "content": "Inspect the repository."},
+                {
+                    "type": "function_call",
+                    "call_id": "call_inspection",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"git status --short"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_inspection",
+                    "output": "Repository inspection: café / 東京\n" * 32768,
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                }
+            ]
+            + ([{"type": "image_generation"}] if image_generation else []),
+        }
+    )
+    expected_payload = payload.to_payload()
+    expected_body = json.dumps(expected_payload).encode("utf-8")
+    assert len(expected_body) > 1_000_000
+    upstream_bodies: list[bytes] = []
+    terminal = 'data: {"type":"response.completed","response":{"id":"resp_preparation"}}\n\n'
+
+    async def respond(request: web.Request) -> web.Response:
+        upstream_bodies.append(await request.read())
+        return web.Response(text=terminal, content_type="text/event-stream")
+
+    origin = web.Application(client_max_size=4 * 1024 * 1024)
+    origin.router.add_post("/codex/responses", respond)
+    settings = proxy_module.get_settings().model_copy(
+        update={
+            "upstream_stream_transport": transport,
+            "trace_channels": frozenset({"upstream_payload"}) if trace_payload else frozenset(),
+        }
+    )
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+    if not image_generation:
+        monkeypatch.setattr(proxy_module, "MAX_SSE_EVENT_BYTES", 2 * 1024 * 1024)
+    else:
+        assert len(expected_body) < proxy_module._ws_transport_payload_budget_bytes()
+    monkeypatch.setattr(proxy_module, "discover_native_egress_client", lambda: None)
+    # Observe only this owning module's JSON calls, leaving aiohttp's real
+    # request serializer and all preparation/stream code unchanged.
+    preparation_json = MagicMock(wraps=json)
+    monkeypatch.setattr(proxy_module, "json", preparation_json)
+    caplog.set_level(logging.INFO, logger=proxy_module.__name__)
+
+    async with TestServer(origin) as server, aiohttp.ClientSession() as session:
+        events = [
+            event
+            async for event in stream_responses(
+                payload,
+                {"originator": "codex_cli_rs"},
+                "access",
+                None,
+                session=session,
+                upstream_stream_transport_override=transport,
+                base_url=str(server.make_url("/")),
+            )
+        ]
+
+    assert events == [terminal]
+    assert len(upstream_bodies) == 1
+    assert hashlib.sha256(upstream_bodies[0]).digest() == hashlib.sha256(expected_body).digest()
+    full_body_dumps = sum(
+        isinstance(call.args[0], dict) and call.args[0].get("model") == payload.model
+        for call in preparation_json.dumps.call_args_list
+    )
+    trace_records = [record for record in caplog.records if record.msg.startswith("upstream_request_payload ")]
+    if trace_payload:
+        assert len(trace_records) == 1
+        trace_args = trace_records[0].args
+        assert isinstance(trace_args, tuple)
+        traced_json = trace_args[-1]
+        assert isinstance(traced_json, str)
+        assert json.loads(traced_json) == expected_payload
+    else:
+        assert trace_records == []
+    assert full_body_dumps == expected_preparation_dumps

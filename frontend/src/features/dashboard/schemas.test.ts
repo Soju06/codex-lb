@@ -85,6 +85,7 @@ describe("DashboardOverviewSchema", () => {
     expect(parsed.summary.metrics?.cancelledCount).toBe(3);
   });
 
+
   it("drops legacy request_logs field from parse result", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,
@@ -628,6 +629,7 @@ describe("FilterStateSchema", () => {
     const parsed = FilterStateSchema.parse(state);
     expect(parsed.conversationId).toBeNull();
   });
+
 });
 
 describe("overview timeframe parsing", () => {

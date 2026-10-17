@@ -57,8 +57,8 @@ def _as_mapping(value: Any) -> Mapping[str, JsonValue]:
 class TestImagesGenerationToResponsesRequest:
     def test_minimal_generation_payload(self) -> None:
         payload = V1ImagesGenerationsRequest.model_validate({"model": "gpt-image-2", "prompt": "tiny red circle"})
-        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
-        assert responses.model == "gpt-5.5"
+        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.6-luna")
+        assert responses.model == "gpt-5.6-luna"
         assert responses.store is False
         # The internal Responses request is always streamed because the
         # upstream backend rejects non-streaming requests that include the
@@ -98,7 +98,7 @@ class TestImagesGenerationToResponsesRequest:
                 "n": 1,
             }
         )
-        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
+        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.6-luna")
         assert responses.stream is True
         tool = _tool(responses)
         assert tool["partial_images"] == 2
@@ -117,15 +117,15 @@ class TestImagesGenerationToResponsesRequest:
                 "partial_images": 2,
             }
         )
-        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
+        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.6-luna")
         assert "partial_images" not in _tool(responses)
 
     def test_host_model_replaces_public_model(self) -> None:
         payload = V1ImagesGenerationsRequest.model_validate({"model": "gpt-image-2", "prompt": "blue square"})
-        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.5")
+        responses = images_service.images_generation_to_responses_request(payload, host_model="gpt-5.6-luna")
         # The public model only appears in tools[0].model — never on the
         # outer Responses ``model`` field.
-        assert responses.model == "gpt-5.5"
+        assert responses.model == "gpt-5.6-luna"
         assert _tool(responses)["model"] == "gpt-image-2"
 
 
@@ -137,7 +137,7 @@ class TestImagesEditToResponsesRequest:
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
         responses = images_service.images_edit_to_responses_request(
             form,
-            host_model="gpt-5.5",
+            host_model="gpt-5.6-luna",
             images=[(png_bytes, "image/png")],
             mask=None,
         )
@@ -157,7 +157,7 @@ class TestImagesEditToResponsesRequest:
         form = V1ImagesEditsForm.model_validate({"model": "gpt-image-1", "prompt": "edit this", "size": "1024x1024"})
         responses = images_service.images_edit_to_responses_request(
             form,
-            host_model="gpt-5.5",
+            host_model="gpt-5.6-luna",
             images=[(b"image-bytes", "image/png")],
             mask=(b"mask-bytes", "image/png"),
         )
@@ -179,7 +179,7 @@ class TestImagesEditToResponsesRequest:
         with pytest.raises(ValueError):
             images_service.images_edit_to_responses_request(
                 form,
-                host_model="gpt-5.5",
+                host_model="gpt-5.6-luna",
                 images=[],
                 mask=None,
             )
@@ -195,7 +195,7 @@ class TestImagesEditToResponsesRequest:
         )
         responses = images_service.images_edit_to_responses_request(
             form,
-            host_model="gpt-5.5",
+            host_model="gpt-5.6-luna",
             images=[(b"data", "image/png")],
             mask=None,
         )

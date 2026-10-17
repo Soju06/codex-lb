@@ -20,6 +20,10 @@ _WEBSOCKET_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
         "all",
     ),
 }
+_HTTP_PROXY_ENV_PRIORITY: dict[str, tuple[str, ...]] = {
+    "http": ("socks", "http", "all"),
+    "https": ("socks", "https", "all"),
+}
 
 STANDARD_OUTBOUND_PROXY_ENV_NAMES: tuple[str, ...] = tuple(
     dict.fromkeys(f"{name}_proxy" for names in _WEBSOCKET_PROXY_ENV_PRIORITY.values() for name in names)
@@ -34,14 +38,26 @@ def outbound_proxy_env_configured(environ: Mapping[str, str | None] = os.environ
 
 
 def resolve_websocket_proxy_from_env(url: str, environ: Mapping[str, str | None] = os.environ) -> str | None:
+    return _resolve_proxy_from_env(url, _WEBSOCKET_PROXY_ENV_PRIORITY, environ)
+
+
+def resolve_http_proxy_from_env(url: str, environ: Mapping[str, str | None] = os.environ) -> str | None:
+    return _resolve_proxy_from_env(url, _HTTP_PROXY_ENV_PRIORITY, environ)
+
+
+def _resolve_proxy_from_env(
+    url: str,
+    priority: Mapping[str, tuple[str, ...]],
+    environ: Mapping[str, str | None],
+) -> str | None:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
-    env_names = _WEBSOCKET_PROXY_ENV_PRIORITY.get(scheme)
+    env_names = priority.get(scheme)
     if env_names is None:
         return None
 
     hostname = parsed.hostname
-    port = parsed.port or (443 if scheme == "wss" else 80)
+    port = parsed.port or (443 if scheme in {"https", "wss"} else 80)
     proxies = _sanitized_proxy_env(environ)
     proxy_bypass_environment = getattr(urllib.request, "proxy_bypass_environment")
     if hostname and proxy_bypass_environment(f"{hostname}:{port}", proxies):

@@ -97,6 +97,71 @@ def test_fast_mode_prohibition_keeps_explicit_service_tier() -> None:
     assert request.service_tier == "flex"
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+@pytest.mark.parametrize("service_tier", ["priority", "fast"])
+def test_fast_mode_prohibition_strips_explicit_priority_service_tier(
+    request_type: type[ResponsesRequest] | type[ResponsesCompactRequest],
+    service_tier: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": service_tier,
+        }
+    )
+    caplog.set_level("INFO", logger="app.modules.proxy.request_policy")
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=True)
+
+    assert request.service_tier is None
+    assert "fast_mode_service_tier_prohibited" in caplog.text
+    assert "stripped_service_tier=priority" in caplog.text
+
+
+def test_fast_mode_prohibition_overrides_api_key_enforced_priority() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": "flex",
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-priority",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            enforced_service_tier="priority",
+            allowed_reasoning_efforts=None,
+        ),
+    )
+
+    result = apply_api_key_enforcement(request, api_key, prohibit_fast_mode=True)
+
+    assert result.service_tier_was_enforced is False
+    assert request.service_tier is None
+
+
+def test_disabled_fast_mode_prohibition_preserves_explicit_priority() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "service_tier": "priority",
+        }
+    )
+
+    apply_api_key_enforcement(request, None, prohibit_fast_mode=False)
+
+    assert request.service_tier == "priority"
+
+
 def test_minimal_reasoning_alias_uses_upstream_safe_fallback() -> None:
     request = ResponsesRequest.model_validate(
         {
@@ -869,6 +934,40 @@ def test_source_route_excluded_is_false_for_plain_turns() -> None:
     assert responses_source_route_excluded(request) is False
 
 
+@pytest.mark.parametrize(
+    "previous_response_id",
+    [
+        "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
+        "resp_source_owned_continuation",
+    ],
+)
+def test_source_route_excluded_does_not_infer_previous_response_ownership(previous_response_id: str) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "previous_response_id": previous_response_id,
+        }
+    )
+
+    assert responses_source_route_excluded(request) is False
+
+
+def test_source_route_excluded_is_false_for_blank_previous_response_id() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "previous_response_id": "   ",
+        }
+    )
+
+    assert request.previous_response_id is None
+    assert responses_source_route_excluded(request) is False
+
+
 def test_source_route_excluded_for_input_file_references() -> None:
     request = _responses_request_with_input(
         [{"role": "user", "content": [{"type": "input_file", "file_id": "file_123"}]}]
@@ -886,6 +985,7 @@ def test_source_route_excluded_for_terminal_compaction_trigger() -> None:
     )
 
     assert responses_source_route_excluded(request) is True
+    assert responses_source_route_excluded(request, exclude_compaction=False) is False
 
 
 def test_source_route_excluded_raises_for_malformed_compaction_trigger() -> None:

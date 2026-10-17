@@ -1,7 +1,7 @@
 # automations Specification
 
 ## Purpose
-TBD - created by archiving change add-automations-scheduled-pings. Update Purpose after archive.
+Governs operator-defined automation jobs that send scheduled ping traffic from selected accounts and models for readiness checks and warm-up. It defines the dashboard API for managing jobs, daily schedules with timezone and weekday semantics, safe execution in multi-replica deployments, account failover within a run, and queryable run history. Automation traffic must never alter durable user continuity such as sticky sessions.
 ## Requirements
 ### Requirement: Automation jobs are manageable via dashboard APIs
 
@@ -121,7 +121,7 @@ The scheduler MUST execute each enabled daily job once per local calendar day at
 
 ### Requirement: Scheduler is safe in multi-replica deployments
 
-The system MUST guarantee at-most-once execution for each due schedule slot `(job_id, scheduled_for)` across replicas.
+The system MUST guarantee at-most-once execution for each due schedule slot `(job_id, scheduled_for)` across replicas. A running claim MUST be reclaimable only after it has been held longer than its own reclaim window, and that window MUST cover the larger of the compact request budget captured on the run row when the claim was made (`automation_runs.claim_budget_seconds`, stored on every fresh claim and every reclaim) and the effective budget when staleness is judged, so a later dashboard change can only widen a live claim's window, never narrow it. A run's compact request timeout MUST NOT exceed that captured budget (the core compact deadline still follows the current budget, so lowering it can end the request early but never reclaims the slot early). Rows claimed before the budget was stored (NULL) MUST fall back to the current effective compact request budget.
 
 #### Scenario: Two replicas contend for the same due job
 
@@ -134,6 +134,27 @@ The system MUST guarantee at-most-once execution for each due schedule slot `(jo
 - **WHEN** one scheduler replica crashes after claiming a slot and before completion
 - **THEN** no second replica creates a duplicate claim row for the same slot
 - **AND** the existing run row remains the single source of truth for that slot
+
+#### Scenario: Lowering the dashboard compact budget does not reclaim an in-flight run
+
+- **GIVEN** a run claimed while the effective compact request budget was 600 seconds, 200 seconds ago
+- **WHEN** the dashboard lowers the compact request budget to 60 seconds and the scheduler evaluates the slot
+- **THEN** the run is not reclaimed and no second compact ping is started for that slot
+- **AND** the run becomes reclaimable only once it has been held longer than 630 seconds
+
+#### Scenario: Raising the dashboard compact budget widens the window of a claim pinned lower
+
+- **GIVEN** a running claim whose captured budget is 60 seconds, held for 200 seconds
+- **WHEN** the effective compact request budget is 600 seconds (a writer that does not refresh the pin, such as a pre-upgrade replica during a rolling deploy, may be executing this claim under it)
+- **THEN** the claim is not reclaimed
+- **AND** it becomes reclaimable only once it has been held longer than 630 seconds
+
+#### Scenario: Legacy claim without a captured budget follows the current budget
+
+- **GIVEN** a running claim whose `claim_budget_seconds` is NULL, held for 200 seconds
+- **WHEN** the effective compact request budget is 600 seconds
+- **THEN** the claim is still in flight
+- **AND** once the effective budget is 60 seconds the same claim is reclaimed
 
 ### Requirement: Account failover is attempted within a job run
 
@@ -263,3 +284,34 @@ Automation ping execution MUST avoid creating or mutating durable sticky-thread/
 
 - **WHEN** an automation ping run is executed
 - **THEN** existing durable sticky-thread/codex-session mappings for user conversations remain unchanged
+
+### Requirement: Automation scheduling can be paused from the dashboard
+
+The dashboard setting `automations_scheduler_enabled` (a nullable `dashboard_settings` column; NULL inherits the deprecated `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED` environment variable, then the default `true`) SHALL decide whether automations run. It SHALL be exposed with provenance on `GET`/`PUT /api/settings` and offered both in Settings → Advanced → Background jobs and as a "pause all automations" control on the Automations page. The scheduler loop SHALL always start; each tick SHALL read the effective value from the dashboard-settings snapshot at the start of the tick and, while it is `false`, SHALL dispatch nothing — neither scheduled cycles nor pending manual runs — so a change applies on the next tick on every replica without a restart. While paused, `POST /api/automations/{id}/run-now` SHALL be refused with a `409` conflict error whose code is `automations_paused` and SHALL create no run. The scheduler MUST NOT read the database inside its lock to obtain the value: the snapshot is taken once per tick before the leader-gated body and passed into it. A failure of that read MUST NOT terminate the loop; the tick is logged and the next one retries.
+
+#### Scenario: Dashboard pause skips the next tick
+
+- **GIVEN** the scheduler was started with `automations_scheduler_enabled` effectively `true`
+- **WHEN** an operator sets `automations_scheduler_enabled` to `false` in the dashboard
+- **THEN** the next scheduler tick dispatches no scheduled cycle and no manual run
+- **AND** no replica was restarted
+
+#### Scenario: Resume applies on the next tick
+
+- **GIVEN** automations are paused from the dashboard
+- **WHEN** the operator sets `automations_scheduler_enabled` back to `true` (or clears it so the inherited `true` applies)
+- **THEN** the next scheduler tick dispatches due work again
+
+#### Scenario: Run now is refused while paused
+
+- **GIVEN** automations are paused from the dashboard
+- **WHEN** a dashboard user calls `POST /api/automations/{id}/run-now`
+- **THEN** the response is `409` with error code `automations_paused`
+- **AND** no automation run is created for that job
+
+#### Scenario: Environment alias applies only while the dashboard value is unset
+
+- **GIVEN** `CODEX_LB_AUTOMATIONS_SCHEDULER_ENABLED=false` and no dashboard value
+- **WHEN** an operator sets `automations_scheduler_enabled` to `true` in the dashboard
+- **THEN** ticks dispatch due work and `provenance.automations_scheduler_enabled.source` is `dashboard`
+

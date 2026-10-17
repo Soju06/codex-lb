@@ -1041,6 +1041,9 @@ class RequestLogsRepository:
         upstream_proxy_fallback_used: bool | None = None,
         upstream_proxy_fail_closed_reason: str | None = None,
         archive_request_id: str | None = None,
+        sticky_key_source: str | None = None,
+        sticky_kind: str | None = None,
+        sticky_key_hash: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
@@ -1058,6 +1061,9 @@ class RequestLogsRepository:
             resolved_conversation_id = _normalize_conversation_id(conversation_id)
             resolved_client_ip = client_ip if not isinstance(client_ip, str) or client_ip.strip() else None
             log = RequestLog(
+                sticky_key_source=sticky_key_source,
+                sticky_kind=sticky_kind,
+                sticky_key_hash=sticky_key_hash,
                 account_id=account_id,
                 model_source_id=model_source_id,
                 model_source_kind=model_source_kind,
@@ -1147,6 +1153,28 @@ class RequestLogsRepository:
                 await _safe_rollback(self._session)
                 raise
 
+    async def latest_successful_log_for_request_id(self, request_id: str, *, request_kind: str) -> RequestLog | None:
+        """Return the newest *successful* ``request_kind`` log for ``request_id``.
+
+        A stable request id can carry more than one row. A warmup probe that
+        succeeded upstream and then failed while recording its effect writes a
+        success row followed by an error row under the same id, so a caller
+        reconciling "did this request already happen upstream" must not read
+        only the newest row: the status and kind belong in the query.
+        """
+
+        stmt = (
+            select(RequestLog)
+            .where(
+                RequestLog.request_id == ensure_request_id(request_id),
+                RequestLog.request_kind == request_kind,
+                RequestLog.status == "success",
+            )
+            .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
+            .limit(1)
+        )
+        return await self._session.scalar(stmt)
+
     async def update_model_for_request(self, request_id: str, model: str) -> int:
         """Override the ``model`` field of any logs matching ``request_id``.
 
@@ -1158,9 +1186,9 @@ class RequestLogsRepository:
 
         Only rows in the un-folded live tail — strictly above the lifetime
         watermark (its fold interval is ``(start, end]``) AND at or above the
-        hourly watermark (half-open ``[start, end)``) — are rewritten:
+        hourly and report watermarks (half-open ``[start, end)``) — are rewritten:
         ``model`` is a rollup dimension and ``cost_usd`` a folded measure, so
-        mutating a row either rollup already captured would silently diverge
+        mutating a row any rollup already captured would silently diverge
         that rollup from raw (and the divergence becomes unrepairable once
         retention prunes the raw row).
         A matching row below the watermarks can only be a client-reused
@@ -1181,6 +1209,7 @@ class RequestLogsRepository:
                         select(
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
+                            AccountUsageRollupState.reports_folded_through,
                         ).where(AccountUsageRollupState.id == 1)
                     )
                 ).first()
@@ -1192,14 +1221,15 @@ class RequestLogsRepository:
                 stmt = select(RequestLog).where(RequestLog.request_id == resolved_request_id)
                 if watermarks is not None:
                     # A row is un-folded by EVERY rollup only when it clears
-                    # both bounds, each matching its fold's own interval
+                    # all bounds, each matching its fold's own interval
                     # convention: the lifetime fold is `(start, end]`
                     # (inclusive end — a row AT the watermark is folded), the
-                    # hourly fold is `[start, end)`.
-                    folded_through, hourly_folded_through = watermarks
+                    # hourly and report folds are `[start, end)`.
+                    folded_through, hourly_folded_through, reports_folded_through = watermarks
                     stmt = stmt.where(
                         RequestLog.requested_at > folded_through,
                         RequestLog.requested_at >= hourly_folded_through,
+                        RequestLog.requested_at >= reports_folded_through,
                     )
                 result_rows = await self._session.execute(stmt)
                 logs = list(result_rows.scalars())
@@ -1238,7 +1268,11 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
         *,
+        cache_mode: str = "since",
+        timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> RequestLogsResult:
         since = _naive_utc(since) if since is not None else None
         until = _naive_utc(until) if until is not None else None
@@ -1259,6 +1293,8 @@ class RequestLogsRepository:
             error_codes_excluding=error_codes_excluding,
             exclude_soft_deleted=True,
             include_sensitive_metadata=include_sensitive_metadata,
+            include_account_identity=include_account_identity,
+            include_api_key_identity=include_api_key_identity,
         )
 
         stmt = select(RequestLog).order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
@@ -1294,9 +1330,10 @@ class RequestLogsRepository:
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
             return RequestLogsResult(logs=logs, total=await self._count_recent(filters, demand_params))
+        window_identity = ("timeframe", timeframe) if cache_mode == "timeframe" else ("since", since)
         cache_key = (
             search,
-            since,
+            window_identity,
             until,
             conversation_id,
             tuple(account_ids or ()),
@@ -1310,6 +1347,8 @@ class RequestLogsRepository:
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
             include_sensitive_metadata,
+            include_account_identity,
+            include_api_key_identity,
         )
         total = _cached_recent_count(cache_key)
         if total is None:
@@ -1533,17 +1572,27 @@ class RequestLogsRepository:
     async def _distinct_skip_scan(
         self,
         column: InstrumentedAttribute[str] | InstrumentedAttribute[str | None],
-        conditions: list,
+        conditions: list[ColumnElement[bool]],
+        *,
+        prefix_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> list[str]:
         """Loose-index-scan emulation: seed min(column), then min(column) >
         previous, one btree probe per distinct value. NULLs never seed or
         chain (min() skips them); empty strings are preserved — the legacy
         DISTINCT path only drops falsy values per facet, in the callers."""
-        seed = select(func.min(column).label("val")).where(*conditions)
+        sqlite = self._session.get_bind().dialect.name == "sqlite"
+        # SQLite can choose the deleted_at index for MIN(facet), rescanning
+        # every live row per successor. Traverse the facet index first, then
+        # check visibility with an equality probe for each candidate value.
+        scan_conditions = prefix_conditions if sqlite else conditions
+        seed = select(func.min(column).label("val")).where(*scan_conditions)
         skip = seed.cte("facet_skip", recursive=True)
-        successor = select(func.min(column)).where(*conditions, column > skip.c.val).scalar_subquery()
+        successor = select(func.min(column)).where(*scan_conditions, column > skip.c.val).scalar_subquery()
         skip = skip.union_all(select(successor).where(skip.c.val.is_not(None)))
         stmt = select(skip.c.val).where(skip.c.val.is_not(None)).order_by(skip.c.val.asc())
+        if sqlite:
+            visible = select(RequestLog.id).where(*conditions, column == skip.c.val).correlate(skip).exists()
+            stmt = stmt.where(visible)
         rows = await self._session.execute(stmt)
         return [value for (value,) in rows.all() if value is not None]
 
@@ -1564,10 +1613,11 @@ class RequestLogsRepository:
             if not value:
                 # Legacy DISTINCT drops falsy leading values in Python.
                 continue
-            value_conditions = [*conditions, leading == value]
+            prefix = leading == value
+            value_conditions = [*conditions, prefix]
             null_probe = select(RequestLog.id).where(*value_conditions, second.is_(None)).limit(1)
             has_null = (await self._session.execute(null_probe)).scalar_one_or_none() is not None
-            second_values = await self._distinct_skip_scan(second, value_conditions)
+            second_values = await self._distinct_skip_scan(second, value_conditions, prefix_conditions=(prefix,))
             if has_null and nulls_first:
                 pairs.append((value, None))
             pairs.extend((value, second_value) for second_value in second_values)
@@ -1610,6 +1660,8 @@ class RequestLogsRepository:
         error_codes_excluding: list[str] | None = None,
         exclude_soft_deleted: bool = False,
         include_sensitive_metadata: bool = True,
+        include_account_identity: bool = True,
+        include_api_key_identity: bool = True,
     ) -> _RequestLogFilters:
         conditions = []
         if exclude_soft_deleted:
@@ -1624,7 +1676,6 @@ class RequestLogsRepository:
             conditions.append(RequestLog.account_id.in_(account_ids))
         if api_key_ids:
             conditions.append(RequestLog.api_key_id.in_(api_key_ids))
-
         if model_options:
             pair_conditions = []
             for model, effort in model_options:
@@ -1666,7 +1717,6 @@ class RequestLogsRepository:
             search_pattern = f"%{search}%"
             search_conditions = [
                 RequestLog.account_id.ilike(search_pattern),
-                Account.email.ilike(search_pattern),
                 RequestLog.request_id.ilike(search_pattern),
                 RequestLog.model.ilike(search_pattern),
                 RequestLog.reasoning_effort.ilike(search_pattern),
@@ -1674,8 +1724,6 @@ class RequestLogsRepository:
                 RequestLog.status.ilike(search_pattern),
                 RequestLog.error_code.ilike(search_pattern),
                 RequestLog.error_message.ilike(search_pattern),
-                RequestLog.api_key_id.ilike(search_pattern),
-                ApiKey.name.ilike(search_pattern),
                 cast(RequestLog.requested_at, String).ilike(search_pattern),
                 cast(RequestLog.input_tokens, String).ilike(search_pattern),
                 cast(RequestLog.output_tokens, String).ilike(search_pattern),
@@ -1683,8 +1731,17 @@ class RequestLogsRepository:
                 cast(RequestLog.reasoning_tokens, String).ilike(search_pattern),
                 cast(RequestLog.latency_ms, String).ilike(search_pattern),
             ]
+            if include_api_key_identity:
+                # API-key ids and names are an api_keys:read surface; matching on
+                # them would let a guest enumerate the key inventory.
+                search_conditions.append(RequestLog.api_key_id.ilike(search_pattern))
+                search_conditions.append(ApiKey.name.ilike(search_pattern))
             if include_sensitive_metadata:
                 search_conditions.append(RequestLog.client_ip.ilike(search_pattern))
+            if include_account_identity:
+                # Account emails are redacted for principals without account
+                # write access; matching on them would be a membership oracle.
+                search_conditions.append(Account.email.ilike(search_pattern))
             conditions.append(or_(*search_conditions))
             return _RequestLogFilters(conditions=conditions, needs_related_search_joins=True)
         return _RequestLogFilters(conditions=conditions, needs_related_search_joins=False)

@@ -9,6 +9,7 @@ directly for determinism (no sleeps).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -20,11 +21,13 @@ from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth.api_key_cache import ApiKeyCache, get_api_key_cache
 from app.core.cache.invalidation import (
     _NAMESPACE_LOG_LABELS,
     NAMESPACE_ACCOUNT_ROUTING,
     NAMESPACE_ACCOUNT_SELECTION,
     NAMESPACE_API_KEY,
+    NAMESPACE_DASHBOARD_USERS,
     NAMESPACE_FIREWALL,
     NAMESPACE_MODEL_REGISTRY,
     NAMESPACE_RESET_CREDITS,
@@ -34,7 +37,7 @@ from app.core.cache.invalidation import (
     get_cache_invalidation_poller,
     set_cache_invalidation_poller,
 )
-from app.core.config.settings_cache import SettingsCache
+from app.core.config.settings_cache import SettingsCache, get_settings_cache
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     cache_invalidation_bump_failures_total,
@@ -50,6 +53,7 @@ from app.modules.proxy.account_cache import (
     is_account_routing_unavailable,
     mark_account_routing_unavailable,
 )
+from app.modules.settings.repository import SettingsRepository
 
 if TYPE_CHECKING:
     from app.modules.proxy._service.http_bridge.helpers import _HTTPBridgeSession
@@ -107,7 +111,7 @@ async def _namespace_version(namespace: str) -> int | None:
 
 
 def _fake_bridge_session(account: Account) -> "_HTTPBridgeSession":
-    return cast("_HTTPBridgeSession", SimpleNamespace(account=account))
+    return cast("_HTTPBridgeSession", SimpleNamespace(account=account, access_token_expires_at=None))
 
 
 def _make_replica_b_routing() -> tuple[RoutingAvailabilityCache, CacheInvalidationPoller]:
@@ -218,9 +222,9 @@ async def test_failed_prime_recovery_stops_stale_bridge_session_reuse(db_setup, 
 
 
 @pytest.mark.asyncio
-async def test_reauth_on_peer_clears_local_routing_marker(db_setup, poller_slot) -> None:
-    """A routing-unavailable marker set locally is cleared when another replica
-    re-authenticates the account (previously permanent until restart)."""
+async def test_reauth_status_clears_legacy_local_routing_marker(db_setup, poller_slot) -> None:
+    """A converged REAUTH_REQUIRED snapshot is request-routable and clears any
+    stale local overlay left by an older replica's hard-blocking behavior."""
     account_id = "acct-bus-reauth"
     await _insert_account(account_id)
 
@@ -231,18 +235,21 @@ async def test_reauth_on_peer_clears_local_routing_marker(db_setup, poller_slot)
     await routing_cache.refresh_from_db()
     await local_poller._poll_once()
 
-    # Local permanent refresh failure: committed status write + local marker.
+    # Simulate an old replica committing REAUTH_REQUIRED and adding the former
+    # routing-unavailable overlay.
     await _set_account_status(account_id, AccountStatus.REAUTH_REQUIRED)
     mark_account_routing_unavailable(account_id)
     assert is_account_routing_unavailable(account_id) is True
 
-    # Replica A re-authenticates the account: committed status write + durable bump.
-    await _set_account_status(account_id, AccountStatus.ACTIVE)
+    # A current replica publishes the committed status. REAUTH_REQUIRED itself
+    # is now routable, so convergence clears the stale overlay.
     remote_poller = CacheInvalidationPoller(SessionLocal)
     assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
 
     await local_poller._poll_once()
     assert is_account_routing_unavailable(account_id) is False
+    reauth_session = _fake_bridge_session(_make_account(account_id, AccountStatus.REAUTH_REQUIRED))
+    assert _http_bridge_session_account_active(reauth_session) is True
 
 
 @pytest.mark.asyncio
@@ -308,23 +315,33 @@ async def test_selection_cache_invalidation_propagates_to_peer(db_setup, poller_
 
 @pytest.mark.asyncio
 async def test_password_setup_propagates_settings_to_peer(async_client, db_setup) -> None:
-    """Setting the dashboard password on replica A is visible to replica B's settings
-    cache after one poll cycle, without waiting for the 5s TTL."""
+    """First-run setup clears the bootstrap token, and replica B sees that after one poll.
+
+    The credential itself no longer lives in ``dashboard_settings``; the token
+    that setup invalidates does, and it is the settings fact that setup changes.
+    """
+
+    async with SessionLocal() as session:
+        row = await SettingsRepository(session).get_or_create()
+        row.bootstrap_token_encrypted, row.bootstrap_token_hash = b"token", b"token-hash"
+        await session.commit()
+    await get_settings_cache().invalidate()
+
     b_settings = SettingsCache()
     poller_b = CacheInvalidationPoller(SessionLocal)
     poller_b.on_invalidation(NAMESPACE_SETTINGS, lambda: b_settings.invalidate(propagate=False))
     await poller_b._poll_once()
 
-    assert (await b_settings.get()).password_hash is None
+    assert (await b_settings.get()).bootstrap_token_hash is not None
 
     response = await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
     assert response.status_code == 200
 
     # Replica B still serves the stale row until its next poll (the defect window).
-    assert (await b_settings.get()).password_hash is None
+    assert (await b_settings.get()).bootstrap_token_hash is not None
 
     await poller_b._poll_once()
-    assert (await b_settings.get()).password_hash is not None
+    assert (await b_settings.get()).bootstrap_token_hash is None
 
 
 class _FlakySessionFactory:
@@ -338,6 +355,108 @@ class _FlakySessionFactory:
             self.remaining -= 1
             raise OperationalError("stmt", {}, Exception("database is locked"))
         return SessionLocal()
+
+
+@pytest.mark.asyncio
+async def test_api_key_disable_retries_failed_notification_and_revokes_peer_auth(
+    async_client, db_setup, poller_slot, monkeypatch
+) -> None:
+    created = await async_client.post("/api/api-keys/", json={"name": "retrying-revocation"})
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    token = created.json()["key"]
+    key_hash = hashlib.sha256(token.encode()).hexdigest()
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await async_client.get("/v1/usage", headers=headers)).status_code == 200
+
+    local_cache = get_api_key_cache()
+    cached_auth = await local_cache.get(key_hash)
+    assert cached_auth is not None
+    peer_cache: ApiKeyCache[object] = ApiKeyCache(ttl_seconds=60)
+    peer = CacheInvalidationPoller(SessionLocal)
+    peer.on_invalidation(NAMESPACE_API_KEY, peer_cache.clear)
+    await peer.initialize()
+    await peer_cache.set(key_hash, cached_auth)
+
+    source = CacheInvalidationPoller(_FlakySessionFactory(failures=3))
+    set_cache_invalidation_poller(source)
+    updated = await async_client.patch(f"/api/api-keys/{key_id}", json={"isActive": False})
+    assert updated.status_code == 200
+    assert updated.json()["isActive"] is False
+    assert await local_cache.get(key_hash) is None
+    assert await peer_cache.get(key_hash) is cached_auth
+
+    # Drive the real usage route with the independent peer's auth cache. The
+    # stale cache still accepts the revoked key before notification recovery.
+    monkeypatch.setattr("app.core.auth.dependencies.get_api_key_cache", lambda: peer_cache)
+    assert (await async_client.get("/v1/usage", headers=headers)).status_code == 200
+
+    await source._poll_once()
+    await peer._poll_once()
+    assert await peer_cache.get(key_hash) is None
+    denied = await async_client.get("/v1/usage", headers=headers)
+    assert denied.status_code == 401
+    assert denied.json()["error"]["code"] == "invalid_api_key"
+    assert NAMESPACE_API_KEY not in source._pending_bumps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publication", ["immediate", "coalesced"])
+@pytest.mark.parametrize("cancelled", [False, True], ids=["driver-error", "cancellation"])
+async def test_publication_interrupted_after_real_commit_retries_safely(
+    db_setup, monkeypatch, publication: str, cancelled: bool
+) -> None:
+    namespace = "test_ambiguous_commit"
+    poller = CacheInvalidationPoller(SessionLocal)
+    real_write = poller._bump_once
+
+    async def commit_then_interrupt(ns: str) -> None:
+        await real_write(ns)
+        if cancelled:
+            raise asyncio.CancelledError
+        raise RuntimeError("commit accepted but completion interrupted")
+
+    monkeypatch.setattr(poller, "_bump_once", commit_then_interrupt)
+    if publication == "coalesced":
+        poller.request_bump(namespace)
+    operation = poller.bump(namespace) if publication == "immediate" else poller._flush_pending_bumps()
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    else:
+        result = await operation
+        if publication == "immediate":
+            assert result is False
+
+    assert await _namespace_version(namespace) == 1
+    assert namespace in poller._pending_bumps
+    monkeypatch.setattr(poller, "_bump_once", real_write)
+    await poller._poll_once()
+    assert await _namespace_version(namespace) == 2
+    assert namespace not in poller._pending_bumps
+
+
+@pytest.mark.asyncio
+async def test_pause_api_retries_failed_routing_notification_on_peer(async_client, db_setup, poller_slot) -> None:
+    account_id = "acct-bus-pause-retry"
+    await _insert_account(account_id)
+    peer_routing, peer = _make_replica_b_routing()
+    await peer.initialize()
+    await peer_routing.refresh_from_db()
+    assert peer_routing.is_unavailable(account_id) is False
+
+    source = CacheInvalidationPoller(_FlakySessionFactory(failures=3))
+    set_cache_invalidation_poller(source)
+    paused = await async_client.post(f"/api/accounts/{account_id}/pause")
+    assert paused.status_code == 200
+    async with SessionLocal() as session:
+        assert await session.scalar(select(Account.status).where(Account.id == account_id)) == AccountStatus.PAUSED
+    assert peer_routing.is_unavailable(account_id) is False
+
+    await source._poll_once()
+    await peer._poll_once()
+    assert peer_routing.is_unavailable(account_id) is True
+    assert NAMESPACE_ACCOUNT_ROUTING not in source._pending_bumps
 
 
 def _counter_value(counter, *label_values: str) -> float:
@@ -367,6 +486,7 @@ async def test_bump_failure_is_observable_and_does_not_raise(db_setup, caplog) -
     if before is not None:
         assert _counter_value(cache_invalidation_bump_failures_total, namespace) == before + 1
     assert await _namespace_version(namespace) is None
+    assert namespace in poller._pending_bumps
 
 
 def test_namespace_log_labels_cover_all_namespaces() -> None:
@@ -382,6 +502,7 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
             NAMESPACE_RESET_CREDITS,
             NAMESPACE_MODEL_REGISTRY,
             NAMESPACE_UPSTREAM_ROUTE,
+            NAMESPACE_DASHBOARD_USERS,
         )
     }
 
@@ -396,13 +517,12 @@ async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) ->
     namespace = "test_flush_cancelled"
     started = asyncio.Event()
 
-    async def never_finishes(ns: str) -> bool:
+    async def never_finishes(_namespace: str) -> None:
         started.set()
         await asyncio.Event().wait()
-        return True
 
     poller = CacheInvalidationPoller(SessionLocal)
-    monkeypatch.setattr(poller, "bump", never_finishes)
+    monkeypatch.setattr(poller, "_bump_once", never_finishes)
     poller.request_bump(namespace)
 
     flush_task = asyncio.create_task(poller._flush_pending_bumps())
@@ -891,3 +1011,20 @@ async def test_aborted_bump_is_retried_by_the_running_poller(db_setup, monkeypat
     assert attempts >= 2, "the poller must retry the aborted namespace"
     assert await _namespace_version(namespace) == 1
     assert namespace not in poller._pending_bumps
+
+
+@pytest.mark.asyncio
+async def test_lifespan_registers_a_settings_refresh_on_the_bus(app_instance) -> None:
+    """The settings namespace must both expire and reload the snapshot.
+
+    Readers that cannot await the cache — the conversation archive gate runs
+    per archived frame — otherwise keep the pre-change value on a replica that
+    is only carrying already-open streams.
+    """
+
+    async with app_instance.router.lifespan_context(app_instance):
+        poller = get_cache_invalidation_poller()
+        assert poller is not None
+        callbacks = poller._callbacks[NAMESPACE_SETTINGS]
+
+    assert get_settings_cache().refresh in callbacks

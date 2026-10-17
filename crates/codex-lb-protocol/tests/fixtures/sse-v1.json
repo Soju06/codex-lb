@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "name": "lf_separator_split_across_reads",
+      "chunks_base64": ["ZGF0YTogb25lCg==", "CmRhdGE6IHR3bwoK"],
+      "max_event_bytes": 1024,
+      "events": ["data: one\n\n", "data: two\n\n"]
+    },
+    {
+      "name": "cr_only_separator",
+      "chunks_base64": ["ZGF0YTogY3INDQ=="],
+      "max_event_bytes": 1024,
+      "events": ["data: cr\r\r"]
+    },
+    {
+      "name": "cr_only_separator_split_across_reads",
+      "chunks_base64": ["ZGF0YTogY3IN", "DQ=="],
+      "max_event_bytes": 1024,
+      "events": ["data: cr\r\r"]
+    },
+    {
+      "name": "crlf_separator_split_after_first_cr",
+      "chunks_base64": ["ZGF0YTogY3JsZg0=", "Cg0K"],
+      "max_event_bytes": 1024,
+      "events": ["data: crlf\r\n\r\n"]
+    },
+    {
+      "name": "mixed_separator",
+      "chunks_base64": ["ZGF0YTogbWl4ZWQKDQpkYXRhOiBuZXh0Cgo="],
+      "max_event_bytes": 1024,
+      "events": ["data: mixed\n\r\n", "data: next\n\n"]
+    },
+    {
+      "name": "trailing_cr_dispatch_swallows_next_lf",
+      "chunks_base64": ["ZGF0YTogc3BsaXQNCg0=", "CmRhdGE6IG5leHQKCg=="],
+      "max_event_bytes": 1024,
+      "events": ["data: split\r\n\r", "data: next\n\n"]
+    },
+    {
+      "name": "invalid_utf8_replaced_unicode_separator_preserved",
+      "chunks_base64": ["ZGF0YTogYeIooeKAqHoKCg=="],
+      "max_event_bytes": 1024,
+      "events": ["data: a\ufffd(\ufffd\u2028z\n\n"]
+    },
+    {
+      "name": "valid_utf8_code_point_split_across_reads",
+      "chunks_base64": ["ZGF0YTogY2Fmww==", "qQoK"],
+      "max_event_bytes": 13,
+      "events": ["data: caf\u00e9\n\n"]
+    },
+    {
+      "name": "terminated_ascii_whitespace_skipped_eof_whitespace_kept",
+      "chunks_base64": ["IAkNDQ==", "IAk="],
+      "max_event_bytes": 1024,
+      "events": [" \t"]
+    },
+    {
+      "name": "valid_prefix_precedes_oversized_complete_event",
+      "chunks_base64": ["ZGF0YTogb2sKCmRhdGE6IDEyMzQKCg=="],
+      "max_event_bytes": 10,
+      "events": ["data: ok\n\n"],
+      "failure": {"type": "event_too_large", "size_bytes": 12, "limit_bytes": 10}
+    },
+    {
+      "name": "oversized_unterminated_buffer",
+      "chunks_base64": ["ZGF0YTog", "YWJj"],
+      "max_event_bytes": 8,
+      "events": [],
+      "failure": {"type": "event_too_large", "size_bytes": 9, "limit_bytes": 8}
+    }
+  ]
+}

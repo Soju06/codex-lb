@@ -1,8 +1,8 @@
 ## ADDED Requirements
 
-### Requirement: Post-drain teardown stays bounded
+### Requirement: Managed HTTP client shutdown wait is bounded
 
-Every post-drain shutdown step MUST complete or be abandoned within its own deadline so the process always reaches process-death marking and database disposal. The managed HTTP client close MUST force-close each client and then wait for its completion under a deadline. When that deadline passes the wait MUST be abandoned rather than cancelled, because each client owns its own close task and cancelling the waiter would not unwind a stalled transport teardown. An abandoned close MUST report its eventual outcome, and a close that fails MUST NOT fail shutdown.
+The managed HTTP client close MUST force-close each client and then wait for its completion for at most 10 seconds before shutdown continues to process-death marking and database disposal. When that deadline passes the wait MUST be abandoned rather than cancelled, because each client owns its own close task and cancelling the waiter would not unwind a stalled transport teardown. The shutdown coordinator MUST retain the close task until it settles and consume any terminal exception. A close that fails or cancels itself MUST NOT fail shutdown.
 
 #### Scenario: A stalled transport teardown does not pin shutdown
 

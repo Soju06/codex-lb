@@ -57,6 +57,7 @@ Change directory: <!-- openspec/changes/<change>/ -->
 - [ ] New feature defaults to **off** or works with **zero config**
 - [ ] No new required setup step (or maintainer approval via `simplicity-budget-approved` label)
 - New setting(s) and why each can't be a default: <!-- name → justification -->
+- Tier of each new setting (T0-T4 per PRINCIPLES P6) and, for T3, its `dashboard_settings` column: <!-- name → tier → column -->
 - [ ] README sections / `.env.example` / dashboard nav within budget (or `simplicity-budget-approved` label requested)
 
 ## Test plan
@@ -84,5 +85,5 @@ Required: unit tests for new logic, integration tests for new endpoints.
 - [ ] Added or updated tests covering the change.
 - [ ] Ran `uv run pre-commit run local-ci --hook-stage manual --all-files` or the relevant `make <target>` subset locally.
 - [ ] If touching specs: `openspec validate --specs` passes and `/opsx:verify` is clean.
-- [ ] Simplicity gates reviewed: the five simplicity rules (PRINCIPLES.md P1-P5).
+- [ ] Simplicity gates reviewed: the six simplicity rules (PRINCIPLES.md P1-P6).
 - [ ] CHANGELOG is **not** edited by hand (release-please handles it).

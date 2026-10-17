@@ -174,12 +174,18 @@ The database schema SHALL preserve a nullable archive lookup id on request logs 
 
 ### Requirement: Dashboard settings persistence
 
-The database SHALL persist dashboard settings, including weekly pace working days and the weekly pace gap smoothing window.
+The database SHALL persist dashboard settings, including weekly pace working days, the weekly pace gap smoothing window, reset-credit badge visibility, reset-credit action expiry-label visibility, and automatic reset-credit redemption before expiry.
 
 #### Scenario: Existing installs receive weekly pace smoothing default
 - **WHEN** an existing database is migrated
 - **THEN** `dashboard_settings.weekly_pace_smoothing_minutes` exists
 - **AND** existing rows use a default smoothing window of 30 minutes
+
+#### Scenario: Dashboard settings persist reset-credit controls
+- **WHEN** the database is migrated to the current head
+- **THEN** `dashboard_settings` includes `show_reset_credit_badges`, `show_reset_credit_expiry_badge`, and `auto_redeem_reset_credits_before_expiry`
+- **AND** existing rows default `show_reset_credit_badges` and `show_reset_credit_expiry_badge` to true
+- **AND** existing rows default `auto_redeem_reset_credits_before_expiry` to false
 
 ### Requirement: SQLite pre-migration backups use online snapshots
 
@@ -331,4 +337,177 @@ When the application builds an Alembic `Config` for migration inspection or upgr
 - **GIVEN** a SQLite or PostgreSQL URL whose path contains no `%`
 - **WHEN** the escape and decode round-trip is applied
 - **THEN** the URL is unchanged and migration behavior is identical to before
+
+### Requirement: Overflow and transport migration heads converge without rewriting history
+
+The migration graph MUST join `20260908_000000_add_subscription_overflow` and
+`20260908_000000_replace_upstream_stream_transport_default_sentinel` through a
+new merge revision. Both existing revisions MUST remain unchanged. The merge
+revision's upgrade and downgrade MUST NOT execute application schema or data
+operations.
+
+#### Scenario: An existing parent upgrades to the merged head
+
+- **GIVEN** a populated database at either parent, or at both parents
+- **WHEN** the normal migration runner upgrades to `head`
+- **THEN** it MUST apply any missing parent according to that parent's existing
+  behavior and finish at the single merge head
+- **AND** it MUST preserve existing application rows except for data changes
+  already required by a missing parent's migration
+- **AND** the resulting schema MUST match the current ORM metadata
+
+#### Scenario: Downgrading only the merge preserves both parents
+
+- **GIVEN** a populated database at the merge revision
+- **WHEN** Alembic downgrades to either immediate parent
+- **THEN** it MUST undo only the merge revision and retain both parent revision
+  stamps and both parent schemas
+- **AND** application data MUST remain unchanged
+- **AND** upgrading to `head` again MUST restore the single merge stamp without
+  repeating either parent's schema or data operations
+
+### Requirement: Chunk transcript schema expands without rewriting history
+
+The chunk transcript migration MUST add the operation format discriminator and
+chunk table without rewriting existing event rows. Existing operation rows
+MUST be classified as `rows_v1`, the migration graph MUST retain one canonical
+head, and upgrade MUST preserve every existing transcript.
+
+#### Scenario: Existing transcript survives upgrade
+
+- **GIVEN** a database with a completed legacy operation and event rows
+- **WHEN** it upgrades through the chunk transcript migration
+- **THEN** the operation is `rows_v1`
+- **AND** all legacy event rows remain unchanged
+
+#### Scenario: New database has both transcript stores
+
+- **WHEN** an empty database upgrades to the canonical head
+- **THEN** both legacy event and chunk tables exist
+- **AND** Alembic reports one head
+
+### Requirement: Chunk schema downgrade refuses data loss
+
+The chunk transcript migration MUST downgrade only while no chunk row and no
+`chunks_v2` operation exists. If chunk-format data exists, downgrade MUST fail
+before dropping the chunk table or operation format discriminator.
+
+#### Scenario: Empty expansion downgrades safely
+
+- **GIVEN** no chunk-format transcript has been written
+- **WHEN** the migration is downgraded
+- **THEN** only the additive chunk schema is removed
+- **AND** legacy events remain intact
+
+#### Scenario: Populated chunk store blocks downgrade
+
+- **GIVEN** at least one chunk row or `chunks_v2` operation exists
+- **WHEN** downgrade is requested
+- **THEN** downgrade fails before destructive DDL
+- **AND** all transcript data remains present
+
+### Requirement: SQLite recovery MUST fence replacement sidecars
+
+Before any sidecar cleanup or output write, recovery MUST reject source/output
+paths that are identical or overlap either path's fixed SQLite sidecars or
+master-journal namespace.
+
+When recovery writes or installs a file-backed SQLite replacement, it MUST
+remove the target's `-wal`, `-shm`, `-journal`, and master-journal sidecars
+before and after dump import. For both output-only and `--replace` flows,
+pre-existing output sidecars MUST be removed before opening the recovery lock;
+recovery MUST then acquire an exclusive SQLite transaction on the source before
+exporting the source dump, generate that dump from the lock-holding connection,
+and retain the transaction through final output import. Once that transaction
+closes, recovery MUST perform final output/source sidecar cleanup before either
+database rename. It MUST remove source sidecars before moving the source to its
+corrupt backup and repeat source cleanup after that move, before installing the
+output. Master-journal matching MUST treat the database basename literally.
+Recovery MUST close every recovery-opened SQLite connection before each sidecar
+unlink or database rename. The operator MUST keep external writers quiescent
+from lock release through completion of both renames; this is the bounded
+post-probe window required by platforms that reject filesystem mutation with
+open SQLite handles. If an active connection prevents the lock, or any
+pre-move sidecar cleanup fails, recovery MUST fail without moving the source or
+installing the output. If the repeat source cleanup after the source move
+fails, recovery MUST restore the source from its corrupt backup before
+reporting the cleanup failure; the recovered output MUST NOT be installed as
+the live source, though the output and any partially cleaned sidecars MAY
+remain for operator recovery.
+
+#### Scenario: A stale source WAL cannot attach to the replacement
+
+- **GIVEN** recovery is replacing a file-backed SQLite database
+- **AND** source WAL/shared-memory sidecars contain rows that are absent from
+  the exported dump
+- **AND** external writers remain quiescent after the recovery lock closes
+  until both replacement renames complete
+- **WHEN** recovery moves the source aside and installs the output
+- **THEN** source and output SQLite sidecars MUST be absent
+- **AND** reopening the installed database MUST not apply stale WAL rows
+
+#### Scenario: An active writer cannot cross the fenced snapshot boundary
+
+- **GIVEN** a source connection is open while recovery is replacing the database
+- **AND** the external writer closes its connection before recovery releases
+  the lock and starts replacement renames
+- **WHEN** that connection attempts a write while recovery exports the source
+  from the lock-holding transaction
+- **THEN** the write MUST fail with the source's exclusive recovery lock held
+- **AND** a fresh connection MUST be able to write to the installed database
+
+#### Scenario: Recovery closes handles before Windows renames
+
+- **GIVEN** recovery has prepared an output replacement
+- **WHEN** it moves the source to its corrupt backup and the output into place
+- **THEN** every recovery-opened SQLite connection MUST already be closed before each rename
+- **AND** both file mutations MUST succeed on a platform with exclusive rename handles
+
+#### Scenario: A busy source fails closed before replacement
+
+- **GIVEN** another process already holds a conflicting SQLite write lock
+- **WHEN** recovery cannot acquire its exclusive source lock
+- **THEN** recovery MUST fail
+- **AND** the source MUST remain at its original path
+- **AND** no replacement MUST be installed
+
+#### Scenario: Partial sidecar cleanup fails closed
+
+- **GIVEN** one target sidecar cannot be removed while other sidecars can be removed
+- **WHEN** recovery prepares a replacement
+- **THEN** recovery MUST fail before moving the source or installing the output
+- **AND** the source MUST remain at its original path
+
+#### Scenario: Post-move sidecar cleanup restores the source
+
+- **GIVEN** recovery has moved the source to its corrupt backup
+- **AND** the repeat source sidecar cleanup fails
+- **WHEN** recovery handles the cleanup error
+- **THEN** the corrupt backup MUST be restored to the original source path
+- **AND** the recovered output MUST remain uninstalled as the live source
+- **AND** recovery MUST report the cleanup failure
+
+#### Scenario: Output installation failure restores the source
+
+- **GIVEN** the source has moved to its corrupt backup
+- **AND** moving the recovered output into the source path fails
+- **WHEN** recovery handles the replacement error
+- **THEN** recovery MUST restore the corrupt backup to the original source path
+- **AND** recovery MUST report the installation failure
+
+#### Scenario: Wildcard names do not broaden cleanup
+
+- **GIVEN** the database basename contains a glob metacharacter
+- **AND** an unrelated database has a matching-looking master journal
+- **WHEN** recovery cleans the target sidecars
+- **THEN** the target journal MUST be removed
+- **AND** the unrelated journal MUST remain
+
+#### Scenario: Source and output sidecar namespaces cannot overlap
+
+- **GIVEN** the source or output path is a fixed SQLite sidecar or master
+  journal of the other path
+- **WHEN** recovery is invoked in either replace or non-replace mode
+- **THEN** recovery MUST fail before deleting sidecars, writing output, or
+  moving the source
 

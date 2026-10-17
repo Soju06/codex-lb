@@ -14,10 +14,12 @@ Instead, report them privately using GitHub's
    have.
 4. Submit. The report is visible only to repository maintainers.
 
-If for some reason you cannot use the private advisory flow, you may instead
-contact the maintainer via the email address listed in
-[CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md), with a subject line starting with
-`[codex-lb security]`.
+If for some reason you cannot use the private advisory flow, contact the
+maintainer ([@Soju06](https://github.com/Soju06)) directly to arrange a private
+channel — for example by opening a
+[Discussion](https://github.com/Soju06/codex-lb/discussions) titled
+`[codex-lb security] request for private contact` that contains **no**
+vulnerability details.
 
 ## What to include
 

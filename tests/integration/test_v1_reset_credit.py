@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from contextlib import asynccontextmanager
@@ -580,6 +581,110 @@ async def test_v1_reset_credit_post_claim_contention_returns_openai_envelope(
     assert error["code"] == "invalid_request_error"
     assert "already in progress" in error["message"]
     consume_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_v1_reset_credit_post_repeated_cancellation_releases_real_sqlite_claim(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.modules.rate_limit_reset_credits import api as reset_credits_api
+    from app.modules.rate_limit_reset_credits.redeem_coordination import (
+        release_redeem_claim,
+        try_acquire_redeem_claim,
+    )
+
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-reset-cancel-release",
+        "cancel-release@example.com",
+    )
+    _, key = await _create_api_key(async_client, name="reset-credit-cancel-release")
+
+    credit = ResetCreditItem(
+        id="credit-cancel-release",
+        status="available",
+        expires_at=datetime(2031, 4, 4, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "app.modules.proxy.api.fetch_reset_credits",
+        AsyncMock(return_value=_upstream_available([credit])),
+    )
+
+    consume_started = asyncio.Event()
+    consume_allowed = asyncio.Event()
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+
+    async def blocked_consume(*args, **kwargs):
+        del args, kwargs
+        consume_started.set()
+        await consume_allowed.wait()
+        raise AssertionError("cancelled redeem must not resume upstream consumption")
+
+    monkeypatch.setattr("app.modules.proxy.api.consume_reset_credit", blocked_consume)
+
+    real_release_redeem_claim = reset_credits_api.release_redeem_claim
+    original_holder_id: str | None = None
+
+    async def observed_real_release(account_id_arg: str, holder_id: str) -> None:
+        nonlocal original_holder_id
+        assert account_id_arg == account_id
+        original_holder_id = holder_id
+        release_started.set()
+        await release_allowed.wait()
+        await real_release_redeem_claim(account_id_arg, holder_id)
+
+    monkeypatch.setattr(
+        reset_credits_api,
+        "release_redeem_claim",
+        observed_real_release,
+    )
+
+    successor_holder = "successor-after-cancellation"
+    successor_acquired = False
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/reset-credit",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "account_id": account_id,
+                "redeem_id": credit.id,
+            },
+        )
+    )
+
+    try:
+        await asyncio.wait_for(consume_started.wait(), timeout=5)
+
+        assert await try_acquire_redeem_claim(account_id, successor_holder) is False
+
+        request_task.cancel("redeem-body-cancelled")
+        await asyncio.wait_for(release_started.wait(), timeout=5)
+
+        request_task.cancel("release-cancelled")
+        release_allowed.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request_task, timeout=5)
+
+        successor_acquired = await try_acquire_redeem_claim(
+            account_id,
+            successor_holder,
+        )
+        assert successor_acquired is True
+    finally:
+        consume_allowed.set()
+        release_allowed.set()
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
+
+        if original_holder_id is not None:
+            await real_release_redeem_claim(account_id, original_holder_id)
+        if successor_acquired:
+            await release_redeem_claim(account_id, successor_holder)
 
 
 @pytest.mark.asyncio

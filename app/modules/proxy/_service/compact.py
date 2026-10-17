@@ -6,9 +6,12 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
+import anyio
+from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
@@ -21,6 +24,13 @@ from app.core.clients.proxy import (
     push_compact_timeout_overrides,
 )
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.clients.thread_cache_identity import (
+    ThreadCacheIdentity,
+)
+from app.core.clients.thread_cache_identity import (
+    effective_thread_cache_identity_mode as _effective_thread_cache_identity_mode,
+)
+from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
@@ -28,10 +38,12 @@ from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
+from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -48,10 +60,10 @@ from app.modules.proxy.affinity import (
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
     _resolve_prompt_cache_key,
-    _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
     _thread_codex_session_affinity,
 )
+from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import (
     resolve_required_account_id,
@@ -262,17 +274,11 @@ def _compact_freshness_budget_seconds(remaining_budget: float) -> float:
     return min(20.0, max(0.0, remaining_budget - reserve))
 
 
-def _compact_upstream_budget_seconds(
-    remaining_budget: float,
-    configured_timeout_seconds: float | None = None,
-) -> float:
+def _compact_upstream_budget_seconds(remaining_budget: float) -> float:
     if remaining_budget <= 0:
         return 0.0
     reserve = _compact_upstream_call_budget_reserve_seconds(remaining_budget)
-    available = max(0.0, remaining_budget - reserve)
-    if configured_timeout_seconds is not None:
-        return min(configured_timeout_seconds, available)
-    return available
+    return max(0.0, remaining_budget - reserve)
 
 
 def _raise_proxy_budget_exhausted() -> NoReturn:
@@ -442,11 +448,18 @@ def _sticky_key_for_compact_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
 ) -> _AffinityPolicy:
-    cache_key, _ = _resolve_prompt_cache_key(
+    # A compact body is already trimmed, so it rarely extends the ordinary
+    # turns' transcript and will usually mint a new anchor. That is the same
+    # answer the ordinary path gives for a compacted turn, and it is correct:
+    # the upstream prefix cache is cold after compaction.
+    resolution = _resolve_prompt_cache_key(
         payload,
         openai_cache_affinity=openai_cache_affinity,
         api_key=api_key,
+        max_age_seconds=openai_cache_affinity_max_age_seconds,
     )
+    cache_key = resolution.sticky_key
+    cache_key_source = resolution.source
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         policy = _AffinityPolicy(
@@ -475,15 +488,18 @@ def _sticky_key_for_compact_request(
             key=cache_key,
             kind=StickySessionKind.PROMPT_CACHE,
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            prompt_cache_key_source=cache_key_source,
         )
     elif sticky_threads_enabled:
         policy = _AffinityPolicy(
             key=cache_key,
             kind=StickySessionKind.STICKY_THREAD,
             reallocate_sticky=True,
+            prompt_cache_key_source=cache_key_source,
         )
     else:
         policy = _AffinityPolicy()
+    policy = replace(policy, prompt_cache_derivation_outcome=resolution.outcome)
     return _affinity_with_payload_continuity(policy, payload)
 
 
@@ -626,9 +642,10 @@ class _CompactMixin:
         only for owner loss the owner's quota state caused. At selection time
         that evidence is the owner's own persisted status: ``RATE_LIMITED`` or
         ``QUOTA_EXCEEDED`` is the same upstream usage-exhaustion state the
-        selector consulted. Authentication loss (``REAUTH_REQUIRED``,
-        ``DEACTIVATED``), operator pauses, local capacity caps on an ``ACTIVE``
-        account, and a failed lookup all stay owner-bound.
+        selector consulted. Hard authentication loss (``DEACTIVATED``),
+        operator pauses, local capacity caps on a request-routable account, and
+        a failed lookup all stay owner-bound. ``REAUTH_REQUIRED`` remains
+        selectable and therefore does not itself cause owner loss.
         """
 
         proxy = cast(_CompactServiceProtocol, self)
@@ -731,12 +748,11 @@ class _CompactMixin:
                 if owner_account_id == resolved_owner and session_identity is not None
             }
             if len(session_identities) > 1:
-                sources = ", ".join(source for source, _account_id, _session_id in owner_refs)
                 raise ProxyResponseError(
                     502,
                     openai_error(
                         "continuity_owner_conflict",
-                        f"Account-owned continuity sources conflict ({sources}); retry the logical turn.",
+                        "Turn-state owner sessions conflict; retry the logical turn.",
                         error_type="server_error",
                     ),
                 )
@@ -851,9 +867,17 @@ class _CompactMixin:
                     )
             raise
         settings = await _service_get_settings_cache().get()
+        # C2-3 resilience toggles: this request's snapshot, bound for the client.
+        resilience = bind_resilience_toggles(settings, startup_settings=base_settings)
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
+        # Resolved once per request: API-key override, then the fleet value read
+        # off the *overlaid* settings (dashboard over environment over default),
+        # never the raw dashboard row whose column is NULL until an operator sets
+        # it. See the matching comment in ``streaming/retry.py``.
+        thread_cache_identity_mode, thread_cache_identity_from_key = _effective_thread_cache_identity_mode(
+            api_key, with_dashboard_overrides(base_settings)
+        )
         affinity = _sticky_key_for_compact_request(
             payload,
             headers,
@@ -863,27 +887,17 @@ class _CompactMixin:
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
         )
-        sticky_key_source = "none"
-        if affinity.codex_session_source == "thread_header":
-            # The payload cache hint remains unchanged; diagnostics must not
-            # imply that it supplied the internal thread-local routing key.
-            sticky_key_source = "thread_header"
-        elif affinity.kind == StickySessionKind.CODEX_SESSION:
-            if _sticky_key_from_turn_state_header(headers) is not None:
-                sticky_key_source = "turn_state_header"
-            elif _sticky_key_from_session_header(headers) is not None:
-                sticky_key_source = "session_header"
-            else:
-                sticky_key_source = "payload"
-        elif affinity.key:
-            sticky_key_source = "payload" if had_prompt_cache_key else "derived"
+        affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
             "compact",
             payload,
             headers,
-            sticky_kind=affinity.kind.value if affinity.kind is not None else None,
-            sticky_key_source=sticky_key_source,
+            sticky_kind=affinity_observation.kind,
+            sticky_key_source=affinity_observation.source,
+            derivation_outcome=affinity.prompt_cache_derivation_outcome,
             prompt_cache_key_set=_prompt_cache_key_from_request_model(payload) is not None,
+            thread_cache_identity_mode=thread_cache_identity_mode,
+            thread_cache_identity_from_key=thread_cache_identity_from_key,
         )
         routing_strategy = _routing_strategy(settings)
         turn_state_owner_account_id: str | None = None
@@ -944,6 +958,7 @@ class _CompactMixin:
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
+        deferred_permanent_health: list[tuple[Account, str]] = []
         settlement_attempted = False
 
         async def flush_deferred_health() -> None:
@@ -953,6 +968,8 @@ class _CompactMixin:
             deferred_http_500_health.clear()
             proxy_pending = list(deferred_proxy_health)
             deferred_proxy_health.clear()
+            permanent_pending = list(deferred_permanent_health)
+            deferred_permanent_health.clear()
             for failed_account, failed_error, failed_code, failed_status in stream_pending:
                 try:
                     await proxy._handle_stream_error(
@@ -989,6 +1006,16 @@ class _CompactMixin:
                         request_id,
                         exc_info=True,
                     )
+            for failed_account, failed_code in permanent_pending:
+                try:
+                    await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact permanent health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
 
         async def settle_compact_usage(
             *,
@@ -1016,13 +1043,26 @@ class _CompactMixin:
                 name=f"compact-deferred-health-{request_id}",
             )
             cancellation_pending = False
-            while not flush_task.done():
+            # The anyio shield keeps a level-cancelled Starlette scope from
+            # re-raising into every ``await`` (busy-spin), and
+            # ``wait_on_shared_future`` keeps waits off the task's
+            # done-callback list (3.14 shield leaks one per cancelled wait).
+            with anyio.CancelScope(shield=True):
+                while not flush_task.done():
+                    try:
+                        await wait_on_shared_future(flush_task)
+                    except asyncio.CancelledError:
+                        cancellation_pending = True
+                    except Exception:
+                        break
+            if not cancellation_pending:
+                # The shield also blocks the level cancellation this block
+                # promises to re-raise after the flush. Probe without
+                # suspending so a disconnected compact request still cancels.
                 try:
-                    await asyncio.shield(flush_task)
+                    await checkpoint_if_cancelled()
                 except asyncio.CancelledError:
                     cancellation_pending = True
-                except Exception:
-                    break
             try:
                 flush_task.result()
             except Exception:
@@ -1061,6 +1101,15 @@ class _CompactMixin:
                 deferred_proxy_health.append((failed_account, failed_exc))
                 return
             await proxy._handle_proxy_error(failed_account, failed_exc)
+
+        async def record_or_defer_permanent_health(
+            failed_account: Account,
+            failed_code: str,
+        ) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_permanent_health.append((failed_account, failed_code))
+                return
+            await proxy._load_balancer.mark_permanent_failure(failed_account, failed_code)
 
         async def record_or_defer_stream_health(
             failed_account: Account,
@@ -1115,10 +1164,7 @@ class _CompactMixin:
                             target.id,
                         )
                         _raise_proxy_budget_exhausted()
-                    upstream_budget = _compact_upstream_budget_seconds(
-                        remaining_budget,
-                        getattr(settings, "upstream_compact_timeout_seconds", None),
-                    )
+                    upstream_budget = _compact_upstream_budget_seconds(remaining_budget)
                     if upstream_budget <= 0:
                         logger.warning(
                             "Compact request budget exhausted before upstream call cap request_id=%s account_id=%s",
@@ -1157,6 +1203,15 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
+                                    "synthesize_routing_hint": True,
+                                    # ``target.id`` is the load-balancer account
+                                    # id; ``account_id`` above is the wire one.
+                                    # The scope token hashes the LB id in both
+                                    # the stream and compact paths.
+                                    "thread_cache_identity": ThreadCacheIdentity(
+                                        mode=thread_cache_identity_mode,
+                                        account_id=target.id,
+                                    ),
                                 },
                             ),
                             timeout=upstream_budget,
@@ -1736,6 +1791,22 @@ class _CompactMixin:
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                                 if isinstance(refresh_exc, RefreshError):
                                     if refresh_exc.is_permanent:
+                                        if preferred_account_id is None:
+                                            # This compact request is not bound to an
+                                            # account-owned response, turn state, or
+                                            # file. Retire the revoked account and
+                                            # continue the same pre-visible request on
+                                            # another healthy account. For API-key
+                                            # requests the health write is deferred
+                                            # until after usage settlement.
+                                            await record_or_defer_permanent_health(
+                                                account,
+                                                refresh_exc.code,
+                                            )
+                                            last_exc = exc
+                                            excluded_account_ids.add(account.id)
+                                            transient_exhausted = True
+                                            break
                                         await settle_compact_usage(
                                             api_key=api_key,
                                             api_key_reservation=api_key_reservation,
@@ -1999,7 +2070,7 @@ class _CompactMixin:
                             http_status=exc.status_code,
                             phase="first_event",
                         )
-                        if getattr(base_settings, "deterministic_failover_enabled", True):
+                        if resilience.deterministic_failover_enabled:
                             action = failover_decision(
                                 failure_class=classified["failure_class"],
                                 downstream_visible=False,
@@ -2094,6 +2165,7 @@ class _CompactMixin:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None
             await proxy._write_request_log(
+                affinity_observation=affinity_observation,
                 account_id=account_id_value,
                 api_key=api_key,
                 request_id=request_id,

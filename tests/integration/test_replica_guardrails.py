@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.core.auth.guardian import _count_live_bridge_ring_members
 from app.core.config.key_fingerprint import (
@@ -17,6 +18,7 @@ from app.core.config.key_fingerprint import (
 )
 from app.core.exceptions import DashboardSettingsConflictError
 from app.core.utils.time import utcnow
+from app.db import sqlite_lock_retry
 from app.db.models import BridgeRingMember, RuntimeSentinel
 from app.db.session import SessionLocal
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
@@ -81,6 +83,31 @@ async def test_fingerprint_matching_replica_passes(db_setup):
     # Second replica with the same key material re-runs the startup check.
     await verify_encryption_key_fingerprint()
 
+    assert await _stored_sentinel_values() == [compute_encryption_key_fingerprint()]
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_retries_transient_sqlite_lock(db_setup, monkeypatch):
+    import app.core.config.key_fingerprint as key_fingerprint_module
+
+    real_stamp_if_absent = key_fingerprint_module._stamp_if_absent
+    attempts = 0
+
+    async def fail_once_then_stamp(session, fingerprint: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError("INSERT runtime_sentinels", {}, Exception("database is locked"))
+        await real_stamp_if_absent(session, fingerprint)
+
+    monkeypatch.setattr(key_fingerprint_module, "_stamp_if_absent", fail_once_then_stamp)
+    # The retry budget now lives in the shared helper; zero the delays so the
+    # test exercises the retry without waiting it out.
+    monkeypatch.setattr(sqlite_lock_retry, "SQLITE_LOCK_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0))
+
+    await verify_encryption_key_fingerprint()
+
+    assert attempts == 2
     assert await _stored_sentinel_values() == [compute_encryption_key_fingerprint()]
 
 
@@ -295,7 +322,7 @@ async def test_settings_put_conflicts_when_writer_commits_between_check_and_upda
     second_writer_committed = asyncio.Event()
     call_count = 0
 
-    async def racing_update(self, payload, *, expected_version=None):
+    async def racing_update(self, payload, *, expected_version=None, actor_user_id=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -304,7 +331,7 @@ async def test_settings_put_conflicts_when_writer_commits_between_check_and_upda
             # service touches the row again so writer B can commit in between.
             first_writer_passed_check.set()
             await asyncio.wait_for(second_writer_committed.wait(), timeout=10)
-        return await original_update(self, payload, expected_version=expected_version)
+        return await original_update(self, payload, expected_version=expected_version, actor_user_id=actor_user_id)
 
     monkeypatch.setattr(SettingsService, "update_settings", racing_update)
 

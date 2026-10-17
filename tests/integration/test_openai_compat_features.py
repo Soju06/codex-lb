@@ -300,7 +300,7 @@ async def test_v1_responses_preserves_explicit_prompt_cache_for_model_source(asy
         return source, model
 
     async def fake_source_response(
-        request, payload, *, source, api_key, rate_limit_headers, pre_normalization_effort=None
+        request, payload, *, source, api_key, rate_limit_headers, pre_normalization_effort=None, **_kwargs
     ):
         seen["payload"] = payload.model_dump_for_forwarding()
         return JSONResponse({"id": "resp_prompt_cache_source", "status": "completed", "output": []})

@@ -1,0 +1,5 @@
+- [x] Measure the current helper output cost with repeatable stream workloads.
+- [x] Implement bounded batching of ready SSE records and cancellation-safe output ownership.
+- [x] Verify immediate delivery, ordering, limits, cancellation and sibling isolation.
+- [x] Compare candidate and baseline elapsed time/CPU and validate relevant checks.
+- [x] Sync specs, record evidence and archive the verified change.

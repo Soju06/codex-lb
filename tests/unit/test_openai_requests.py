@@ -257,12 +257,15 @@ def test_openai_prompt_cache_aliases_are_normalized():
     assert "promptCacheRetention" not in dumped
 
 
-def test_settings_default_prompt_cache_affinity_ttl_is_1800():
-    from app.core.config.settings import Settings
+def test_dashboard_default_prompt_cache_affinity_ttl_is_1800():
+    # The affinity TTL is a dashboard runtime setting; the column default is
+    # what a freshly created settings row carries (no env seed).
+    from app.db.models import DashboardSettings
 
-    settings = Settings()
+    column = DashboardSettings.__table__.c.openai_cache_affinity_max_age_seconds
 
-    assert settings.openai_cache_affinity_max_age_seconds == 1800
+    assert column.default is not None
+    assert column.default.arg == 1800
 
 
 def test_responses_to_payload_preserves_tool_order_and_object_keys():

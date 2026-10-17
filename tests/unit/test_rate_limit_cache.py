@@ -8,15 +8,10 @@ from app.modules.proxy.rate_limit_cache import RateLimitHeadersCache
 pytestmark = pytest.mark.unit
 
 
-class _FakeSettings:
-    usage_refresh_interval_seconds = 60
-
-
 @pytest.mark.asyncio
 async def test_cache_hit_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"now": 100.0, "calls": 0}
     monkeypatch.setattr(rate_limit_cache_module.time, "monotonic", lambda: state["now"])
-    monkeypatch.setattr(rate_limit_cache_module, "get_settings", lambda: _FakeSettings())
 
     cache = RateLimitHeadersCache()
 
@@ -35,7 +30,6 @@ async def test_cache_hit_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_cache_recompute_after_ttl_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"now": 100.0, "calls": 0}
     monkeypatch.setattr(rate_limit_cache_module.time, "monotonic", lambda: state["now"])
-    monkeypatch.setattr(rate_limit_cache_module, "get_settings", lambda: _FakeSettings())
 
     cache = RateLimitHeadersCache()
 
@@ -57,7 +51,6 @@ async def test_cache_recompute_after_ttl_expiry(monkeypatch: pytest.MonkeyPatch)
 async def test_cache_recompute_after_invalidate(monkeypatch: pytest.MonkeyPatch) -> None:
     state = {"now": 100.0, "calls": 0}
     monkeypatch.setattr(rate_limit_cache_module.time, "monotonic", lambda: state["now"])
-    monkeypatch.setattr(rate_limit_cache_module, "get_settings", lambda: _FakeSettings())
 
     cache = RateLimitHeadersCache()
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import TypeVar, cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
@@ -17,6 +18,7 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.unit
 
@@ -42,6 +44,14 @@ class _SharedSessionGuard:
             return result
         finally:
             self.in_flight -= 1
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.expunge_all_calls = 0
+
+    def expunge_all(self) -> None:
+        self.expunge_all_calls += 1
 
 
 class _GuardedAccountsRepository:
@@ -81,9 +91,18 @@ class _TestRateLimitService(_RateLimitMixin):
         self._repo_factory = repo_factory
         self.refresh_calls = 0
 
-    async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
-        del repos, accounts
+    async def _refresh_usage(
+        self,
+        accounts: list[Account],
+        latest_usage: Mapping[str, UsageHistory],
+    ) -> None:
+        del accounts, latest_usage
         self.refresh_calls += 1
+
+
+class _RefreshRateLimitService(_RateLimitMixin):
+    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+        self._repo_factory = repo_factory
 
 
 def _account(account_id: str, *, plan_type: str) -> Account:
@@ -124,7 +143,7 @@ def _usage(
     )
 
 
-def _service_and_guard() -> tuple[_TestRateLimitService, _SharedSessionGuard]:
+def _service_and_guard(*, session: _FakeSession | None = None) -> tuple[_TestRateLimitService, _SharedSessionGuard]:
     guard = _SharedSessionGuard()
     plus_account = _account("plus", plan_type="plus")
     free_account = _account("free", plan_type="free")
@@ -176,6 +195,7 @@ def _service_and_guard() -> tuple[_TestRateLimitService, _SharedSessionGuard]:
                 _GuardedAdditionalUsageRepository(guard),
             ),
             quota_planner=cast(QuotaPlannerRepository, object()),
+            session=cast(AsyncSession, session),
         )
 
     return _TestRateLimitService(repo_factory), guard
@@ -223,6 +243,8 @@ async def test_rate_limit_payload_serializes_usage_reads(monkeypatch: pytest.Mon
     assert guard.calls == [
         "accounts",
         "usage:primary",
+        "accounts",
+        "usage:primary",
         "usage:secondary",
         "usage:monthly",
         "additional:list_limit_names",
@@ -247,3 +269,42 @@ async def test_rate_limit_payload_serializes_usage_reads(monkeypatch: pytest.Mon
     assert payload.credits.unlimited is False
     assert payload.credits.balance == "8.75"
     assert payload.additional_rate_limits == []
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_payload_detaches_pre_refresh_rows() -> None:
+    session = _FakeSession()
+    service, _ = _service_and_guard(session=session)
+
+    await service.get_rate_limit_payload()
+
+    assert session.expunge_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_usage_refresh_owns_and_joins_singleflight_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_service, _ = _service_and_guard()
+    service = _RefreshRateLimitService(base_service._repo_factory)
+    account = _account("plus", plan_type="plus")
+    captured: dict[str, object] = {}
+
+    async def capture_refresh(
+        self,
+        accounts: list[Account],
+        latest_usage: dict[str, UsageHistory],
+        **kwargs: object,
+    ) -> bool:
+        del self
+        captured["accounts"] = accounts
+        captured["latest_usage"] = latest_usage
+        captured.update(kwargs)
+        return False
+
+    monkeypatch.setattr(UsageUpdater, "refresh_accounts", capture_refresh)
+
+    await service._refresh_usage([account], {})
+
+    assert captured["own_singleflight_sessions"] is True
+    assert captured["join_existing"] is True

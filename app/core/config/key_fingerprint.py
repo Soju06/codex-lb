@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config.settings import get_settings
 from app.core.crypto import get_or_create_key
 from app.db.models import RuntimeSentinel
+from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +81,22 @@ async def verify_encryption_key_fingerprint(
     if session_factory is None:
         from app.db.session import SessionLocal
 
-        session_factory = SessionLocal
+        make_session: Callable[[], AsyncSession] = SessionLocal
+    else:
+        make_session = session_factory
 
     local_fingerprint = compute_encryption_key_fingerprint(key_file)
-    async with session_factory() as session:
-        await _stamp_if_absent(session, local_fingerprint)
-        stored = await session.scalar(
-            select(RuntimeSentinel.value).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)
-        )
+
+    async def stamp_and_read() -> str | None:
+        async with make_session() as session:
+            await _stamp_if_absent(session, local_fingerprint)
+            return await session.scalar(
+                select(RuntimeSentinel.value).where(RuntimeSentinel.name == ENCRYPTION_KEY_FINGERPRINT_SENTINEL)
+            )
+
+    # A lock failure that outlives the budget still propagates and fails
+    # startup, exactly as it did before the retry was factored out.
+    stored = await retry_on_sqlite_lock(stamp_and_read, what="encryption-key fingerprint stamp")
 
     if stored is None or stored == local_fingerprint:
         return

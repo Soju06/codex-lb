@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Generic, Literal, Protocol, TypeVar
@@ -23,15 +22,27 @@ from app.core.balancer import (
     TrafficClass,
     select_account,
 )
+from app.core.clock import Clock
+from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy._load_balancer.overload_backoff import (
+    filter_overload_backoff_candidates,
+    isolation_substitute_seed,
+    overload_backoff_active,
+    overload_isolation_active,
+    sticky_owner_isolation_reroute_pool,
+)
+from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
     ProbeReservation,
+    RuntimeState,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.fair_share import (
@@ -52,6 +63,7 @@ _STICKY_EXISTING_UNSET = object()
 _RECOVERABLE_STATUSES = frozenset(
     {
         AccountStatus.ACTIVE,
+        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
     }
@@ -85,7 +97,79 @@ class SelectionInputsProtocol(Protocol):
 SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 
+class SelectionStatesOwner(Protocol):
+    """What ``prepare_selection_states`` needs from the balancer: runtime, clock, encryptor, lock-held maintenance."""
+
+    _clock: Clock
+    _runtime: dict[str, RuntimeState]
+    _encryptor: TokenEncryptor
+
+    def _reclaim_stale_account_leases_locked(
+        self,
+        *,
+        routing_tunables: RoutingTunables,
+        redact_sensitive_details: bool = False,
+    ) -> None: ...
+
+    def _prune_runtime(self, accounts: Iterable[Account]) -> None: ...
+
+
+def prepare_selection_states(
+    owner: SelectionStatesOwner,
+    selection_inputs: SelectionInputsProtocol,
+    *,
+    build_states: Callable[..., tuple[list[AccountState], dict[str, Account]]],
+    required_account_id: str | None,
+    redact_sensitive_details: bool,
+    routing_tunables: RoutingTunables,
+    soft_drain_enabled: bool | None = None,
+    model: str | None = None,
+) -> tuple[list[AccountState], dict[str, Account]]:
+    """Build the live selection states for one attempt of a selection path.
+
+    Runs under the owner's runtime lock: reclaims stale leases, prunes runtime
+    entries for accounts that left the pool, builds the states over the live
+    runtime with ``build_states`` (``load_balancer._build_states``; passed in
+    so the balancer module stays the seam tests patch) and, when the path is
+    pinned to ``required_account_id``, narrows the result to that account.
+    ``model`` is the requested model the latency cohort weight is scoped to.
+    """
+    owner._reclaim_stale_account_leases_locked(
+        routing_tunables=routing_tunables,
+        redact_sensitive_details=redact_sensitive_details,
+    )
+    owner._prune_runtime(selection_inputs.runtime_accounts or selection_inputs.accounts)
+    states, account_map = build_states(
+        accounts=selection_inputs.accounts,
+        latest_primary=selection_inputs.latest_primary,
+        latest_secondary=selection_inputs.latest_secondary,
+        latest_monthly=selection_inputs.latest_monthly,
+        runtime=owner._runtime,
+        now=owner._clock.time(),
+        routing_policy_override=selection_inputs.routing_policy_override,
+        ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
+        encryptor=owner._encryptor,
+        routing_tunables=routing_tunables,
+        # C2-3 resilience toggles: an explicit value (opportunistic admission)
+        # wins; selection carries it on its inputs.
+        soft_drain_enabled=(
+            soft_drain_enabled
+            if soft_drain_enabled is not None
+            else getattr(selection_inputs, "soft_drain_enabled", None)
+        ),
+        model=model,
+    )
+    if required_account_id is None:
+        return states, account_map
+    return (
+        [state for state in states if state.account_id == required_account_id],
+        {account_id: account for account_id, account in account_map.items() if account_id == required_account_id},
+    )
+
+
 class StickySelectionOwner(Protocol):
+    _clock: Clock
+    _runtime: dict[str, RuntimeState]
     _runtime_lock: asyncio.Lock
     _repo_factory: ProxyRepoFactory
 
@@ -95,6 +179,8 @@ class StickySelectionOwner(Protocol):
         *,
         required_account_id: str | None,
         redact_sensitive_details: bool,
+        routing_tunables: RoutingTunables,
+        model: str | None = None,
     ) -> tuple[list[AccountState], dict[str, Account]]: ...
 
     def _sync_runtime_state(
@@ -191,11 +277,13 @@ class StickySelectionOwner(Protocol):
         sticky_existing_account_id: str | None | object,
         initial_preferred_account_id: str | None,
         preserve_existing_mapping_on_fallback: bool,
+        preserve_reason_request_local: bool = False,
         traffic_class: TrafficClass,
         ignore_standard_quota: bool,
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
         sticky_refresh_skip_deadline: datetime | None = None,
+        redact_sensitive_details: bool = False,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -232,12 +320,20 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     traffic_class: TrafficClass
     concurrency_caps: AccountConcurrencyCaps
     redact_sensitive_details: bool
+    # C2-2 routing/overload: dashboard snapshot resolved once by the caller.
+    routing_tunables: RoutingTunables
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # Accounts this request's retry loop already failed over from. Distinct
+    # from the pre-exclusion continuity pool, which also differs from the
+    # routable pool by catalog-evidence model filtering.
+    exclude_account_ids: frozenset[str] = frozenset()
+    # Requested model; scopes the per-model latency cohort weight of fresh draws.
+    model: str | None = None
     # First-iteration owner read performed by the caller inside its shared
     # owner-lookup session (see load_balancer.select_account). Consumed exactly
     # once; retries re-read fresh ownership evidence through a repo bundle.
@@ -261,6 +357,16 @@ class _StickyMutation:
 class _StickySelectionOutcome:
     selection: SelectionResult
     mutation: _StickyMutation | None = None
+    # The candidate pool the selection actually ran over when a NEW account
+    # was chosen for the key (overload-free first pass); ``None`` means the
+    # caller's full pool. Probe reservation must use the same pool.
+    effective_states: list[AccountState] | None = None
+    # ``(mapping, overload_free_candidates)`` when this selection released an
+    # isolated sticky owner. Carried rather than logged, because selection can
+    # still lose the candidate to a concurrent lease or be retried on stale
+    # state -- and a release that never served must not reach the counter. The
+    # caller emits it once admission has actually succeeded.
+    isolation_release: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +378,45 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     error_code: str | None
     resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
+    # Set only alongside ``hard_affinity_saturated`` when the resolved hard
+    # owner is one of the caller's own ``exclude_account_ids``
+    # (``_hard_affinity_owner_excluded_by_caller``).
+    hard_affinity_owner_excluded: bool = False
+
+
+def _hard_affinity_owner_excluded_by_caller(
+    *,
+    error_code: str | None,
+    owner_account_id: str | None | object,
+    exclude_account_ids: frozenset[str],
+) -> bool:
+    """Whether this ``hard_affinity_saturated`` was caused by the caller's own exclusion.
+
+    ``hard_affinity_saturated`` means "the resolved hard ``CODEX_SESSION``
+    owner is not selectable". Two causes reach the same code and the callers'
+    recovery wait (``_HARD_AFFINITY_RECOVERY_SLEEP_SECONDS``) can only help
+    one of them:
+
+    * the owner is briefly unavailable (cap, health backoff, status) -- it may
+      recover inside the wait, which is exactly why the short wait exists;
+    * the caller passed the owner in ``exclude_account_ids`` -- the exclusion
+      filter drops it from the pool before ownership narrows selection to it
+      (``select_account``), so **no** amount of waiting can produce a
+      candidate while the caller keeps excluding it. Selection is not going to
+      spill to another account either: a resolved hard row is ownership
+      evidence, never a preference.
+
+    Only the selector can tell these apart, because only it knows which
+    account the row resolved to. Reporting the distinction (rather than the
+    owner id itself) keeps the account id out of surfaces that would have to
+    redact it, and answers exactly the question every caller asks: "is my own
+    exclusion set the reason, so is waiting futile?"
+    """
+    return (
+        error_code == "hard_affinity_saturated"
+        and isinstance(owner_account_id, str)
+        and owner_account_id in exclude_account_ids
+    )
 
 
 async def run_sticky_selection_path(
@@ -309,6 +454,7 @@ async def run_sticky_selection_path(
     traffic_class = request.traffic_class
     caps = request.concurrency_caps
     redact_sensitive_details = request.redact_sensitive_details
+    routing_tunables = request.routing_tunables
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
     allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
@@ -419,6 +565,8 @@ async def run_sticky_selection_path(
                 selection_inputs,
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
+                routing_tunables=routing_tunables,
+                model=request.model,
             )
             if retired_legacy_owner_account_ids:
                 # Retirement is authoritative even when this selector loaded a
@@ -437,7 +585,7 @@ async def run_sticky_selection_path(
                 else build_routing_costs(
                     settings=selection_inputs.quota_planner_settings,
                     states=states,
-                    now=datetime.now(timezone.utc),
+                    now=datetime.fromtimestamp(owner._clock.time(), timezone.utc),
                 )
             )
             # Key shape is deliberately irrelevant here. Only typed
@@ -494,6 +642,11 @@ async def run_sticky_selection_path(
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
+            # An isolated soft owner may be released to a sibling by the
+            # overload isolation stage (see ``_run_select_with_stickiness``).
+            owner_overload_isolated = isinstance(sticky_existing_account_id, str) and overload_isolation_active(
+                owner._runtime.get(sticky_existing_account_id), owner._clock.time()
+            )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -506,6 +659,25 @@ async def run_sticky_selection_path(
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
+                if owner_overload_isolated:
+                    # The owner keeps its cap exemption, but a sibling it
+                    # may be released to must pass the caps: otherwise the
+                    # reroute could pick a saturated sibling that lease
+                    # admission then rejects while the owner had capacity.
+                    cap_eligible_ids = {
+                        state.account_id
+                        for state in _filter_states_for_account_caps(
+                            states,
+                            lease_kind=lease_kind,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                        )
+                    }
+                    selection_states = [
+                        state
+                        for state in states
+                        if state.account_id == sticky_existing_account_id or state.account_id in cap_eligible_ids
+                    ]
             else:
                 selection_states = _filter_states_for_account_caps(
                     states,
@@ -525,22 +697,79 @@ async def run_sticky_selection_path(
                     stream_reserve_slots=0,
                 )
                 selection_states = response_create_states or selection_states
-            preserve_existing_mapping = (
+            # Cap spillover is request-local: the mapping is preserved so the
+            # session returns to its owner once the cap clears. Overload
+            # isolation is request-local for the same reason (see
+            # ``_run_select_with_stickiness``), so an owner that is both
+            # capped and isolated preserves too -- rebinding it would strand
+            # the thread on the sibling after both conditions clear.
+            # Why the mapping is being kept matters downstream: only pressure
+            # that is *request-local* (a cap, this request's exclusion list)
+            # means "this owner can serve the next turn". An owner kept because
+            # the conversation's ownership is ambiguous
+            # (``require_unambiguous_account``) may be out of this request's
+            # routable or security scope entirely, and must not be treated as a
+            # warm owner waiting out an isolation window.
+            preserve_reason_request_local = (
                 bare_session_key
                 and isinstance(sticky_existing_account_id, str)
                 and (
-                    (
-                        cap_spillover_allowed
-                        and any(state.account_id == sticky_existing_account_id for state in states)
-                        and not any(state.account_id == sticky_existing_account_id for state in selection_states)
-                    )
-                    or require_unambiguous_account
+                    cap_spillover_allowed
+                    # An explicit reallocation is an instruction to retire the
+                    # mapping, and it outranks cap spillover exactly as it
+                    # already does on the TTL-bounded branch below. Without
+                    # this the owner is absent from ``selection_states``, so
+                    # the later ``caller_requested_reallocation`` guard is
+                    # never reached and the row survives a reallocation that
+                    # used to rebind it. The ``require_unambiguous_account``
+                    # arm below is not gated: it is a correctness requirement
+                    # about an ambiguous conversation owner, not a locality
+                    # preference, so a caller cannot waive it.
+                    and not reallocate_sticky
+                    and any(state.account_id == sticky_existing_account_id for state in states)
+                    and not any(state.account_id == sticky_existing_account_id for state in selection_states)
                 )
             )
+            preserve_existing_mapping = preserve_reason_request_local or (
+                bare_session_key and isinstance(sticky_existing_account_id, str) and require_unambiguous_account
+            )
+            if (
+                not preserve_existing_mapping
+                and isinstance(sticky_existing_account_id, str)
+                and not hard_sticky
+                and not reallocate_sticky
+                and sticky_max_age_seconds is not None
+                and all(state.account_id != sticky_existing_account_id for state in selection_states)
+            ):
+                # A soft TTL-bounded owner (prompt-cache thread row) missing
+                # from this request's candidates only because of request-local
+                # pressure -- the per-account cap filter dropped it, or the
+                # retry loop excluded it after a transient upstream failure
+                # while its persisted status is still recoverable -- keeps its
+                # mapping. Same rule as bare-session cap spillover: serve the
+                # alternate for this request so the conversation returns to
+                # its warm owner next turn. A PAUSED/DEACTIVATED owner or one
+                # outside the request's continuity scope is still rebound.
+                # The PAUSED/DEACTIVATED half of that rule needs no test here:
+                # ``_selectable_accounts`` drops both before ``_build_states``,
+                # so such an owner never reaches ``states`` and this predicate
+                # is already false for it. Only the exclusion arm below can see
+                # an owner outside that filter, and it checks the status.
+                preserve_reason_request_local = any(
+                    state.account_id == sticky_existing_account_id for state in states
+                ) or (
+                    sticky_existing_account_id in request.exclude_account_ids
+                    and any(
+                        account.id == sticky_existing_account_id and account.status in _RECOVERABLE_STATUSES
+                        for account in selection_inputs.effective_continuity_owner_candidates
+                    )
+                )
+                preserve_existing_mapping = preserve_reason_request_local
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
                     traffic_class=traffic_class,
+                    now=owner._clock.time(),
                 )
             probe_reservation: ProbeReservation | None = None
         # Raw sticky rows are global, while account-assigned API keys and
@@ -682,12 +911,14 @@ async def run_sticky_selection_path(
                             else None
                         ),
                         preserve_existing_mapping_on_fallback=preserve_existing_mapping,
+                        preserve_reason_request_local=preserve_reason_request_local,
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
                         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                         usage_exhaustion_states=states,
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
+                        redact_sensitive_details=redact_sensitive_details,
                     )
                     result = sticky_outcome.selection
                     if (
@@ -696,7 +927,9 @@ async def run_sticky_selection_path(
                         and lease_kind is not None
                         and len(selection_states) < len(states)
                         and any(
-                            state.status == AccountStatus.ACTIVE for state in states if state not in selection_states
+                            state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                            for state in states
+                            if state not in selection_states
                         )
                     ):
                         selection_error_code = _account_cap_error_code(lease_kind)
@@ -725,11 +958,16 @@ async def run_sticky_selection_path(
                     or reallocate_sticky
                 )
             )
+            # A fresh binding may have been chosen from the overload-free
+            # subset; reserve the recovery probe from that same pool so an
+            # older due probe the pass skipped cannot invalidate the match.
+            probe_states = sticky_outcome.effective_states or selection_states
             probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
-                selection_states,
+                probe_states,
                 result.account,
                 routing_strategy=routing_strategy,
                 traffic_class=traffic_class,
+                now=owner._clock.time(),
             )
             if should_reserve_probe and probing_result_requires_reservation:
                 # Sticky persistence happens outside the runtime lock.
@@ -739,7 +977,7 @@ async def run_sticky_selection_path(
                 # can temporarily consume the only due probing slot and
                 # make concurrent unbound traffic miss recovery.
                 probe_reservation = owner._reserve_due_probe_locked(
-                    selection_states,
+                    probe_states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
@@ -1132,6 +1370,21 @@ async def run_sticky_selection_path(
                     await owner.release_account_lease(selected_lease)
                     selected_lease = None
                     raise
+        if sticky_outcome.isolation_release is not None:
+            # Here, not at selection: the candidate can still be lost to a
+            # concurrent lease or the attempt retried on stale state, and this
+            # counter is the one the accounts-per-conversation change is judged
+            # by -- a release that never served must not appear in it, and a
+            # retried attempt must not appear twice. Account identifiers are
+            # deliberately omitted: this path has no privacy flag and private
+            # realtime diagnostics must not expose them.
+            release_mapping, overload_free_candidates = sticky_outcome.isolation_release
+            logger.info(
+                "sticky_owner_overload_isolation_reroute sticky_kind=%s overload_free_candidates=%d mapping=%s",
+                sticky_kind.value if sticky_kind is not None else "unknown",
+                overload_free_candidates,
+                release_mapping,
+            )
         break
 
     return StickySelectionOutcome(
@@ -1141,6 +1394,11 @@ async def run_sticky_selection_path(
         error_message=error_message,
         error_code=selection_error_code,
         resets_at=selection_resets_at,
+        hard_affinity_owner_excluded=_hard_affinity_owner_excluded_by_caller(
+            error_code=selection_error_code,
+            owner_account_id=sticky_existing_account_id,
+            exclude_account_ids=request.exclude_account_ids,
+        ),
     )
 
 
@@ -1164,11 +1422,15 @@ async def _select_with_stickiness(
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
     initial_preferred_account_id: str | None = None,
     preserve_existing_mapping_on_fallback: bool = False,
+    preserve_reason_request_local: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
+    overload_backoff_runtime: Mapping[str, RuntimeState] | None = None,
+    clock: Clock,
+    redact_sensitive_details: bool = False,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1197,6 +1459,7 @@ async def _select_with_stickiness(
         *,
         persist_account_id: str | None = None,
         refresh_skip_deadline: datetime | None = None,
+        effective_states: list[AccountState] | None = None,
     ) -> _StickySelectionOutcome:
         mutation = pending_mutation
         if persist_account_id is not None:
@@ -1204,7 +1467,12 @@ async def _select_with_stickiness(
                 account_id=persist_account_id,
                 refresh_skip_deadline=refresh_skip_deadline,
             )
-        return _StickySelectionOutcome(selection=selection, mutation=mutation)
+        return _StickySelectionOutcome(
+            selection=selection,
+            mutation=mutation,
+            effective_states=effective_states,
+            isolation_release=isolation_release,
+        )
 
     if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
         existing = await sticky_repo.get_account_id(
@@ -1226,13 +1494,79 @@ async def _select_with_stickiness(
     # reassignment.
     persist_fallback = not preserve_existing_mapping_on_fallback
     apply_sticky_secondary_budget_threshold = False
+    # Set when an isolated soft owner is released: the replacement pick and the
+    # overload-free pool it came from (probe reservation must see that pool).
+    overload_reroute: SelectionResult | None = None
+    overload_reroute_pool: list[AccountState] | None = None
+    usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else states
+    # True when that release is request-local: the substitute serves this turn
+    # and the sticky row keeps pointing at the isolated owner, so the thread
+    # returns home when isolation lifts instead of accumulating one permanent
+    # new owner per isolation episode it touches. Never true when the caller
+    # asked for reallocation: ``reallocate_sticky`` is an explicit instruction
+    # to retire the mapping and the isolation reroute reuses the same local
+    # further down, so the caller's intent is captured before that happens.
+    #
+    # ``STICKY_THREAD`` is the exception, because on that kind the flag carries
+    # no per-request intent to respect: ``affinity.py`` sets it on *every*
+    # sticky-thread policy (see ``_resolve_affinity_policy``), so reading it as
+    # "this caller asked to retire the mapping" would exempt the whole kind
+    # from retention and leave it accumulating an owner per isolation episode --
+    # while the two kinds either side of it stopped.
+    caller_requested_reallocation = reallocate_sticky and sticky_kind != StickySessionKind.STICKY_THREAD
+    overload_reroute_request_local = False
+    isolation_release: tuple[str, int] | None = None
+    # A mapping kept because the conversation's owner is *ambiguous* is not a
+    # warm owner waiting out isolation: it may sit outside this request's
+    # routable or security scope. It still keeps its row -- ambiguity is a
+    # reason not to rebind -- but it must not have its TTL extended by a turn
+    # served elsewhere, and it is not an isolation release to count.
+    retention_may_write = not preserve_existing_mapping_on_fallback or preserve_reason_request_local
+
+    def _choose_from(candidates: list[AccountState], *, selection_seed: str | None = None) -> SelectionResult:
+        return _select_account_preferring_budget_safe(
+            candidates,
+            selection_seed=selection_seed,
+            prefer_earlier_reset=prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            budget_threshold_pct=budget_threshold_pct,
+            secondary_budget_threshold_pct=secondary_budget_threshold_pct,
+            apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs_by_account_id=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_state_list,
+        )
 
     if not existing and initial_preferred_account_id is not None:
         initial_preferred = next(
             (state for state in states if state.account_id == initial_preferred_account_id),
             None,
         )
-        if initial_preferred is not None:
+        # The process-session preference is a fresh upstream admission on that
+        # account: do not honor it while the account is in overload backoff and
+        # the strategy can actually select an overload-free candidate. A pool
+        # whose only alternatives are unselectable (cooldown, exhausted) keeps
+        # the preference, so the bypass can never fail a request the
+        # preferred account would have served.
+        if (
+            initial_preferred is not None
+            and overload_backoff_runtime is not None
+            and overload_backoff_active(overload_backoff_runtime.get(initial_preferred.account_id), clock.time())
+        ):
+            preference_free_pool = filter_overload_backoff_candidates(
+                states, overload_backoff_runtime, now=clock.time()
+            )
+            if preference_free_pool is not states:
+                alternative = _choose_from(preference_free_pool)
+                if alternative.account is not None and alternative.account.account_id != initial_preferred.account_id:
+                    overload_reroute = alternative
+                    overload_reroute_pool = preference_free_pool
+        if initial_preferred is not None and overload_reroute is None:
             initial_result = select_account(
                 [initial_preferred],
                 prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1273,7 +1607,7 @@ async def _select_with_stickiness(
             # budget threshold. That preserves continuity below the
             # threshold while avoiding obvious short-window failures once
             # the session is skating on the edge of exhaustion.
-            now = time.time()
+            now = clock.time()
             budget_pressured = (
                 sticky_kind
                 in (
@@ -1313,7 +1647,87 @@ async def _select_with_stickiness(
                     )
                     burn_first_reallocate = burn_first.account is not None
 
-            if not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
+            # Isolation stage of the overload backoff: the pinned owner is a
+            # *soft* mapping (hard continuity owners never reach this path)
+            # and every request re-entering it is a fresh admission upstream
+            # keeps rejecting, so release it while the strategy can still pick
+            # an overload-free sibling. Soft backoff levels below isolation
+            # keep the owner, so a short burst never churns warm sessions.
+            if (
+                sticky_kind
+                in (
+                    StickySessionKind.PROMPT_CACHE,
+                    StickySessionKind.STICKY_THREAD,
+                    StickySessionKind.CODEX_SESSION,
+                )
+                # Retention is only ever applied to an owner that can come
+                # back. A PAUSED/DEACTIVATED owner is not "isolated, will
+                # recover" -- it is gone, and it must fall through to the
+                # unchanged rebind path below so the mapping is released on
+                # this turn rather than held for the isolation window.
+                and pinned.status in _RECOVERABLE_STATUSES
+            ):
+                overload_reroute_pool = sticky_owner_isolation_reroute_pool(
+                    states,
+                    overload_backoff_runtime,
+                    owner_account_id=pinned.account_id,
+                    now=now,
+                )
+
+            if overload_reroute_pool is not None:
+                # A budget-pressured owner's replacement honors the same
+                # secondary-budget filter the budget reallocation applies, so
+                # the substitute is not an equally pressured sibling that the
+                # next turn would reallocate again.
+                if budget_pressured:
+                    apply_sticky_secondary_budget_threshold = True
+                # The release is request-local, so this pick is repeated on
+                # every turn of the thread while isolation holds. A plain
+                # weighted draw would answer differently each time and rotate
+                # the conversation across the siblings -- more churn than the
+                # single rebind this change replaces -- so the pick is seeded
+                # by the thread instead.
+                #
+                # The seed is spent *inside* the selector, among the accounts
+                # it would otherwise draw from, rather than picking a
+                # substitute here and asking the selector to ratify it: every
+                # gate the selector applies is pool-relative (it accepts an
+                # over-budget account only when no safe one is visible, a
+                # draining one only when nothing healthier is, a ``preserve``
+                # one only when no ``normal`` one is), and validating a single
+                # candidate hides all of them.
+                candidate = _choose_from(
+                    overload_reroute_pool,
+                    selection_seed=isolation_substitute_seed(
+                        sticky_key=sticky_key,
+                        owner_account_id=pinned.account_id,
+                    ),
+                )
+                if candidate.account is not None and candidate.account.account_id != pinned.account_id:
+                    overload_reroute = candidate
+                    overload_reroute_request_local = not caller_requested_reallocation
+                    # Account identifiers are deliberately omitted: this path
+                    # has no privacy flag and private realtime diagnostics
+                    # must not expose them. The isolation-engaged warning
+                    # already names the account under the redaction policy.
+                    #
+                    # ``mapping=retained`` is the attributable marker for the
+                    # accounts-per-conversation factor: it says this turn went
+                    # to a sibling *without* adding an owner to the thread.
+                    if retention_may_write or not overload_reroute_request_local:
+                        isolation_release = (
+                            "retained" if overload_reroute_request_local else "rebound",
+                            len(overload_reroute_pool),
+                        )
+                else:
+                    overload_reroute_pool = None
+
+            if overload_reroute is not None:
+                # Skips the pinned-owner return and the rate-limit grace
+                # retry below; the mutation block honors
+                # ``overload_reroute_request_local`` and keeps the mapping.
+                reallocate_sticky = True
+            elif not ((budget_pressured or rate_limit_far_away) and burn_first_reallocate):
                 pinned_result = select_account(
                     [pinned],
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -1398,7 +1812,7 @@ async def _select_with_stickiness(
                 grace_copy = replace(pinned)
                 grace_result = select_account(
                     [grace_copy],
-                    now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
+                    now=clock.time() + _STICKY_GRACE_PERIOD_SECONDS,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
@@ -1415,7 +1829,29 @@ async def _select_with_stickiness(
                         persist_account_id=pinned_refresh_account_id,
                         refresh_skip_deadline=pinned_refresh_skip_deadline,
                     )
-            if reallocate_sticky:
+            if overload_reroute_request_local:
+                # Overload isolation is a property of the *account*, not of
+                # the thread, and it lifts. Deleting or rebinding the mapping
+                # here is what made one conversation accumulate a new account
+                # per isolation episode; preserving it costs nothing in
+                # availability because the turn is already being served by
+                # the substitute.
+                persist_fallback = False
+                # Preserving must not mean going silent. A TTL-based kind
+                # (PROMPT_CACHE) expires on ``updated_at``, and the default
+                # affinity TTL and the default isolation window are both 1800
+                # seconds -- so suppressing every write would let the retained
+                # row die *before* isolation lifts, and the next turn would
+                # persist the substitute as a brand-new owner. That is the
+                # accumulation this change exists to remove, arriving through
+                # the back door. Rewrite the same owner instead: the row stays
+                # on the warm account and its freshness tracks the thread.
+                if sticky_max_age_seconds is not None and retention_may_write:
+                    pending_mutation = _StickyMutation(
+                        account_id=pinned.account_id,
+                        refresh_skip_deadline=sticky_refresh_skip_deadline,
+                    )
+            elif reallocate_sticky:
                 pending_mutation = _StickyMutation(account_id=None)
             elif pinned.status not in _RECOVERABLE_STATUSES:
                 # Permanently down (PAUSED/DEACTIVATED) — let the
@@ -1434,35 +1870,152 @@ async def _select_with_stickiness(
             if not preserve_existing_mapping_on_fallback:
                 pending_mutation = _StickyMutation(account_id=None)
 
-    chosen = _select_account_preferring_budget_safe(
-        states,
-        prefer_earlier_reset=prefer_earlier_reset_accounts,
-        prefer_earlier_reset_window=prefer_earlier_reset_window,
-        routing_strategy=routing_strategy,
-        relative_availability_power=relative_availability_power,
-        relative_availability_top_k=relative_availability_top_k,
-        budget_threshold_pct=budget_threshold_pct,
-        secondary_budget_threshold_pct=secondary_budget_threshold_pct,
-        apply_secondary_budget_threshold=apply_sticky_secondary_budget_threshold,
-        traffic_class=traffic_class,
-        ignore_standard_quota=ignore_standard_quota,
-        routing_costs_by_account_id=routing_costs_by_account_id,
-        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-        usage_exhaustion_states=usage_exhaustion_states,
+    # Reaching here means a NEW account is being chosen for this key (no
+    # owner, an unusable owner, or a reallocation): a fresh upstream
+    # admission, not warm-session reuse. Prefer accounts upstream is not
+    # currently rejecting as overloaded; fall back to the full pool when the
+    # strategy rejects every overload-free candidate. The pinned-owner paths
+    # above never consult the overload window, so an established owner keeps
+    # serving its session even while backed off.
+    # The owner is isolated *and* absent from selection -- a concurrency cap or
+    # this request's exclusion list removed it before selection ran, so the
+    # isolation branch above never saw a ``pinned`` state for it. Everything
+    # that branch does for a retained owner has to happen here too.
+    owner_isolated_off_pool = (
+        preserve_existing_mapping_on_fallback
+        # ...for request-local pressure only. A mapping kept because the
+        # conversation's owner is ambiguous may be outside this request's
+        # routable or security scope, and refreshing it would pin the thread
+        # to an account that cannot serve it, turn after turn.
+        and preserve_reason_request_local
+        and isinstance(existing, str)
+        and not persist_fallback
+        and not reallocate_sticky
+        and overload_backoff_runtime is not None
+        and overload_isolation_active(overload_backoff_runtime.get(existing), clock.time())
     )
+    if owner_isolated_off_pool and isinstance(existing, str):
+        existing_owner_state = next(
+            (state for state in usage_exhaustion_state_list if state.account_id == existing),
+            None,
+        )
+        if (
+            sticky_kind
+            in (
+                StickySessionKind.PROMPT_CACHE,
+                StickySessionKind.STICKY_THREAD,
+                StickySessionKind.CODEX_SESSION,
+            )
+            and existing_owner_state is not None
+            and routing_strategy not in ("sequential_drain", "reset_drain", "single_account")
+            # Unlike the pinned branch, no RATE_LIMITED carve-out. There the
+            # exclusion exists because a rate-limited owner takes the separate
+            # grace-retry path instead of budget reallocation; here the owner
+            # never reached selection at all, so skipping the filter would just
+            # hand its replacement to a sibling the budget rule excludes.
+            and _state_above_sticky_budget_threshold(
+                existing_owner_state,
+                budget_threshold_pct,
+                secondary_budget_threshold_pct,
+            )
+        ):
+            apply_sticky_secondary_budget_threshold = True
+    fallback_candidates = states
+    if overload_reroute is not None and overload_reroute_pool is not None:
+        fallback_candidates = overload_reroute_pool
+        chosen = overload_reroute
+    else:
+        if overload_backoff_runtime is not None:
+            fallback_candidates = filter_overload_backoff_candidates(states, overload_backoff_runtime, now=clock.time())
+        chosen = _choose_from(fallback_candidates)
+        if chosen.account is None and fallback_candidates is not states:
+            fallback_candidates = states
+            chosen = _choose_from(states)
+        # When an *isolated* owner's mapping is being kept while it sits out
+        # this turn -- cap-filtered or excluded by this request's retry loop,
+        # so it never reached ``selection_states`` and the isolation branch
+        # above could not see a ``pinned`` state -- the substitute is re-picked
+        # on every turn just as it is there, so it gets the same thread-seeded
+        # pick. The seed is spent inside the selector, so the pool-relative
+        # gates all hold.
+        #
+        # Only for isolation. Ordinary cap or retry spillover is a one-turn
+        # detour on a healthy pool, and seeding it would trade that pool's
+        # load-proportional draw (and its recovery probes) for stability
+        # nothing is asking for.
+        if owner_isolated_off_pool and isinstance(existing, str) and chosen.account is not None:
+            seeded = _choose_from(
+                fallback_candidates,
+                selection_seed=isolation_substitute_seed(sticky_key=sticky_key, owner_account_id=existing),
+            )
+            if seeded.account is not None:
+                chosen = seeded
+            serving = chosen.account
+            if serving is not None and serving.account_id != existing:
+                # This is an isolation release too -- the owner is isolated and
+                # a sibling is serving its turn -- so it belongs in the same
+                # counter. Leaving it to the generic spillover line would
+                # undercount exactly the releases this change is measured by.
+                # Account identifiers stay out, as on the branch above.
+                isolation_release = ("retained", len(fallback_candidates))
+    if (
+        isinstance(existing, str)
+        and chosen.account is not None
+        and chosen.account.account_id != existing
+        # The reroute branch already logged its own outcome, retained or not.
+        and overload_reroute is None
+        # ...as did the off-pool retention path. And a mapping that is being
+        # *kept* for any reason -- including an ambiguous owner, which is
+        # preserved but deliberately neither refreshed nor counted -- is not a
+        # rebind, whatever account served this turn.
+        and not owner_isolated_off_pool
+        and persist_fallback
+        and overload_backoff_runtime is not None
+        and overload_isolation_active(overload_backoff_runtime.get(existing), clock.time())
+    ):
+        # An isolated owner whose mapping is being rebound rather than kept:
+        # past recovering, dropped before selection ran (``_selectable_accounts``
+        # removes paused and deactivated accounts), or outside this request's
+        # scope. Still an isolation release, and the counter must carry both
+        # halves of what isolation does to a conversation or it reports only the
+        # reversible one.
+        #
+        # Emitted here, where the replacement is known: the request may instead
+        # have failed, or kept its owner, and a release that did not happen must
+        # not be counted. Account identifiers stay out, as on the retained line.
+        isolation_release = ("rebound", len(fallback_candidates))
+    if pending_mutation is None and sticky_max_age_seconds is not None and owner_isolated_off_pool:
+        # The owner is isolated and its mapping is being kept, but it never
+        # reached ``selection_states`` -- a cap or this request's exclusion
+        # list removed it -- so the retention branch above could not see a
+        # ``pinned`` state and scheduled no write. Preserving must not mean
+        # going silent on a TTL-based kind: the default affinity TTL and the
+        # default isolation window are both 1800 seconds, so a retained row
+        # left unwritten expires *during* the episode and the next turn
+        # persists the substitute as a brand-new owner -- the accumulation
+        # this change removes, arriving through the back door.
+        #
+        # Scoped to isolation on purpose. When an owner is merely rate-limited
+        # the TTL expiring *is* the intended escape, and refreshing it would
+        # hold a conversation on an account that may never come back.
+        pending_mutation = _StickyMutation(
+            account_id=existing,
+            refresh_skip_deadline=sticky_refresh_skip_deadline,
+        )
+    chosen_pool = fallback_candidates if fallback_candidates is not states else None
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
-        return finish_selection(chosen, persist_account_id=chosen.account.account_id)
+        return finish_selection(chosen, persist_account_id=chosen.account.account_id, effective_states=chosen_pool)
     if preserve_existing_mapping_on_fallback and chosen.account is not None and existing is not None:
         # Spillover is deliberately request-local. The alternate may create
         # its own hard response/file/bridge owner, but local cap pressure
         # alone never turns this soft mapping into a distributed commit.
         logger.info(
             "internal_soft_affinity_spillover old_account_id=%s new_account_id=%s sticky_kind=%s",
-            existing,
-            chosen.account.account_id,
+            "<redacted>" if redact_sensitive_details else existing,
+            "<redacted>" if redact_sensitive_details else chosen.account.account_id,
             sticky_kind.value,
         )
-    return finish_selection(chosen)
+    return finish_selection(chosen, effective_states=chosen_pool)
 
 
 def _sticky_refresh_write_skippable(
@@ -1568,20 +2121,22 @@ def _probing_result_requires_recovery_reservation(
     *,
     routing_strategy: str,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
         return False
     if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
         return False
-    return _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class)
+    return _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class, now=now)
 
 
 def _filter_recovery_probe_candidates(
     states: list[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> list[AccountState]:
-    if not _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class):
+    if not _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class, now=now):
         return states
     return [state for state in states if state.health_tier != HEALTH_TIER_PROBING]
 
@@ -1590,10 +2145,12 @@ def _pool_has_available_healthy_account_without_backoff(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     return _pool_has_available_account_without_backoff(
         (state for state in states if state.health_tier == HEALTH_TIER_HEALTHY),
         traffic_class=traffic_class,
+        now=now,
     )
 
 
@@ -1601,6 +2158,7 @@ def _pool_has_available_account_without_backoff(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     """Return whether the complete pool passes non-cap routing eligibility."""
     # ``select_account`` normalizes expired quota/cooldown fields in place;
@@ -1609,7 +2167,7 @@ def _pool_has_available_account_without_backoff(
     # opportunistic admission compares candidates with one another.
     result = select_account(
         [replace(state) for state in states],
-        now=time.time(),
+        now=now,
         routing_strategy="single_account",
         allow_backoff_fallback=False,
         traffic_class=traffic_class,
@@ -1696,11 +2254,20 @@ def _select_account_preferring_budget_safe(
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
+    selection_seed: str | None = None,
 ) -> SelectionResult:
     state_list = list(states)
-    if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
+    if selection_seed is None and routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
         # This pass must precede budget-safe and routing-policy shortcuts below;
         # otherwise a healthy preferred account can starve PROBING indefinitely.
+        #
+        # A seeded caller is exempt. The due probe is whichever probing account
+        # went quiet longest, so admitting one advances its clock and hands the
+        # next turn to a different sibling -- the rotation the seed exists to
+        # prevent. Probes ride on unbound traffic and on every other thread
+        # instead, so nothing here starves them; only the handful of
+        # conversations being held warm through an isolation window stop
+        # carrying them.
         recovery_probe = select_account(
             state_list,
             prefer_earlier_reset=prefer_earlier_reset,
@@ -1749,6 +2316,7 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
+            selection_seed=selection_seed,
         )
 
     best_health_states = _best_health_tier_states(state_list)
@@ -1768,6 +2336,7 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
+            selection_seed=selection_seed,
         )
         if burn_first.account is not None:
             return burn_first
@@ -1793,6 +2362,7 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
+            selection_seed=selection_seed,
         )
         if preferred.account is not None:
             return preferred
@@ -1812,6 +2382,7 @@ def _select_account_preferring_budget_safe(
             routing_costs=routing_costs_by_account_id,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
+            selection_seed=selection_seed,
         )
     return select_account(
         state_list,
@@ -1827,6 +2398,7 @@ def _select_account_preferring_budget_safe(
         routing_costs=routing_costs_by_account_id,
         allow_usage_exhaustion_error=allow_usage_exhaustion_error,
         usage_exhaustion_states=usage_exhaustion_states,
+        selection_seed=selection_seed,
     )
 
 
@@ -1842,5 +2414,4 @@ def _best_health_tier_states(states: list[AccountState]) -> list[AccountState]:
 
 
 def _clone_account(account: Account) -> Account:
-    data = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
-    return Account(**data)
+    return clone_row(account)

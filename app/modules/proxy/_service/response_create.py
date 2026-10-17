@@ -14,18 +14,29 @@ from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from app.core.clients.proxy import (
+    _AGENT_CONTROL_OUTPUT_ITEM_TYPES,
+    _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE,
     CODEX_INSTALLATION_ID_HEADER,
+    UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
     ImageFetchSession,
     ProxyResponseError,
+    _agent_control_tool_output_occurrences,
     _finalize_responses_lite_reasoning_context,
+    _historical_agent_control_output_occurrences,
     _inline_content_images,
+    _is_inline_image_reference,
     _normalize_responses_lite_websocket_client_metadata,
     _payload_has_responses_lite_websocket_marker,
     _payload_uses_responses_lite,
+    _response_create_inline_image_notice_item,
+    _response_create_recent_suffix_start,
+    _response_create_too_large_error_envelope,
+    _should_slim_historical_tool_output,
+    _slim_historical_response_content,
+    _ws_transport_payload_budget_bytes,
     apply_codex_installation_metadata,
 )
 from app.core.config.settings import DEFAULT_HOME_DIR, get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
@@ -39,16 +50,12 @@ from app.modules.proxy._service.support import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = UPSTREAM_RESPONSE_CREATE_MAX_BYTES
 _UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS = 10
 _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE = (
     "[codex-lb omitted {count} historical input items to fit upstream websocket budget]"
 )
-_RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
-    "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
-)
-_RESPONSE_CREATE_IMAGE_OMISSION_NOTICE = "[codex-lb omitted historical inline image to fit upstream websocket budget]"
 _OVERSIZED_RESPONSE_CREATE_DUMP_DIR: Path | None = None
 _RESPONSE_CREATE_DUMP_SUFFIX = ".response-create.json.gz"
 _RESPONSE_CREATE_META_SUFFIX = ".meta.json"
@@ -174,6 +181,65 @@ def _responses_request_contains_input_image(payload: ResponsesRequest) -> bool:
     return any(_json_value_contains_input_image_part(item) for item in input_value)
 
 
+def _json_value_contains_external_input_image(value: JsonValue) -> bool:
+    """Whether ``value`` holds an ``input_image`` part that still names an external URL.
+
+    Recurses the same way :func:`_json_value_contains_input_image_part` does,
+    rather than walking the two shapes ``_count_external_image_urls`` knows
+    (a top-level item and its ``content`` array). The transport decision has to
+    see every external URL the payload carries, including one nested in a
+    ``function_call_output`` output array, because an image the URL inliner
+    never visits is precisely the one that is still external when the request
+    reaches the upstream websocket.
+    """
+    if _input_part_is_image(value):
+        image_url = value.get("image_url") if is_json_mapping(value) else None
+        # URL schemes are case-insensitive, and this decision is the fail-safe
+        # direction: missing one sends a raw external URL to a websocket that
+        # only accepts ``data:``. ``_count_external_image_urls`` still matches
+        # case-sensitively; that is the bridge's own guard and out of scope here.
+        return isinstance(image_url, str) and image_url.lower().startswith(("http://", "https://"))
+    if isinstance(value, list):
+        return any(_json_value_contains_external_input_image(item) for item in value)
+    if is_json_mapping(value):
+        return any(_json_value_contains_external_input_image(child) for child in value.values())
+    return False
+
+
+def _input_image_request_requires_http_upstream(
+    payload: ResponsesRequest,
+    *,
+    payload_size_estimate_bytes: int,
+) -> bool:
+    """Return whether an ``input_image`` request must stay on the upstream HTTP transport.
+
+    Inline ``data:`` images ride the upstream websocket unchanged, so carrying one
+    is not by itself a reason to pin upstream HTTP; the bridge bypass exists to
+    free bridge pending slots (#903), not to avoid the websocket. Two
+    websocket-specific hazards survive, and only those keep the pin (#2363). A
+    payload over the websocket frame budget would reach
+    ``_prepare_websocket_response_create_payload``, which replaces every
+    historical inline image with an omission notice. An external ``http(s)``
+    image URL may still be there after ``_inline_content_images`` gives up on a
+    failed fetch, and the upstream websocket does not accept one.
+
+    The external-URL check recurses the whole input rather than reusing
+    ``_count_external_image_urls``, whose traversal stops at an item's
+    ``content`` array. An ``input_image`` nested deeper — in a
+    ``function_call_output`` output array, a routine Codex tool-result shape —
+    is exactly the one the URL inliner also never visits, so it is still
+    external at the upstream and must keep the pin.
+    """
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return False
+    if not any(_json_value_contains_input_image_part(item) for item in input_value):
+        return False
+    if payload_size_estimate_bytes > _ws_transport_payload_budget_bytes():
+        return True
+    return any(_json_value_contains_external_input_image(item) for item in input_value)
+
+
 def _responses_request_uses_image_generation(payload: ResponsesRequest) -> bool:
     tools = payload.tools
     if not isinstance(tools, list):
@@ -212,6 +278,11 @@ def _response_create_text_with_size_guard(
     request_state: _WebSocketRequestState,
     transport: str,
 ) -> str | None:
+    protected_agent_control_output_occurrences = (
+        _historical_agent_control_output_occurrences(cast(list[JsonValue], payload.input))
+        if isinstance(payload.input, list)
+        else {}
+    )
     upstream_payload = dict(payload.to_payload())
     upstream_payload.pop("stream", None)
     upstream_payload.pop("background", None)
@@ -238,6 +309,7 @@ def _response_create_text_with_size_guard(
         slimmed_payload, slim_summary = slim_payload_for_upstream(
             upstream_payload,
             max_bytes=max_bytes,
+            protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
         )
         if slim_summary is not None:
             upstream_payload = slimmed_payload
@@ -302,6 +374,7 @@ def _slim_response_create_payload_for_upstream(
     payload: dict[str, JsonValue],
     *,
     max_bytes: int,
+    protected_agent_control_output_occurrences: Mapping[tuple[str, str], tuple[bool, ...]] | None = None,
 ) -> tuple[dict[str, JsonValue], dict[str, int] | None]:
     input_value = payload.get("input")
     if not isinstance(input_value, list) or not input_value:
@@ -314,6 +387,9 @@ def _slim_response_create_payload_for_upstream(
 
     tool_outputs_slimmed = 0
     images_slimmed = 0
+    if protected_agent_control_output_occurrences is None:
+        protected_agent_control_output_occurrences = _agent_control_tool_output_occurrences(historical)
+    agent_control_output_counts: dict[tuple[str, str], int] = {}
 
     slimmed_historical: list[JsonValue] = []
     for item in historical:
@@ -321,7 +397,11 @@ def _slim_response_create_payload_for_upstream(
             slimmed_item,
             item_tool_outputs_slimmed,
             item_images_slimmed,
-        ) = _slim_historical_response_input_item(item)
+        ) = _slim_historical_response_input_item(
+            item,
+            protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
+            agent_control_output_counts=agent_control_output_counts,
+        )
         tool_outputs_slimmed += item_tool_outputs_slimmed
         images_slimmed += item_images_slimmed
         slimmed_historical.append(slimmed_item)
@@ -420,36 +500,12 @@ def _response_output_item_done_tool_call(payload: dict[str, JsonValue] | None) -
     return call_id, item_type
 
 
-def _response_create_too_large_error_envelope(
-    actual_bytes: int,
-    max_bytes: int,
-) -> OpenAIErrorEnvelope:
-    payload = openai_error(
-        "payload_too_large",
-        (
-            "response.create is too large for upstream websocket "
-            f"({actual_bytes} bytes > {max_bytes} bytes). "
-            "Reduce historical images/screenshots or compact the thread."
-        ),
-        error_type="invalid_request_error",
-    )
-    payload["error"]["param"] = "input"
-    return payload
-
-
-def _response_create_recent_suffix_start(input_items: list[JsonValue]) -> int:
-    last_user_index: int | None = None
-    for index, item in enumerate(input_items):
-        if not is_json_mapping(item):
-            continue
-        if item.get("role") == "user":
-            last_user_index = index
-    if last_user_index is not None:
-        return last_user_index
-    return 0
-
-
-def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, int, int]:
+def _slim_historical_response_input_item(
+    item: JsonValue,
+    *,
+    protected_agent_control_output_occurrences: Mapping[tuple[str, str], tuple[bool, ...]],
+    agent_control_output_counts: dict[tuple[str, str], int],
+) -> tuple[JsonValue, int, int]:
     if not is_json_mapping(item):
         return item, 0, 0
 
@@ -458,6 +514,15 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     images_slimmed = 0
 
     item_type = item_mapping.get("type")
+    if isinstance(item_type, str) and item_type in _AGENT_CONTROL_OUTPUT_ITEM_TYPES:
+        call_id = item_mapping.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            key = (item_type, call_id)
+            occurrence = agent_control_output_counts.get(key, 0)
+            agent_control_output_counts[key] = occurrence + 1
+            namespaced_flags = protected_agent_control_output_occurrences.get(key, ())
+            if occurrence < len(namespaced_flags) and namespaced_flags[occurrence]:
+                return item_mapping, tool_outputs_slimmed, images_slimmed
     if isinstance(item_type, str) and item_type in _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES:
         output = item_mapping.get("output")
         if isinstance(output, str):
@@ -484,50 +549,6 @@ def _slim_historical_response_input_item(item: JsonValue) -> tuple[JsonValue, in
     return item_mapping, tool_outputs_slimmed, images_slimmed
 
 
-def _slim_historical_response_content(content: JsonValue) -> tuple[JsonValue, int]:
-    if is_json_mapping(content):
-        return _slim_historical_response_content_part(content)
-    if not isinstance(content, list):
-        return content, 0
-
-    slimmed_parts: list[JsonValue] = []
-    images_slimmed = 0
-    for part in content:
-        slimmed_part, part_images_slimmed = _slim_historical_response_content_part(part)
-        slimmed_parts.append(slimmed_part)
-        images_slimmed += part_images_slimmed
-    return slimmed_parts, images_slimmed
-
-
-def _slim_historical_response_content_part(part: JsonValue) -> tuple[JsonValue, int]:
-    if not is_json_mapping(part):
-        return part, 0
-
-    part_mapping = dict(cast(dict[str, JsonValue], deepcopy(part)))
-    part_type = part_mapping.get("type")
-    if part_type == "input_image" and _is_inline_image_reference(part_mapping.get("image_url")):
-        return _response_create_inline_image_notice_part(), 1
-
-    if part_type == "image_url":
-        image_url_value = part_mapping.get("image_url")
-        if is_json_mapping(image_url_value):
-            image_url = image_url_value.get("url")
-        else:
-            image_url = image_url_value
-        if _is_inline_image_reference(image_url):
-            return _response_create_inline_image_notice_part(), 1
-
-    return part_mapping, 0
-
-
-def _response_create_inline_image_notice_part() -> dict[str, JsonValue]:
-    return {"type": "input_text", "text": _RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
-
-
-def _response_create_inline_image_notice_item() -> dict[str, JsonValue]:
-    return {"role": "user", "content": [_response_create_inline_image_notice_part()]}
-
-
 def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonValue]:
     return {
         "role": "assistant",
@@ -538,10 +559,6 @@ def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonV
             }
         ],
     }
-
-
-def _is_inline_image_reference(value: JsonValue) -> bool:
-    return isinstance(value, str) and value.startswith("data:image/")
 
 
 async def _inline_top_level_input_image_urls(
@@ -593,10 +610,6 @@ def _count_external_image_urls(payload: dict[str, JsonValue]) -> int:
             if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
                 count += 1
     return count
-
-
-def _should_slim_historical_tool_output(output: str) -> bool:
-    return "data:image/" in output or len(output.encode("utf-8")) > 32 * 1024
 
 
 def _enforce_response_create_size_limit(request_state: _WebSocketRequestState) -> None:

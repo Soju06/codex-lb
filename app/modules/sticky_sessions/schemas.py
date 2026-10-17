@@ -34,10 +34,6 @@ class StickySessionIdentifier(DashboardModel):
     kind: StickySessionKind
 
 
-class StickySessionDeleteResponse(DashboardModel):
-    status: str
-
-
 class StickySessionsDeleteRequest(DashboardModel):
     sessions: list[StickySessionIdentifier] = Field(min_length=1, max_length=500)
 

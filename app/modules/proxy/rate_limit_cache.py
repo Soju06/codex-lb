@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 
 import anyio
 
-from app.core.config.settings import get_settings
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 
 
 class RateLimitHeadersCache:
@@ -18,7 +18,7 @@ class RateLimitHeadersCache:
         self,
         compute: Callable[[], Awaitable[dict[str, str]]],
     ) -> dict[str, str]:
-        ttl = get_settings().usage_refresh_interval_seconds
+        ttl = USAGE_REFRESH_INTERVAL_SECONDS
         now = time.monotonic()
         if self._cached_headers is not None and now - self._cached_at < ttl:
             return self._cached_headers

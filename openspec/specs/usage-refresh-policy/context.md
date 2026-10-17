@@ -11,6 +11,19 @@ OpenAI account surfaces can display reset state earlier than `/wham/usage`,
 especially during team reset windows, so the dashboard can temporarily show an
 account as `rate_limited` even when Codex Desktop says the quota has reset.
 
+## Access and refresh eligibility
+
+A permanent refresh-token failure marks an account `reauth_required` and stops
+proactive exchange of that refresh material, while ordinary requests may keep
+using the stored access token until its known expiry. Claimless forced refresh
+first reads current state: it adopts genuine peer rotation, uses fresh ciphertext
+as the guard for unchanged non-terminal material, and fails closed without
+exchange when terminal material is unchanged. Before access-token expiry, a
+request that reaches this terminal failure may fail over after excluding the
+account locally; it does not globally de-route it or move owner-bound continuity
+to another account. At known expiry, selection and bridge reuse reject the
+account before upstream I/O.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:
@@ -73,12 +86,24 @@ behavior can set the threshold to `100.0`.
   rate limiter; codex-lb auto-recovers on the next refresh tick after the
   upstream payload changes.
 - The dashboard Force Probe action fires one minimal `responses.create` against
-  the selected account and immediately refreshes its usage. An accepted 2xx
-  probe also contributes to that replica's probing-health recovery streak;
-  non-2xx results do not restore routing health. Settlement reloads and
-  normalizes weekly/monthly and zero-primary-capacity usage like ordinary
-  routing and is discarded when newer replica-local runtime activity arrives
-  during that snapshot load.
+  the selected account and immediately refreshes its usage. The probe uses a
+  one-dot prompt and closes the stream after response headers. It omits
+  `max_output_tokens`: the Codex Responses endpoint now rejects that field at
+  any value. For example, a probe with `max_output_tokens=16` returned HTTP 400
+  with `Unsupported parameter: max_output_tokens`, while the same request
+  without the field returned HTTP 200. An accepted 2xx probe
+  also contributes to that replica's probing-health recovery streak; non-2xx
+  results do not restore routing health. Settlement reloads and normalizes
+  weekly/monthly and zero-primary-capacity usage like ordinary routing and is
+  discarded when newer replica-local health evidence arrives during that
+  snapshot load; lease-only activity does not invalidate it. The account and
+  usage rows are copied before the read session closes because rollback
+  expires ORM attributes even with `expire_on_commit=False`. For example,
+  an HTTP 200 probe with healthy usage must advance the local recovery
+  streak after session teardown, rather than only returning a successful
+  dashboard response while settlement logs an expired-row error. The earlier `16` floor addressed
+  [#1895](https://github.com/Soju06/codex-lb/issues/1895) when upstream still
+  accepted the field; warmup/compact-404 is a separate path.
 - Do not manually flip the codex-lb account state to `ACTIVE` while
   `/wham/usage` still reports the account as fully used. That only masks the
   upstream state and can route traffic back to an account that the upstream

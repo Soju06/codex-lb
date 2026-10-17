@@ -2,35 +2,40 @@
 
 ## Purpose and Scope
 
-`prohibitFastMode` is an operator-wide routing preference for Codex harness
-model labels that end in the known `fast` suffix. It keeps the request on the
-same canonical OpenAI model and preserves the selected reasoning effort while
-preventing the alias from opting into the priority tier.
+`prohibitFastMode` is an operator-wide control for preventing OpenAI priority
+service-tier requests across the proxy. It covers explicit client fields,
+Fast Mode model aliases, API-key enforcement, forwarded requests, and other
+resolved defaults while preserving the selected model and reasoning effort.
 
 ## Decision Rationale
 
-The setting lives with dashboard routing controls because operators normally
-use it to control account consumption across the entire proxy, not one API
-key. It acts during alias normalization, before source selection and quota
-reservation, so downstream routing observes the normal-tier request rather
-than only changing an already-built wire payload.
+The setting lives with dashboard routing controls because operators use it to
+control account consumption across the entire proxy. An administrator-enabled
+global prohibition therefore takes precedence over a narrower API-key policy:
+an enforced priority tier cannot bypass the operator control.
 
-The policy is intentionally narrower than disabling all `priority` traffic.
-Explicit `service_tier` values and API-key service-tier enforcement are
-separate caller and operator contracts and remain intact.
+Policy resolution happens after request-tier writers have run but before
+source selection, quota reservation, request logging, and serialization. This
+keeps internal routing and accounting aligned with the payload sent upstream.
+The shared policy removes priority by setting the typed field to `None` (or
+removing it from a source-chat dictionary), because wire-level absence is the
+existing representation of the upstream default. It does not substitute the
+literal `"default"` value.
 
 ## Constraints and Failure Modes
 
-- It applies only to supported qualified GPT-5 aliases containing the `fast`
-  token. It does not reinterpret unrelated slugs such as Codex Spark.
+- Both `fast` and `priority` canonicalize to the prohibited priority identity;
+  unrelated service tiers remain unchanged.
 - Existing requests remain unchanged until an operator enables the setting;
   this preserves rollout compatibility.
-- HTTP requests observe a refreshed dashboard setting through the normal
-  settings-cache invalidation path. A connected Codex WebSocket uses the
-  policy snapshot taken when it connected, so reconnect it after changing the
-  setting when immediate WebSocket behavior is required.
+- API-key enforcement provenance remains intact even when its resulting
+  priority tier is later removed by the global policy.
+- HTTP requests observe a refreshed dashboard setting through normal cache
+  invalidation. A connected Codex WebSocket uses the policy snapshot taken
+  when it connected, so reconnect it after changing the setting when immediate
+  WebSocket behavior is required.
 
-## Example
+## Examples
 
 With the switch enabled, this harness request:
 
@@ -38,13 +43,22 @@ With the switch enabled, this harness request:
 {"model":"gpt-5.6-sol-xhigh-fast","input":"review this change"}
 ```
 
-is forwarded as the `gpt-5.6-sol` model with `reasoning.effort: "high"` and
-without a `service_tier`. With the switch disabled, the same alias derives the
-usual `service_tier: "priority"` request.
+is forwarded as `gpt-5.6-sol` with `reasoning.effort: "high"` and without a
+`service_tier`.
+
+The same omission applies to an explicit request:
+
+```json
+{"model":"gpt-5.6-sol","input":"review this change","service_tier":"priority"}
+```
+
+and to an API key that enforces priority. With the switch disabled, these
+requests retain the existing priority-tier behavior.
 
 ## Operational Notes
 
 Enable the setting from Settings → Routing when normal-tier requests are
-required for Codex harness Fast Mode labels. Check the request log's requested
-service tier after a new HTTP request; it will be absent for a prohibited Fast
-Mode alias unless another explicit policy set it.
+required. New HTTP requests use the updated policy immediately; reconnect
+long-lived Codex WebSockets. The info log
+`fast_mode_service_tier_prohibited` records each removal with the request ID
+and stripped value.

@@ -279,6 +279,39 @@ class AccountUsageRollupState(Base):
         server_default=text("'1970-01-01 00:00:00'"),
     )
 
+    reports_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+
+
+class RequestReportHourlyRollup(Base):
+    """Permanent report measures; conversation remains a dimension for exact distinct counts.
+
+    Hours are assembled into timezone days at read time. Normal traffic only,
+    including detached/deleted accounts, matching the reports contract.
+    """
+
+    __tablename__ = "request_report_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    first_requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cancelled_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    reasoning_usage_known_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+
 
 class RequestUsageHourlyRollup(Base):
     """Hour-bucketed request-usage sums (time-axis rollup).
@@ -446,6 +479,10 @@ class RequestLog(Base):
         Index("idx_logs_client_ip", "client_ip"),
     )
 
+    sticky_key_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    sticky_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    sticky_key_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str | None] = mapped_column(
         String,
@@ -499,12 +536,6 @@ class RequestLog(Base):
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Deprecated: no longer written since the prewarm canary retirement
-    # (reduce-settings-surface-phase-4). Kept one release so old replicas can
-    # keep inserting during rolling upgrades; the column drop ships in the
-    # next release.
-    prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
-    prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -665,7 +696,19 @@ class AccountLimitWarmup(Base):
 
 
 class AuditLog(Base):
+    """Append-only record of dashboard actions.
+
+    The ``actor_*`` columns are a snapshot of the acting account, not foreign
+    keys: a row must survive the deletion of the account it names. They are all
+    NULL for rows written before attribution existed and for principals without
+    an account row (implicit local admin, trusted header, guest).
+    """
+
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("idx_audit_logs_actor_user_id", "actor_user_id"),
+        Index("idx_audit_logs_target", "target_type", "target_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
@@ -673,6 +716,13 @@ class AuditLog(Base):
     actor_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_role_slug: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    auth_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'info'"))
 
 
 class SchedulerLeader(Base):
@@ -830,6 +880,426 @@ class CapabilityLineageMarker(Base):
     )
 
 
+class DashboardUserStatus(str, Enum):
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    INVITED = "invited"
+
+
+class DashboardUserRoleSource(str, Enum):
+    MANUAL = "manual"
+    MAPPING = "mapping"
+    SCIM = "scim"
+
+
+class ApiKeyDeactivatedReason(str, Enum):
+    MANUAL = "manual"
+    OWNER_DISABLED = "owner_disabled"
+    EXPIRED = "expired"
+
+
+class AuthProviderKind(str, Enum):
+    PASSWORD = "password"
+    TRUSTED_HEADER = "trusted_header"
+    OIDC = "oidc"
+
+
+class LocalLoginPolicy(str, Enum):
+    """Who may still sign in with a local password (PLAN §4.6, DB only).
+
+    ``ENABLED`` is today's behaviour and the default: every active account that
+    holds a password may sign in. The two tightened values are the switch a
+    company throws once its people arrive through a sign-in provider; both are
+    guarded by the qualifying break-glass invariant so the switch can never be
+    a lockout.
+    """
+
+    ENABLED = "enabled"
+    ADMINS_ONLY = "admins_only"
+    BREAK_GLASS_ONLY = "break_glass_only"
+
+
+#: Name the install's first (break-glass) account is created under, and the one
+#: name no other account may take. It is a reservation of the *name*: the
+#: account itself may be renamed, so nothing may identify it by this string.
+COMPAT_ADMIN_USERNAME = "admin"
+
+#: Deterministic id of that account, so the migration and the runtime bootstrap
+#: path create the same row, re-runs stay idempotent, and every path that has to
+#: find the bootstrapped account after a rename has a stable handle.
+COMPAT_ADMIN_USER_ID = str(
+    uuid.uuid5(uuid.UUID("6f1c0e4e-2b4a-4c1e-9c3b-7a5d2e8f0a11"), "codex-lb:dashboard-user:compat-admin")
+)
+
+
+class DashboardUser(Base):
+    """A person (or service) who signs in to the dashboard.
+
+    ``status``/``role_source`` are plain strings validated by the enums above
+    (no database enum type, so adding values needs no type migration). The
+    ``role_id`` foreign key is RESTRICT: a role in use cannot be deleted.
+    """
+
+    __tablename__ = "dashboard_users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, nullable=True)
+    role_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    role_source: Mapped[str] = mapped_column(
+        String(16),
+        default=DashboardUserRoleSource.MANUAL.value,
+        server_default=text("'manual'"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        default=DashboardUserStatus.ACTIVE.value,
+        server_default=text("'active'"),
+        nullable=False,
+    )
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    session_generation: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    is_break_glass: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    role: Mapped["DashboardRoleRecord"] = relationship("DashboardRoleRecord")
+    identities: Mapped[list["DashboardIdentity"]] = relationship(
+        "DashboardIdentity",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DashboardIdentity(Base):
+    """An external identity (reverse-proxy header, OIDC, SCIM) linked to a user.
+
+    One user may hold several identities from several providers; the
+    ``(provider, provider_key, subject)`` triple is unique.
+    """
+
+    __tablename__ = "dashboard_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_key", "subject", name="uq_dashboard_identities_subject"),
+        Index("idx_dashboard_identities_user_id", "user_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    groups_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: What the provider calls this person, as pushed and unslugified. Only the
+    #: SCIM path writes it, because only SCIM has to answer a filter on the
+    #: provider's own spelling: our usernames have no ``@``, so an address can
+    #: never equal one and an identity provider reconciling its own resources
+    #: would otherwise match nothing it created.
+    user_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    user: Mapped["DashboardUser"] = relationship("DashboardUser", back_populates="identities")
+
+
+class DashboardUserInvite(Base):
+    """A one-time invitation link for a pre-created (``status=invited``) account.
+
+    Only the SHA-256 of the token is stored; the plaintext is returned once when
+    the invite is issued or resent. A user holds at most one invite row
+    (resending rotates the token in place). Revoking or lazily expiring the
+    invite of an ``invited`` account deletes the account row with it, so no
+    orphan "invited" accounts remain. ``created_by_user_id`` is a snapshot, not
+    a foreign key: the invite must survive the inviter's deletion.
+    """
+
+    __tablename__ = "dashboard_user_invites"
+    __table_args__ = (
+        # One open invite per expected identity: two pre-created accounts must not wait for the same person.
+        Index(
+            "uq_dashboard_user_invites_expected_identity",
+            "expected_provider",
+            "expected_provider_key",
+            "expected_subject",
+            unique=True,
+            postgresql_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+            sqlite_where=text("consumed_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sso_only: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    username_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: The external identity this pre-created account waits for; the identity
+    #: resolver links it (and activates the account) on an exact triple match.
+    expected_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expected_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expected_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user: Mapped["DashboardUser"] = relationship("DashboardUser")
+
+
+class DashboardAuthProvider(Base):
+    """One way of signing in to the dashboard (password, trusted header, later OIDC).
+
+    Rows carry the settings the identity resolver reads: which role an unknown
+    identity gets (``NULL`` = refuse), where a mapped user without a matching
+    mapping lands, whether e-mail linking is allowed, and whether the IdP is
+    trusted for MFA. The password and trusted-header providers have one row
+    each (``provider_key`` ``default``). ``enabled`` is not a copy of the auth
+    mode: a provider is *active* when its row is enabled and the mode allows
+    it. ``config_encrypted`` holds provider secrets (OIDC) and is never returned
+    in clear.
+    """
+
+    __tablename__ = "dashboard_auth_providers"
+    __table_args__ = (UniqueConstraint("kind", "provider_key", name="uq_dashboard_auth_providers_kind_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    unknown_identity_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    no_match_role_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    link_by_email: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    skip_role_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    idp_mfa_enforced: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    #: Proof that the acting admin's own browser completed a round trip through
+    #: this exact configuration. Enabling a redirect-style provider requires one
+    #: no older than ten minutes; freshness is computed on read, never stored as
+    #: a deadline, and a connection-field write clears it.
+    test_login_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    test_login_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class DashboardOidcLoginFlow(Base):
+    """One in-flight OIDC round trip, held where every replica can see it.
+
+    The callback routinely lands on a replica that did not serve the start, so
+    the flow cannot live in process memory. Neither the ``state`` nor the
+    ``nonce`` is stored in clear: the ``state`` arrives in the callback URL and
+    the ``nonce`` arrives inside the ID token, so both can be hashed and
+    compared, and a copy that is never needed in clear is only a liability. The
+    row is consumed by one conditional ``DELETE``, which is what makes a state
+    single-use across the fleet.
+    """
+
+    __tablename__ = "dashboard_oidc_login_flows"
+    __table_args__ = (Index("idx_dashboard_oidc_login_flows_expires_at", "expires_at"),)
+
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_auth_providers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    nonce_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    #: ``login``, ``test`` or ``step_up``; it decides where the browser lands,
+    #: which is why no destination is ever accepted from the caller.
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    acting_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    #: The redirect URI exactly as sent, so the token exchange repeats it
+    #: byte-identically even if the configuration changes mid-flow.
+    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: A digest of the connection document this flow was started against. A
+    #: pre-flight proves *a configuration*, so the stamp it leaves must name the
+    #: one it actually reached: without this a configuration write that commits
+    #: while the callback is exchanging its code would be handed the proof that
+    #: the previous issuer worked.
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DashboardScimToken(Base):
+    """A bearer credential that may reach ``/scim/v2`` and nothing else.
+
+    Only the SHA-256 digest of the secret is stored, in a unique index, so the
+    lookup is an index equality and no copy of the credential exists after it
+    is issued; ``token_prefix`` is the non-secret head of the value, kept in
+    clear so an operator can tell two tokens apart. Rotation replaces the
+    digest and the prefix on the same row, so the id, the label and the sync
+    history survive and the previous secret stops working the moment the write
+    commits. ``provider_key`` is the identity namespace the token writes and
+    reads: it comes from this row on every request and never from the caller.
+    """
+
+    __tablename__ = "dashboard_scim_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    #: A snapshot link, cleared rather than cascaded: revoking a token is an
+    #: act of its own and must not be a side effect of deleting its issuer.
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DashboardRoleMappingClaim(str, Enum):
+    """Which fact about an identity a rule matches on.
+
+    A plain string column validated here, not a database enum: a later claim
+    (an OIDC claim name, a SCIM attribute) must not need a type migration.
+    """
+
+    GROUPS = "groups"
+    EMAIL_DOMAIN = "email_domain"
+
+
+class DashboardRoleMapping(Base):
+    """One "identities like this get that role" rule of a sign-in provider.
+
+    Rules are evaluated in descending ``priority`` and the first match wins;
+    ``UNIQUE(provider, provider_key, priority)`` makes a tie impossible and the
+    order server-owned (the rows of one provider are always the contiguous
+    integers ``N..1``). ``role_id`` is RESTRICT: a role a rule hands out cannot
+    be deleted while the rule exists.
+    """
+
+    __tablename__ = "dashboard_role_mappings"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_key", "priority", name="uq_dashboard_role_mappings_priority"),
+        Index("idx_dashboard_role_mappings_provider", "provider", "provider_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Normalized (trimmed, case-folded; an ``email_domain`` value carries no leading ``@``).
+    claim_value: Mapped[str] = mapped_column(String(320), nullable=False)
+    role_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("dashboard_roles.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class DashboardRoleRecord(Base):
+    """A dashboard role: one of the five presets or an operator-defined custom role.
+
+    Preset rows exist so users, invites, mappings and policies can reference a
+    role by foreign key and so listings have one source; their grants are the
+    code table ``PRESET_ROLE_GRANTS`` and are never stored. Only custom roles
+    carry ``dashboard_role_grants`` rows. ``kind`` is a plain string validated
+    by the application (adding a value must not need a database type change).
+    """
+
+    __tablename__ = "dashboard_roles"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    slug: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    assignable_to_users: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    cloned_from_role_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    permissions_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    grants: Mapped[list["DashboardRoleGrant"]] = relationship(
+        "DashboardRoleGrant",
+        back_populates="role",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class DashboardRoleGrant(Base):
+    """One (permission, scope) grant of a custom dashboard role."""
+
+    __tablename__ = "dashboard_role_grants"
+
+    role_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("dashboard_roles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    permission: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(8), nullable=False)
+
+    role: Mapped["DashboardRoleRecord"] = relationship("DashboardRoleRecord", back_populates="grants")
+
+
 class DashboardSettings(Base):
     __tablename__ = "dashboard_settings"
 
@@ -837,8 +1307,8 @@ class DashboardSettings(Base):
     sticky_threads_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     upstream_stream_transport: Mapped[str] = mapped_column(
         String,
-        default="default",
-        server_default=text("'default'"),
+        default="auto",
+        server_default=text("'auto'"),
         nullable=False,
     )
     prohibit_fast_mode: Mapped[bool] = mapped_column(
@@ -853,6 +1323,10 @@ class DashboardSettings(Base):
         server_default=text("'smart'"),
         nullable=False,
     )
+    # T3, tri-state: NULL inherits the environment value and then the ``shared``
+    # code default. Never seeded from the environment (configuration-tiers,
+    # "Environment values are fallbacks, never seeds").
+    thread_cache_identity_mode: Mapped[str | None] = mapped_column(String, nullable=True)
     proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -869,6 +1343,30 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-1 timeouts: dashboard-managed upstream timeouts and request budgets.
+    # NULL = inherit the ``Settings`` field (environment value or code default).
+    upstream_connect_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    compact_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    transcription_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stream_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_downstream_websocket_idle_timeout_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sse_keepalive_interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-1 timeouts
+    # M1 stream/bridge budgets: dashboard-managed Responses stream and HTTP
+    # session bridge request budgets. NULL = inherit the ``Settings`` field.
+    http_responses_stream_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    http_responses_session_bridge_request_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end M1 stream/bridge budgets
+    # C2-2 routing/overload: dashboard-managed routing weights and overload
+    # isolation. NULL inherits the process environment value (or the code
+    # default) at read time; a non-NULL value wins over the environment.
+    proxy_overload_isolation_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_account_error_rate_weighting_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    proxy_account_inflight_penalty_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_token_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxy_account_lease_ttl_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # end C2-2 routing/overload
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
@@ -915,6 +1413,10 @@ class DashboardSettings(Base):
         nullable=False,
     )
     single_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Subscription-exhaustion overflow designation (#2123). No foreign key on
+    # purpose: a dangling id means "off", mirroring single_account_id. The drain
+    # deadline is armed when the designation is cleared and compared against
+    # utcnow() (naive UTC) like every other dashboard_settings timestamp.
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
         Integer,
         default=1800,
@@ -938,7 +1440,24 @@ class DashboardSettings(Base):
         default=False,
         nullable=False,
     )
-    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # D9: TOTP required for admin-level accounts only (admin preset or a custom
+    # role holding a privileged permission); independent of the global toggle.
+    totp_required_for_admin_role: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    # PLAN §4.6: who may still use the local password form. Deliberately has no
+    # environment variable -- a redeploy must not silently re-open local
+    # sign-in a company closed. Tightening it is gated on a qualifying
+    # break-glass account; the host CLI is the way back.
+    local_login_policy: Mapped[str] = mapped_column(
+        String(32),
+        default=LocalLoginPolicy.ENABLED.value,
+        server_default=text(f"'{LocalLoginPolicy.ENABLED.value}'"),
+        nullable=False,
+    )
     guest_access_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -946,6 +1465,16 @@ class DashboardSettings(Base):
         nullable=False,
     )
     guest_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Bumped whenever guest credentials or guest access change so every
+    # outstanding guest session cookie (which carries the generation it was
+    # issued under) stops validating. Sessions are stateless Fernet cookies, so
+    # this counter is the only server-side revocation handle for guests.
+    guest_session_generation: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
     bootstrap_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     bootstrap_token_hash: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     api_key_auth_enabled: Mapped[bool] = mapped_column(
@@ -959,8 +1488,6 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
-    totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
     telemetry_consent: Mapped[str] = mapped_column(
         String(16),
         default="undecided",
@@ -981,6 +1508,11 @@ class DashboardSettings(Base):
         server_default=false(),
         nullable=False,
     )
+    # M3 codex prewarm: dashboard-managed Codex HTTP-bridge session prewarm.
+    # NULL inherits the deprecated ``CODEX_LB_*`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    http_responses_session_bridge_codex_prewarm_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M3 codex prewarm
     upstream_proxy_routing_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1094,7 +1626,7 @@ class DashboardSettings(Base):
         nullable=False,
     )
     # Data retention windows in days; NULL = never set from the dashboard
-    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    # (treated as disabled), 0 = explicitly disabled.
     request_log_retention_days: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
@@ -1103,6 +1635,32 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    # C2-3 resilience toggles: NULL inherits the deprecated ``CODEX_LB_*`` env
+    # alias (then the code default); a non-NULL value is dashboard-owned.
+    soft_drain_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    deterministic_failover_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    circuit_breaker_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # M2 background jobs: NULL inherits the deprecated ``CODEX_LB_*`` env alias
+    # (then the code default); schedulers read the value at every cycle entry.
+    auth_guardian_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    automations_scheduler_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rate_limit_reset_credits_refresh_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M2 background jobs
+    # M5 conversation archive: NULL inherits the deprecated
+    # ``CODEX_LB_CONVERSATION_ARCHIVE_ENABLED`` env alias (then the code
+    # default, off); a non-NULL value is dashboard-owned.
+    conversation_archive_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # end M5 conversation archive
+    # R2 spool retention: how long the durable HTTP-bridge operation spool --
+    # raw request payloads and their spooled response events -- is kept before
+    # the retention sweep deletes it. NULL inherits the deprecated
+    # ``CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_OPERATION_SPOOL_RETENTION_SECONDS``
+    # env alias (then the code default, 7 days); a non-NULL value is
+    # dashboard-owned and must stay at or above the replay floor.
+    http_responses_session_bridge_operation_spool_retention_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    # end R2 spool retention
     version: Mapped[int] = mapped_column(
         Integer,
         default=1,
@@ -1118,6 +1676,31 @@ class DashboardSettings(Base):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+# M4 model catalogue: dashboard-managed per-model context window overrides.
+class ModelContextWindowOverride(Base):
+    """One dashboard-stored context window override for a model slug.
+
+    A row wins over the ``CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES`` entry for
+    the same slug; slugs without a row inherit the environment entry (or have
+    no override). The migration never copies the environment into rows.
+    """
+
+    __tablename__ = "model_context_window_overrides"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+# end M4 model catalogue
 
 
 class RuntimeSentinel(Base):
@@ -1175,6 +1758,8 @@ class ApiKey(Base):
         nullable=False,
     )
     transport_policy_override: Mapped[str | None] = mapped_column(String, nullable=True)
+    # NULL = follow the fleet (dashboard, then environment, then ``shared``).
+    thread_cache_identity_override: Mapped[str | None] = mapped_column(String, nullable=True)
     account_assignment_scope_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1195,6 +1780,21 @@ class ApiKey(Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Ownership (per-user accounts). NULL owner = shared/service key. Populated
+    # once principals carry a user id; declared here so the schema lands once.
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("dashboard_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Why an inactive key is inactive, so re-enabling a user restores only the
+    # keys that were disabled because of that user (never manual blocks).
+    deactivated_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -1586,6 +2186,12 @@ class AutomationRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    # Compact request budget (seconds) in effect when this row was last
+    # claimed; the stale-claim reclaim window covers the larger of this value
+    # and the current budget so a later dashboard change cannot reclaim an
+    # in-flight run early. NULL on rows claimed before the column existed
+    # (they use the current budget).
+    claim_budget_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     job: Mapped[AutomationJob] = relationship("AutomationJob", back_populates="runs")
@@ -1713,6 +2319,7 @@ class QuotaPlannerDecision(Base):
     action: Mapped[str] = mapped_column(String, nullable=False)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1848,10 +2455,32 @@ class HttpBridgeRecoveryAttemptState(str, Enum):
     REPLAYED = "replayed"
 
 
+HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1 = "rows_v1"
+HTTP_BRIDGE_SPOOL_FORMAT_CHUNKS_V2 = "chunks_v2"
+
+# Where one dispatch of an operation stands in the two-phase terminal write.
+# This is deliberately separate from ``event_spool_complete``: an ordinary
+# operation carries an incomplete spool under a terminal ``state`` for the whole
+# window in which its terminal append runs, because the relay publishes the
+# operation state before appending the terminal transcript block.
+#
+#   PENDING  -> no terminal transcript outcome recorded yet; appends allowed.
+#   APPENDED -> a terminal append committed and is awaiting fenced
+#               finalization; further terminal appends must not rewrite the
+#               outcome, but finalization may still mark it replayable.
+#   SETTLED  -> the terminal outcome was published without a confirmed append
+#               (fallback settlement). The row is final and never replayable,
+#               so both later appends and finalization are refused.
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING = "pending"
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_APPENDED = "appended"
+HTTP_BRIDGE_TERMINAL_APPEND_PHASE_SETTLED = "settled"
+
+
 class HttpBridgeOperationState(str, Enum):
     SUBMITTED = "submitted"
     UNKNOWN = "unknown"
     ACKNOWLEDGED = "acknowledged"
+    ABANDONED = "abandoned"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -1889,6 +2518,14 @@ class HttpBridgeSessionRecord(Base):
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Continuity-owner retirement, mirroring sticky_sessions' pair: a non-NULL
+    # scope retires ownership only for the matching typed source, while a
+    # non-NULL timestamp with NULL scope retires it globally. Deleting the row
+    # instead would be indistinguishable from "never seen" and would leave the
+    # lookup failing closed forever; a marker says the owner was deliberately
+    # abandoned, so picking a fresh one is authorized.
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1990,6 +2627,18 @@ class HttpBridgeOperationRecord(Base):
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    terminal_append_phase: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=HTTP_BRIDGE_TERMINAL_APPEND_PHASE_PENDING,
+        server_default=text("'pending'"),
+    )
+    spool_format: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=HTTP_BRIDGE_SPOOL_FORMAT_ROWS_V1,
+        server_default=text("'rows_v1'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2039,6 +2688,33 @@ class HttpBridgeOperationEvent(Base):
             name="uq_http_bridge_operation_events_operation_fingerprint",
         ),
         Index("idx_http_bridge_operation_events_operation_sequence", "operation_id", "sequence_number"),
+    )
+
+
+class HttpBridgeOperationEventChunk(Base):
+    """Compressed, ordered SSE blocks for a future chunk-format operation."""
+
+    __tablename__ = "http_bridge_operation_event_chunks"
+
+    operation_id: Mapped[str] = mapped_column(
+        String(80),
+        ForeignKey("http_bridge_operations.operation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    first_sequence_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    codec: Mapped[str] = mapped_column(String(64), nullable=False)
+    uncompressed_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("first_sequence_number > 0", name="ck_http_bridge_event_chunks_first_sequence_positive"),
+        CheckConstraint("event_count > 0", name="ck_http_bridge_event_chunks_event_count_positive"),
+        CheckConstraint("uncompressed_bytes >= 0", name="ck_http_bridge_event_chunks_bytes_nonnegative"),
     )
 
 
@@ -2104,6 +2780,12 @@ class HttpBridgeRetryCircuit(Base):
     )
     last_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
     updated_at_epoch: Mapped[float] = mapped_column(Float, nullable=False)
+    admission_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
 
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
@@ -2160,6 +2842,7 @@ Index(
     postgresql_where=text("delete_requested_at IS NOT NULL"),
     sqlite_where=text("delete_requested_at IS NOT NULL"),
 )
+Index("idx_accounts_chatgpt_account_id", Account.chatgpt_account_id)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
@@ -2182,6 +2865,21 @@ Index(
 )
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
+Index(
+    "idx_logs_missing_cost",
+    RequestLog.model_source_id,
+    RequestLog.id,
+    postgresql_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+    sqlite_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+)
 Index(
     "idx_logs_deleted_at_requested_at_id",
     RequestLog.deleted_at,
@@ -2232,6 +2930,32 @@ Index(
     RequestLog.error_code,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+# Live-row partial indexes for the unfiltered request-log facet skip scan
+# (recursive ``facet_skip`` probes: ``min(column) WHERE deleted_at IS NULL AND
+# column > previous``). The predicate matches the probe so a probe never walks
+# the soft-deleted cohort sharing a value. Account ids need none: soft deletion
+# detaches account_id (NULL), which ``account_id > previous`` never walks.
+# Enforced via the manual drift index requirements like the covering index.
+Index(
+    "idx_logs_live_api_key",
+    RequestLog.api_key_id,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_model_effort",
+    RequestLog.model,
+    RequestLog.reasoning_effort,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
+)
+Index(
+    "idx_logs_live_status_error",
+    RequestLog.status,
+    RequestLog.error_code,
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
 )
 Index(
     "idx_logs_request_status_api_key_time",

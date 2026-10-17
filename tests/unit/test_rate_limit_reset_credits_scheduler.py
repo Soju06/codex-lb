@@ -5,7 +5,6 @@ import logging
 import random
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -38,18 +37,35 @@ class StubEncryptor(TokenEncryptor):
 
 
 class _FakeDashboardSettings:
-    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        auto_redeem_reset_credits_before_expiry: bool = False,
+        rate_limit_reset_credits_refresh_enabled: bool | None = None,
+    ) -> None:
         self.auto_redeem_reset_credits_before_expiry = auto_redeem_reset_credits_before_expiry
+        # M2 background jobs: NULL inherits the env alias / default (True).
+        self.rate_limit_reset_credits_refresh_enabled = rate_limit_reset_credits_refresh_enabled
 
 
 class _FakeSettingsRepository:
-    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        auto_redeem_reset_credits_before_expiry: bool = False,
+        rate_limit_reset_credits_refresh_enabled: bool | None = None,
+    ) -> None:
         self._settings = _FakeDashboardSettings(
             auto_redeem_reset_credits_before_expiry=auto_redeem_reset_credits_before_expiry,
+            rate_limit_reset_credits_refresh_enabled=rate_limit_reset_credits_refresh_enabled,
         )
 
     async def get_or_create(self) -> _FakeDashboardSettings:
         return self._settings
+
+
+async def _always_enabled() -> bool:
+    return True
 
 
 def _make_account(
@@ -363,7 +379,7 @@ async def test_refresh_once_caches_snapshots_on_each_replica(monkeypatch: pytest
 
     monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
 
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, dashboard_enabled=_always_enabled)
     await scheduler._refresh_once()
 
     assert ("fetch", "token-for-acc_replica", "workspace-x") in captured
@@ -407,7 +423,7 @@ async def test_refresh_once_closes_account_read_session_before_fetch(monkeypatch
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: store)
     monkeypatch.setattr(scheduler_module, "fetch_reset_credits", fetch_fn)
 
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, dashboard_enabled=_always_enabled)
     await scheduler._refresh_once()
 
     snapshot = store.get(account.id)
@@ -446,7 +462,7 @@ async def test_refresh_once_uses_consume_route_for_auto_redeem(monkeypatch: pyte
     monkeypatch.setattr(scheduler_module, "get_rate_limit_reset_credits_store", lambda: RateLimitResetCreditsStore())
     monkeypatch.setattr(scheduler_module, "refresh_reset_credits_for_accounts", refresh_stub)
 
-    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, dashboard_enabled=_always_enabled)
     await scheduler._refresh_once()
 
     assert captured["accounts"] == [account]
@@ -825,7 +841,9 @@ async def test_run_loop_stops_cleanly_during_startup_delay(monkeypatch: pytest.M
     assert refreshed is False
 
 
-def _patch_dashboard_settings(monkeypatch: pytest.MonkeyPatch, *, auto_redeem: bool) -> None:
+def _patch_dashboard_settings(
+    monkeypatch: pytest.MonkeyPatch, *, auto_redeem: bool, polling_enabled: bool | None = None
+) -> None:
     class _FakeSession:
         def expunge_all(self) -> None:
             return None
@@ -838,7 +856,10 @@ def _patch_dashboard_settings(monkeypatch: pytest.MonkeyPatch, *, auto_redeem: b
     monkeypatch.setattr(
         scheduler_module,
         "SettingsRepository",
-        lambda session: _FakeSettingsRepository(auto_redeem_reset_credits_before_expiry=auto_redeem),
+        lambda session: _FakeSettingsRepository(
+            auto_redeem_reset_credits_before_expiry=auto_redeem,
+            rate_limit_reset_credits_refresh_enabled=polling_enabled,
+        ),
     )
 
 
@@ -853,10 +874,11 @@ async def test_scheduler_start_is_noop_when_disabled(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_disabled_start_warns_on_persisted_auto_redeem_conflict(
+async def test_start_warns_when_dashboard_disables_polling_with_persisted_auto_redeem(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _patch_dashboard_settings(monkeypatch, auto_redeem=True)
+    """M2: the conflict check reads the effective (dashboard) toggle, not the env alias alone."""
+    _patch_dashboard_settings(monkeypatch, auto_redeem=True, polling_enabled=False)
     scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level(logging.WARNING):
@@ -874,10 +896,10 @@ async def test_disabled_start_warns_on_persisted_auto_redeem_conflict(
 
 
 @pytest.mark.asyncio
-async def test_disabled_start_stays_silent_without_auto_redeem_opt_in(
+async def test_start_stays_silent_without_auto_redeem_opt_in(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _patch_dashboard_settings(monkeypatch, auto_redeem=False)
+    _patch_dashboard_settings(monkeypatch, auto_redeem=False, polling_enabled=False)
     scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
 
     with caplog.at_level(logging.WARNING):
@@ -900,6 +922,7 @@ async def test_scheduler_start_creates_task_when_enabled(monkeypatch: pytest.Mon
         await self._stop.wait()
 
     monkeypatch.setattr(RateLimitResetCreditsRefreshScheduler, "_run_loop", _fake_run_loop)
+    _patch_dashboard_settings(monkeypatch, auto_redeem=False)
     scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=True)
 
     await scheduler.start()
@@ -911,17 +934,92 @@ async def test_scheduler_start_creates_task_when_enabled(monkeypatch: pytest.Mon
     assert scheduler._task is None
 
 
-def test_build_scheduler_wires_enabled_setting(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        scheduler_module,
-        "get_settings",
-        lambda: SimpleNamespace(
-            rate_limit_reset_credits_refresh_enabled=False,
-            rate_limit_reset_credits_refresh_interval_seconds=123,
-        ),
-    )
+def test_build_scheduler_always_starts_and_reads_the_dashboard_toggle_per_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: the env alias no longer decides whether the loop exists; each cycle reads the effective toggle."""
+    monkeypatch.setattr(scheduler_module, "_REFRESH_INTERVAL_SECONDS", 123)
 
     scheduler = scheduler_module.build_rate_limit_reset_credits_scheduler()
 
-    assert scheduler.enabled is False
+    assert scheduler.enabled is True
     assert scheduler.interval_seconds == 123
+    assert scheduler.dashboard_enabled is scheduler_module._dashboard_polling_enabled
+
+
+@pytest.mark.asyncio
+async def test_start_warns_when_polling_is_enabled_and_auto_redeem_is_on_stays_silent(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # NULL column inherits the default (polling on): no conflict to report.
+    _patch_dashboard_settings(monkeypatch, auto_redeem=True, polling_enabled=None)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
+
+    with caplog.at_level(logging.WARNING):
+        await scheduler.start()
+
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "rate_limit_reset_credits_refresh_enabled" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_cycles_follow_the_dashboard_toggle_without_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M2: booted enabled -> dashboard off -> next cycle skipped -> dashboard on -> next cycle runs."""
+    toggle = {"enabled": True}
+    cycles = 0
+
+    async def dashboard_enabled() -> bool:
+        return toggle["enabled"]
+
+    @asynccontextmanager
+    async def _counting_session():
+        nonlocal cycles
+        cycles += 1
+        raise RuntimeError("stop before touching the database")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _counting_session)
+    scheduler = RateLimitResetCreditsRefreshScheduler(
+        interval_seconds=60, enabled=True, dashboard_enabled=dashboard_enabled
+    )
+
+    await scheduler._refresh_once()
+    assert cycles == 1
+
+    toggle["enabled"] = False
+    await scheduler._refresh_once()
+    assert cycles == 1
+
+    toggle["enabled"] = True
+    await scheduler._refresh_once()
+    assert cycles == 2
+
+
+@pytest.mark.asyncio
+async def test_run_loop_survives_a_transient_toggle_read_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M2: a flaky settings read must not kill the loop task (a dead task also aborts shutdown)."""
+    reads = 0
+    scheduler: RateLimitResetCreditsRefreshScheduler
+
+    async def flaky_dashboard_enabled() -> bool:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("database is briefly unavailable")
+        scheduler._stop.set()
+        return False
+
+    scheduler = RateLimitResetCreditsRefreshScheduler(
+        interval_seconds=0, enabled=True, dashboard_enabled=flaky_dashboard_enabled
+    )
+
+    with caplog.at_level("ERROR"):
+        await scheduler._run_loop()
+
+    assert reads == 2
+    assert "Reset credits refresh cycle failed" in caplog.text

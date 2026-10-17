@@ -16,11 +16,9 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import (
     AdditionalUsageRepository,
     UsageRepository,
-    _additional_latest_by_account_sqlite,
     _bulk_history_since_sqlite,
     _clear_bulk_history_since_sqlite_cache,
     _latest_by_account_sqlite,
-    _resolve_additional_quota_query_scope,
 )
 
 pytestmark = pytest.mark.integration
@@ -418,7 +416,10 @@ async def _vacuum_analyze_usage_history(session: AsyncSession) -> None:
     await session.commit()
     autocommit_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
     async with autocommit_engine.connect() as conn:
-        await conn.execute(text("VACUUM (ANALYZE) usage_history"))
+        if _dialect_name(session) == "postgresql":
+            await conn.execute(text("VACUUM (ANALYZE) usage_history"))
+        else:
+            await conn.execute(text("ANALYZE usage_history"))
 
 
 @pytest.mark.asyncio
@@ -677,44 +678,6 @@ def test_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch
     result = _latest_by_account_sqlite(str(db_path), "primary", None)
 
     assert result["acc1"].used_percent == 10.0
-    assert closed == [True]
-
-
-def test_additional_latest_by_account_sqlite_closes_direct_connection(tmp_path, monkeypatch):
-    db_path = tmp_path / "usage.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            create table additional_usage_history (
-                id integer primary key,
-                account_id text not null,
-                quota_key text not null,
-                limit_name text not null,
-                metered_feature text not null,
-                window text not null,
-                used_percent real not null,
-                reset_at integer,
-                window_minutes integer,
-                recorded_at text not null
-            )
-            """
-        )
-        conn.execute(
-            """
-            insert into additional_usage_history
-                (id, account_id, quota_key, limit_name, metered_feature, window, used_percent, recorded_at)
-            values (1, 'acc1', 'codex_spark', 'Codex Spark', 'codex_spark', 'primary', 20.0,
-                    '2026-01-01 00:00:00')
-            """
-        )
-        conn.commit()
-    scope = _resolve_additional_quota_query_scope(quota_key="codex_spark")
-    assert scope is not None
-    closed = _track_sqlite_connect_close(monkeypatch)
-
-    result = _additional_latest_by_account_sqlite(str(db_path), scope, "primary", None, None)
-
-    assert result["acc1"].used_percent == 20.0
     assert closed == [True]
 
 
@@ -1300,9 +1263,8 @@ async def test_bulk_history_since_per_account_cutoffs_parity(db_setup):
 
 @pytest.mark.asyncio
 async def test_bulk_history_since_per_account_row_cap_keeps_newest_rows(db_setup):
-    """The PostgreSQL row cap keeps each account's newest in-cutoff rows in
-    oldest-first order; under-cap accounts are unaffected and SQLite ignores
-    the cap entirely (snapshot-cache path, like ``cutoffs``)."""
+    """The row cap keeps each account's newest in-cutoff rows in oldest-first
+    order across both PostgreSQL and SQLite; under-cap accounts are unaffected."""
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -1329,18 +1291,53 @@ async def test_bulk_history_since_per_account_row_cap_keeps_newest_rows(db_setup
         )
         uncapped = await repo.bulk_history_since(["acc-dense", "acc-sparse"], "secondary", since)
 
-    dialect = "postgresql" if str(engine.url).startswith("postgresql") else "sqlite"
-    if dialect == "postgresql":
-        # Newest three rows, still oldest-first.
-        assert [snapshot.used_percent for snapshot in capped["acc-dense"]] == [15.0, 16.0, 17.0]
-        assert capped["acc-dense"] == uncapped["acc-dense"][-3:]
-    else:
-        # SQLite serves the shared-floor snapshot cache; the cap is ignored.
-        assert [snapshot.used_percent for snapshot in capped["acc-dense"]] == [
-            snapshot.used_percent for snapshot in uncapped["acc-dense"]
-        ]
+    # Newest three rows, still oldest-first across both PostgreSQL and SQLite.
+    assert [snapshot.used_percent for snapshot in capped["acc-dense"]] == [15.0, 16.0, 17.0]
+    assert capped["acc-dense"] == uncapped["acc-dense"][-3:]
     # Under-cap accounts return their full in-cutoff slice on every backend.
     assert [snapshot.used_percent for snapshot in capped["acc-sparse"]] == [90.0, 95.0]
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_negative_row_cap_is_empty_on_sqlite(db_setup):
+    """SQLite treats a negative cap as an empty tail, not an unlimited query."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only negative LIMIT regression test")
+
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-negative-cap"))
+        await repo.add_entry(
+            "acc-negative-cap",
+            10.0,
+            window="secondary",
+            recorded_at=now - timedelta(hours=2),
+        )
+        await repo.add_entry(
+            "acc-negative-cap",
+            20.0,
+            window="secondary",
+            recorded_at=now - timedelta(minutes=30),
+        )
+
+        without_floor = await repo.bulk_history_since(
+            ["acc-negative-cap"],
+            "secondary",
+            now - timedelta(days=1),
+            per_account_row_cap=-1,
+        )
+        with_floor = await repo.bulk_history_since(
+            ["acc-negative-cap"],
+            "secondary",
+            now - timedelta(days=1),
+            per_account_row_cap=-1,
+            uncapped_recent_floor=now - timedelta(hours=1),
+        )
+
+    assert without_floor.get("acc-negative-cap", []) == []
+    assert [snapshot.used_percent for snapshot in with_floor["acc-negative-cap"]] == [20.0]
 
 
 @pytest.mark.asyncio
@@ -1349,9 +1346,6 @@ async def test_bulk_history_since_row_cap_respects_per_account_cutoffs_postgresq
     lookback first, then the cap keeps the newest rows inside it."""
     now = utcnow()
     async with SessionLocal() as session:
-        if _dialect_name(session) != "postgresql":
-            pytest.skip("PostgreSQL-only row-cap test")
-
         accounts_repo = AccountsRepository(session)
         repo = UsageRepository(session)
         await accounts_repo.upsert(_make_account("acc-short"))
@@ -1396,9 +1390,6 @@ async def test_bulk_history_since_row_cap_exempts_uncapped_recent_floor_postgres
     """
     now = utcnow()
     async with SessionLocal() as session:
-        if _dialect_name(session) != "postgresql":
-            pytest.skip("PostgreSQL-only row-cap test")
-
         accounts_repo = AccountsRepository(session)
         repo = UsageRepository(session)
         await accounts_repo.upsert(_make_account("acc-burst"))
@@ -1441,6 +1432,36 @@ async def test_bulk_history_since_row_cap_exempts_uncapped_recent_floor_postgres
         54.0,
         55.0,
     ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_row_cap_all_recent_when_floor_covers_cutoff(db_setup):
+    """When uncapped_recent_floor <= cutoff, all in-cutoff rows are exempt from the cap."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc-floor-all"))
+
+        for offset in range(8):
+            await repo.add_entry(
+                "acc-floor-all",
+                10.0 + offset,
+                window="primary",
+                recorded_at=now - timedelta(minutes=8 - offset),
+            )
+
+        # floor is older than since, so uncapped_floor <= cutoff applies and all 8 rows return
+        grouped = await repo.bulk_history_since(
+            ["acc-floor-all"],
+            "primary",
+            now - timedelta(minutes=10),
+            per_account_row_cap=3,
+            uncapped_recent_floor=now - timedelta(hours=2),
+        )
+
+    assert len(grouped["acc-floor-all"]) == 8
+    assert [s.used_percent for s in grouped["acc-floor-all"]] == [10.0 + i for i in range(8)]
 
 
 @pytest.mark.asyncio
@@ -1535,6 +1556,92 @@ async def test_bulk_history_since_capped_floor_query_plan_is_index_only_postgres
     assert "idx_usage_window_raw_account_time_covering" in plan_json
     assert "Seq Scan on usage_history" not in plan_json
     assert "Index Scan using" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_capped_query_plan_is_indexed_sqlite(db_setup):
+    """The capped SQLite queries must use composite indexes without temp B-trees."""
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "sqlite":
+            pytest.skip("SQLite-only query plan test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        # 1. Primary window capped query
+        primary_plan_rows = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE account_id = 'acc1'
+                      AND coalesce(window, 'primary') = 'primary'
+                      AND recorded_at >= '2026-01-01 00:00:00'
+                    ORDER BY recorded_at DESC, id DESC
+                    LIMIT 64
+                    """
+                )
+            )
+        ).all()
+        primary_plan_text = " ".join(str(row) for row in primary_plan_rows)
+        assert "USING INDEX" in primary_plan_text
+        assert "idx_usage_window" in primary_plan_text
+        assert "USE TEMP B-TREE" not in primary_plan_text
+
+        # 2. Raw / secondary window capped query
+        sec_plan_rows = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE account_id = 'acc1'
+                      AND window = 'secondary'
+                      AND recorded_at >= '2026-01-01 00:00:00'
+                    ORDER BY recorded_at DESC, id DESC
+                    LIMIT 64
+                    """
+                )
+            )
+        ).all()
+        sec_plan_text = " ".join(str(row) for row in sec_plan_rows)
+        assert "USING INDEX" in sec_plan_text
+        assert "idx_usage_window_raw" in sec_plan_text
+        assert "USE TEMP B-TREE" not in sec_plan_text
+
+        # 3. Floor-exempt compound query (UNION ALL)
+        compound_plan_rows = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM (
+                        SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                        FROM usage_history
+                        WHERE account_id = 'acc1'
+                          AND coalesce(window, 'primary') = 'primary'
+                          AND recorded_at >= '2026-01-01 00:00:00'
+                          AND recorded_at < '2026-01-02 00:00:00'
+                        ORDER BY recorded_at DESC, id DESC
+                        LIMIT 64
+                    )
+                    UNION ALL
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE account_id = 'acc1'
+                      AND coalesce(window, 'primary') = 'primary'
+                      AND recorded_at >= '2026-01-02 00:00:00'
+                    """
+                )
+            )
+        ).all()
+        compound_plan_text = " ".join(str(row) for row in compound_plan_rows)
+        assert "USING INDEX" in compound_plan_text
+        assert "idx_usage_window" in compound_plan_text
+        assert "USE TEMP B-TREE" not in compound_plan_text
 
 
 def _legacy_additional_entry(

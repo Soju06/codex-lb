@@ -1,12 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { createDashboardSettings } from "@/test/mocks/factories";
+import type { DashboardSettings } from "@/features/settings/schemas";
+import {
+  ADMIN_PERMISSIONS,
+  OPERATOR_PERMISSIONS,
+  VIEWER_PERMISSIONS,
+  createDashboardSettings,
+  createSessionUser,
+  createUpstreamProxyAdmin,
+} from "@/test/mocks/factories";
 
 const useSettingsMock = vi.fn();
 const useAccountsMock = vi.fn();
@@ -21,15 +29,20 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const upstreamTimeoutSettingsMock = vi.fn();
 const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
-  useUpstreamProxyAdmin: () => useUpstreamProxyAdminMock(),
+  useUpstreamProxyAdmin: (options: unknown) => useUpstreamProxyAdminMock(options),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
   useAccounts: () => useAccountsMock(),
+}));
+
+vi.mock("@/features/settings/components/settings-skeleton", () => ({
+  SettingsSkeleton: () => <div data-testid="settings-skeleton" />,
 }));
 
 vi.mock("@/features/settings/components/appearance-settings", () => ({
@@ -72,10 +85,41 @@ vi.mock("@/features/settings/components/session-settings", () => ({
   SessionSettings: () => <div>Session Settings</div>,
 }));
 
+vi.mock("@/features/settings/components/resilience-settings", () => ({
+  ResilienceSettings: () => <div>Resilience Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/session-bridge-settings", () => ({
+  SessionBridgeSettings: () => <div>Session Bridge Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/model-catalogue-settings", () => ({
+  ModelCatalogueSettings: () => <div>Model Catalogue Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/background-jobs-settings", () => ({
+  BackgroundJobsSettings: () => <div>Background Jobs Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/totp-settings", () => ({
+  TotpSettings: () => <div>TOTP Settings</div>,
+}));
+
 vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
     return <div>Data Retention Settings</div>;
+  },
+}));
+
+vi.mock("@/features/settings/components/conversation-archive-settings", () => ({
+  ConversationArchiveSettings: () => <div>Conversation Archive Settings</div>,
+}));
+
+vi.mock("@/features/settings/components/upstream-timeout-settings", () => ({
+  UpstreamTimeoutSettings: (props: unknown) => {
+    upstreamTimeoutSettingsMock(props);
+    return <div>Upstream Timeout Settings</div>;
   },
 }));
 
@@ -121,9 +165,28 @@ vi.mock("@/features/model-sources/components/model-sources-settings", () => ({
   },
 }));
 
+type SettingsQueryState = {
+  data: DashboardSettings | undefined;
+  error: unknown;
+  isPending: boolean;
+  isFetching: boolean;
+  refetch: Mock;
+};
+
 describe("SettingsPage", () => {
   const settings = createDashboardSettings();
   const upstreamAdmin = { endpoints: [], pools: [], bindings: [], routingEnabled: false, defaultPoolId: null };
+
+  function mockSettingsQuery(settingsQuery: SettingsQueryState) {
+    useSettingsMock.mockReturnValue({
+      settingsQuery,
+      updateSettingsMutation: {
+        isPending: false,
+        error: null,
+        mutateAsync: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+  }
 
   beforeEach(() => {
     useAuthStore.setState({
@@ -131,19 +194,15 @@ describe("SettingsPage", () => {
       passwordManagementEnabled: true,
       passwordSessionActive: false,
       canWrite: true,
+      permissions: ADMIN_PERMISSIONS,
     });
 
-    useSettingsMock.mockReturnValue({
-      settingsQuery: {
-        data: settings,
-        error: null,
-        refetch: vi.fn().mockResolvedValue(undefined),
-      },
-      updateSettingsMutation: {
-        isPending: false,
-        error: null,
-        mutateAsync: vi.fn().mockResolvedValue(undefined),
-      },
+    mockSettingsQuery({
+      data: settings,
+      error: null,
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
     });
     useAccountsMock.mockReturnValue({
       accountsQuery: {
@@ -179,13 +238,20 @@ describe("SettingsPage", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    return render(
+    const renderTree = () => (
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[initialEntry]}>
           <SettingsPage />
         </MemoryRouter>
-      </QueryClientProvider>,
+      </QueryClientProvider>
     );
+    const rendered = render(renderTree());
+    return {
+      ...rendered,
+      rerenderSettings: () => {
+        rendered.rerender(renderTree());
+      },
+    };
   }
 
   async function expandAdvancedSettings() {
@@ -219,6 +285,31 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Telemetry Settings")).toBeInTheDocument();
   });
 
+  it("renders the security-bearing controls read-only for an operator (write without security:write)", async () => {
+    useAuthStore.setState({ permissions: OPERATOR_PERMISSIONS });
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    renderSettings();
+
+    expect(screen.queryByText("Read-only access")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ disabled: false, policyControlsDisabled: true }),
+    );
+
+    await expandAdvancedSettings();
+
+    expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ busy: false, canCreateEndpoint: false }),
+    );
+    expect(modelSourcesSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
   it("mounts every advanced section after one expand interaction", async () => {
     renderSettings();
 
@@ -231,10 +322,21 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Quota Planner Section")).toBeInTheDocument();
     expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
     expect(screen.getByText("Data Retention Settings")).toBeInTheDocument();
+    expect(screen.getByText("Conversation Archive Settings")).toBeInTheDocument();
+    expect(screen.getByText("Upstream Timeout Settings")).toBeInTheDocument();
   });
 
-  it("disables write-capable sections for read-only guests", async () => {
+  it("disables write-capable sections and hides restricted surfaces for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
+    // The guest query is disabled, so it usually has no data; the cached-data
+    // case is covered separately below.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: undefined, error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
 
     renderSettings();
 
@@ -243,17 +345,97 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Password Settings")).not.toBeInTheDocument();
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(telemetrySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    // Backend answers API-key and upstream-proxy reads with 403 for guests, so
+    // the section is not mounted and the admin query is never enabled.
+    expect(screen.queryByText("API Keys Section")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: false });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     await expandAdvancedSettings();
 
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
-    expect(upstreamProxySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(firewallSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(quotaPlannerSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
-    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
     expect(dataRetentionSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(upstreamTimeoutSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Sticky Sessions Section")).not.toBeInTheDocument();
+    expect(stickySessionsSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not render cached upstream-proxy data for read-only guests", async () => {
+    useAuthStore.setState({ canWrite: false });
+    // `enabled: false` only stops fetching: data cached by an earlier admin
+    // session is still returned by the hook and must not reach the card.
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: { data: createUpstreamProxyAdmin(), error: null },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+
+    renderSettings();
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Routing Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Upstream Proxy Settings")).not.toBeInTheDocument();
+    expect(upstreamProxySettingsMock).not.toHaveBeenCalled();
+  });
+
+  it("mounts API key and sticky-session sections and enables the upstream-proxy query for writers", async () => {
+    renderSettings();
+
+    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+    expect(useUpstreamProxyAdminMock).toHaveBeenCalledWith({ enabled: true });
+
+    await expandAdvancedSettings();
+
+    expect(screen.getByText("Upstream Proxy Settings")).toBeInTheDocument();
+    expect(screen.getByText("Sticky Sessions Section")).toBeInTheDocument();
+    expect(stickySessionsSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: false }));
+  });
+
+  it("mounts the Access card for a fully signed-in Viewer (own password and TOTP, no security controls)", async () => {
+    useAuthStore.setState({
+      canWrite: false,
+      permissions: VIEWER_PERMISSIONS,
+      passwordSessionActive: true,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    expect(await screen.findByText("Password Settings")).toBeInTheDocument();
+    expect(await screen.findByText("TOTP Settings")).toBeInTheDocument();
+    expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
+    expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
+    expect(apiKeysSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("folds guest access, password, session and TOTP into the Access card in today's order", async () => {
+    useAuthStore.setState({ passwordSessionActive: true });
+    renderSettings();
+
+    const card = document.getElementById("access");
+    expect(card).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Access" })).toBeInTheDocument();
+    await screen.findByText("TOTP Settings");
+    const labels = ["Guest Access Settings", "Password Settings", "Session Settings", "TOTP Settings"].map(
+      (label) => screen.getByText(label),
+    );
+    expect(labels.every((node) => card?.contains(node))).toBe(true);
+    // Each control follows the previous one: today's order, nothing reshuffled.
+    expect(
+      labels.slice(1).every((node, index) => Boolean(labels[index].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)),
+    ).toBe(true);
+    // Cards outside the Access card keep their place: Access sits between Reset credits and API keys.
+    expect(screen.getByText("API Keys Section").compareDocumentPosition(card!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   });
 
   it("keeps guest access settings available for writable sessions", async () => {
@@ -272,6 +454,133 @@ describe("SettingsPage", () => {
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: false }));
   });
 
+  it("shows an initial settings fetch error with retry", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("load failed");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("falls back to load-failure copy when the initial settings error has no message", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: {},
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load settings");
+  });
+
+  it("refetches settings when retry is activated after a failed initial load", async () => {
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+    renderSettings();
+
+    await userEvent.setup({ delay: null }).click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps retry visible and disabled while the settings refetch is in flight", async () => {
+    let finishRefetch: (() => void) | undefined;
+    const refetch = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRefetch = resolve;
+        }),
+    );
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+
+    const rendered = renderSettings();
+    await userEvent.setup({ delay: null }).click(screen.getByRole("button", { name: "Retry" }));
+    mockSettingsQuery({
+      data: undefined,
+      error: null,
+      isPending: true,
+      isFetching: true,
+      refetch,
+    });
+    rendered.rerenderSettings();
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("load failed");
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+    expect(finishRefetch).toBeTypeOf("function");
+    await act(async () => {
+      finishRefetch?.();
+    });
+    rendered.rerenderSettings();
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("keeps the skeleton while the first settings load is pending", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: null,
+      isPending: true,
+      isFetching: true,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByTestId("settings-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the settings form visible when a fetch error arrives with cached data", () => {
+    mockSettingsQuery({
+      data: settings,
+      error: new Error("refresh failed"),
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByText("refresh failed")).toBeInTheDocument();
+    expect(screen.getByText("Import Settings")).toBeInTheDocument();
+    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
   it("expands Advanced and mounts firewall on the advanced deeplink", () => {
     renderSettings("/settings?advanced=1#firewall");
 
@@ -280,4 +589,63 @@ describe("SettingsPage", () => {
     expect(firewallSectionMock).toHaveBeenCalled();
   });
 
+  it("waits for the model catalogue query before scrolling to firewall", async () => {
+    // The Model catalogue card sits above Firewall and grows by a table row per
+    // override, so a late overrides response would otherwise land after the
+    // one-shot #firewall scroll and push the target back out of view.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let resolveOverrides: ((value: unknown) => void) | undefined;
+    const overridesQuery = queryClient.fetchQuery({
+      queryKey: ["settings", "model-context-window-overrides"],
+      queryFn: () =>
+        new Promise((resolve) => {
+          resolveOverrides = resolve;
+        }),
+    });
+    const scrollIntoView = vi.fn();
+    const elementLookup = vi
+      .spyOn(document, "getElementById")
+      .mockReturnValue({ scrollIntoView } as unknown as HTMLElement);
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 1;
+    });
+
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/settings?advanced=1#firewall"]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveOverrides?.({ overrides: [] });
+      await overridesQuery;
+    });
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    animationFrame.mockRestore();
+    elementLookup.mockRestore();
+  });
+
+
+  it("mounts the Access card for a reverse-proxy account that cannot write", async () => {
+    // No password session, no `write`: its own two-factor is still how it
+    // confirms sensitive changes, so the card must be reachable.
+    useAuthStore.setState({
+      canWrite: false,
+      passwordManagementEnabled: true,
+      passwordSessionActive: false,
+      user: createSessionUser({ id: "user_viewer", username: "viewer" }),
+    });
+
+    renderSettings();
+
+    expect(await screen.findByText("Access")).toBeInTheDocument();
+  });
 });

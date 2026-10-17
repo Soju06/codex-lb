@@ -38,16 +38,20 @@ def to_request_log_entry(
     *,
     api_key_name: str | None = None,
     include_sensitive_metadata: bool,
+    include_api_key_identity: bool = True,
 ) -> RequestLogEntry:
     log_like = typing_cast(RequestLogLike, log)
     cost_breakdown = cost_breakdown_from_log(log_like, precision=6)
     return RequestLogEntry(
+        sticky_key_source=log.sticky_key_source if include_sensitive_metadata else None,
+        sticky_kind=log.sticky_kind if include_sensitive_metadata else None,
+        sticky_key_hash=log.sticky_key_hash if include_sensitive_metadata else None,
         requested_at=log.requested_at,
         conversation_id=log.conversation_id if include_sensitive_metadata else None,
         account_id=log.account_id,
         plan_type=log.plan_type,
-        api_key_id=log.api_key_id,
-        api_key_name=api_key_name,
+        api_key_id=log.api_key_id if include_api_key_identity else None,
+        api_key_name=api_key_name if include_api_key_identity else None,
         request_id=log.request_id,
         archive_request_id=log.archive_request_id if include_sensitive_metadata else None,
         request_kind=log.request_kind,

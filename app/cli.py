@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sqlite3
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.core.ingress_limits import MAX_DECOMPRESSED_RESPONSES_BODY_BYTES
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -55,22 +57,74 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
 
+    admin = subparsers.add_parser(
+        "admin",
+        help="Host recovery commands that act on the database directly (see docs/sso.md).",
+        formatter_class=_CliHelpFormatter,
+    )
+    admin_subparsers = admin.add_subparsers(dest="admin_command")
+    reset_password = admin_subparsers.add_parser(
+        "reset-password",
+        help="Set a new password for one account. The password is prompted for, never taken from the arguments.",
+        formatter_class=_CliHelpFormatter,
+    )
+    reset_password.add_argument("username", help="Account whose password to reset.")
+    reset_password.add_argument(
+        "--clear-two-factor",
+        action="store_true",
+        help="Also remove the account's two-factor secret. Use when the authenticator is lost too.",
+    )
+    local_login = admin_subparsers.add_parser(
+        "local-login",
+        help="Re-open local password sign-in.",
+        formatter_class=_CliHelpFormatter,
+    )
+    local_login_subparsers = local_login.add_subparsers(dest="admin_local_login_command")
+    local_login_subparsers.add_parser(
+        "enable",
+        help="Set the local sign-in policy back to enabled.",
+        formatter_class=_CliHelpFormatter,
+    )
+    disable_provider = admin_subparsers.add_parser(
+        "disable-provider",
+        help="Turn one company sign-in provider off.",
+        formatter_class=_CliHelpFormatter,
+    )
+    disable_provider.add_argument(
+        "provider_id",
+        metavar="ID",
+        help="Provider row id. Run with an unknown id to list the providers in the database.",
+    )
+    reset_login_policy = admin_subparsers.add_parser(
+        "reset-login-policy",
+        help="Re-open local sign-in and disable every company sign-in provider.",
+        formatter_class=_CliHelpFormatter,
+    )
+    reset_login_policy.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the reset and allow a non-interactive run.",
+    )
+
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
     parser.add_argument(
         "--timeout-keep-alive",
-        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200"),
+        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300"),
         help=(
-            "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
-            "connections for large compact POSTs; short keepalive windows can leave the "
-            "client writing to a stale socket before the request reaches the app."
+            "Seconds an idle keep-alive HTTP connection stays open between requests "
+            "(env: UVICORN_TIMEOUT_KEEP_ALIVE). Keep it above any client's connection-pool "
+            "idle timeout (reqwest default 90s; Codex CLI opens a fresh connection per "
+            "/responses request, so this mainly matters for other SDKs and reverse proxies) "
+            "and well under an hour, because every idle connection is held for the full "
+            "window. uvicorn's stock 5s default is too short for pooled clients."
         ),
     )
     parser.add_argument(
         "--ws-max-size",
-        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(MAX_DECOMPRESSED_RESPONSES_BODY_BYTES)),
         help=(
             "Maximum decompressed size in bytes of a single incoming websocket message. "
             "Codex clients resend the full conversation history (inline screenshots "
@@ -92,6 +146,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         raise SystemExit("codex-sessions requires a subcommand")
 
+    if args.command == "admin":
+        _run_admin_command(args)
+        return
+
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
@@ -111,6 +169,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         proxy_headers=False,
         log_config=_build_log_config(),
     )
+
+
+def _run_admin_command(args: argparse.Namespace) -> None:
+    """Host recovery commands (docs/sso.md). Imported late: the server path must not pay for them."""
+
+    from app.admin_cli import run_admin_command
+
+    run_admin_command(args)
 
 
 def _load_uvicorn():
@@ -138,6 +204,10 @@ def _load_shutdown_drain_timeout_seconds() -> int:
 
 
 def _run_server(app: str, **kwargs: Any) -> None:
+    # Route warnings.warn() output (for example aiohttp ResourceWarning reprs
+    # that embed connection keys) through the redacting log handlers instead
+    # of raw stderr.
+    logging.captureWarnings(True)
     uvicorn = _load_uvicorn()
     drain_timeout_seconds = _load_shutdown_drain_timeout_seconds()
     config = uvicorn.Config(

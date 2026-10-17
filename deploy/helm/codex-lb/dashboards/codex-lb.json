@@ -123,7 +123,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.50, rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\"}[5m]))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -132,7 +132,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.95, rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\"}[5m]))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
@@ -141,7 +141,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.99, rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\"}[5m]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(codex_lb_request_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -303,7 +303,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.99, rate(codex_lb_upstream_request_duration_seconds_bucket{namespace=\"$namespace\"}[5m]))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(codex_lb_upstream_request_duration_seconds_bucket{namespace=\"$namespace\",job=~\"$job\"}[5m])))",
           "legendFormat": "p99",
           "refId": "A"
         }

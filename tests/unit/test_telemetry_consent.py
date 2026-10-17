@@ -29,14 +29,27 @@ class _GateLeader:
 
 
 def test_consent_precedence_and_default_activation() -> None:
-    assert resolve_consent(False, "enabled").state == "disabled"
-    assert resolve_consent(False, "enabled").source == "env"
-    assert resolve_consent(False, "enabled").active is False
+    # A persisted dashboard decision is authoritative; the environment never
+    # overrides it (dashboard > env > default).
+    persisted_over_env = resolve_consent(False, "enabled")
+    assert persisted_over_env.state == "enabled"
+    assert persisted_over_env.source == "persisted"
+    assert persisted_over_env.active is True
 
+    assert resolve_consent(True, "disabled").state == "disabled"
+    assert resolve_consent(True, "disabled").source == "persisted"
+    assert resolve_consent(True, "disabled").active is False
+
+    # The environment decides only while no decision is saved.
     env_enabled = resolve_consent(True, "undecided")
     assert env_enabled.state == "enabled"
     assert env_enabled.source == "env"
     assert env_enabled.active is True
+
+    env_disabled = resolve_consent(False, "undecided")
+    assert env_disabled.state == "disabled"
+    assert env_disabled.source == "env"
+    assert env_disabled.active is False
 
     persisted_disabled = resolve_consent(None, "disabled")
     assert persisted_disabled.state == "disabled"

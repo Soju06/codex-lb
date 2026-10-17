@@ -1,19 +1,8 @@
-## 1. Regression coverage
+## 1. Reconcile and verify the implementation
 
-- [x] 1.1 Prove a managed client that never reports itself closed no longer
-  pins shutdown, and that its close is abandoned rather than cancelled.
-- [x] 1.2 Prove a prompt close is still awaited normally.
-- [x] 1.3 Prove a raising close does not fail shutdown.
-
-## 2. Bounded close
-
-- [x] 2.1 Run the managed HTTP client close as a task and wait for it under the
-  same 10s budget the leader lease release uses.
-- [x] 2.2 Abandon the wait on deadline and log the eventual outcome from a done
-  callback.
-
-## 3. Verification
-
-- [x] 3.1 Run the graceful-shutdown unit suite.
-- [x] 3.2 Run lint, formatting, type checks, and the proxy architecture check.
-- [x] 3.3 Run strict OpenSpec validation for this change.
+- [x] 1.1 Compare current main and related shutdown PRs; preserve their distinct contracts.
+- [x] 1.2 Bound the managed HTTP close wait and retain its task through completion.
+- [x] 1.3 Cover prompt completion, timeout, failure and self-cancellation.
+- [x] 1.4 Prove a stalled close no longer prevents lifespan process-death marking and database disposal; reproduce on the baseline.
+- [x] 1.5 Run focused lifecycle tests, lint and type checks.
+- [ ] 1.6 Complete independent review, local CI and scoped strict OpenSpec verification.

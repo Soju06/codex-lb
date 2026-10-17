@@ -110,11 +110,6 @@ class StickySessionsService:
             has_more=offset + len(entries) < total,
         )
 
-    async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
-        if is_reserved_sticky_session_key(key):
-            return False
-        return await self._repository.delete(key, kind=kind)
-
     async def delete_entries(self, entries: Sequence[tuple[str, StickySessionKind]]) -> StickySessionsDeleteData:
         failed: list[StickySessionDeleteFailureData] = []
         seen: set[tuple[str, StickySessionKind]] = set()

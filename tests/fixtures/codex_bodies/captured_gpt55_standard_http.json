@@ -1,0 +1,288 @@
+{
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "input": [
+    {
+      "content": [
+        {
+          "text": "[synthetic input[0].content[0].text]",
+          "type": "input_text"
+        },
+        {
+          "text": "[synthetic input[0].content[1].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000001",
+      "role": "developer",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[1].content[0].text]",
+          "type": "input_text"
+        },
+        {
+          "text": "[synthetic input[1].content[1].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000002",
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": [
+        {
+          "text": "[synthetic input[2].content[0].text]",
+          "type": "input_text"
+        }
+      ],
+      "id": "msg_00000000-0000-4000-8000-000000000003",
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "[synthetic instructions]",
+  "model": "gpt-5.5",
+  "parallel_tool_calls": true,
+  "prompt_cache_key": "00000000-0000-4000-8000-000000000000",
+  "reasoning": {
+    "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "text": {
+    "verbosity": "low"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "description": "[synthetic tools[0].description]",
+      "name": "exec_command",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "[synthetic tools[0].parameters.properties.field01]": {
+            "description": "[synthetic tools[0].parameters.properties.field01.description]",
+            "type": "string"
+          },
+          "[synthetic tools[0].parameters.properties.field02]": {
+            "description": "[synthetic tools[0].parameters.properties.field02.description]",
+            "type": "string"
+          },
+          "[synthetic tools[0].parameters.properties.field03]": {
+            "description": "[synthetic tools[0].parameters.properties.field03.description]",
+            "type": "boolean"
+          },
+          "[synthetic tools[0].parameters.properties.field04]": {
+            "description": "[synthetic tools[0].parameters.properties.field04.description]",
+            "type": "number"
+          },
+          "[synthetic tools[0].parameters.properties.field05]": {
+            "description": "[synthetic tools[0].parameters.properties.field05.description]",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "[synthetic tools[0].parameters.properties.field06]": {
+            "description": "[synthetic tools[0].parameters.properties.field06.description]",
+            "enum": [
+              "[synthetic tools[0].parameters.properties.field06.enum[0]]",
+              "[synthetic tools[0].parameters.properties.field06.enum[1]]"
+            ],
+            "type": "string"
+          },
+          "[synthetic tools[0].parameters.properties.field07]": {
+            "description": "[synthetic tools[0].parameters.properties.field07.description]",
+            "type": "string"
+          },
+          "[synthetic tools[0].parameters.properties.field08]": {
+            "description": "[synthetic tools[0].parameters.properties.field08.description]",
+            "type": "boolean"
+          },
+          "[synthetic tools[0].parameters.properties.field09]": {
+            "description": "[synthetic tools[0].parameters.properties.field09.description]",
+            "type": "string"
+          },
+          "[synthetic tools[0].parameters.properties.field10]": {
+            "description": "[synthetic tools[0].parameters.properties.field10.description]",
+            "type": "number"
+          }
+        },
+        "required": [
+          "[synthetic tools[0].parameters.properties.field01]"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    },
+    {
+      "description": "[synthetic tools[1].description]",
+      "name": "write_stdin",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "[synthetic tools[1].parameters.properties.field01]": {
+            "description": "[synthetic tools[1].parameters.properties.field01.description]",
+            "type": "string"
+          },
+          "[synthetic tools[1].parameters.properties.field02]": {
+            "description": "[synthetic tools[1].parameters.properties.field02.description]",
+            "type": "number"
+          },
+          "[synthetic tools[1].parameters.properties.field03]": {
+            "description": "[synthetic tools[1].parameters.properties.field03.description]",
+            "type": "number"
+          },
+          "[synthetic tools[1].parameters.properties.field04]": {
+            "description": "[synthetic tools[1].parameters.properties.field04.description]",
+            "type": "number"
+          }
+        },
+        "required": [
+          "[synthetic tools[1].parameters.properties.field03]"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    },
+    {
+      "description": "[synthetic tools[2].description]",
+      "name": "request_user_input",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "[synthetic tools[2].parameters.properties.field01]": {
+            "description": "[synthetic tools[2].parameters.properties.field01.description]",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field01]": {
+                  "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field01.description]",
+                  "type": "string"
+                },
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field02]": {
+                  "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field02.description]",
+                  "type": "string"
+                },
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field03]": {
+                  "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field03.description]",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01]": {
+                        "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01.description]",
+                        "type": "string"
+                      },
+                      "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02]": {
+                        "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02.description]",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field02]",
+                      "[synthetic tools[2].parameters.properties.field01.items.properties.field03.items.properties.field01]"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field04]": {
+                  "description": "[synthetic tools[2].parameters.properties.field01.items.properties.field04.description]",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field02]",
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field01]",
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field04]",
+                "[synthetic tools[2].parameters.properties.field01.items.properties.field03]"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "[synthetic tools[2].parameters.properties.field01]"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    },
+    {
+      "description": "[synthetic tools[3].description]",
+      "format": {
+        "definition": "[synthetic tools[3].format.definition]",
+        "syntax": "lark",
+        "type": "grammar"
+      },
+      "name": "apply_patch",
+      "type": "custom"
+    },
+    {
+      "description": "[synthetic tools[4].description]",
+      "name": "view_image",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "[synthetic tools[4].parameters.properties.field01]": {
+            "description": "[synthetic tools[4].parameters.properties.field01.description]",
+            "enum": [
+              "[synthetic tools[4].parameters.properties.field01.enum[0]]",
+              "[synthetic tools[4].parameters.properties.field01.enum[1]]"
+            ],
+            "type": "string"
+          },
+          "[synthetic tools[4].parameters.properties.field02]": {
+            "description": "[synthetic tools[4].parameters.properties.field02.description]",
+            "type": "string"
+          }
+        },
+        "required": [
+          "[synthetic tools[4].parameters.properties.field02]"
+        ],
+        "type": "object"
+      },
+      "strict": false,
+      "type": "function"
+    },
+    {
+      "description": "[synthetic tools[5].description]",
+      "execution": "client",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "[synthetic tools[5].parameters.properties.field01]": {
+            "description": "[synthetic tools[5].parameters.properties.field01.description]",
+            "type": "number"
+          },
+          "[synthetic tools[5].parameters.properties.field02]": {
+            "description": "[synthetic tools[5].parameters.properties.field02.description]",
+            "type": "string"
+          }
+        },
+        "required": [
+          "[synthetic tools[5].parameters.properties.field02]"
+        ],
+        "type": "object"
+      },
+      "type": "tool_search"
+    },
+    {
+      "external_web_access": false,
+      "search_content_types": [
+        "text",
+        "image"
+      ],
+      "type": "web_search"
+    }
+  ]
+}

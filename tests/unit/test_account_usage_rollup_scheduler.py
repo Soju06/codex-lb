@@ -12,6 +12,14 @@ from app.modules.accounts.usage_rollup_scheduler import AccountUsageRollupSchedu
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def report_fold(monkeypatch):
+    fold = AsyncMock(return_value=0)
+    monkeypatch.setattr(rollup_scheduler, "run_report_fold_pass", fold)
+    monkeypatch.setattr(rollup_scheduler, "run_conversation_fold_pass", AsyncMock(return_value=0))
+    return fold
+
+
 class _GateLeader:
     """Leader stub mirroring ``run_if_leader``: heartbeat gate, not one-shot.
 
@@ -40,7 +48,7 @@ def test_build_account_usage_rollup_scheduler_uses_constant_interval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fold_once_skips_when_not_leader(monkeypatch) -> None:
+async def test_fold_once_skips_when_not_leader(monkeypatch, report_fold) -> None:
     leader = _GateLeader(leader=False)
     monkeypatch.setattr(rollup_scheduler, "_get_leader_election", lambda: leader)
     fold = AsyncMock()
@@ -50,6 +58,7 @@ async def test_fold_once_skips_when_not_leader(monkeypatch) -> None:
 
     await AccountUsageRollupScheduler(interval_seconds=1)._fold_once()
 
+    report_fold.assert_not_awaited()
     fold.assert_not_called()
     hourly.assert_not_called()
     assert leader.run_if_leader_calls == 1
@@ -90,7 +99,7 @@ async def test_fold_once_swallows_fold_errors(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_fold_once_runs_hourly_pass_even_when_lifetime_pass_fails(monkeypatch) -> None:
+async def test_fold_once_runs_hourly_pass_even_when_lifetime_pass_fails(monkeypatch, report_fold) -> None:
     """Blast-radius isolation: a lifetime-fold failure must not stop the
     hourly time-axis fold (and vice versa) — each has its own watermark and
     retention only pauses via the min-gate."""
@@ -105,6 +114,7 @@ async def test_fold_once_runs_hourly_pass_even_when_lifetime_pass_fails(monkeypa
 
     fold.assert_awaited_once()
     hourly.assert_awaited_once()
+    report_fold.assert_awaited_once()
 
 
 @pytest.mark.asyncio

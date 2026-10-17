@@ -1,0 +1,27 @@
+{
+  "events": 2048,
+  "samples": 12,
+  "results": {
+    "raw": {
+      "elapsed_ms": {
+        "median": 640.3768903110176,
+        "mean": 699.3091359812146
+      },
+      "helper_cpu_ms": {
+        "median": 310.0,
+        "mean": 325.0
+      }
+    },
+    "interpreted": {
+      "elapsed_ms": {
+        "median": 674.0176621824503,
+        "mean": 754.1654755283768
+      },
+      "helper_cpu_ms": {
+        "median": 329.9999999999999,
+        "mean": 345.8333333333333
+      }
+    }
+  },
+  "note": "Same helper binary, loopback websocket; raw parses each JSON frame in Python; interpreted reuses the IPC payload and Rust classification."
+}

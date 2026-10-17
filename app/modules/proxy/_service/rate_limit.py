@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 from app.core import usage as usage_core
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, UsageHistory
+from app.db.session import detach_session_objects
+from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.proxy.helpers import (
     _credits_headers,
     _credits_snapshot,
@@ -26,6 +28,7 @@ from app.modules.proxy.types import (
     RateLimitWindowSnapshotData,
 )
 from app.modules.usage.additional_quota_keys import get_additional_display_label_for_quota_key
+from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
 
@@ -130,11 +133,19 @@ class _RateLimitMixin:
         proxy = cast(_RateLimitServiceProtocol, self)
         async with proxy._repo_factory() as repos:
             accounts = await repos.accounts.list_accounts()
-            await self._refresh_usage(repos, accounts)
+            latest_usage = await repos.usage.latest_by_account(window="primary")
+            if repos.session is not None:
+                detach_session_objects(repos.session)
+
+        # Do not hold the request session while an owned refresh checks out its
+        # background session; pool_size=1 must still make progress.
+        await self._refresh_usage(accounts, latest_usage)
+
+        async with proxy._repo_factory() as repos:
+            accounts = await repos.accounts.list_accounts()
             selected_accounts = _select_accounts_for_limits(accounts)
             if not selected_accounts:
                 return RateLimitStatusPayloadData(plan_type="guest")
-
             account_map = {account.id: account for account in selected_accounts}
             primary_rows_raw = await self._latest_usage_rows(repos, account_map, "primary")
             secondary_rows_raw = await self._latest_usage_rows(repos, account_map, "secondary")
@@ -176,10 +187,22 @@ class _RateLimitMixin:
                 additional_rate_limits=additional_rate_limits,
             )
 
-    async def _refresh_usage(self, repos: ProxyRepositories, accounts: list[Account]) -> None:
-        latest_usage = await repos.usage.latest_by_account(window="primary")
-        updater = UsageUpdater(repos.usage, repos.accounts, repos.additional_usage)
-        await updater.refresh_accounts(accounts, latest_usage)
+    async def _refresh_usage(
+        self,
+        accounts: list[Account],
+        latest_usage: Mapping[str, UsageHistory],
+    ) -> None:
+        updater = UsageUpdater(
+            BackgroundUsageRepository(),
+            BackgroundAccountsRepository(),
+            BackgroundAdditionalUsageRepository(),
+        )
+        await updater.refresh_accounts(
+            accounts,
+            latest_usage,
+            own_singleflight_sessions=True,
+            join_existing=True,
+        )
 
     async def _latest_usage_rows(
         self,

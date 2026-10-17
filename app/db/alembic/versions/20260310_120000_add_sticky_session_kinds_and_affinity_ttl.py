@@ -7,8 +7,6 @@ Create Date: 2026-03-10
 
 from __future__ import annotations
 
-import os
-
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
@@ -40,12 +38,12 @@ def _indexes(connection: Connection, table_name: str) -> set[str]:
 
 
 def _prompt_cache_ttl_default() -> int:
-    raw = os.getenv("CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS", "300").strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return 300
-    return value if value > 0 else 300
+    # Historical default at this revision. This backfill used to read
+    # CODEX_LB_OPENAI_CACHE_AFFINITY_MAX_AGE_SECONDS; that env field was removed
+    # (remove-dead-env-settings) and the dashboard column is the only owner, so
+    # a fresh database bootstrap must not let a removed variable seed the row.
+    # 20260319_100937 raises 300 -> 1800 for rows still at this default.
+    return 300
 
 
 def _sticky_session_kind_enum() -> sa.Enum:

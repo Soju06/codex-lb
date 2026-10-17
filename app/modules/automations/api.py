@@ -9,7 +9,7 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
+from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AutomationsContext, get_automations_context
 from app.modules.automations.schemas import (
     AutomationDeleteResponse,
@@ -33,6 +33,7 @@ from app.modules.automations.service import (
     AutomationRunAccountStateData,
     AutomationRunData,
     AutomationRunDetailsData,
+    AutomationsPausedError,
     AutomationValidationError,
 )
 
@@ -244,6 +245,9 @@ async def run_automation_now(
         run = await context.service.run_now(automation_id)
     except AutomationNotFoundError as exc:
         raise DashboardNotFoundError("Automation not found", code="automation_not_found") from exc
+    except AutomationsPausedError as exc:
+        # M2 background jobs: the dashboard pause covers manual runs too.
+        raise DashboardConflictError(str(exc), code="automations_paused") from exc
     return _to_run_response(run)
 
 

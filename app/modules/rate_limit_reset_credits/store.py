@@ -4,7 +4,11 @@ from datetime import datetime
 
 import anyio
 
-from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
+from app.core.clients.rate_limit_reset_credits import (
+    RateLimitResetCreditsSnapshot,
+    ResetCreditItem,
+    _nearest_available_expires_at,
+)
 
 
 class RateLimitResetCreditsStore:
@@ -108,10 +112,3 @@ def _mark_credit_redeemed(
         matched = True
         updated.append(credit.model_copy(update={"status": "redeemed", "redeemed_at": redeemed_at}))
     return updated, matched
-
-
-def _nearest_available_expires_at(credits: list[ResetCreditItem]) -> datetime | None:
-    candidates = [
-        credit.expires_at for credit in credits if credit.status == "available" and credit.expires_at is not None
-    ]
-    return min(candidates) if candidates else None

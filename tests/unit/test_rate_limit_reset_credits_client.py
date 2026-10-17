@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from app.core.clients import rate_limit_reset_credits as reset_credits_module
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
@@ -17,7 +18,6 @@ from app.core.clients.rate_limit_reset_credits import (
     fetch_reset_credits,
 )
 from app.core.clients.usage import _usage_headers
-from app.core.config.settings import get_settings
 
 pytestmark = pytest.mark.unit
 
@@ -382,9 +382,7 @@ async def test_consume_reset_credit_uses_supplied_redeem_request_id() -> None:
 
 @pytest.mark.asyncio
 async def test_consume_reset_credit_does_not_retry_when_max_retries_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = get_settings()
-    original_retries = settings.usage_fetch_max_retries
-    monkeypatch.setattr(settings, "usage_fetch_max_retries", 2)
+    monkeypatch.setattr(reset_credits_module, "USAGE_FETCH_MAX_RETRIES", 2)
 
     state = ClientState()
     client = StubRetryClient(
@@ -409,7 +407,6 @@ async def test_consume_reset_credit_does_not_retry_when_max_retries_omitted(monk
     assert excinfo.value.status_code == 503
     assert excinfo.value.code == "temporarily_unavailable"
     assert state.calls == 1
-    monkeypatch.setattr(settings, "usage_fetch_max_retries", original_retries)
 
 
 @pytest.mark.asyncio

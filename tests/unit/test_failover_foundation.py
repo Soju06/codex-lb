@@ -3,23 +3,51 @@ from __future__ import annotations
 import pytest
 
 from app.core.balancer.logic import (
+    BURST_SAME_ACCOUNT_BASE_SECONDS,
+    BURST_SAME_ACCOUNT_MAX_RETRIES,
+    BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
     ROUTING_POLICY_BURN_FIRST,
     AccountState,
+    burst_same_account_backoff_seconds,
     evaluate_health_tier,
     failover_decision,
     select_account,
 )
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import FailureClass, UpstreamError
 from app.db.models import AccountStatus
-from app.modules.proxy.helpers import classify_upstream_failure
+from app.modules.proxy.helpers import (
+    classify_upstream_failure,
+    is_upstream_burst_rejection,
+    is_upstream_usage_limit_rejection,
+)
 
 pytestmark = pytest.mark.unit
 
 
 class TestClassifyUpstreamFailure:
+    @pytest.mark.parametrize("http_status", [402, None, 500])
+    def test_deactivated_workspace_is_account_unavailable(self, http_status: int | None) -> None:
+        result = classify_upstream_failure(
+            error_code="deactivated_workspace",
+            error=UpstreamError(message="Workspace has been deactivated"),
+            http_status=http_status,
+            phase="first_event",
+        )
+        assert result["failure_class"] == "account_unavailable"
+
+    @pytest.mark.parametrize("error_code", ["payment_required", "unknown_error"])
+    def test_bare_402_is_not_account_unavailable(self, error_code: str) -> None:
+        result = classify_upstream_failure(
+            error_code=error_code,
+            error=UpstreamError(message="Payment Required"),
+            http_status=402,
+            phase="connect",
+        )
+        assert result["failure_class"] == "non_retryable"
+
     def test_rate_limit_exceeded(self) -> None:
         result = classify_upstream_failure(
             error_code="rate_limit_exceeded",
@@ -195,7 +223,172 @@ class TestClassifyUpstreamFailure:
         assert result["failure_class"] == "retryable_transient"
 
 
+class TestIsUpstreamBurstRejection:
+    def test_truth_table(self) -> None:
+        # Only a code-less HTTP 429 (classified retryable_transient) is a burst.
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=429) is True
+        assert is_upstream_burst_rejection(failure_class="rate_limit", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="quota", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="non_retryable", http_status=429) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=500) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=503) is False
+        assert is_upstream_burst_rejection(failure_class="retryable_transient", http_status=None) is False
+
+    def test_composes_with_classify_for_the_prod_shape(self) -> None:
+        # Prod: upstream 429 body carries only a message -> code normalizes to
+        # ``upstream_error`` -> retryable_transient -> burst. Note that
+        # ``classify_upstream_failure`` itself is unchanged: a bare
+        # ``upstream_error`` with http_status=429 is still classified by the
+        # transient code table, not by the status.
+        codeless = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="Rate limit exceeded"),
+            http_status=429,
+            phase="connect",
+        )
+        assert codeless["failure_class"] == "retryable_transient"
+        assert is_upstream_burst_rejection(failure_class=codeless["failure_class"], http_status=codeless["http_status"])
+        coded = classify_upstream_failure(
+            error_code="rate_limit_exceeded",
+            error=UpstreamError(message="Try again in 1.5s"),
+            http_status=429,
+            phase="connect",
+        )
+        assert coded["failure_class"] == "rate_limit"
+        assert not is_upstream_burst_rejection(failure_class=coded["failure_class"], http_status=coded["http_status"])
+
+
+class TestIsUpstreamUsageLimitRejection:
+    @pytest.mark.parametrize(
+        ("error_code", "message"),
+        [
+            ("usage_limit_reached", "The usage limit has been reached"),
+            ("usage_limit_reached", None),
+            # The delivery form that carries no code: the message is the only
+            # evidence there is.
+            ("upstream_error", "The usage limit has been reached"),
+            ("upstream_error", "You've hit your usage limit."),
+            # The same sentence as upstream actually punctuates and wraps it.
+            ("upstream_error", "You’ve hit your usage limit."),
+            ("upstream_error", "The usage-limit has been reached."),
+            ("upstream_error", "The usage limit\nhas been reached"),
+        ],
+    )
+    def test_coded_and_message_derived_usage_limits_are_both_rejections(
+        self,
+        error_code: str,
+        message: str | None,
+    ) -> None:
+        assert is_upstream_usage_limit_rejection(error_code=error_code, message=message) is True
+
+    @pytest.mark.parametrize(
+        ("error_code", "message"),
+        [
+            # Plain throttling proves nothing about the subscription window.
+            ("rate_limit_exceeded", "Rate limit reached"),
+            ("upstream_error", "Account stream concurrency limit reached"),
+            ("upstream_error", None),
+            # A coded envelope keeps what its code said; the sentence may not
+            # reverse a decision the code already made.
+            ("overloaded_error", "The usage limit has been reached"),
+            ("server_error", "The usage limit has been reached"),
+            # Upstream's catch-all for request-shaped failures, whose message
+            # can quote request content back at us.
+            ("invalid_request_error", "The usage limit has been reached"),
+        ],
+    )
+    def test_the_message_decides_only_where_the_code_decided_nothing(
+        self,
+        error_code: str,
+        message: str | None,
+    ) -> None:
+        assert is_upstream_usage_limit_rejection(error_code=error_code, message=message) is False
+
+    def test_the_generic_envelope_is_never_read_from_its_message(self) -> None:
+        """``invalid_request_error`` is upstream's catch-all for request-shaped failures, whose
+        message can quote request content back. The paths that would ask about it forward their
+        HTTP status to the health write as evidence only, so nothing downstream could tell a real
+        rejection from an echo -- and a false bench is worse than the miss it would close."""
+        assert (
+            is_upstream_usage_limit_rejection(
+                error_code="invalid_request_error", message="You've hit your usage limit."
+            )
+            is False
+        )
+
+
+class TestUsageLimitClassificationDeliveryForm:
+    """Upstream picks the delivery form; the classification must not depend on which it picked."""
+
+    @pytest.mark.parametrize("http_status", [429, None])
+    def test_the_same_rejection_classifies_alike_with_and_without_a_status(self, http_status: int | None) -> None:
+        # ``http_status=None`` is the serialized ``response.failed`` frame, which
+        # carries no status at all; 429 is the HTTP body form of the same thing.
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="The usage limit has been reached"),
+            http_status=http_status,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "rate_limit"
+
+    def test_a_spent_account_is_not_filed_as_momentarily_busy(self) -> None:
+        """``upstream_error`` is a transient code, so without the message this lands in the class
+        whose remedy is waiting on the same account -- which an account with nothing left to give
+        can never satisfy."""
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="The usage limit has been reached"),
+            http_status=None,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "rate_limit"
+        assert (
+            is_upstream_burst_rejection(failure_class=result["failure_class"], http_status=result["http_status"])
+            is False
+        )
+
+    def test_an_unrelated_status_less_frame_keeps_its_transient_class(self) -> None:
+        result = classify_upstream_failure(
+            error_code="upstream_error",
+            error=UpstreamError(message="Upstream error"),
+            http_status=None,
+            phase="first_event",
+        )
+
+        assert result["failure_class"] == "retryable_transient"
+
+
 class TestFailoverDecision:
+    @pytest.mark.parametrize(
+        ("downstream_visible", "owner_bound", "candidates_remaining", "expected"),
+        [
+            (False, False, 1, "failover_next"),
+            (True, False, 1, "surface"),
+            (False, True, 1, "surface"),
+            (False, False, 0, "surface"),
+        ],
+    )
+    def test_workspace_unavailable_respects_visibility_and_ownership(
+        self,
+        downstream_visible: bool,
+        owner_bound: bool,
+        candidates_remaining: int,
+        expected: str,
+    ) -> None:
+        assert (
+            failover_decision(
+                failure_class="account_unavailable",
+                downstream_visible=downstream_visible,
+                candidates_remaining=candidates_remaining,
+                owner_bound=owner_bound,
+                same_account_retry_available=True,
+            )
+            == expected
+        )
+
     def test_surface_when_downstream_visible(self) -> None:
         assert (
             failover_decision(
@@ -498,3 +691,98 @@ class TestSelectAccountHealthTier:
         result = select_account(states, routing_strategy="capacity_weighted", deterministic_probe=True)
         assert result.account is not None
         assert result.account.account_id == "healthy"
+
+
+class TestFailoverDecisionOwnerBound:
+    """Owner-bound requests never fail over: retry the same account or surface."""
+
+    @pytest.mark.parametrize("failure_class", ["rate_limit", "quota", "retryable_transient", "non_retryable"])
+    def test_owner_bound_without_same_account_retry_surfaces(self, failure_class: FailureClass) -> None:
+        assert (
+            failover_decision(
+                failure_class=failure_class,
+                downstream_visible=False,
+                candidates_remaining=5,
+                owner_bound=True,
+            )
+            == "surface"
+        )
+
+    def test_owner_bound_with_same_account_retry_retries_same_account(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=0,
+                owner_bound=True,
+                same_account_retry_available=True,
+            )
+            == "retry_same_account"
+        )
+
+    def test_downstream_visible_overrides_owner_bound_retry(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=True,
+                candidates_remaining=3,
+                owner_bound=True,
+                same_account_retry_available=True,
+            )
+            == "surface"
+        )
+
+    def test_same_account_retry_flag_is_ignored_when_not_owner_bound(self) -> None:
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=2,
+                owner_bound=False,
+                same_account_retry_available=True,
+            )
+            == "failover_next"
+        )
+        assert (
+            failover_decision(
+                failure_class="retryable_transient",
+                downstream_visible=False,
+                candidates_remaining=0,
+                owner_bound=False,
+                same_account_retry_available=True,
+            )
+            == "surface"
+        )
+
+    def test_defaults_keep_legacy_positional_free_callers(self) -> None:
+        # websocket/mixin.py and compact.py call without the new keywords.
+        assert (
+            failover_decision(
+                failure_class="rate_limit",
+                downstream_visible=False,
+                candidates_remaining=1,
+            )
+            == "failover_next"
+        )
+
+
+class TestBurstSameAccountBackoffSeconds:
+    def test_exponential_schedule_without_retry_after(self) -> None:
+        assert [
+            burst_same_account_backoff_seconds(index, retry_after_seconds=None)
+            for index in range(1, BURST_SAME_ACCOUNT_MAX_RETRIES + 1)
+        ] == [1.0, 2.0, 4.0]
+        assert BURST_SAME_ACCOUNT_BASE_SECONDS == 1.0
+
+    def test_retry_after_is_a_floor_not_a_ceiling(self) -> None:
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=3) == 3.0
+        assert burst_same_account_backoff_seconds(3, retry_after_seconds=3) == 4.0
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=0) == 1.0
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=-7) == 1.0
+
+    def test_wait_is_capped(self) -> None:
+        assert burst_same_account_backoff_seconds(1, retry_after_seconds=120) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
+        assert burst_same_account_backoff_seconds(10, retry_after_seconds=None) == BURST_SAME_ACCOUNT_MAX_WAIT_SECONDS
+
+    def test_retry_index_below_one_is_clamped(self) -> None:
+        assert burst_same_account_backoff_seconds(0, retry_after_seconds=None) == 1.0

@@ -1,13 +1,5 @@
 import { z } from "zod";
 
-export const ConversationArchiveFileSchema = z.object({
-  name: z.string(),
-  date: z.string().nullable(),
-  sizeBytes: z.number().int().nonnegative(),
-  compressed: z.boolean(),
-  modifiedAt: z.iso.datetime({ offset: true }),
-});
-
 const ConversationArchiveRecordSchema = z.object({
   fileName: z.string().nullable().default(null),
   timestamp: z.iso.datetime({ offset: true }).nullable(),
@@ -30,6 +22,5 @@ export const ConversationArchiveRecordsResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
-export type ConversationArchiveFile = z.infer<typeof ConversationArchiveFileSchema>;
 export type ConversationArchiveRecord = z.infer<typeof ConversationArchiveRecordSchema>;
 export type ConversationArchiveRecordsResponse = z.infer<typeof ConversationArchiveRecordsResponseSchema>;

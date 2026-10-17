@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
+import { type ReactElement, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -13,6 +13,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -25,9 +26,15 @@ export type PasswordSetupDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   disabled?: boolean;
+  children: ReactElement;
 };
 
-export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: PasswordSetupDialogProps) {
+export function PasswordSetupDialog({
+  open,
+  onOpenChange,
+  disabled = false,
+  children,
+}: PasswordSetupDialogProps) {
   const { t } = useTranslation();
   const bootstrapRequired = useAuthStore((s) => s.bootstrapRequired);
   const bootstrapTokenConfigured = useAuthStore((s) => s.bootstrapTokenConfigured);
@@ -75,6 +82,7 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>{children}</DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{t("settings.password.setupDialog.title")}</DialogTitle>

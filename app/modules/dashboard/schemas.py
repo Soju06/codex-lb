@@ -71,6 +71,21 @@ class DepletionResponse(DashboardModel):
 
 WeeklyCreditPaceStatus = Literal["behind", "on_track", "ahead", "danger"]
 WeeklyCreditPaceConfidence = Literal["high", "medium", "low"]
+WeeklyCreditRunwayStatus = Literal["safe", "tight", "runs_dry"]
+
+
+class WeeklyCreditResetEvent(DashboardModel):
+    at: datetime
+    credits_returned: float
+
+
+class WeeklyCreditApiKeyAttribution(DashboardModel):
+    api_key_id: str | None = None
+    name: str
+    requests: int
+    billable_tokens: int
+    cached_tokens: int
+    dominant_model: str
 
 
 class WeeklyCreditPaceResponse(DashboardModel):
@@ -97,6 +112,17 @@ class WeeklyCreditPaceResponse(DashboardModel):
     projected_minimum_remaining_credits: float | None = None
     forecast_burn_rate_credits_per_hour: float | None = None
     scheduled_burn_rate_credits_per_hour: float
+    headroom_percent: float
+    headroom_credits: float
+    burn_rate_recent_credits_per_hour: float | None = None
+    depletion_eta_hours: float | None = None
+    next_relief_in_hours: float
+    next_relief_credits: float
+    reset_events: list[WeeklyCreditResetEvent] = Field(default_factory=list)
+    runway_status: WeeklyCreditRunwayStatus
+    saturated_account_count: int
+    top_api_keys: list[WeeklyCreditApiKeyAttribution] = Field(default_factory=list)
+    add_pro_accounts: int | None = None
     status: WeeklyCreditPaceStatus
     account_count: int
     stale_account_count: int = 0

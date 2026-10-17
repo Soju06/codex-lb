@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select
 
+import app.main as main_module
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
 from app.db.models import HttpBridgeSessionRecord, HttpBridgeSessionState
 from app.db.session import SessionLocal
-from app.main import create_app
 
 pytestmark = pytest.mark.integration
 
@@ -59,7 +61,7 @@ async def test_lifespan_startup_purges_abandoned_ownerless_bridge_rows(db_setup,
         )
         await session.commit()
 
-    app = create_app()
+    app = main_module.create_app()
     async with app.router.lifespan_context(app):
         async with SessionLocal() as session:
             remaining_keys = set(
@@ -76,3 +78,69 @@ async def test_lifespan_startup_purges_abandoned_ownerless_bridge_rows(db_setup,
             )
 
     assert remaining_keys == {"sid-recent-ownerless-startup"}
+
+
+@pytest.mark.asyncio
+async def test_startup_operation_retention_failure_records_sanitized_aggregate(monkeypatch, caplog) -> None:
+    recorded = Mock()
+    purge = AsyncMock(side_effect=RuntimeError("operation_id=secret SQL DELETE FROM transcript"))
+    coordinator = SimpleNamespace(purge_operation_spool_batch=purge)
+
+    monkeypatch.setattr(main_module, "DurableBridgeSessionCoordinator", lambda _session_factory: coordinator)
+    monkeypatch.setattr(main_module, "_record_operation_retention_cleanup", recorded)
+
+    with caplog.at_level("WARNING", logger=main_module.__name__):
+        with pytest.raises(RuntimeError, match="startup retention failed") as captured:
+            await main_module._purge_operation_spool_on_startup(retention_seconds=60.0)
+
+    assert captured.value.__cause__ is None
+    purge.assert_awaited_once()
+    result = recorded.call_args.args[0]
+    assert result.deleted_operations == 0
+    assert result.batches == 0
+    assert result.backlog_likely is True
+    assert result.outcome == "failed"
+    assert "error_type=RuntimeError" in caplog.text
+    assert "operation_id=secret" not in caplog.text
+    assert "DELETE FROM" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_operation_retention_success_logs_aggregate_without_prometheus(monkeypatch, caplog) -> None:
+    recorded = Mock()
+    purge = AsyncMock(return_value=SimpleNamespace(deleted_operations=0, selected_operations=0))
+    coordinator = SimpleNamespace(purge_operation_spool_batch=purge)
+
+    monkeypatch.setattr(main_module, "DurableBridgeSessionCoordinator", lambda _session_factory: coordinator)
+    monkeypatch.setattr(main_module, "PROMETHEUS_AVAILABLE", False)
+    monkeypatch.setattr(main_module, "_record_operation_retention_cleanup", recorded)
+
+    with caplog.at_level("INFO", logger=main_module.__name__):
+        assert await main_module._purge_operation_spool_on_startup(retention_seconds=60.0) == 0
+
+    purge.assert_awaited_once()
+    result = recorded.call_args.args[0]
+    assert result.deleted_operations == 0
+    assert result.batches == 1
+    assert result.backlog_likely is False
+    assert result.outcome == "completed"
+    assert "deleted_operations=0 batches=1 outcome=completed backlog_likely=False" in caplog.text
+    assert "duration_seconds=" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_operation_retention_success_logs_aggregate_when_metrics_disabled(monkeypatch, caplog) -> None:
+    recorded = Mock()
+    purge = AsyncMock(return_value=SimpleNamespace(deleted_operations=0, selected_operations=0))
+    coordinator = SimpleNamespace(purge_operation_spool_batch=purge)
+
+    monkeypatch.setattr(main_module, "DurableBridgeSessionCoordinator", lambda _session_factory: coordinator)
+    monkeypatch.setattr(main_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(main_module, "operation_retention_metrics_enabled", lambda: False)
+    monkeypatch.setattr(main_module, "_record_operation_retention_cleanup", recorded)
+
+    with caplog.at_level("INFO", logger=main_module.__name__):
+        assert await main_module._purge_operation_spool_on_startup(retention_seconds=60.0) == 0
+
+    recorded.assert_called_once()
+    assert "deleted_operations=0 batches=1 outcome=completed backlog_likely=False" in caplog.text

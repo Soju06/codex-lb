@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+from pathlib import Path
 
 import aiohttp
 import anyio
+from anyio.to_thread import run_sync
 
 from app.core.config.settings import get_settings
+from app.core.metadata_store import write_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +19,10 @@ _GITHUB_RELEASES_URL = "https://api.github.com/repos/openai/codex/releases/lates
 _NPM_REGISTRY_URL = "https://registry.npmjs.org/@openai/codex/latest"
 _FETCH_TIMEOUT_SECONDS = 10.0
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
 
 
 class CodexVersionCache:
@@ -25,9 +33,13 @@ class CodexVersionCache:
         self._cached_version: str | None = None
         self._cached_at = 0.0
         self._lock = anyio.Lock()
+        self._retry_at = 0.0
+        self._cache_path: Path | None = None
 
     async def get_version(self) -> str:
         now = time.monotonic()
+        if now < self._retry_at:
+            return self.cached_version_or_default()
         if self._cached_version is not None and now - self._cached_at < self._ttl_seconds:
             return self._cached_version
 
@@ -36,11 +48,23 @@ class CodexVersionCache:
             if self._cached_version is not None and now - self._cached_at < self._ttl_seconds:
                 return self._cached_version
 
+            if now < self._retry_at:
+                return self.cached_version_or_default()
             version = await self._fetch_latest_version()
             if version is not None:
+                if self._cached_version is not None and _version_key(version) < _version_key(self._cached_version):
+                    version = self._cached_version
                 self._cached_version = version
-                self._cached_at = now
+                self._cached_at = time.monotonic()
+                self._retry_at = 0.0
+                if self._cache_path is not None:
+                    try:
+                        await run_sync(write_metadata, self._cache_path, json.dumps({"version": version}))
+                    except OSError:
+                        logger.warning("Unable to persist Codex version", exc_info=True)
                 return version
+
+            self._retry_at = time.monotonic() + min(300.0, self._ttl_seconds)
 
             # Fallback: stale cache value
             if self._cached_version is not None:
@@ -62,6 +86,20 @@ class CodexVersionCache:
         async with self._lock:
             self._cached_version = None
             self._cached_at = 0.0
+            self._retry_at = 0.0
+
+    async def restore(self, path: Path) -> None:
+        self._cache_path = path
+        try:
+            payload = json.loads(await run_sync(path.read_text))
+            version = payload.get("version") if isinstance(payload, dict) else None
+            if isinstance(version, str) and _VERSION_RE.fullmatch(version):
+                floor = self._cached_version or get_settings().model_registry_client_version
+                if _VERSION_RE.fullmatch(floor) and _version_key(version) >= _version_key(floor):
+                    self._cached_version = version
+                    self._cached_at = float("-inf")
+        except (OSError, ValueError):
+            logger.debug("No usable persisted Codex version at %s", path)
 
     def cached_version_or_default(self) -> str:
         """Return the cached Codex client version without any network I/O.
@@ -105,8 +143,13 @@ class CodexVersionCache:
             logger.warning("Failed to fetch latest Codex release from GitHub", exc_info=True)
             return None
 
+        if isinstance(data, dict) and data.get("prerelease") is True:
+            return None
         name = data.get("name") if isinstance(data, dict) else None
-        if not isinstance(name, str) or not _VERSION_RE.match(name):
+        if not isinstance(name, str) or not _VERSION_RE.fullmatch(name):
+            tag = data.get("tag_name") if isinstance(data, dict) else None
+            name = tag.removeprefix("rust-v") if isinstance(tag, str) else None
+        if not isinstance(name, str) or not _VERSION_RE.fullmatch(name):
             logger.warning("Unexpected release name from GitHub: %r", name)
             return None
 
@@ -129,7 +172,7 @@ class CodexVersionCache:
             return None
 
         version = data.get("version") if isinstance(data, dict) else None
-        if not isinstance(version, str) or not _VERSION_RE.match(version):
+        if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
             logger.warning("Unexpected version from npm registry: %r", version)
             return None
 

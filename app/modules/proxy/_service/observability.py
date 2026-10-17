@@ -12,6 +12,9 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    continuity_replay_rejected_total,
+    http_bridge_routing_total,
+    upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
 )
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, canonicalized_tools
@@ -38,6 +41,17 @@ def _service_get_settings() -> Any:
     return cast(Callable[[], Any], _service_global("get_settings", get_settings))()
 
 
+def record_http_bridge_routing(*, stage: str, reason: str) -> None:
+    if http_bridge_routing_total is not None:
+        http_bridge_routing_total.labels(stage=stage, reason=reason).inc()
+    logger.info(
+        "http_bridge_routing stage=%s reason=%s request_id=%s",
+        stage,
+        reason,
+        get_request_id(),
+    )
+
+
 def _record_upstream_transport_decision(
     *,
     downstream_transport: str,
@@ -57,6 +71,51 @@ def _record_upstream_transport_decision(
     ).inc()
 
 
+def _is_reasoning_replay_rejection(
+    *,
+    code: str,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Return whether upstream rejected replayed reasoning items with a 400.
+
+    Observation only: a forked thread that replays reasoning ciphertext minted
+    for another account dies on ChatGPT's 400 and is undetectable from ids,
+    so this predicate feeds ``codex_lb_upstream_reasoning_replay_400_total``
+    to size that residual. It never alters classification, account health,
+    or failover. Without an HTTP status (terminal ``error`` /
+    ``response.failed`` frames) only the ``invalid_request_error`` code
+    qualifies.
+    """
+    if http_status is None:
+        if code != "invalid_request_error":
+            return False
+    elif http_status != 400:
+        return False
+    return "reasoning" in (message or "").lower()
+
+
+def _record_upstream_reasoning_replay_rejection() -> None:
+    if PROMETHEUS_AVAILABLE and upstream_reasoning_replay_400_total is not None:
+        upstream_reasoning_replay_400_total.inc()
+    logger.info("Counted upstream reasoning replay rejection request_id=%s", get_request_id())
+
+
+def _observe_terminal_stream_error_frame(code: str | None, message: str | None) -> None:
+    """Count a reasoning-replay rejection carried by a terminal ``error``/``response.failed`` frame.
+
+    Runs where the frame is classified, before and independent of any account
+    health write: ``invalid_request_error`` is never penalized, so
+    ``_handle_stream_error`` never sees these frames. HTTP status rejections
+    are counted by ``_handle_stream_error`` instead, so each upstream failure
+    is counted exactly once.
+    """
+    if code is None:
+        return
+    if _is_reasoning_replay_rejection(code=code, http_status=None, message=message):
+        _record_upstream_reasoning_replay_rejection()
+
+
 def _maybe_log_proxy_request_shape(
     kind: str,
     payload: ResponsesRequest | ResponsesCompactRequest,
@@ -65,6 +124,9 @@ def _maybe_log_proxy_request_shape(
     sticky_kind: str | None = None,
     sticky_key_source: str | None = None,
     prompt_cache_key_set: bool | None = None,
+    derivation_outcome: str | None = None,
+    thread_cache_identity_mode: str | None = None,
+    thread_cache_identity_from_key: bool | None = None,
 ) -> None:
     trace_channels = _service_get_settings().trace_channels
     if "shape" not in trace_channels:
@@ -90,8 +152,9 @@ def _maybe_log_proxy_request_shape(
     logger.warning(
         "proxy_request_shape request_id=%s kind=%s model=%s stream=%s input=%s "
         "prompt_cache_key=%s prompt_cache_key_raw=%s fields=%s extra=%s headers=%s "
-        "sticky_kind=%s sticky_key_source=%s prompt_cache_key_set=%s"
-        " session_header_present=%s tools_hash=%s model_class=%s",
+        "sticky_kind=%s sticky_key_source=%s derivation_outcome=%s prompt_cache_key_set=%s"
+        " session_header_present=%s tools_hash=%s model_class=%s"
+        " thread_cache_identity_mode=%s thread_cache_identity_from_key=%s",
         request_id,
         kind,
         payload.model,
@@ -104,10 +167,13 @@ def _maybe_log_proxy_request_shape(
         header_keys,
         sticky_kind,
         sticky_key_source,
+        derivation_outcome,
         prompt_cache_key_set,
         session_header_present,
         tools_hash,
         model_class,
+        thread_cache_identity_mode,
+        thread_cache_identity_from_key,
     )
 
 
@@ -190,6 +256,19 @@ def _record_continuity_owner_resolution(
         _hash_identifier_or_none(previous_response_id),
         _hash_identifier_or_none(session_id),
     )
+
+
+def _record_continuity_replay_rejected(*, surface: str, reason: str) -> None:
+    """Count one refusal to move an unavailable owner's turn to another account.
+
+    The recovery gate is a conjunction of independent proofs, so the caller
+    reports the first one that refused; the paired ``owner_unavailable_replay_rejected``
+    bridge event carries the request-scoped identifiers.
+    """
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("continuity_replay_rejected_total", continuity_replay_rejected_total)
+    if prometheus_available and counter is not None:
+        counter.labels(surface=surface, reason=reason).inc()
 
 
 def _format_continuity_fail_closed_diagnostics(

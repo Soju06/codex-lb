@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable
+import re
+from collections.abc import Mapping
+from typing import Iterable, cast
 
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorParam, is_upstream_usage_limit_message
+from app.core.openai.chat_responses import _coerce_number
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -34,12 +37,67 @@ PLAN_TYPE_PRIORITY = (
     "k12",
 )
 
-_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "usage_limit_reached"})
+_USAGE_LIMIT_CODE = "usage_limit_reached"
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", _USAGE_LIMIT_CODE})
 _QUOTA_CODES = frozenset({"insufficient_quota", "usage_not_included", "quota_exceeded"})
+# The one normalized code that carries no classification decision of its own:
+# ``upstream_error`` is what a *missing* code normalizes to, which is exactly
+# the shape a message has to speak for. Every other code -- rate-limit, quota,
+# ``overloaded_error``, any transient code -- already decided what the failure
+# is, and a sentence must not be allowed to reverse that decision.
+#
+# ``invalid_request_error`` is deliberately excluded even though upstream does
+# reuse it for rejections it has no code for. It is also upstream's catch-all
+# for request-shaped 400s, whose message can quote request content back; and the
+# HTTP paths forward their status to the health write as evidence only
+# (``upstream_http_status``), never as the positional ``http_status`` the
+# classifier reads, so a status guard could not tell the two apart here. Reading
+# that code off a message would let an echoed sentence bench a serving account,
+# which is a worse failure than the one this predicate exists to fix.
+_MESSAGE_CLASSIFIED_CODES = frozenset({"upstream_error"})
 _TRANSIENT_CODES = frozenset(
     {"server_error", "upstream_error", "stream_incomplete", "overloaded_error", "server_is_overloaded"}
 )
 _MODEL_CAPACITY_MESSAGE_MARKERS = ("selected model is at capacity",)
+_SAFETY_BLOCK_MESSAGE_PREFIX = "This request was blocked by our safety systems."
+_MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
+    r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"
+)
+
+
+def is_account_neutral_safety_policy_rejection(
+    *,
+    code: str | None,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Match deterministic request-policy blocks that are independent of the account."""
+    return bool(
+        code == "misalignment_policy_violation"
+        and http_status in (None, 400)
+        and isinstance(message, str)
+        and message.startswith(_SAFETY_BLOCK_MESSAGE_PREFIX)
+    )
+
+
+def is_model_scoped_upstream_rejection(message: str | None) -> bool:
+    """Match the ChatGPT model-entitlement rejection for *any* requested model.
+
+    The rejection names the model, not the account: it reproduces on every
+    request for that model and says nothing about whether the serving account
+    can still stream the models it is entitled to. Callers use it to keep the
+    rejection out of account health while leaving failover alone -- a different
+    account may hold a different entitlement.
+
+    Unlike ``_is_account_model_unsupported_error`` this does not require the
+    caller to know the requested model or the normalized error code. Upstream
+    delivers this rejection over the Codex WebSocket with neither ``code`` nor
+    ``type`` populated, which normalizes to the ``upstream_error`` fallback, so
+    a code-gated match misses it on the live stream path.
+    """
+    if message is None:
+        return False
+    return _MODEL_UNSUPPORTED_MESSAGE_RE.fullmatch(" ".join(message.split())) is not None
 
 
 def _is_account_model_unsupported_error(
@@ -63,6 +121,27 @@ def is_upstream_model_capacity_error(message: str | None) -> bool:
     return any(marker in normalized_message for marker in _MODEL_CAPACITY_MESSAGE_MARKERS)
 
 
+def is_upstream_usage_limit_rejection(*, error_code: str, message: str | None) -> bool:
+    """True when upstream says this account's usage limit is spent.
+
+    Either the code names the limit or the message does. The message-only form
+    is how the serialized ``response.failed`` frame arrives -- upstream sends
+    that frame with no status and no error code at all -- and it is the same
+    rejection the coded form carries, so a caller that keys on the literal code
+    alone answers "this account is fine" for a form upstream chooses freely.
+
+    Deliberately status-free: the same rejection arrives with a status and
+    without one, so a status could only make the two forms disagree. The
+    message is allowed to decide only where the code decided nothing; a coded
+    envelope keeps what its code said. Plain ``rate_limit_exceeded`` throttling
+    is not included -- it says the request arrived too fast, not that the
+    subscription window is exhausted.
+    """
+    return error_code == _USAGE_LIMIT_CODE or (
+        error_code in _MESSAGE_CLASSIFIED_CODES and is_upstream_usage_limit_message(message)
+    )
+
+
 def classify_upstream_failure(
     *,
     error_code: str,
@@ -71,10 +150,20 @@ def classify_upstream_failure(
     phase: FailurePhase,
 ) -> ClassifiedFailure:
     failure_class: FailureClass
-    if error_code in _RATE_LIMIT_CODES:
+    if error_code == "deactivated_workspace":
+        failure_class = "account_unavailable"
+    elif error_code in _RATE_LIMIT_CODES:
         failure_class = "rate_limit"
     elif error_code in _QUOTA_CODES:
         failure_class = "quota"
+    elif is_upstream_usage_limit_rejection(error_code=error_code, message=error.get("message")):
+        # The same rejection, in the delivery form that carries no code: a
+        # spent account cannot be waited out on itself, so this must not reach
+        # the transient branch below, where an account with nothing left to
+        # give would be treated as momentarily busy. Only the code that decided
+        # nothing is raised this way; a coded envelope keeps the class its code
+        # chose.
+        failure_class = "rate_limit"
     elif (
         error_code in _TRANSIENT_CODES
         or is_upstream_model_capacity_error(error.get("message"))
@@ -92,6 +181,13 @@ def classify_upstream_failure(
     )
 
 
+def is_upstream_burst_rejection(*, failure_class: FailureClass, http_status: int | None) -> bool:
+    """True for a code-less upstream HTTP 429: a per-account burst/concurrency
+    rejection that ``classify_upstream_failure`` files as ``retryable_transient``
+    (coded 429s land in ``rate_limit`` / ``quota`` and are not bursts)."""
+    return http_status == 429 and failure_class == "retryable_transient"
+
+
 def _header_account_id(account_id: str | None) -> str | None:
     if not account_id:
         return None
@@ -101,11 +197,7 @@ def _header_account_id(account_id: str | None) -> str | None:
 
 
 def _select_accounts_for_limits(accounts: Iterable[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _summarize_window(
@@ -289,39 +381,34 @@ def _normalize_error_code(code: str | None, error_type: str | None) -> str:
     return value.lower()
 
 
-def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
+def _parse_openai_error(payload: Mapping[str, object]) -> OpenAIError | None:
     error = payload.get("error")
-    if not error:
+    if not isinstance(error, Mapping) or not error:
         return None
+    error_mapping = cast(Mapping[str, JsonValue], error)
+    param_state = OpenAIErrorParam.from_mapping(error_mapping)
     try:
-        return OpenAIError.model_validate(error)
+        parsed = OpenAIError.model_validate(error_mapping)
     except ValidationError:
-        if not isinstance(error, dict):
-            return None
-        return OpenAIError(
-            message=_coerce_str(error.get("message")),
-            type=_coerce_str(error.get("type")),
-            code=_coerce_str(error.get("code")),
-            param=_coerce_str(error.get("param")),
-            plan_type=_coerce_str(error.get("plan_type")),
-            resets_at=_coerce_number(error.get("resets_at")),
-            resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
+        parsed = OpenAIError(
+            message=_coerce_str(error_mapping.get("message")),
+            type=_coerce_str(error_mapping.get("type")),
+            code=_coerce_str(error_mapping.get("code")),
+            param=_coerce_str(error_mapping.get("param")),
+            plan_type=_coerce_str(error_mapping.get("plan_type")),
+            resets_at=_coerce_number(error_mapping.get("resets_at")),
+            resets_in_seconds=_coerce_number(error_mapping.get("resets_in_seconds")),
         )
+    parsed.set_param_state(param_state)
+    return parsed
+
+
+def _openai_error_param(error: OpenAIError | None) -> OpenAIErrorParam:
+    return error.param_state if error is not None else OpenAIErrorParam.absent()
 
 
 def _coerce_str(value: JsonValue) -> str | None:
     return value if isinstance(value, str) else None
-
-
-def _coerce_number(value: JsonValue) -> int | float | None:
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _apply_error_metadata(target: OpenAIErrorDetail, error: OpenAIError | None) -> None:

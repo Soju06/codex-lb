@@ -16,15 +16,6 @@ _GZIP_JSONL_SUFFIX = ".jsonl.gz"
 
 
 @dataclass(frozen=True)
-class ConversationArchiveFile:
-    name: str
-    date: str | None
-    size_bytes: int
-    compressed: bool
-    modified_at: datetime
-
-
-@dataclass(frozen=True)
 class ConversationArchivePage:
     records: list[dict[str, Any]]
     total: int
@@ -37,26 +28,6 @@ class ConversationArchiveNotFoundError(ValueError):
 
 class ConversationArchiveInvalidFileError(ValueError):
     pass
-
-
-def list_archive_files() -> list[ConversationArchiveFile]:
-    directory = _archive_dir()
-    if not directory.exists():
-        return []
-
-    files: list[ConversationArchiveFile] = []
-    for path in sorted(_iter_archive_paths(directory), key=lambda item: item.name, reverse=True):
-        stat = path.stat()
-        files.append(
-            ConversationArchiveFile(
-                name=path.name,
-                date=_date_from_filename(path.name),
-                size_bytes=stat.st_size,
-                compressed=path.name.endswith(_GZIP_JSONL_SUFFIX),
-                modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
-            )
-        )
-    return files
 
 
 def read_archive_records(
@@ -143,22 +114,6 @@ def _archive_dir() -> Path:
 def _iter_archive_paths(directory: Path) -> Iterator[Path]:
     yield from directory.glob(f"*{_JSONL_SUFFIX}")
     yield from directory.glob(f"*{_GZIP_JSONL_SUFFIX}")
-
-
-def _date_from_filename(filename: str) -> str | None:
-    if filename.endswith(_GZIP_JSONL_SUFFIX):
-        stem = filename[: -len(_GZIP_JSONL_SUFFIX)]
-    elif filename.endswith(_JSONL_SUFFIX):
-        stem = filename[: -len(_JSONL_SUFFIX)]
-    else:
-        return None
-    for date_format in ("%Y-%m-%dT%H", "%Y-%m-%d"):
-        try:
-            datetime.strptime(stem, date_format)
-        except ValueError:
-            continue
-        return stem
-    return None
 
 
 def _resolve_archive_file(filename: str) -> Path:

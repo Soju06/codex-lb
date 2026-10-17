@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -748,7 +749,7 @@ async def test_release_deletes_own_row_and_demotes(monkeypatch: pytest.MonkeyPat
     election = leader_election_module.LeaderElection(leader_id="node-a")
     assert await election.try_acquire() is True
 
-    await election.release()
+    assert await election.release() is True
 
     assert election.is_leader is False
     assert isinstance(session.statements[1], Delete)
@@ -768,7 +769,7 @@ async def test_release_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     election = leader_election_module.LeaderElection(leader_id="node-a")
     election._is_leader = True
 
-    await election.release()
+    assert await election.release() is False
 
     assert election.is_leader is False
 
@@ -776,6 +777,18 @@ async def test_release_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 def _make_locked_error() -> OperationalError:
     """Build a SQLAlchemy OperationalError wrapping a SQLite ``database is locked``."""
     return OperationalError("UPDATE scheduler_leader ...", {}, Exception("database is locked"))
+
+
+class _DriverLockError(sqlite3.OperationalError):
+    """The driver-raised shape: ``sqlite3`` sets ``sqlite_errorname`` itself."""
+
+    def __init__(self, error_name: str) -> None:
+        super().__init__("database is locked")
+        self.sqlite_errorname = error_name
+
+
+def _make_named_locked_error(error_name: str) -> OperationalError:
+    return OperationalError("UPDATE scheduler_leader ...", {}, _DriverLockError(error_name))
 
 
 @pytest.mark.asyncio
@@ -845,7 +858,7 @@ async def test_release_swallows_database_locked_at_debug(
     election = leader_election_module.LeaderElection(leader_id="node-a")
     election._is_leader = True
     with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
-        await election.release()
+        assert await election.release() is False
 
     assert election.is_leader is False
     assert not any("Failed to release scheduler leader lease" in r.getMessage() for r in caplog.records)
@@ -1152,7 +1165,7 @@ async def test_release_waits_for_detached_body_then_deletes_lease(monkeypatch: p
     election, release, body_finished = await _detach_shielded_body(monkeypatch, session)
 
     asyncio.get_running_loop().call_later(0.1, release.set)
-    await election.release()
+    assert await election.release() is True
 
     assert body_finished.is_set()
     assert election.is_leader is False
@@ -1174,7 +1187,7 @@ async def test_release_skips_delete_while_detached_body_still_draining(monkeypat
     monkeypatch.setattr(leader_election_module, "_RELEASE_DRAIN_GRACE_SECONDS", 0.2)
     statements_before_release = len(session.statements)
 
-    await election.release()
+    assert await election.release() is False
 
     assert not body_finished.is_set()
     assert election.is_leader is False
@@ -1528,7 +1541,7 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
     assert not body_done.is_set()
 
     # Release runs concurrently with the still-draining detached body.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
 
     # Let release wait through several renew intervals (renew_interval = 1s)
     # while the body is still draining. On the pre-fix code release waits without
@@ -1542,7 +1555,7 @@ async def test_release_renews_lease_while_detached_body_drains(monkeypatch: pyte
 
     # The body finishes draining; release then deletes the row it still owns.
     release_body.set()
-    await release_task
+    assert await release_task is True
 
     assert body_done.is_set()
     assert election.is_leader is False
@@ -1618,9 +1631,9 @@ async def test_release_keeper_renews_across_cross_scheduler_stop_gap(monkeypatch
     # The final release runs: it stops the keeper (handing renewal to its own
     # drain), drains the body — here we let it finish — then deletes the row it
     # still owns.
-    release_task: asyncio.Task[None] = asyncio.ensure_future(election.release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(election.release())
     release_body.set()
-    await release_task
+    assert await release_task is True
 
     assert body_done.is_set()
     assert election.is_leader is False
@@ -1642,3 +1655,40 @@ async def test_run_if_leader_runs_body_directly_when_disabled(monkeypatch: pytes
 
     assert await election.run_if_leader(_body) == "ran"
     assert session.statements == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_name", ["SQLITE_BUSY_SNAPSHOT", "SQLITE_BUSY"])
+async def test_best_effort_lease_writes_name_the_lock_mechanism(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error_name: str
+) -> None:
+    # Both best-effort shutdown writes fail fast BY DESIGN: the renewal's
+    # caller tries again on its next cadence and the release is one-shot (the
+    # row is left to expire after its TTL), so neither may sit in an in-place
+    # retry and hold shutdown past its deadline. What they owe an operator is
+    # the mechanism: ``database is locked`` is emitted both for an instant
+    # SQLITE_BUSY_SNAPSHOT and for a SQLITE_BUSY returned only after the full
+    # busy timeout, and only the driver's ``sqlite_errorname`` tells them apart.
+    class _NamedLockedSession(_FakeSession):
+        async def execute(self, statement: Any, params: Any = None) -> _FakeResult:
+            raise _make_named_locked_error(error_name)
+
+    session = _NamedLockedSession("sqlite", [])
+    _install(monkeypatch, session)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    election._is_leader = True
+    with caplog.at_level(logging.DEBUG, logger="app.core.scheduling.leader_election"):
+        assert await election._renew_lease_row() is False
+        assert await election.release() is False
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert any(
+        "renewal contended on a locked database" in message and f"sqlite_errorname={error_name}" in message
+        for message in debug
+    )
+    assert any(
+        "release contended on a locked database" in message and f"sqlite_errorname={error_name}" in message
+        for message in debug
+    )

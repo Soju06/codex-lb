@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import AsyncIterator
 from tempfile import SpooledTemporaryFile
+from unittest.mock import patch
 
+import aiohttp
 import pytest
 import starlette.formparsers as starlette_formparsers
+from aiohttp import web
+from aiohttp.multipart import BodyPartReader
 from httpx import AsyncByteStream
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
+from app.core.clients import proxy as core_proxy
 from app.core.errors import openai_error
 from app.core.multipart import TRANSCRIPTION_MULTIPART_POLICY
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
-from app.db.models import ApiKeyLimit
+from app.db.models import ApiKeyLimit, ApiKeyUsageReservation
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
 
@@ -466,6 +473,177 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
     assert captured["audio_bytes"] == b"\x0a\x0b"
     assert captured["prompt"] == "domain context"
     assert captured["account_id"] == "acc_transcribe_v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_phase", ["forward", "release"])
+async def test_subscription_transcription_cancellation_releases_reservation(
+    async_client, monkeypatch: pytest.MonkeyPatch, cancel_phase: str
+) -> None:
+    await _enable_api_key_auth(async_client)
+    await _import_account(async_client, "acc_transcribe_cancel", "cancel-transcribe@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cancelled-transcription-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    forward_started = asyncio.Event()
+    allow_upstream_finish = asyncio.Event()
+    allow_release_finish = asyncio.Event()
+
+    async def transcribe(
+        self, *, audio_bytes: bytes, filename: str, content_type: str | None, prompt: str | None, headers, api_key=None
+    ):
+        forward_started.set()
+        if cancel_phase == "forward":
+            await allow_upstream_finish.wait()
+        return {"text": "cancelled transcription"}
+
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", transcribe)
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+    release_calls = 0
+    original_release = proxy_api._release_reservation
+
+    async def tracked_release(reservation):
+        nonlocal release_calls
+        release_calls += 1
+        release_started.set()
+        if cancel_phase == "release":
+            await allow_release_finish.wait()
+        else:
+            await asyncio.sleep(0)
+        await original_release(reservation)
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", tracked_release)
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {key}"},
+            data={"model": "gpt-4o-transcribe"},
+            files={"file": ("sample.wav", b"\x01\x02", "audio/wav")},
+        )
+    )
+    if cancel_phase == "forward":
+        await asyncio.wait_for(forward_started.wait(), timeout=1)
+    else:
+        await asyncio.wait_for(release_started.wait(), timeout=1)
+    request_task.cancel()
+    allow_release_finish.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+    finally:
+        allow_upstream_finish.set()
+        allow_release_finish.set()
+    assert release_started.is_set()
+    assert release_finished.is_set()
+    assert release_calls == 1
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(
+                ApiKeyUsageReservation.api_key_id == key_id, ApiKeyUsageReservation.model == "gpt-4o-transcribe"
+            )
+        )
+        reservation = result.scalar_one()
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert (reservation.status, limits[0].current_value) == ("released", 0)
+
+
+@pytest.mark.asyncio
+async def test_v1_audio_transcriptions_normalizes_openai_sdk_fingerprint_upstream(async_client, monkeypatch) -> None:
+    await _import_account(async_client, "acc_transcribe_sdk", "sdk-transcribe@example.com")
+    captured_headers: dict[str, str] = {}
+    captured_content_type = ""
+    captured_file = b""
+
+    async def upstream(request: web.Request) -> web.Response:
+        nonlocal captured_content_type, captured_file
+        captured_headers.update(request.headers)
+        captured_content_type = request.headers["Content-Type"]
+        multipart = await request.multipart()
+        file_part = await multipart.next()
+        assert isinstance(file_part, BodyPartReader)
+        captured_file = await file_part.read()
+        return web.json_response({"text": "transcribed by fake upstream"})
+
+    app = web.Application()
+    app.router.add_post("/transcribe", upstream)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    addresses = runner.addresses
+    assert addresses
+    address = addresses[0]
+    assert isinstance(address, tuple)
+    port = address[1]
+    assert isinstance(port, int)
+
+    async def fake_transcribe(
+        audio_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str | None,
+        prompt: str | None,
+        headers,
+        access_token: str,
+        account_id: str | None,
+        base_url=None,
+        session=None,
+    ):
+        del base_url, session
+        async with aiohttp.ClientSession() as client_session:
+            return await core_proxy.transcribe_audio(
+                audio_bytes,
+                filename=filename,
+                content_type=content_type,
+                prompt=prompt,
+                headers=headers,
+                access_token=access_token,
+                account_id=account_id,
+                base_url=f"http://127.0.0.1:{port}",
+                session=client_session,
+                allow_direct_egress=True,
+            )
+
+    monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
+    try:
+        with patch.object(core_proxy.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+            response = await async_client.post(
+                "/v1/audio/transcriptions",
+                data={"model": "gpt-4o-transcribe"},
+                files={"file": ("voice.wav", b"audio bytes", "audio/wav")},
+                headers={
+                    "User-Agent": "OpenAI/JS 4.104.0",
+                    "x-openai-client-user-agent": "OpenAIJS/4.104.0",
+                    "x-stainless-lang": "js",
+                    "x-stainless-package-version": "4.104.0",
+                },
+            )
+    finally:
+        await runner.cleanup()
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "transcribed by fake upstream"}
+    headers = {key.lower(): value for key, value in captured_headers.items()}
+    assert headers["user-agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
+    assert headers["authorization"] == "Bearer access-token"
+    assert headers["chatgpt-account-id"] == "acc_transcribe_sdk"
+    assert not any(key.startswith("x-stainless-") for key in headers)
+    assert not any(key.startswith("x-openai-client-") for key in headers)
+    assert "openai/js" not in headers["user-agent"].lower()
+    assert captured_content_type.startswith("multipart/form-data; boundary=")
+    assert captured_file == b"audio bytes"
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import { ShieldCheck } from "lucide-react";
 import { lazy, Suspense, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
@@ -20,6 +21,7 @@ import {
 	useApiKeyTrends,
 	useApiKeyUsage7Day,
 } from "@/features/apis/hooks/use-apis";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
@@ -37,13 +39,18 @@ const ApiKeyEditDialog = lazy(() =>
 export function ApisPage() {
 	const { t } = useTranslation();
 	const [searchParams, setSearchParams] = useSearchParams();
+	// The backend answers every API-key read with 403 for principals without
+	// `api_keys:read`, so the queries stay idle and the page explains instead.
+	// Mutations still run behind the coarse write alias, so the controls follow it.
+	const canReadKeys = usePermission("api_keys:read");
+	const canWrite = useAuthStore((state) => state.canWrite);
 	const {
 		apiKeysQuery,
 		createMutation,
 		updateMutation,
 		deleteMutation,
 		regenerateMutation,
-	} = useApiKeys();
+	} = useApiKeys({ enabled: canReadKeys });
 
 	const createDialog = useDialogState();
 	const editDialog = useDialogState<ApiKey>();
@@ -77,8 +84,8 @@ export function ApisPage() {
 		[apiKeys, resolvedSelectedKeyId],
 	);
 
-	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null);
-	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null);
+	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null, { enabled: canReadKeys });
+	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null, { enabled: canReadKeys });
 
 	const mutationBusy =
 		createMutation.isPending ||
@@ -104,6 +111,29 @@ export function ApisPage() {
 		if (!editDialog.data) return;
 		await updateMutation.mutateAsync({ keyId: editDialog.data.id, payload });
 	};
+
+	if (!canReadKeys) {
+		return (
+			<div className="animate-fade-in-up space-y-6">
+				<div>
+					<h1 className="text-2xl font-semibold tracking-tight">{t("apis.page.title")}</h1>
+					<p className="mt-1 text-sm text-muted-foreground">
+						{t("apis.page.subtitle")}
+					</p>
+				</div>
+				<div
+					role="status"
+					className="flex flex-col items-center gap-2 rounded-xl border border-dashed bg-card p-8 text-center"
+				>
+					<div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
+						<ShieldCheck className="h-5 w-5 text-primary" aria-hidden="true" />
+					</div>
+					<p className="text-sm font-medium">{t("apis.page.adminOnlyTitle")}</p>
+					<p className="text-xs text-muted-foreground">{t("apis.page.adminOnlyDescription")}</p>
+				</div>
+			</div>
+		);
+	}
 
 	return (
 		<div className="animate-fade-in-up space-y-6">
@@ -148,6 +178,7 @@ export function ApisPage() {
 								selectedKeyId={resolvedSelectedKeyId}
 								onSelect={handleSelectKey}
 								onOpenCreate={() => createDialog.show()}
+								readOnly={!canWrite}
 							/>
 						</div>
 
@@ -158,6 +189,7 @@ export function ApisPage() {
 							usage7DayLoading={usage7DayQuery.isPending}
 							usage7DayError={usage7DayError}
 							busy={mutationBusy}
+							readOnly={!canWrite}
 							onEdit={(apiKey) => editDialog.show(apiKey)}
 							onToggleActive={(apiKey) => {
 								void updateMutation

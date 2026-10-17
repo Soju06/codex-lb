@@ -25,6 +25,7 @@ from app.modules.proxy._service.realtime_live import (
     realtime_call_id_from_location,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 
 def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
@@ -461,7 +462,6 @@ async def test_live_connector_never_archives_frames(monkeypatch: pytest.MonkeyPa
         lambda: SimpleNamespace(
             upstream_connect_timeout_seconds=7.0,
             proxy_downstream_websocket_idle_timeout_seconds=120.0,
-            max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
     )
@@ -800,6 +800,15 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
             raise AssertionError("unreachable")
 
     lease = cast(AccountLease, object())
+    release_started = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    class ContendedLoadBalancer(_FakeLoadBalancer):
+        async def release_account_lease(self, lease) -> None:
+            release_started.set()
+            await finish_release.wait()
+            self.released.append(lease)
+
     account = SimpleNamespace(
         id="account-a",
         status=AccountStatus.ACTIVE,
@@ -814,6 +823,7 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
         return upstream
 
     service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
+    service._load_balancer = ContendedLoadBalancer()
     task = asyncio.create_task(
         service.proxy_realtime_live_websocket(
             cast(Any, downstream),
@@ -825,9 +835,12 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
     )
     await asyncio.wait_for(downstream.accepted_event.wait(), timeout=1)
     task.cancel()
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    task.cancel()
+    finish_release.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=1)
 
     assert downstream.close_codes == [1011]
     assert upstream.close_calls == [(1000, "")]
@@ -836,18 +849,24 @@ async def test_live_sideband_cancellation_closes_both_peers_and_releases_lease()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "status",
+    [AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED],
+    ids=["active", "reauth-required"],
+)
+@pytest.mark.parametrize(
     ("selected_subprotocol", "expected_accepted_subprotocol"),
     [(None, None), ("live.v1", "live.v1")],
     ids=["absent", "offered"],
 )
 async def test_live_sideband_accepts_only_absent_or_offered_upstream_subprotocol(
+    status: AccountStatus,
     selected_subprotocol: str | None,
     expected_accepted_subprotocol: str | None,
 ) -> None:
     lease = cast(AccountLease, object())
     account = SimpleNamespace(
         id="account-a",
-        status=AccountStatus.ACTIVE,
+        status=status,
         access_token_encrypted="encrypted-token",
         chatgpt_account_id="chatgpt-account-a",
         codex_installation_id="installation-a",
@@ -918,10 +937,9 @@ async def test_live_sideband_rejects_an_upstream_subprotocol_the_client_did_not_
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
-        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
     ],
-    ids=["rate-limited", "quota-exceeded", "paused", "reauth-required", "deactivated"],
+    ids=["rate-limited", "quota-exceeded", "paused", "deactivated"],
 )
 async def test_live_sideband_fails_closed_when_fresh_owner_snapshot_is_unavailable(
     status: AccountStatus,
@@ -974,3 +992,56 @@ async def test_live_sideband_unavailable_exact_owner_never_falls_back_or_decrypt
     assert service.selection_calls[0]["redact_sensitive_details"] is True
     assert service.decrypt_calls == []
     assert service._load_balancer.released == [None]
+
+
+class _RecordingScheduler(VirtualScheduler):
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__(clock)
+        self.spawned: list[str] = []
+
+    def create_task(self, coroutine, *, name=None):
+        self.spawned.append(name or getattr(coroutine, "__qualname__", repr(coroutine)))
+        return super().create_task(coroutine, name=name)
+
+
+class _VirtualProxyService(_ProxyService):
+    def __init__(self, *args: Any, clock: VirtualClock, scheduler: VirtualScheduler, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._clock = clock
+        self._scheduler = scheduler
+
+
+@pytest.mark.asyncio
+async def test_live_sideband_owner_mismatch_lease_release_is_scheduler_owned() -> None:
+    clock = VirtualClock()
+    scheduler = _RecordingScheduler(clock)
+    lease = cast(AccountLease, object())
+    selected_account = SimpleNamespace(
+        id="account-b",
+        status=AccountStatus.ACTIVE,
+        access_token_encrypted="encrypted-token",
+        chatgpt_account_id="chatgpt-account-b",
+        codex_installation_id="installation-b",
+    )
+    service = _VirtualProxyService(
+        selected_account,
+        lease,
+        owner_account_id="account-a",
+        clock=clock,
+        scheduler=scheduler,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service.proxy_realtime_live_websocket(
+            cast(Any, _FakeDownstreamWebSocket()),
+            "rtc_example",
+            {},
+            protocol=proxy_websocket_module.RealtimeWebSocketProtocol.LIVE_V3,
+            api_key=_unscoped_api_key(),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert service._load_balancer.released == [lease]
+    # The lease release ran as a scheduler-owned task and was awaited to completion.
+    assert [name for name in scheduler.spawned if name.endswith("release_account_lease")] != []
+    assert scheduler.owned_tasks == frozenset()

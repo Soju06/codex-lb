@@ -10,16 +10,20 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+    UpstreamWebSocket,
+)
+from app.core.clock import REAL_CLOCK, Clock, Scheduler
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import classify_event_type
@@ -28,14 +32,17 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.affinity_observation import AffinityObservation
+from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
@@ -45,6 +52,7 @@ from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -56,7 +64,13 @@ _TTFT_EVENT_TYPES = frozenset(
         "response.reasoning_text.delta",
     }
 )
-_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset(
+    {
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+        "response.custom_tool_call_input.delta",
+    }
+)
 _TTFT_REASONING_EVENT_TYPES = frozenset(
     {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
@@ -68,6 +82,22 @@ _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE = {
 _PENDING_TOOL_CALL_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE)
 _PENDING_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(_PENDING_TOOL_CALL_OUTPUT_ITEM_TYPE_BY_CALL_TYPE.values())
 _TTFT_OUTPUT_ITEM_TYPES = _PENDING_TOOL_CALL_ITEM_TYPES - {"function_call"}
+# Upstream ``response.*`` events that prove the model already ran for a turn.
+# Both relay surfaces flip ``upstream_model_output_seen`` on them; in the
+# Responses protocol the first one is always ``response.output_item.added``.
+_MODEL_OUTPUT_EVENT_TYPES = frozenset(
+    {
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.delta",
+        "response.refusal.delta",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+    }
+)
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
 _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
@@ -167,17 +197,18 @@ def _visible_reasoning_prefix_before_blank_comment_candidate(text: str) -> str:
 
 def _finalize_ttft_reasoning_deltas(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+    *,
+    now: float,
 ) -> float | None:
+    # ``now`` is the caller's owner-clock sample; it stamps every pending
+    # reasoning delta that became visible without a stamp of its own.
     visible_at_values: list[float] = []
-    now: float | None = None
     for pending in pending_reasoning_deltas.values():
         if not _strip_blank_html_comment_lines(pending.text):
             continue
         if pending.visible_at is not None:
             visible_at_values.append(pending.visible_at)
             continue
-        if now is None:
-            now = time.monotonic()
         visible_at_values.append(now)
     pending_reasoning_deltas.clear()
     return min(visible_at_values) if visible_at_values else None
@@ -187,8 +218,11 @@ def _ttft_event_visible_at(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float,
 ) -> float | None:
-    now = time.monotonic()
+    # ``now`` is the caller's owner-clock sample (``clock_for(owner).monotonic()``);
+    # it stamps every visible_at value this event makes visible.
     pending = pending_reasoning_deltas if pending_reasoning_deltas is not None else {}
     event_key = _reasoning_summary_delta_key(payload) if payload is not None else (None, None, None)
     if (
@@ -196,7 +230,7 @@ def _ttft_event_visible_at(
         and not _is_reasoning_summary_interleavable_event(event_type)
         and not (event_type in _TTFT_REASONING_EVENT_TYPES and event_key in pending)
     ):
-        visible_at = _finalize_ttft_reasoning_deltas(pending)
+        visible_at = _finalize_ttft_reasoning_deltas(pending, now=now)
         if visible_at is not None:
             return visible_at
     if event_type == "response.reasoning_summary_text.delta":
@@ -220,7 +254,7 @@ def _ttft_event_visible_at(
             return None
         return previous.visible_at if previous is not None and previous.visible_at is not None else now
     if event_type == "response.reasoning_summary_text.done" and event_key in pending:
-        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)})
+        visible_at = _finalize_ttft_reasoning_deltas({event_key: pending.pop(event_key)}, now=now)
         return visible_at
     if event_type in _TTFT_TOOL_DELTA_EVENT_TYPES:
         if payload is None:
@@ -232,18 +266,26 @@ def _ttft_event_visible_at(
     if event_type in _TTFT_EVENT_TYPES:
         delta = payload.get("delta") if payload is not None else None
         return now if isinstance(delta, str) and bool(delta) else None
-    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+    if event_type not in {"response.output_item.added", "response.output_item.done"} or not isinstance(payload, dict):
         return None
     item = payload.get("item")
-    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+    if not isinstance(item, dict) or item.get("type") not in _TTFT_OUTPUT_ITEM_TYPES:
+        return None
+    if item.get("type") == "custom_tool_call":
+        meaningful = any(isinstance(item.get(key), str) and bool(item[key]) for key in ("input", "arguments"))
+    else:
+        meaningful = any(item.get(key) not in (None, "", {}) for key in ("operation", "patch", "input"))
+    return now if meaningful else None
 
 
 def _is_ttft_event(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] | None = None,
+    *,
+    now: float,
 ) -> bool:
-    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas) is not None
+    return _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now) is not None
 
 
 def _ttft_latency_ms_from_visible_at(visible_at: float | None, started_at: float) -> int | None:
@@ -255,21 +297,27 @@ def _ttft_event_latency_ms(
     payload: dict[str, JsonValue] | None,
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float,
 ) -> int | None:
     return _ttft_latency_ms_from_visible_at(
-        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas), started_at
+        _ttft_event_visible_at(event_type, payload, pending_reasoning_deltas, now=now), started_at
     )
 
 
 def _finalize_ttft_latency_ms(
     pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
     started_at: float,
+    *,
+    now: float,
 ) -> int | None:
-    return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
+    return _ttft_latency_ms_from_visible_at(
+        _finalize_ttft_reasoning_deltas(pending_reasoning_deltas, now=now), started_at
+    )
 
 
 # Stream frames whose parsed payload feeds a real per-event consumer:
-# lifecycle/terminal handling and usage settlement (created/in_progress/
+# lifecycle/terminal handling and usage settlement (created/queued/in_progress/
 # completed/failed/incomplete/error), parallel tool-call rewrite + duplicate
 # side-effect suppression (response.output_item.*), and text-done suppression
 # (response.output_text.done / response.content_part.done). Canonically framed
@@ -278,6 +326,7 @@ def _finalize_ttft_latency_ms(
 _MUST_PARSE_STREAM_EVENT_TYPES = frozenset(
     {
         "response.created",
+        "response.queued",
         "response.in_progress",
         "response.completed",
         "response.failed",
@@ -448,6 +497,23 @@ def _account_selection_recovery_sleep_seconds_from_message(
 
 
 def _account_selection_recovery_sleep_seconds(selection: AccountSelection) -> float | None:
+    """The wait this selection failure earns before the caller re-selects.
+
+    ``hard_affinity_owner_excluded`` is the selector's proof that the hard
+    ``CODEX_SESSION`` owner it resolved is one of the caller's own
+    ``exclude_account_ids``. The owner cannot become selectable while that
+    exclusion holds and a hard row never spills to another account, so the
+    short owner-recovery window earns nothing here: every re-selection would
+    report the same ``hard_affinity_saturated`` until the request budget is
+    spent (7200s on the HTTP bridge), long after the client gave up. Fail
+    closed at once instead -- the same fail-closed the bridge already applies
+    when the request excludes the account its hard session is bound to
+    (``_require_http_bridge_bound_account_not_excluded``) -- and let the
+    client's own retry reach the owner with no exclusion. A genuinely
+    unavailable owner the caller did NOT exclude keeps its recovery wait.
+    """
+    if selection.hard_affinity_owner_excluded:
+        return None
     return _account_selection_recovery_sleep_seconds_from_message(
         selection.error_message,
         error_code=selection.error_code,
@@ -462,9 +528,12 @@ def _account_capacity_wait_payload(
     reason: str | None,
     retry_after_seconds: float | None,
     started_at: float | None = None,
+    now: float,
 ) -> dict[str, JsonValue]:
     wait_started_at = request_state.account_capacity_wait_started_at if request_state is not None else started_at
-    waited_seconds = int(max(0.0, time.monotonic() - wait_started_at)) if wait_started_at is not None else 0
+    # ``now`` must come from the clock that stamped ``wait_started_at``;
+    # callers pass their owner clock sample.
+    waited_seconds = int(max(0.0, now - wait_started_at)) if wait_started_at is not None else 0
     payload: dict[str, JsonValue] = {
         "type": "codex.keepalive",
         "status": "waiting_for_account_capacity",
@@ -488,6 +557,8 @@ async def _sleep_for_account_selection_recovery(
     max_sleep_seconds: float | None = None,
     request_state: "_WebSocketRequestState | None" = None,
     heartbeat: Callable[[float], Awaitable[None]] | None = None,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> bool:
     sleep_seconds = _account_selection_recovery_sleep_seconds(selection)
     if sleep_seconds is None:
@@ -501,7 +572,7 @@ async def _sleep_for_account_selection_recovery(
         request_state.account_capacity_waiting = True
         request_state.account_capacity_wait_reason = selection.error_message
         request_state.account_capacity_wait_started_at = (
-            request_state.account_capacity_wait_started_at or time.monotonic()
+            request_state.account_capacity_wait_started_at or clock.monotonic()
         )
         request_state.account_capacity_wait_retry_after_seconds = sleep_seconds
 
@@ -521,7 +592,7 @@ async def _sleep_for_account_selection_recovery(
             if heartbeat is not None:
                 await heartbeat(remaining)
             chunk = min(remaining, _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS)
-            await asyncio.sleep(chunk)
+            await scheduler.sleep(chunk)
             remaining -= chunk
     finally:
         if request_state is not None:
@@ -651,6 +722,9 @@ class _RefreshFailoverProxy(Protocol):
         http_status: int | None = None,
         *,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
+        retry_after_seconds: float | None = None,
+        burst_cooldown_recorded: bool = False,
+        upstream_http_status: int | None = None,
     ) -> Any: ...
 
 
@@ -812,11 +886,18 @@ class _StreamSettlement:
     error_message: str | None = None
     error: UpstreamError | None = None
     account_health_error: bool = False
+    settlement_order_required: bool = False
     record_success: bool = True
     downstream_visible: bool = False
     downstream_text_visible: bool = False
     response_id: str | None = None
     usage_settlement_transferred: bool = False
+    # Monotonic instant the upstream terminal frame (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed by
+    # ``_stream_once``, before it is yielded downstream. The throughput cohort
+    # sample ends its generation span here; the row's ``latency_ms`` keeps
+    # measuring to the generator's close (downstream flush, upstream EOF).
+    upstream_terminal_at: float | None = None
 
     def reset(self) -> None:
         fresh = type(self)()
@@ -872,11 +953,25 @@ class _DeferredAccountBackoffTracker:
     current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
 
 
+@dataclass(slots=True)
+class _DeferredKeyedStreamHealthPenalty:
+    """Classified account-health write deferred until reservation settlement."""
+
+    account: Account
+    error: UpstreamError
+    code: str
+
+
 @dataclass(eq=False, slots=True)
 class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
     disarmed: bool = False
     response_observed: bool = False
+    # A non-terminal response event (a deferred-reasoning prelude, for
+    # example) proves the attempt was answered midstream even when ordinary
+    # event accounting was deliberately skipped. A later terminal failure
+    # frame must then not be charged as a pre-response strike.
+    non_terminal_response_observed: bool = False
     retry_circuit_failure_recorded: bool = False
     retry_circuit_failure_settled: anyio.Event | None = None
 
@@ -917,6 +1012,12 @@ class _WebSocketRequestState:
     latency_first_upstream_event_ms: int | None = None
     latency_response_create_gate_wait_ms: int | None = None
     latency_bridge_queue_wait_ms: int | None = None
+    # Monotonic instant the upstream terminal event (``response.completed`` /
+    # ``response.failed`` / ``response.incomplete`` / ``error``) was parsed for
+    # this turn, before terminal bookkeeping, API-key settlement and cleanup.
+    # The throughput cohort sample ends its generation span here; the row's
+    # ``latency_ms`` keeps measuring to the end of the finalizer.
+    upstream_terminal_at: float | None = None
     response_create_gate_wait_started_at: float | None = None
     # Monotonic time immediately before the current upstream response.create
     # send. Retries replace this value so admission wait and prior attempts do
@@ -956,14 +1057,10 @@ class _WebSocketRequestState:
     # ``_prepare_websocket_response_create_request`` (replays, archives),
     # which keeps those on the normalized-model check.
     raw_source_model: str | None = None
-    # True when the HTTP route would exclude this request from model-source
-    # routing (``responses_source_route_excluded``: a terminal compaction
-    # trigger, or ``input_file`` references pinned to the uploading
-    # subscription account). The WebSocket source-ownership guards skip such
-    # requests so the owner-routing logic can dispatch them to a subscription
-    # account, exactly like HTTP. ``False`` on request states that were not
-    # built by ``_prepare_websocket_response_create_request``, which keeps
-    # the guards active for those.
+    # True when the Codex HTTP route structurally excludes this request from
+    # model-source routing: a terminal compaction trigger or ``input_file``
+    # references pinned to the uploading subscription account. Previous
+    # response ownership is recorded separately after continuity lookup.
     source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -1008,6 +1105,17 @@ class _WebSocketRequestState:
     # genuine delta-only client has no other way to convey prior context and
     # must stay anchored.
     proxy_injected_anchor_had_full_resend_payload: bool = False
+    # Process-local denial generation captured before any canonical session
+    # exists. A detached predecessor can reject the anchor while the request
+    # is waiting for owner resolution; retain that generation through retries
+    # so the successor's final dispatch fence still fails closed.
+    denied_proxy_injected_anchor_fence_generation_at_prepare: int | None = None
+    # Generation equality alone cannot distinguish a request captured after a
+    # denial from one captured before it. Preserve the tombstone observation on
+    # the prepared request so a stale durable lookup cannot be redispatched.
+    denied_proxy_injected_anchor_fence_response_id: str | None = None
+    denied_proxy_injected_anchor_fence_request_id: str | None = None
+    denied_proxy_injected_anchor_fence_was_already_denied: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -1019,6 +1127,38 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Memo for the account installation-id stamp applied to ``request_text`` /
+    # ``fresh_upstream_request_text`` on the HTTP bridge submit path. The stamp
+    # is re-applied at several submit and retry sites; these fields remember the
+    # exact ``str`` objects the last stamp returned for ``codex_installation_id``
+    # so an already-stamped object is recognised by identity instead of being
+    # decoded and re-encoded again. Every text rewrite yields a new ``str``
+    # object and an account swap changes the id, so both miss automatically.
+    installation_stamp_installation_id: str | None = None
+    installation_stamp_text: str | None = None
+    installation_stamp_fresh_text: str | None = None
+    # Set only on the internally constructed one-shot request that replaces an
+    # explicitly rejected stale anchor with a verified full-history payload.
+    # It may bypass an older hard-key retry circuit without deleting that
+    # circuit or weakening admission for ordinary client retries.
+    verified_stale_anchor_replay: bool = False
+    # Snapshot of the hard-key circuit observed when the stale-anchor replay
+    # was authorized. ``captured=True`` with ``generation=None`` proves that no
+    # circuit existed; a newer local/durable failure must suppress submit.
+    verified_stale_anchor_retry_circuit_generation_captured: bool = False
+    verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
+    verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
+    verified_stale_anchor_quarantine_generation: int | None = None
+    # The exact half-open lease this request's admission claimed (0.0 when
+    # it claimed none); released by the submit finalizer whenever the probe
+    # was never dispatched, so no pre-dispatch exit can strand the lease.
+    claimed_half_open_until: float = 0.0
+    # True while the submit owns an admission-waiter registration taken at
+    # submit entry, before the retry-circuit gate, that the dispatch path has
+    # not yet taken over. It keeps the turn visible to a concurrent
+    # cooldown-suppressed sibling deciding whether the shared session is
+    # idle; every pre-dispatch exit releases it.
+    admission_waiter_preregistered: bool = False
     # Stable fingerprint used by the durable recovery-attempt journal. It is
     # populated only for a proof-gated fresh replay candidate.
     recovery_attempt_fingerprint: str | None = None
@@ -1044,16 +1184,17 @@ class _WebSocketRequestState:
     # True after an existing UNKNOWN operation is claimed for this attempt.
     # If admission fails before send, cleanup must restore UNKNOWN rather than
     # treating the pre-existing row like a newly-created operation.
-    operation_recovery_claimed: bool = False
     # True only when this request created the durable operation row. A
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
     operation_created: bool = False
+    operation_rebound: bool = False
+    operation_rebound_from_session_id: str | None = None
+    operation_rebound_from_account_id: str | None = None
+    operation_rebound_from_model: str | None = None
+    operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
-    # Immutable durable attempt generation. Recovery claims increment the
-    # operation's dispatch count before sending a replacement attempt.
-    operation_attempt_generation: int = 0
     # Last response identity successfully written to the durable operation.
     # Retry setup may clear the active response before a replacement is
     # acknowledged, but fallback settlement must still fence against this ID.
@@ -1076,7 +1217,7 @@ class _WebSocketRequestState:
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
-    error_param_override: str | None = None
+    error_param_override: OpenAIErrorParam | JsonValue | None = None
     failure_phase_override: str | None = None
     failure_detail_override: str | None = None
     upstream_error_code_override: str | None = None
@@ -1084,11 +1225,22 @@ class _WebSocketRequestState:
     response_event_count: int = 0
     last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
+    # Terminal WebSocket error sanitization records continuity telemetry once;
+    # later serializers preserve the normalized fields without recording it a
+    # second time.
+    websocket_terminal_error_fields_sanitized: bool = False
     previous_response_not_found_rewritten: bool = False
+    # A canonical stale-anchor code with malformed present ``param`` may be
+    # matched for masking, but must never authorize replay.
+    previous_response_not_found_recovery_blocked: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
     previous_response_owner_session_id: str | None = None
+    # Subscription account proven to own ``previous_response_id`` by the
+    # continuity index/request-log lookup. Identifier syntax is never used as
+    # an ownership signal, so ``None`` leaves configured source routing intact.
+    previous_response_owner_account_id: str | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -1097,8 +1249,8 @@ class _WebSocketRequestState:
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    affinity_observation: AffinityObservation | None = None
     thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
-    suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
@@ -1118,6 +1270,11 @@ class _WebSocketRequestState:
     useragent: str | None = None
     useragent_group: str | None = None
     conversation_id: str | None = None
+    # The Responses payload's own ``conversation``, distinct from the client
+    # log's ``conversation_id`` above. It is account-scoped continuity with no
+    # dedicated owner index, so the raw path cannot prove the bridge session's
+    # owner for it.
+    payload_conversation_bound: bool = False
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
@@ -1128,8 +1285,18 @@ class _WebSocketRequestState:
     deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
     deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
     deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+    # Classified health writes (mark_rate_limit / mark_quota_exceeded /
+    # record_error) deferred by keyed pre-created retry branches until this
+    # request's API-key reservation settles or its fallback release commits
+    # (settlement-ordering invariant). Entries drop unapplied when neither
+    # confirms.
+    deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
+    # Armed together with the created suppression when the client already saw
+    # ``response.in_progress`` from the failed attempt, so the replay's
+    # duplicate prelude frame is dropped and the lifecycle stays single.
+    suppress_next_in_progress_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
@@ -1192,16 +1359,27 @@ class _HTTPBridgeSession:
     admission_waiter_count: int = 0
     request_service_tier: str | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
-    lifecycle_lock: anyio.Lock = field(default_factory=anyio.Lock)
-    recovery_alias_lock: anyio.Lock = field(default_factory=anyio.Lock)
+    lifecycle_lock: anyio.Lock = field(default_factory=fast_lock)
+    recovery_alias_lock: anyio.Lock = field(default_factory=fast_lock)
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False
+    access_token_expires_at: float | None = None
     prewarm_lock: anyio.Lock | None = None
     upstream_turn_state: str | None = None
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
+    # The live session keeps only its current denial tombstone.  Historical
+    # ids remain in the process-local fence ledger while prepared requests pin
+    # them, so this carrier cannot grow with every denied sibling anchor.
+    denied_proxy_injected_anchor_ids: set[str] = field(default_factory=set)
+    # Denials whose durable or local alias cleanup still needs a retry.  This
+    # is separate from the current tombstone carrier: a sibling-advanced
+    # denial remains fenced for pinned requests, but is not unresolved cleanup
+    # and may be retired when the session closes.
+    denied_proxy_injected_anchor_cleanup_pending: set[str] = field(default_factory=set)
+    denied_proxy_injected_anchor_generation: int = 0
     alias_registration_generation: int = 0
     turn_state_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
@@ -1218,6 +1396,7 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
+    last_upstream_event_generation: int = 0
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
@@ -1250,6 +1429,24 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+    # Upstream frames that proved transport liveness but matched no pending
+    # request. They are dropped from the downstream queues, so without this
+    # counter a pre-response bridge timeout cannot tell "upstream said nothing"
+    # apart from "upstream spoke and our matching lost the frame".
+    unmatched_upstream_liveness_count: int = 0
+
+    def replace_connection(
+        self,
+        account: Account,
+        headers: dict[str, str],
+        upstream: UpstreamWebSocket,
+        access_token_expires_at: float | None,
+    ) -> None:
+        """Replace account-bound transport state as one in-memory operation."""
+        self.account = account
+        self.headers = headers
+        self.upstream = upstream
+        self.access_token_expires_at = access_token_expires_at
 
     def claim_liveness_settlement(self) -> bool:
         """Claim whole-deque settlement for a liveness-failed submitter.
@@ -1384,11 +1581,21 @@ class _WebSocketUpstreamControl:
 
 @dataclass(slots=True)
 class _DownstreamWebSocketActivity:
-    last_activity_at: float = field(default_factory=time.monotonic)
+    """Downstream websocket liveness stamps, read with the owner's clock.
+
+    ``clock`` is the owner's collaborator (``clock_for(proxy)``); the real
+    default keeps the previous ``time.monotonic`` stamps verbatim.
+    """
+
+    clock: Clock = field(default=REAL_CLOCK, kw_only=True)
+    last_activity_at: float = field(init=False)
     disconnected: bool = False
 
+    def __post_init__(self) -> None:
+        self.last_activity_at = self.clock.monotonic()
+
     def mark(self) -> None:
-        self.last_activity_at = time.monotonic()
+        self.last_activity_at = self.clock.monotonic()
 
     def mark_disconnected(self) -> None:
         self.disconnected = True
@@ -1476,13 +1683,22 @@ def _mark_response_create_attempt_observed(
     attempt = request_state.response_create_attempt
     if attempt is not None:
         attempt.response_observed = True
+        if event_type not in {"response.failed", "response.incomplete"}:
+            attempt.non_terminal_response_observed = True
 
 
-def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
+def _record_response_event(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+    *,
+    now: float,
+) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
     _mark_response_create_attempt_observed(request_state, event_type)
-    request_state.last_upstream_activity_at = time.monotonic()
+    # ``now`` is the owner clock sample the bridge/websocket idle deadlines are
+    # later compared against; callers pass ``clock_for(owner).monotonic()``.
+    request_state.last_upstream_activity_at = now
     if event_type in {"response.failed", "response.incomplete"}:
         return
     request_state.response_event_count += 1
@@ -1497,13 +1713,24 @@ def _websocket_request_can_replay_before_visible_output(
         return False
     if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
+    # The bounded clean-close retry is a pre-created affordance. An accepted
+    # lifecycle (``replay_downstream_response_id`` captured) is re-sent exactly
+    # once; a clean close of the replacement socket before its
+    # ``response.created`` surfaces one terminal under the visible id instead
+    # of a third send (openspec: retry-accepted-output-free-capacity-failures).
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry
         and request_state.replay_count == 1
         and request_state.response_event_count == 0
         and request_state.clean_close_replay_count == 0
+        and request_state.replay_downstream_response_id is None
     ):
         return False
+    # A sequenced downstream frame pins the request to its socket: a fresh
+    # upstream generation restarts ``sequence_number`` from zero (openspec
+    # requirement "Direct WebSocket replay never mixes numeric response
+    # sequences"). The accepted-lifecycle replay does not widen this; the
+    # created-only ``generate: false`` prewarm keeps its watermark-0 exception.
     sequenced_created_only_prewarm = (
         request_state.generate_false_prewarm
         and request_state.last_downstream_sequence_number == 0
@@ -1524,15 +1751,67 @@ def _websocket_request_can_replay_before_visible_output(
     precreated_pending = request_state.response_id is None and request_state.awaiting_response_created
     if precreated_pending and request_state.previous_response_id is not None and not has_retry_safe_fresh_payload:
         return False
-    created_only_pending = (
-        request_state.response_id is not None
-        and not request_state.awaiting_response_created
-        and request_state.response_event_count <= 1
-        and (request_state.previous_response_id is None or has_retry_safe_fresh_payload)
+    accepted_lifecycle_only_pending = _websocket_request_is_accepted_lifecycle_only(request_state) and (
+        request_state.previous_response_id is None or has_retry_safe_fresh_payload
     )
     if precreated_pending and request_state.response_event_count > 0:
         return False
-    return precreated_pending or created_only_pending
+    return precreated_pending or accepted_lifecycle_only_pending
+
+
+def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:
+    """Return whether upstream accepted the request without producing any output.
+
+    True only while the accepted response consists of its lifecycle prelude:
+    ``response.created`` and optionally ``response.in_progress``. In the
+    Responses protocol every other counted ``response.*`` event follows
+    ``response.output_item.added``, which is a model-output event
+    (``_MODEL_OUTPUT_EVENT_TYPES``) that both the HTTP bridge and the direct
+    websocket relay record in ``upstream_model_output_seen``, so "at most two
+    counted events and no output marker" is equivalent to "lifecycle only"
+    even when upstream skips ``response.in_progress``. A buffered reasoning
+    prelude or a pending tool call disqualifies the request. Such a turn has
+    no client-observable or conversational side effect, which is what makes
+    its single-lifecycle replay safe.
+
+    This predicate describes the upstream lifecycle only. Downstream sequence
+    exposure (``last_downstream_sequence_number``) is judged by the callers:
+    ``_websocket_request_can_replay_before_visible_output`` and the accepted
+    capacity classifier both keep refusing a sequenced request, so the direct
+    websocket surface never replays after a finite ``sequence_number`` frame
+    was forwarded.
+    """
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return False
+    if not 1 <= request_state.response_event_count <= 2:
+        return False
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return False
+    if request_state.deferred_reasoning_downstream_texts:
+        return False
+    return not (request_state.pending_function_call_ids or request_state.pending_tool_call_types)
+
+
+def _affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this affinity to one owner account.
+
+    A resolved hard ``CODEX_SESSION`` row narrows selection to its owner
+    (``hard_sticky`` in ``sticky_selection``): turn-state ownership, or the raw
+    compatibility row an old replica persisted for a bare session or thread
+    header, which every policy exposing ``legacy_selection_key`` consults and
+    which wins over the namespaced soft row. The owner is not a request-state
+    pin -- it is read from the database at selection time -- so neither the
+    direct websocket request nor the HTTP bridge session can tell whether its
+    affinity resolves to a hard owner. Any policy that may is treated as
+    owner-bound: excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out. Shared by
+    the direct websocket accepted-replay exclusion and the HTTP bridge one.
+    """
+    return (
+        affinity_policy.kind == StickySessionKind.CODEX_SESSION
+        or affinity_policy.legacy_selection_key is not None
+        or affinity_policy.legacy_continuity_source is not None
+    )
 
 
 def _record_websocket_route_metadata(
@@ -1618,16 +1897,18 @@ async def _wait_for_websocket_continuity_gap(
     *,
     pending_lock: anyio.Lock,
     timeout_seconds: float,
+    scheduler: Scheduler,
+    clock: Clock,
 ) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    deadline = clock.monotonic() + max(0.0, timeout_seconds)
     while True:
         async with pending_lock:
             if not pending_requests:
                 return True
-        remaining = deadline - time.monotonic()
+        remaining = deadline - clock.monotonic()
         if remaining <= 0:
             return False
-        await asyncio.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
+        await scheduler.sleep(min(_WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS, remaining))
 
 
 async def _websocket_full_replay_should_wait_for_continuity(
@@ -1690,6 +1971,29 @@ def _selection_api_key_fair_share_threshold_pct(
     return _api_key_fair_share_threshold_pct_from_settings(settings)
 
 
+def opportunistic_admission_account_scope(settings: object, api_key: ApiKeyData | None) -> set[str] | None:
+    """Account ids an opportunistic admission check may consider; ``None`` is the whole pool.
+
+    The API key's account-assignment scope applies first. Single-account
+    routing then narrows the scope to the selected account, or to nothing when
+    no account is selected or the selected one lies outside the key's scope.
+    This is the exact scope ``ProxyService.check_opportunistic_admission`` has
+    always applied, hoisted so read-only callers (the pool-exhaustion probe)
+    share one definition with the admission gate.
+    """
+    scoped_account_ids = (
+        set(api_key.assigned_account_ids) if api_key is not None and api_key.account_assignment_scope_enabled else None
+    )
+    if getattr(settings, "routing_strategy", None) != "single_account":
+        return scoped_account_ids
+    selected_account_id = (getattr(settings, "single_account_id", None) or "").strip()
+    if not selected_account_id:
+        return set()
+    if scoped_account_ids is None or selected_account_id in scoped_account_ids:
+        return {selected_account_id}
+    return set()
+
+
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:
     if not isinstance(payload, dict):
         return None
@@ -1726,9 +2030,9 @@ def _openai_error_envelope_from_response_failed_payload(
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
 
     envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
+    if "param" in error_payload:
+        param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error_payload))
+        envelope["error"]["param"] = param_state.raw
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:
@@ -1740,3 +2044,79 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(resets_in, int | float):
         error_detail["resets_in_seconds"] = resets_in
     return envelope
+
+
+# --- Upstream websocket transport health -----------------------------------
+#
+# Codex clients only switch to the HTTP transport when the websocket
+# handshake is rejected with HTTP 426 (codex-rs checks
+# ``StatusCode::UPGRADE_REQUIRED`` on connect; in-band error events never
+# trigger the transport fallback). This per-instance marker remembers a
+# recent connect-phase upstream websocket transport failure so the websocket
+# routes can deny the next handshake with 426 and the HTTP paths can pin the
+# upstream transport to HTTP until the websocket upstream proves healthy
+# again.
+
+UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS = 60.0
+_upstream_ws_transport_failure_at: float | None = None
+
+
+def mark_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = time.monotonic()
+
+
+def clear_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = None
+
+
+def websocket_connect_transport_failure_code(
+    exc: ProxyResponseError,
+    *,
+    confirmed_pre_dispatch: bool,
+) -> str | None:
+    """Code of a host-scoped upstream websocket transport failure, else ``None``.
+
+    The discriminator is the provenance the direct upstream open stamps, not
+    the sanitized error code. Codes cannot carry it in either direction: the
+    responses policy preserves the upstream handshake body, so a direct 5xx
+    upgrade rejection surfaces as ``upstream_error`` or whatever the edge
+    returned, while OAuth refresh transport errors, routed-proxy handshakes,
+    TLS verification failures and host-wide network loss all share the
+    ``upstream_unavailable`` envelope and must keep their
+    classify-penalize-failover handling.
+    """
+
+    if confirmed_pre_dispatch or exc.failure_phase != "connect":
+        return None
+    if exc.failure_detail != UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL:
+        return None
+    connect_error = _parse_openai_error(exc.payload)
+    return _normalize_error_code(
+        connect_error.code if connect_error else None,
+        connect_error.type if connect_error else None,
+    )
+
+
+UPSTREAM_STREAM_TRANSPORTS = frozenset({"auto", "http", "websocket"})
+_UPSTREAM_STREAM_TRANSPORT_DEFAULT = "auto"
+
+
+def configured_upstream_stream_transport(dashboard_settings: Any) -> str:
+    """Return the operator-configured upstream stream transport.
+
+    The dashboard row is the only source. The legacy ``"default"`` sentinel
+    (which used to defer to the removed ``CODEX_LB_UPSTREAM_STREAM_TRANSPORT``
+    env var) and any unknown value resolve to ``"auto"`` so a settings-cache
+    snapshot taken before the data migration ran behaves like the migrated row.
+    """
+    configured = getattr(dashboard_settings, "upstream_stream_transport", None)
+    if configured in UPSTREAM_STREAM_TRANSPORTS:
+        return cast(str, configured)
+    return _UPSTREAM_STREAM_TRANSPORT_DEFAULT
+
+
+def upstream_websocket_transport_recently_failed() -> bool:
+    marked_at = _upstream_ws_transport_failure_at
+    return marked_at is not None and time.monotonic() - marked_at < UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS

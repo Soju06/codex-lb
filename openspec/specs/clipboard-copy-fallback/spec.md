@@ -1,7 +1,7 @@
 # clipboard-copy-fallback Specification
 
 ## Purpose
-TBD - created by archiving change add-clipboard-fallback. Update Purpose after archive.
+Governs the shared dashboard clipboard utility. The Clipboard API is unavailable in non-secure contexts and can fail inside focus-trapped dialogs, which made copy controls fail silently in real flows. This capability defines the secure path, the fallback path, and explicit container scoping so copying keeps working inside dialogs.
 ## Requirements
 ### Requirement: Clipboard copy utility supports secure and fallback paths
 The frontend clipboard utility SHALL use `navigator.clipboard.writeText` when available in secure contexts and SHALL fall back to `document.execCommand("copy")` when the Clipboard API is unavailable or blocked.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ import pytest
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.models import CompactResponsePayload
 from app.core.types import JsonValue
+from app.core.utils.sse import ParsedSseBlock, format_sse_event, sse_block_with_payload
 
 pytestmark = pytest.mark.unit
 
@@ -366,6 +368,31 @@ async def test_normalize_reasoning_summary_stream_cleans_complete_marker_inside_
     assert payload["delta"] == "Plan\nNext"
 
 
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_flushes_before_typeless_error() -> None:
+    pending = proxy_api_module.format_sse_event(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_1",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "Plan\n\n<!-- -->",
+        }
+    )
+    typeless_error = "data: " + json.dumps({"error": {"code": "upstream_error"}}) + "\n\n"
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(pending, typeless_error))
+    ]
+
+    assert blocks[0] != typeless_error
+    first_payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert first_payload is not None
+    assert first_payload["delta"] == "Plan"
+    assert blocks[1] == typeless_error
+
+
 def test_normalize_reasoning_summary_part_removes_only_standalone_placeholder() -> None:
     payload, violation = proxy_api_module._normalize_public_stream_payload(
         {
@@ -710,6 +737,177 @@ async def test_normalize_public_responses_stream_masks_initial_previous_response
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_typeless_previous_response_not_found() -> None:
+    raw_response_id = "resp_typeless_stale"
+    source = (
+        "data: "
+        + json.dumps(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": f"Previous response with id '{raw_response_id}' not found.",
+                    "param": "previous_response_id",
+                }
+            }
+        )
+        + "\n\n"
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(source))]
+
+    joined = "".join(blocks)
+    assert "previous_response_not_found" not in joined
+    assert raw_response_id not in joined
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    assert [payload["type"] for payload in payloads] == ["response.created", "response.failed"]
+    response = payloads[1]["response"]
+    assert isinstance(response, dict)
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_masks_nested_stale_error_but_keeps_response_id() -> None:
+    raw_response_id = "resp_nested_stale"
+    source = (
+        "data: "
+        + json.dumps(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": raw_response_id,
+                    "status": "failed",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found",
+                        "message": f"Previous response with id '{raw_response_id}' not found.",
+                        "param": "previous_response_id",
+                    },
+                },
+            }
+        )
+        + "\n\n"
+    )
+
+    blocks = [block async for block in proxy_api_module._normalize_public_responses_stream(_iter_blocks(source))]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    payloads = [payload for payload in payloads if payload is not None]
+    response = payloads[-1]["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == raw_response_id
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error == {
+        "message": "Upstream websocket closed before response.completed",
+        "type": "server_error",
+        "code": "stream_incomplete",
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_responses_payload_recognizes_typeless_error_event() -> None:
+    result = await proxy_api_module._collect_responses_payload(
+        _iter_blocks('data: {"error":{"code":"rate_limit_exceeded","type":"rate_limit_error"}}\n\n')
+    )
+
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_native_malformed_error_param() -> None:
+    source = 'event: error\ndata: {"type":"error","error":{"code":"upstream_error","message":"bad","param":{}}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks[-1] == "data: [DONE]\n\n"
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+    assert payload["type"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_top_level_and_nested_error_params() -> None:
+    source = (
+        'data: {"type":"error","param":[],"status":400,'
+        '"error":{"code":"upstream_error","message":"bad","param":" model "}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "error"
+    assert payload["status"] == 400
+    assert "param" not in payload
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["param"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_sanitizes_response_failed_top_level_param() -> None:
+    source = (
+        'data: {"type":"response.failed","param":{},"response":{"id":"resp_1",'
+        '"error":{"code":"upstream_error","message":"bad","param":[]}}}\n\n'
+    )
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    payload = proxy_api_module._parse_sse_payload(blocks[0])
+    assert payload is not None
+    assert payload["type"] == "response.failed"
+    assert "param" not in payload
+    response = payload["response"]
+    assert isinstance(response, dict)
+    assert response["id"] == "resp_1"
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert "param" not in error
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_responses_stream_keeps_native_valid_error_frame_byte_identical() -> None:
+    source = 'data: {"type":"error","error":{"code":"upstream_error","message":"bad","param":"model"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(source),
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert blocks == [source, "data: [DONE]\n\n"]
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_responses_stream_preserves_comment_keepalive() -> None:
     terminal = 'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}\n\n'
 
@@ -1023,6 +1221,48 @@ async def test_normalize_public_responses_stream_drops_codex_rate_limits_prefix(
     # First event MUST be response.created (OpenAI SDK contract A)
     standard_events = [t for t in event_types if t not in ("[DONE]",)]
     assert standard_events[0] == "response.created"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "diagnostic_position", [0, 1, 2], ids=["before-created", "before-completed", "after-completed"]
+)
+@pytest.mark.parametrize("enforce_contract", [True, False], ids=["public", "native"])
+async def test_normalize_responses_stream_filters_timing_only_for_public_contract(
+    diagnostic_position: int, enforce_contract: bool
+) -> None:
+    upstream_blocks = [
+        'data: {"type":"response.created","sequence_number":0,'
+        '"response":{"id":"resp_timing","object":"response","status":"in_progress","output":[]}}\n\n',
+        'data: {"type":"response.completed","sequence_number":1,'
+        '"response":{"id":"resp_timing","object":"response","status":"completed","output":[]}}\n\n',
+    ]
+    upstream_blocks.insert(diagnostic_position, 'data: {"type":"responsesapi.websocket_timing","latency_ms":12}\n\n')
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(*upstream_blocks), enforce_openai_sdk_contract=enforce_contract
+        )
+    ]
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks]
+    event_types = [payload["type"] for payload in payloads if payload is not None]
+    expected_types = ["response.created", "response.completed"]
+    if not enforce_contract:
+        expected_types.insert(diagnostic_position, "responsesapi.websocket_timing")
+    assert event_types == expected_types
+
+
+@pytest.mark.parametrize(
+    ("event_type", "forwarded"),
+    [("response.future_event", True), ("error", True), ("vendor.future_event", False)],
+)
+def test_public_responses_event_family_contract(event_type: str, forwarded: bool) -> None:
+    payload: dict[str, JsonValue] = {"type": event_type, "code": "server_error", "message": "test error"}
+    normalized, violation = proxy_api_module._normalize_public_stream_payload(payload)
+    assert (normalized is not None) is forwarded
+    if normalized is not None:
+        assert normalized["type"] == event_type
+    assert violation is None
 
 
 @pytest.mark.asyncio
@@ -1882,3 +2122,216 @@ async def test_normalize_public_stream_reframes_data_only_blocks_with_event_name
     reframed = [block for block in blocks if '"delta":"x"' in block]
     assert reframed
     assert reframed[0].startswith("event: response.output_text.delta\n")
+
+
+class _FrozenDict(dict[str, Any]):
+    """Test-only dict that fails loudly when a stream stage mutates a shared payload."""
+
+    def _frozen(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("shared SSE payload was mutated in place")
+
+    __setitem__ = __delitem__ = _frozen
+    clear = pop = popitem = setdefault = update = _frozen
+
+
+class _FrozenList(list[Any]):
+    def _frozen(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("shared SSE payload list was mutated in place")
+
+    __setitem__ = __delitem__ = __iadd__ = _frozen
+    append = extend = insert = pop = remove = clear = sort = reverse = _frozen
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return _FrozenList(_deep_freeze(item) for item in value)
+    return value
+
+
+_CARRIER_STREAM_PAYLOADS: list[dict[str, Any]] = [
+    {"type": "codex.rate_limits", "plan_type": "pro", "rate_limits": {"allowed": True}},
+    {"type": "response.created", "sequence_number": 0, "response": {"id": "resp_c", "status": "in_progress"}},
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 1,
+        "output_index": 0,
+        "item": {"id": "rs_1", "type": "reasoning", "summary": []},
+    },
+    {
+        "type": "response.reasoning_summary_text.delta",
+        "sequence_number": 2,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": "\ud55c\uae00 thinking",
+    },
+    {
+        "type": "response.reasoning_summary_text.delta",
+        "sequence_number": 3,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "delta": " more",
+    },
+    {
+        "type": "response.reasoning_summary_text.done",
+        "sequence_number": 4,
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "text": "\ud55c\uae00 thinking more",
+    },
+    {
+        "type": "response.output_item.done",
+        "sequence_number": 5,
+        "output_index": 0,
+        "item": {
+            "id": "rs_1",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "\ud55c\uae00 thinking more"}],
+        },
+    },
+    {
+        "type": "response.output_item.added",
+        "sequence_number": 6,
+        "output_index": 1,
+        "item": {"id": "msg_1", "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+    },
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 7,
+        "item_id": "msg_1",
+        "output_index": 1,
+        "content_index": 0,
+        "delta": "caf\u00e9 \u2028",
+    },
+    {
+        "type": "response.output_text.delta",
+        "sequence_number": 8,
+        "item_id": "msg_1",
+        "output_index": 1,
+        "content_index": 0,
+        "delta": " done",
+    },
+    {
+        "type": "response.output_item.done",
+        "sequence_number": 9,
+        "output_index": 1,
+        "item": {
+            "id": "msg_1",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "caf\u00e9 \u2028 done", "annotations": []}],
+        },
+    },
+    {
+        "type": "response.completed",
+        "sequence_number": 10,
+        "response": {
+            "id": "resp_c",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        },
+    },
+]
+
+
+def _carrier_blocks(*, frozen: bool) -> list[str]:
+    blocks: list[str] = []
+    for payload in _CARRIER_STREAM_PAYLOADS:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        event_type = payload["type"]
+        block = f"event: {event_type}\ndata: {text}\n\n"
+        blocks.append(sse_block_with_payload(block, _deep_freeze(payload) if frozen else json.loads(text)))
+    return blocks
+
+
+async def _iter_prebuilt_blocks(blocks: list[str]) -> AsyncIterator[str]:
+    for block in blocks:
+        yield block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enforce_openai_sdk_contract", [True, False])
+async def test_normalize_public_responses_stream_reuses_carried_payload_without_mutating_it(
+    enforce_openai_sdk_contract: bool,
+) -> None:
+    plain_blocks = [str(block) for block in _carrier_blocks(frozen=False)]
+    carrier_blocks = _carrier_blocks(frozen=True)
+
+    expected = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_prebuilt_blocks(plain_blocks),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
+    ]
+    actual = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_prebuilt_blocks(carrier_blocks),
+            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        )
+    ]
+
+    # Same bytes whether or not the payload rode along with the block, and no
+    # stage mutated the shared (frozen) payload in place.
+    assert actual == expected
+    assert [type(block) is str for block in expected] == [True] * len(expected)
+    # Unchanged text deltas pass through as the very same carrier object.
+    delta_blocks = [block for block in carrier_blocks if block.startswith("event: response.output_text.delta\n")]
+    assert delta_blocks
+    for delta_block in delta_blocks:
+        assert any(block is delta_block for block in actual)
+    # Re-serialized blocks come back as plain ``str`` (full parse downstream).
+    reserialized = [block for block in actual if not isinstance(block, ParsedSseBlock)]
+    if enforce_openai_sdk_contract:
+        assert reserialized, "created/completed are re-framed on the public surface"
+        assert not any(block.startswith("event: codex.") for block in actual)
+    assert "\ud55c\uae00" in "".join(actual)
+
+
+@pytest.mark.asyncio
+async def test_normalize_reasoning_summary_stream_passes_carrier_through_and_reads_its_payload() -> None:
+    payload = {"type": "response.output_text.delta", "item_id": "msg_1", "delta": "plain"}
+    block = sse_block_with_payload(format_sse_event(payload), _deep_freeze(payload))
+    typeless_error = sse_block_with_payload(
+        'data: {"error":{"code":"server_error","message":"boom"}}\n\n',
+        _deep_freeze({"error": {"code": "server_error", "message": "boom"}}),
+    )
+
+    blocks = [
+        emitted
+        async for emitted in proxy_api_module._normalize_reasoning_summary_stream(_iter_blocks(block, typeless_error))
+    ]
+
+    assert blocks[0] is block
+    assert blocks[1] is typeless_error
+
+
+def test_looks_like_sse_comment_block_fast_path_matches_scan() -> None:
+    blocks = [
+        ": keepalive\n\n",
+        ":\n: two\n\n",
+        "\n\n",
+        "",
+        "   ",
+        "data: [DONE]\n\n",
+        'data: {"type":"x"}\n\n',
+        'event: x\ndata: {"type":"x"}\n\n',
+        "event: x\r\ndata: {}\r\n\r\n",
+        "retry: 100\n\n",
+        ": comment\ndata: {}\n\n",
+    ]
+
+    def scan(event_block: str) -> bool:
+        return bool(event_block.strip()) and all(
+            not line.strip() or line.lstrip().startswith(":") for line in event_block.splitlines()
+        )
+
+    for event_block in blocks:
+        assert proxy_api_module._looks_like_sse_comment_block(event_block) is scan(event_block), repr(event_block)

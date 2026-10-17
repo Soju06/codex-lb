@@ -5,6 +5,7 @@ from starlette.requests import Request
 
 from app.core.middleware.api_firewall import _resolve_client_ip
 from app.core.request_locality import parse_trusted_proxy_networks
+from app.core.socket_peer import _capture_raw_socket_peer
 
 pytestmark = pytest.mark.unit
 
@@ -25,6 +26,7 @@ def _make_request(
         "server": ("testserver", 80),
         "http_version": "1.1",
     }
+    _capture_raw_socket_peer(scope)
     return Request(scope)
 
 

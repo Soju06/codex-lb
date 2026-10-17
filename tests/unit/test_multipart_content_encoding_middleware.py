@@ -9,8 +9,8 @@ from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.types import Message, Scope
 
+import app.core.middleware.request_body_limit as request_body_limit_module
 from app.core.auth.dependencies import validate_dashboard_session, validate_proxy_api_key
-from app.core.config.settings import get_settings
 from app.core.exceptions import DashboardPermissionError, ProxyAuthError
 from app.core.middleware.firewall_cache import get_firewall_ip_cache
 from app.core.middleware.multipart_content_encoding import (
@@ -257,9 +257,8 @@ class _TrackingBody(AsyncByteStream):
 
 
 def _configure_tiny_generic_ingress_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_BODY_BYTES", "5")
-    monkeypatch.setenv("CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", "5")
-    get_settings.cache_clear()
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_BODY_BYTES", 5)
+    monkeypatch.setattr(request_body_limit_module, "MAX_DECOMPRESSED_RESPONSES_BODY_BYTES", 5)
 
 
 @pytest.mark.asyncio
@@ -298,18 +297,14 @@ async def test_production_stack_keeps_dedicated_uploads_auth_first_above_generic
     app.dependency_overrides[validate_proxy_api_key] = reject_proxy
     transport = ASGITransport(app=app)
 
-    try:
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            headers = {
-                "Content-Type": content_type,
-                "Content-Length": "6",
-            }
-            if content_encoding is not None:
-                headers["Content-Encoding"] = content_encoding
-            response = await client.post(path, content=body, headers=headers)
-    finally:
-        get_settings.cache_clear()
-
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": "6",
+        }
+        if content_encoding is not None:
+            headers["Content-Encoding"] = content_encoding
+        response = await client.post(path, content=body, headers=headers)
     assert response.status_code == (403 if path.startswith("/api/") else 401)
     assert authorization_calls == [path]
     assert body.iterations == 0
@@ -334,18 +329,14 @@ async def test_production_stack_keeps_unrelated_multipart_under_generic_guard(
     app.dependency_overrides[validate_proxy_api_key] = reject_proxy
     transport = ASGITransport(app=app)
 
-    try:
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            headers = {
-                "Content-Type": "multipart/form-data; boundary=unused",
-                "Content-Length": "6",
-            }
-            if content_encoding is not None:
-                headers["Content-Encoding"] = content_encoding
-            response = await client.post("/v1/chat/completions", content=body, headers=headers)
-    finally:
-        get_settings.cache_clear()
-
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        headers = {
+            "Content-Type": "multipart/form-data; boundary=unused",
+            "Content-Length": "6",
+        }
+        if content_encoding is not None:
+            headers["Content-Encoding"] = content_encoding
+        response = await client.post("/v1/chat/completions", content=body, headers=headers)
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "payload_too_large"
     assert authorization_calls == []

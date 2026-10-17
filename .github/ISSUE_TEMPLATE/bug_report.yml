@@ -30,8 +30,8 @@ body:
     id: version
     attributes:
       label: codex-lb version
-      description: Output of `codex-lb --version` or the image tag you deployed.
-      placeholder: "1.17.0"
+      description: Version shown in the dashboard status bar (or `GET /api/runtime/version`), or the image tag you deployed.
+      placeholder: "1.25.0 (dashboard status bar, `GET /api/runtime/version`, or the deployed image tag)"
     validations:
       required: true
 
@@ -91,7 +91,7 @@ body:
     attributes:
       label: Model(s) involved
       description: Exact model string(s) from the request that fails.
-      placeholder: "gpt-5-codex, gpt-5.3-codex-spark"
+      placeholder: "gpt-5.6-sol, gpt-5.6-terra"
 
   - type: textarea
     id: what_happened

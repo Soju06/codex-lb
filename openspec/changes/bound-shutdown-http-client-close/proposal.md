@@ -1,34 +1,28 @@
 ## Why
 
-Shutdown bounds every step around the managed HTTP client close but not the
-close itself. The leader lease release is abandoned after 10s and the metrics
-server after 5s, while `await close_http_client()` waits with no deadline on
-one `closed` event per managed client.
-
-Those events are set by each client's own close task. An upstream WebSocket or
-streaming session stalled in TLS or TCP teardown never sets its event, so the
-wait never returns. It sits directly above the `finally` chain that runs
-`mark_process_dead()` and `close_db()`, so a stall there strands both — the
-replica stays marked live in the ring and its pool is never disposed. That
-contradicts the surrounding comment, which states shutdown always proceeds.
+The shutdown path bounds the scheduler-lease release and metrics-server wait,
+but awaits managed HTTP client closure without a deadline. A stalled transport
+can therefore prevent process-death marking and database disposal even after
+request drain and bridge-ring stale marking have completed.
 
 ## What Changes
 
-- Wait for the managed HTTP client close under a 10s deadline, matching the
-  leader lease release budget alongside it.
-- Abandon the wait rather than cancel it when the deadline passes, and log the
-  eventual outcome from a done callback.
+- Limit the managed HTTP client close wait to 10 seconds.
+- Retain the close task until it settles without cancelling client-owned
+  transport cleanup on timeout.
+- Consume close failures and self-cancellation so later teardown still runs.
+- Test the full lifespan with a stalled HTTP close, alongside focused completion,
+  failure, cancellation and task-ownership cases.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- `graceful-shutdown`: post-drain teardown must stay bounded so process-death
-  marking and database disposal always run.
+- `graceful-shutdown`: bounded managed HTTP client close during final teardown.
 
 ## Impact
 
-Limited to the shutdown path in `app/main.py` and its unit tests. Drain
-deadlines, the preStop contract, and client-close semantics are unchanged: the
-clients are still force-closed first, and their teardown keeps running after an
-abandoned wait. No setting, migration, or dependency is added.
+Only the managed HTTP close wait in application shutdown changes. Existing
+request drain, bridge-ring stale marking, leader-lease release, native-egress
+close and database clean-marker rules remain intact. No setting, schema,
+dependency or deployment change is added.

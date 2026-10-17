@@ -32,6 +32,7 @@ from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.account_cache import AccountSelectionCache
+from tests.integration.off_loop_test_client import off_loop_test_client
 
 pytestmark = pytest.mark.integration
 
@@ -685,7 +686,7 @@ async def test_realtime_call_location_drives_supported_account_bound_sideband_ro
         ("rotated-access-token", "acc_live_rotated"),
     ]
 
-    with TestClient(app_instance) as client:
+    async with off_loop_test_client(app_instance) as client:
         app_instance.state.proxy_service._load_balancer._selection_inputs_cache = selection_cache
         with pytest.raises(WebSocketDenialResponse) as denied:
             with client.websocket_connect(
@@ -817,7 +818,7 @@ async def test_realtime_sideband_unexpected_setup_log_is_content_free(
 
     caplog.clear()
     with caplog.at_level(logging.ERROR, logger=proxy_api_module.__name__):
-        with TestClient(app_instance) as client:
+        async with off_loop_test_client(app_instance) as client:
             with pytest.raises(WebSocketDenialResponse) as denied:
                 with client.websocket_connect(
                     "/v1/live/rtc_setup_failure",
@@ -922,7 +923,7 @@ async def test_realtime_sideband_failure_log_is_content_free(
     )
     assert created.status_code == 201
 
-    with TestClient(app_instance) as client:
+    async with off_loop_test_client(app_instance) as client:
         with pytest.raises(WebSocketDenialResponse) as denied:
             with client.websocket_connect(
                 f"/v1/live/{call_id}?intent=quicksilver&token=query-secret",
@@ -1104,7 +1105,7 @@ async def test_realtime_sideband_rejects_reassigned_key_scope_before_owner_use(
     route_calls.clear()
     connector_calls.clear()
 
-    with TestClient(app_instance) as client:
+    async with off_loop_test_client(app_instance) as client:
         with pytest.raises(WebSocketDenialResponse) as denied:
             with client.websocket_connect(
                 f"/v1/live/{call_id}",

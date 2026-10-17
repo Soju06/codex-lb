@@ -1,0 +1,170 @@
+[
+  {
+    "name": "delta",
+    "text": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":17,\"delta\":\"\ud55c\uae00 \ud83d\ude00\\u007f\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"response_id\":\"r2\",\"sequence_number\":17,\"delta\":\"\ud55c\uae00 \ud83d\ude00\\u007f\"}"
+  },
+  {
+    "name": "whitespace",
+    "text": " { \"type\" : \"response.completed\", \"response\" : {\"id\":\"r2\", \"usage\":{\"total_tokens\":3}} } ",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "compact": "{\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"usage\":{\"total_tokens\":3}}}"
+  },
+  {
+    "name": "multiline",
+    "text": "{\n\"type\":\"response.output_text.delta\",\r\n\"delta\":\"hi\"\n}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}"
+  },
+  {
+    "name": "alias",
+    "text": "{\"type\":\"response.text.delta\",\"delta\":\"hello\"}",
+    "interpreted": true,
+    "event_type": "response.text.delta",
+    "compact": "{\"type\":\"response.text.delta\",\"delta\":\"hello\"}"
+  },
+  {
+    "name": "audio_alias",
+    "text": "{\"type\":\"response.audio.delta\",\"delta\":\"AAAA\"}",
+    "interpreted": true,
+    "event_type": "response.audio.delta",
+    "compact": "{\"type\":\"response.audio.delta\",\"delta\":\"AAAA\"}"
+  },
+  {
+    "name": "transcript_alias",
+    "text": "{\"type\":\"response.audio_transcript.delta\",\"delta\":\"text\"}",
+    "interpreted": true,
+    "event_type": "response.audio_transcript.delta",
+    "compact": "{\"type\":\"response.audio_transcript.delta\",\"delta\":\"text\"}"
+  },
+  {
+    "name": "big_integer",
+    "text": "{\"type\":\"response.output_text.delta\",\"n\":1844674407370955161712345,\"delta\":\"x\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"n\":1844674407370955161712345,\"delta\":\"x\"}"
+  },
+  {
+    "name": "numbers",
+    "text": "{\"type\":\"response.output_text.delta\",\"values\":[-0,1.2345678901234567,1e-10,1e300]}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"values\":[-0,1.2345678901234567,1e-10,1e300]}"
+  },
+  {
+    "name": "surrogate_value",
+    "text": "{\"type\":\"response.output_text.delta\",\"delta\":\"\\ud800\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"delta\":\"\\ud800\"}"
+  },
+  {
+    "name": "duplicates",
+    "text": "{\"type\":\"response.completed\",\"type\":\"response.output_text.delta\",\"delta\":\"first\",\"delta\":\"last\"}",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.completed\",\"type\":\"response.output_text.delta\",\"delta\":\"first\",\"delta\":\"last\"}"
+  },
+  {
+    "name": "escaped_key",
+    "text": "{\"t\\u0079pe\":\"response.completed\",\"response\":{\"id\":\"r2\"}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "compact": "{\"t\\u0079pe\":\"response.completed\",\"response\":{\"id\":\"r2\"}}"
+  },
+  {
+    "name": "error",
+    "text": "{\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"busy\"}",
+    "interpreted": true,
+    "event_type": "error",
+    "compact": "{\"type\":\"error\",\"code\":\"rate_limit_exceeded\",\"message\":\"busy\"}"
+  },
+  {
+    "name": "typeless_error",
+    "text": "{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"busy\"}}",
+    "interpreted": true,
+    "event_type": "error",
+    "compact": "{\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"busy\"}}"
+  },
+  {
+    "name": "numeric_type_error",
+    "text": "{\"type\":42,\"error\":{\"message\":\"busy\"}}",
+    "interpreted": true,
+    "event_type": "error",
+    "compact": "{\"type\":42,\"error\":{\"message\":\"busy\"}}"
+  },
+  {
+    "name": "string_type_error",
+    "text": "{\"type\":\"response.failed\",\"error\":{\"message\":\"busy\"}}",
+    "interpreted": true,
+    "event_type": "response.failed",
+    "compact": "{\"type\":\"response.failed\",\"error\":{\"message\":\"busy\"}}"
+  },
+  {
+    "name": "empty_type_error",
+    "text": "{\"type\":\"\",\"error\":{\"message\":\"busy\"}}",
+    "interpreted": true,
+    "event_type": "",
+    "compact": "{\"type\":\"\",\"error\":{\"message\":\"busy\"}}"
+  },
+  {
+    "name": "opaque_error",
+    "text": "{\"error\":\"message\"}",
+    "interpreted": true,
+    "event_type": null,
+    "compact": "{\"error\":\"message\"}"
+  },
+  {
+    "name": "completed",
+    "text": "{\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"status\":\"completed\"}}",
+    "interpreted": true,
+    "event_type": "response.completed",
+    "compact": "{\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"status\":\"completed\"}}"
+  },
+  {
+    "name": "invalid",
+    "text": "not json",
+    "interpreted": false,
+    "event_type": null,
+    "compact": "notjson"
+  },
+  {
+    "name": "non_object",
+    "text": "[1,2]",
+    "interpreted": false,
+    "event_type": null,
+    "compact": "[1,2]"
+  },
+  {
+    "name": "nonfinite",
+    "text": "{\"type\":\"response.output_text.delta\",\"n\":NaN}",
+    "interpreted": false,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"n\":NaN}"
+  },
+  {
+    "name": "surrogate_key",
+    "text": "{\"type\":\"response.output_text.delta\",\"\\ud800\":7}",
+    "interpreted": false,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"\\ud800\":7}"
+  },
+  {
+    "name": "surrogate_type",
+    "text": "{\"type\":\"\\ud800\"}",
+    "interpreted": false,
+    "event_type": "\ud800",
+    "compact": "{\"type\":\"\\ud800\"}"
+  },
+  {
+    "name": "escaped_quotes",
+    "text": "{ \"type\":\"response.output_text.delta\", \"delta\":\"a \\\\\\\" quote \\\\\\\\ \\\\t \\\\n\" }",
+    "interpreted": true,
+    "event_type": "response.output_text.delta",
+    "compact": "{\"type\":\"response.output_text.delta\",\"delta\":\"a \\\\\\\" quote \\\\\\\\ \\\\t \\\\n\"}"
+  }
+]

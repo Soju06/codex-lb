@@ -1,0 +1,914 @@
+[
+  {
+    "name": "canonical",
+    "block": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\ud55c\uae00\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\ud55c\uae00\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\ud55c\uae00\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\ud55c\uae00\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "data_only",
+    "block": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.text.delta'\\n'",
+    "block": "event: response.text.delta\ndata: {\"type\": \"response.text.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.text.delta'\\r'",
+    "block": "event: response.text.delta\rdata: {\"type\": \"response.text.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\r",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\rdata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\rdata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\rdata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.text.delta'\\r\\n'",
+    "block": "event: response.text.delta\r\ndata: {\"type\": \"response.text.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\n\r\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio.delta'\\n'",
+    "block": "event: response.audio.delta\ndata: {\"type\": \"response.audio.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio.delta\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+    "native_type": "response.output_audio.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio.delta\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_audio.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio.delta\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_audio.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio.delta'\\r'",
+    "block": "event: response.audio.delta\rdata: {\"type\": \"response.audio.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\r",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio.delta\rdata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+    "native_type": "response.output_audio.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio.delta\rdata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_audio.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio.delta\rdata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_audio.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio.delta'\\r\\n'",
+    "block": "event: response.audio.delta\r\ndata: {\"type\": \"response.audio.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\n\r\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio.delta\r\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+    "native_type": "response.output_audio.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio.delta\r\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_audio.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio.delta\r\ndata: {\"type\":\"response.output_audio.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_audio.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio_transcript.delta'\\n'",
+    "block": "event: response.audio_transcript.delta\ndata: {\"type\": \"response.audio_transcript.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio_transcript.delta\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+    "native_type": "response.output_audio_transcript.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio_transcript.delta\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_audio_transcript.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio_transcript.delta\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\n\n",
+        "event_type": "response.output_audio_transcript.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio_transcript.delta'\\r'",
+    "block": "event: response.audio_transcript.delta\rdata: {\"type\": \"response.audio_transcript.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\r",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio_transcript.delta\rdata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+    "native_type": "response.output_audio_transcript.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio_transcript.delta\rdata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_audio_transcript.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio_transcript.delta\rdata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\r",
+        "event_type": "response.output_audio_transcript.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.audio_transcript.delta'\\r\\n'",
+    "block": "event: response.audio_transcript.delta\r\ndata: {\"type\": \"response.audio_transcript.delta\", \"delta\": \"\ud55c\uae00\ud83d\ude00\u2028\u007f\"}\r\n\r\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_audio_transcript.delta\r\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+    "native_type": "response.output_audio_transcript.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_audio_transcript.delta\r\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_audio_transcript.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_audio_transcript.delta\r\ndata: {\"type\":\"response.output_audio_transcript.delta\",\"delta\":\"\\ud55c\\uae00\\ud83d\\ude00\\u2028\\u007f\"}\r\n\r\n",
+        "event_type": "response.output_audio_transcript.delta"
+      }
+    ]
+  },
+  {
+    "name": "multiline",
+    "block": "event: response.text.delta\ndata: {\"type\":\"response.text.delta\",\ndata: \"delta\":\"hi\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "malformed_multiline",
+    "block": "event: response.text.delta\ndata: {\"type\":\"response.te\ndata: xt.delta\"}\n\n",
+    "python_normalization": true,
+    "native_text": "event: response.text.delta\ndata: {\"type\":\"response.te\ndata: xt.delta\"}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.text.delta\ndata: {\"type\":\"response.te\ndata: xt.delta\"}\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "event: response.text.delta\ndata: {\"type\":\"response.te\ndata: xt.delta\"}\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "comment_id",
+    "block": "id: 2\n: note\nevent: response.text.delta\ndata: {\"type\":\"response.text.delta\",\"delta\":\"hi\"}\n\n",
+    "python_normalization": false,
+    "native_text": "id: 2\n: note\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "id: 2\n: note\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "id: 2\n: note\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "mismatch_canonical",
+    "block": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+    "native_type": "response.completed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.completed"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.completed\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.completed"
+      }
+    ]
+  },
+  {
+    "name": "malformed_canonical",
+    "block": "event: response.completed\ndata: {broken\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.completed\ndata: {broken\n\n",
+    "native_type": "response.completed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.completed\ndata: {broken\n\n",
+        "event_type": "response.completed"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.completed\ndata: {broken\n\n",
+        "event_type": "response.completed"
+      }
+    ]
+  },
+  {
+    "name": "malformed_data",
+    "block": "data: not json\n\n",
+    "python_normalization": true,
+    "native_text": "data: not json\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: not json\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "data: not json\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "done",
+    "block": "data: [DONE]\n\n",
+    "python_normalization": true,
+    "native_text": "data: [DONE]\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: [DONE]\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "data: [DONE]\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "comment",
+    "block": ": keepalive\n\n",
+    "python_normalization": true,
+    "native_text": ": keepalive\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": ": keepalive\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": ": keepalive\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "error",
+    "block": "data: {\"type\":\"error\",\"message\":\"boom\"}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"error\",\"message\":\"boom\"}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"error\",\"message\":\"boom\"}\n\n",
+        "event_type": "error"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
+  },
+  {
+    "name": "error_envelope",
+    "block": "data: {\"type\":\"response.output_text.delta\",\"error\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"error\":{\"message\":\"boom\"}}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"error\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
+  },
+  {
+    "name": "typeless_error",
+    "block": "data: {\"error\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"error\":{\"message\":\"boom\"}}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"error\":{\"message\":\"boom\"}}\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
+  },
+  {
+    "name": "alias_float",
+    "block": "data: {\"type\":\"response.text.delta\",\"n\":1e-7}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.text.delta\",\"n\":1e-7}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":1e-07}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":1e-07}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "alias_huge_int",
+    "block": "data: {\"type\":\"response.text.delta\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.text.delta\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "alias_surrogate",
+    "block": "data: {\"type\":\"response.text.delta\",\"x\":\"\\ud800\"}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.text.delta\",\"x\":\"\\ud800\"}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"x\":\"\\ud800\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"x\":\"\\ud800\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "unknown_huge_int",
+    "block": "data: {\"type\":\"vendor.event\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"vendor.event\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+    "native_type": "vendor.event",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"vendor.event\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+        "event_type": "vendor.event"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"vendor.event\",\"n\":10000000000000000000000000000000000000000000000000000000000000000000000}\n\n",
+        "event_type": "vendor.event"
+      }
+    ]
+  },
+  {
+    "name": "unknown_surrogate",
+    "block": "data: {\"type\":\"vendor.event\",\"x\":\"\\ud800\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"vendor.event\",\"x\":\"\\ud800\"}\n\n",
+    "native_type": "vendor.event",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"vendor.event\",\"x\":\"\\ud800\"}\n\n",
+        "event_type": "vendor.event"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"vendor.event\",\"x\":\"\\ud800\"}\n\n",
+        "event_type": "vendor.event"
+      }
+    ]
+  },
+  {
+    "name": "duplicate_type",
+    "block": "data: {\"type\":\"wrong\",\"type\":\"response.text.delta\",\"delta\":\"ok\"}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"wrong\",\"type\":\"response.text.delta\",\"delta\":\"ok\"}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "alias_nested",
+    "block": "data: {\"delta\":{\"z\":[true,null,123],\"a\":\"text\"},\"type\":\"response.text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"delta\":{\"z\":[true,null,123],\"a\":\"text\"},\"type\":\"response.output_text.delta\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"delta\":{\"z\":[true,null,123],\"a\":\"text\"},\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"delta\":{\"z\":[true,null,123],\"a\":\"text\"},\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "empty_type",
+    "block": "data: {\"type\":\"\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"\"}\n\n",
+    "native_type": "",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"\"}\n\n",
+        "event_type": ""
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"\"}\n\n",
+        "event_type": ""
+      }
+    ]
+  },
+  {
+    "name": "numeric_type",
+    "block": "data: {\"type\":17}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":17}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":17}\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":17}\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "escaped_alias",
+    "block": "data: {\"type\":\"response.\\u0074ext.delta\"}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.\\u0074ext.delta\"}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.\\u0074ext.delta\"}\n\n",
+        "event_type": "response.text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "alias_with_marker_elsewhere",
+    "block": "data: {\"type\":\"response.\\u0074ext.delta\",\"delta\":\"response.text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"response.text.delta\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"response.text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":\"response.text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "event_only_alias",
+    "block": "event: response.text.delta\n\n",
+    "python_normalization": true,
+    "native_text": "event: response.text.delta\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "no_colon_data",
+    "block": "data\nevent: response.text.delta\ndata: {\"type\":\"response.text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "response.completed",
+    "block": "data: {\"type\": \"response.completed\", \"response\": {\"id\": \"x\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\": \"response.completed\", \"response\": {\"id\": \"x\"}}\n\n",
+    "native_type": "response.completed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\": \"response.completed\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.completed"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\": \"response.completed\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.completed"
+      }
+    ]
+  },
+  {
+    "name": "response.failed",
+    "block": "data: {\"type\": \"response.failed\", \"response\": {\"id\": \"x\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\": \"response.failed\", \"response\": {\"id\": \"x\"}}\n\n",
+    "native_type": "response.failed",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\": \"response.failed\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.failed"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\": \"response.failed\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
+  },
+  {
+    "name": "response.incomplete",
+    "block": "data: {\"type\": \"response.incomplete\", \"response\": {\"id\": \"x\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\": \"response.incomplete\", \"response\": {\"id\": \"x\"}}\n\n",
+    "native_type": "response.incomplete",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\": \"response.incomplete\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.incomplete"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\": \"response.incomplete\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "response.incomplete"
+      }
+    ]
+  },
+  {
+    "name": "vendor.event",
+    "block": "data: {\"type\": \"vendor.event\", \"response\": {\"id\": \"x\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\": \"vendor.event\", \"response\": {\"id\": \"x\"}}\n\n",
+    "native_type": "vendor.event",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\": \"vendor.event\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "vendor.event"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\": \"vendor.event\", \"response\": {\"id\": \"x\"}}\n\n",
+        "event_type": "vendor.event"
+      }
+    ]
+  },
+  {
+    "name": "mixed_unchanged",
+    "block": "id: 2\r\nevent: vendor.event\ndata: {\"type\":\"vendor.event\",\"note\":\"response.text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "id: 2\r\nevent: vendor.event\ndata: {\"type\":\"vendor.event\",\"note\":\"response.text.delta\"}\n\n",
+    "native_type": "vendor.event",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "id: 2\r\nevent: vendor.event\ndata: {\"type\":\"vendor.event\",\"note\":\"response.text.delta\"}\n\n",
+        "event_type": "vendor.event"
+      },
+      {
+        "sdk": true,
+        "text": "id: 2\r\nevent: vendor.event\ndata: {\"type\":\"vendor.event\",\"note\":\"response.text.delta\"}\n\n",
+        "event_type": "vendor.event"
+      }
+    ]
+  },
+  {
+    "name": "mixed_changed",
+    "block": "id: 2\r\nevent: response.text.delta\ndata: {\"type\":\"response.text.delta\"}\n\n",
+    "python_normalization": false,
+    "native_text": "id: 2\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "id: 2\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "id: 2\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "array_payload",
+    "block": "data: [\"response.completed\",null]\n\n",
+    "python_normalization": true,
+    "native_text": "data: [\"response.completed\",null]\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: [\"response.completed\",null]\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "data: [\"response.completed\",null]\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "array_alias",
+    "block": "data: [\"response.text.delta\",null]\n\n",
+    "python_normalization": true,
+    "native_text": "data: [\"response.text.delta\",null]\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: [\"response.text.delta\",null]\n\n",
+        "event_type": null
+      },
+      {
+        "sdk": true,
+        "text": "data: [\"response.text.delta\",null]\n\n",
+        "event_type": null
+      }
+    ]
+  },
+  {
+    "name": "duplicate_nested",
+    "block": "data: {\"type\":\"response.text.delta\",\"delta\":{\"z\":1,\"a\":2,\"z\":3}}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"delta\":{\"z\":3,\"a\":2}}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":{\"z\":3,\"a\":2}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"delta\":{\"z\":3,\"a\":2}}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "alias_negative_zero",
+    "block": "data: {\"type\":\"response.text.delta\",\"n\":-0}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.text.delta\",\"n\":-0}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":0}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"n\":0}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "unicode_separator",
+    "block": "data: {\"type\":\"vendor.event\",\"delta\":\"x\u2028y\u0085z\"}\n\n",
+    "python_normalization": false,
+    "native_text": "data: {\"type\":\"vendor.event\",\"delta\":\"x\u2028y\u0085z\"}\n\n",
+    "native_type": "vendor.event",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"vendor.event\",\"delta\":\"x\u2028y\u0085z\"}\n\n",
+        "event_type": "vendor.event"
+      },
+      {
+        "sdk": true,
+        "text": "data: {\"type\":\"vendor.event\",\"delta\":\"x\u2028y\u0085z\"}\n\n",
+        "event_type": "vendor.event"
+      }
+    ]
+  },
+  {
+    "name": "canonical_escaped_error_key",
+    "block": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": false,
+    "native_text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "native_type": "response.output_text.delta",
+    "expected": [
+      {
+        "sdk": false,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      }
+    ]
+  },
+  {
+    "name": "data_only_escaped_error_key",
+    "block": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "python_normalization": true,
+    "native_text": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+    "native_type": null,
+    "expected": [
+      {
+        "sdk": false,
+        "text": "data: {\"type\":\"response.output_text.delta\",\"\\u0065rror\":{\"message\":\"boom\"}}\n\n",
+        "event_type": "response.output_text.delta"
+      },
+      {
+        "sdk": true,
+        "text": "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"object\":\"response\",\"status\":\"failed\",\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"code\":\"upstream_error\"},\"incomplete_details\":null,\"created_at\":1700000000}}\n\n",
+        "event_type": "response.failed"
+      }
+    ]
+  }
+]

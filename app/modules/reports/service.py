@@ -4,16 +4,31 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.modules.reports.repository import MAX_DAILY_REPORT_DAYS, DailyReportRangeTooLargeError, ReportsRepository
+from app.modules.reports.repository import (
+    MAX_DAILY_REPORT_DAYS,
+    MAX_SPEED_REPORT_DAYS,
+    DailyReportRangeTooLargeError,
+    ReportsRepository,
+)
 from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
     ModelCostEntry,
     ReportComparison,
     ReportComparisonPrevious,
+    ReportsOptionsResponse,
     ReportsResponse,
     ReportSummary,
+    ThreadIdentityFacet,
+    ThreadIdentityResponse,
     UserAgentCostEntry,
+)
+from app.modules.reports.thread_identity import (
+    CACHE_MIN_INPUT_TOKENS,
+    CONVERSATION_MIN_REQUESTS,
+    MAX_THREAD_IDENTITY_DAYS,
+    SWITCH_MAX_GAP_SECONDS,
+    ThreadIdentityFacetRow,
 )
 
 
@@ -35,17 +50,8 @@ class ReportsService:
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
     ) -> ReportsResponse:
-        timezone_info = _resolve_timezone(report_timezone)
-        now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
-        if end_date is None:
-            end_date = now.date()
-        if start_date is None:
-            start_date = end_date - timedelta(days=6)
-        if start_date > end_date:
-            raise InvalidReportDateRangeError("start_date must be on or before end_date")
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
         window_days = (end_date - start_date).days + 1
-        if window_days > MAX_DAILY_REPORT_DAYS:
-            raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
 
         start_at = _local_midnight_to_utc_naive(start_date, timezone_info)
         end_at = _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info)
@@ -123,6 +129,8 @@ class ReportsService:
         )
 
         return ReportsResponse(
+            speed_metrics_available=window_days <= MAX_SPEED_REPORT_DAYS,
+            speed_metrics_max_days=MAX_SPEED_REPORT_DAYS,
             summary=ReportSummary(
                 total_cost_usd=round(summary.total_cost_usd, 4),
                 total_input_tokens=summary.total_input_tokens,
@@ -169,6 +177,75 @@ class ReportsService:
             ],
         )
 
+    async def get_thread_identity(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        report_timezone: str | None = None,
+    ) -> ThreadIdentityResponse:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        window_days = (end_date - start_date).days + 1
+        # Mirrors the speed medians: a range too wide to scan raw request logs
+        # answers "unavailable" instead of costing the database the scan.
+        available = window_days <= MAX_THREAD_IDENTITY_DAYS
+        total_requests = 0
+        keyed = unkeyed = ThreadIdentityFacet()
+        unkeyed_request_share = 0.0
+        if available:
+            facets = await self._repository.aggregate_thread_identity(
+                _local_midnight_to_utc_naive(start_date, timezone_info),
+                _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+            )
+            keyed_row, unkeyed_row = facets[True], facets[False]
+            total_requests = keyed_row.requests + unkeyed_row.requests
+            unkeyed_request_share = _ratio(unkeyed_row.requests, total_requests)
+            keyed = _thread_identity_facet(keyed_row, total_requests, approximate=False)
+            unkeyed = _thread_identity_facet(unkeyed_row, total_requests, approximate=True)
+        return ThreadIdentityResponse(
+            available=available,
+            max_days=MAX_THREAD_IDENTITY_DAYS,
+            window_days=window_days,
+            conversation_min_requests=CONVERSATION_MIN_REQUESTS,
+            switch_max_gap_seconds=SWITCH_MAX_GAP_SECONDS,
+            cache_min_input_tokens=CACHE_MIN_INPUT_TOKENS,
+            total_requests=total_requests,
+            unkeyed_request_share=unkeyed_request_share,
+            keyed=keyed,
+            unkeyed=unkeyed,
+        )
+
+    async def get_options(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        report_timezone: str | None = None,
+        account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
+    ) -> ReportsOptionsResponse:
+        start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
+        models, useragents = await self._repository.list_filter_options(
+            _local_midnight_to_utc_naive(start_date, timezone_info),
+            _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+            account_ids,
+            api_key_ids,
+        )
+        return ReportsOptionsResponse(models=models, useragents=useragents)
+
+
+def resolve_report_range(
+    start_date: date | None,
+    end_date: date | None,
+    report_timezone: str | None,
+) -> tuple[date, date, ZoneInfo | timezone]:
+    timezone_info = _resolve_timezone(report_timezone)
+    end_date = end_date or utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info).date()
+    start_date = start_date or end_date - timedelta(days=6)
+    if start_date > end_date:
+        raise InvalidReportDateRangeError("start_date must be on or before end_date")
+    if (end_date - start_date).days + 1 > MAX_DAILY_REPORT_DAYS:
+        raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
+    return start_date, end_date, timezone_info
+
 
 def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
     if not timezone_name:
@@ -181,3 +258,30 @@ def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
 
 def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:
     return to_utc_naive(datetime.combine(value, datetime.min.time(), tzinfo=timezone_info))
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return round(numerator / denominator, 4) if denominator > 0 else 0.0
+
+
+def _thread_identity_facet(
+    row: ThreadIdentityFacetRow,
+    total_requests: int,
+    *,
+    approximate: bool,
+) -> ThreadIdentityFacet:
+    return ThreadIdentityFacet(
+        requests=row.requests,
+        request_share=_ratio(row.requests, total_requests),
+        unattributed_request_share=_ratio(row.unattributed_requests, row.requests),
+        conversations=row.conversations,
+        mean_accounts_per_conversation=round(row.conversation_account_total / row.conversations, 4)
+        if row.conversations > 0
+        else 0.0,
+        single_account_conversation_share=_ratio(row.single_account_conversations, row.conversations),
+        turns=row.turns,
+        account_switch_rate=_ratio(row.account_switches, row.turns),
+        cache_hit_ratio=_ratio(row.cache_cached_input_tokens, row.cache_input_tokens),
+        cache_sample_input_tokens=row.cache_input_tokens,
+        thread_grouping_approximate=approximate,
+    )

@@ -564,7 +564,6 @@ async def test_startup_loads_persisted_snapshot_before_first_refresh(app_instanc
 
     await _leader_persist(await _refreshed_leader_export())
 
-    monkeypatch.setattr(get_settings(), "model_registry_enabled", True)
     # Keep the real refresh scheduler out of the way: the assertion is about
     # the catalog served *before* the first refresh tick.
     monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _NoopScheduler())
@@ -594,7 +593,6 @@ async def test_model_scheduler_starts_after_invalidation_poller_installed(app_in
             return None
 
     monkeypatch.setattr(invalidation_module, "_poller", None)
-    monkeypatch.setattr(get_settings(), "model_registry_enabled", True)
     monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _ProbeScheduler())
 
     async with app_instance.router.lifespan_context(app_instance):
@@ -669,7 +667,6 @@ async def test_startup_primes_poll_baseline_before_reconcile(app_instance, monke
             return None
 
     monkeypatch.setattr(invalidation_module, "_poller", None)
-    monkeypatch.setattr(get_settings(), "model_registry_enabled", True)
     monkeypatch.setattr(CacheInvalidationPoller, "prime", _tracked_prime)
     monkeypatch.setattr(store_module, "reconcile_model_registry_from_store", _tracked_reconcile)
     monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _ProbeScheduler())

@@ -281,22 +281,6 @@ def json_object_from_argument(argument_value: str) -> dict[str, JsonValue] | Non
     return cast(dict[str, JsonValue], decoded_argument)
 
 
-def parallel_argument_has_code_mode_side_effect(argument_value: str) -> bool:
-    argument = json_object_from_argument(argument_value)
-    if argument is None:
-        return False
-    tool_uses = argument.get("tool_uses")
-    if not isinstance(tool_uses, list):
-        return False
-    return any(
-        isinstance(tool_use, dict)
-        and isinstance(recipient_name := tool_use.get("recipient_name"), str)
-        and recipient_name.removeprefix("functions.")
-        in tool_call_safety.CODE_MODE_DOWNSTREAM_SIDE_EFFECT_TOOL_CALL_NAMES
-        for tool_use in tool_uses
-    )
-
-
 def parallel_argument_has_only_code_mode_side_effects(argument_value: str) -> bool:
     argument = json_object_from_argument(argument_value)
     if argument is None:

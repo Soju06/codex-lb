@@ -75,6 +75,7 @@ class GracefulDrainServer(uvicorn.Server):
         super().handle_exit(sig, frame)
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        shutdown_state.set_post_drain_cleanup_timeout_seconds(self._post_drain_cleanup_timeout_seconds)
         shutdown_state.commit_shutdown(timeout_seconds=self._drain_timeout_seconds)
         remaining = shutdown_state.remaining_drain_timeout_seconds() or 0.0
         drained = await shutdown_state.wait_for_in_flight_drain(

@@ -1,0 +1,6 @@
+- [x] Add report aggregate schema, migration, paced fold, lifecycle mirroring and retention guard.
+- [x] Serve all report totals and options from rollup plus raw complement, preserving filters and timezone semantics.
+- [x] Guard long-window speed computation and disclose omitted metrics.
+- [x] Add bounded server cache, dedicated dashboard options query, query freshness and manual refresh.
+- [x] Verify API parity, fold/restart/retention/lifecycle boundaries, migrations, cache concurrency and dashboard behavior on SQLite and PostgreSQL.
+- [x] Validate static checks and OpenSpec; record benchmark evidence and rollout procedure.

@@ -11,6 +11,7 @@ import type {
   AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
@@ -67,12 +68,12 @@ function QuotaRow({
                   : "text-red-600 dark:text-red-400",
           )}
         >
-          {formatPercentNullable(percent)}
+          {formatPercentNullable(percent, 1)}
         </span>
       </div>
       <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
         <div
-          className={cn("h-full rounded-full transition-all duration-500 ease-out", quotaBarColor(clamped))}
+          className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
         />
       </div>
@@ -223,7 +224,13 @@ function ResetCreditsRow({
   );
 }
 
-export function AccountUsagePanel({
+/** Remount display state when switching to a different account. */
+export function AccountUsagePanel(props: AccountUsagePanelProps) {
+  return <AccountUsagePanelContent key={props.account.accountId} {...props} />;
+}
+
+/** Present the selected account's usage, quota windows, and trend chart. */
+function AccountUsagePanelContent({
   account,
   trends,
   resetCredits,
@@ -233,19 +240,22 @@ export function AccountUsagePanel({
   onReset,
 }: AccountUsagePanelProps) {
   const { t } = useTranslation();
-  const primary = account.usage?.primaryRemainingPercent ?? null;
-  const secondary = account.usage?.secondaryRemainingPercent ?? null;
-  const monthly = account.usage?.monthlyRemainingPercent ?? null;
+  const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
+  const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
+  const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
+  const primary = primaryState.percent;
+  const secondary = secondaryState.percent;
+  const monthly = monthlyState.percent;
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
+  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
+  const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
+  const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
   const primaryTrendPoints = trends?.primary ?? [];
   const secondaryTrendPoints = trends?.secondary ?? [];
   const secondaryScheduledTrendPoints = trends?.secondaryScheduled ?? [];
-  const monthlyOnly =
-    account.windowMinutesMonthly != null &&
-    account.windowMinutesPrimary == null &&
-    account.windowMinutesSecondary == null;
+  const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const hasTrends =
     primaryTrendPoints.length > 0 || secondaryTrendPoints.length > 0 || secondaryScheduledTrendPoints.length > 0;
 
@@ -327,14 +337,18 @@ export function AccountUsagePanel({
           <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.trendTitle")}</h4>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-                5h
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-                {monthlyOnly ? t("common.quota.monthly") : t("common.quota.weekly")}
-              </span>
+              {primaryTrendPoints.length > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+                  5h
+                </span>
+              )}
+              {secondaryTrendPoints.length > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+                  {monthlyOnly ? t("common.quota.monthly") : t("common.quota.weekly")}
+                </span>
+              )}
               {secondaryScheduledTrendPoints.length > 0 ? (
                 <span className="flex items-center gap-1.5">
                   <span className="inline-block h-0 w-4 border-t border-dashed border-chart-2" />
@@ -345,6 +359,7 @@ export function AccountUsagePanel({
           </div>
           <Suspense fallback={<div className="h-[220px]" />}>
             <AccountTrendChart
+              monthly={monthlyOnly}
               primary={primaryTrendPoints}
               secondary={secondaryTrendPoints}
               secondaryScheduled={secondaryScheduledTrendPoints}

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal
 from app.core.auth.dependencies import (
     require_dashboard_write_access,
     set_dashboard_error_format,
@@ -36,7 +37,7 @@ async def list_model_sources(
 async def create_model_source(
     request: Request,
     payload: ModelSourceCreateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ModelSourcesContext = Depends(get_model_sources_context),
 ) -> ModelSourceResponse:
     try:
@@ -46,6 +47,8 @@ async def create_model_source(
     AuditService.log_async(
         "model_source_created",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("model_source", created.id),
         details={"source_id": created.id},
     )
     return created
@@ -56,7 +59,7 @@ async def update_model_source(
     request: Request,
     source_id: str,
     payload: ModelSourceUpdateRequest = Body(...),
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ModelSourcesContext = Depends(get_model_sources_context),
 ) -> ModelSourceResponse:
     try:
@@ -68,6 +71,8 @@ async def update_model_source(
     AuditService.log_async(
         "model_source_updated",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("model_source", updated.id),
         details={"source_id": updated.id},
     )
     return updated
@@ -77,7 +82,7 @@ async def update_model_source(
 async def delete_model_source(
     request: Request,
     source_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
     context: ModelSourcesContext = Depends(get_model_sources_context),
 ) -> Response:
     try:
@@ -87,6 +92,8 @@ async def delete_model_source(
     AuditService.log_async(
         "model_source_deleted",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("model_source", source_id),
         details={"source_id": source_id},
     )
     return Response(status_code=204)

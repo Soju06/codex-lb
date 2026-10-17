@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import inspect
 
 import app.core.auth.dependencies as auth_dependencies
 import app.core.middleware.api_firewall as api_firewall_module
@@ -18,6 +19,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.crypto import TokenEncryptor
 from app.core.middleware.api_firewall import add_api_firewall_middleware
 from app.core.middleware.firewall_cache import get_firewall_ip_cache, reset_firewall_ip_cache_for_testing
+from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -114,6 +116,7 @@ async def test_firewall_middleware_uses_cache_for_repeated_ip(monkeypatch: pytes
 
     app = FastAPI()
     add_api_firewall_middleware(app)
+    add_trusted_proxy_headers_middleware(app)
 
     @app.get("/v1/test")
     async def _v1_test() -> dict[str, str]:
@@ -241,6 +244,19 @@ async def test_account_selection_cache_reuses_inputs_and_invalidates_on_refresh(
     assert usage_repo.primary_calls == 2
     assert usage_repo.secondary_calls == 2
     assert usage_repo.monthly_calls == 2
+
+    # Every read hands out private transient snapshots: mutating a returned row
+    # must not reach the cached copy or the repository row.
+    refreshed.accounts[0].status = AccountStatus.PAUSED
+    refreshed.latest_monthly[account.id].used_percent = 99.0
+    reread = await balancer._load_selection_inputs(model=None)
+    assert reread.accounts[0] is not refreshed.accounts[0]
+    assert reread.accounts[0].status is AccountStatus.ACTIVE
+    assert reread.latest_monthly[account.id].used_percent == 35.0
+    assert inspect(reread.accounts[0]).transient is True
+    assert account.status is AccountStatus.ACTIVE
+    assert monthly.used_percent == 35.0
+    assert accounts_repo.calls == 2
 
 
 # ---------------------------------------------------------------------------

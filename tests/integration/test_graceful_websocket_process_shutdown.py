@@ -50,9 +50,14 @@ async def _wait_until_ready(server: _RunningServer) -> None:
 async def _wait_until_draining(server: _RunningServer) -> dict[str, str]:
     async with httpx.AsyncClient(timeout=0.2) as client:
         for _ in range(100):
-            response = await client.get(f"{server.http_url}/internal/drain/status")
-            checks = response.json()["checks"]
-            if checks["draining"] == "true":
+            # SIGTERM can land between the poll's connect and its response, so a
+            # transport error here means "not draining yet", not a test failure.
+            try:
+                response = await client.get(f"{server.http_url}/internal/drain/status")
+                checks = response.json()["checks"]
+            except httpx.HTTPError:
+                checks = None
+            if checks is not None and checks["draining"] == "true":
                 return checks
             await asyncio.sleep(0.01)
     raise AssertionError("fixture server did not expose the SIGTERM drain barrier")
@@ -178,9 +183,8 @@ async def test_sigint_exits_when_lifespan_absorbs_cleanup_cancellation() -> None
 @pytest.mark.asyncio
 async def test_prestop_commits_deadline_before_sigterm_and_cannot_reopen() -> None:
     async with _run_server(
-        mode="complete",
+        mode="controlled_complete",
         drain_timeout_seconds=2.0,
-        completion_delay_seconds=0.25,
     ) as server:
         async with connect(server.websocket_url) as websocket:
             await websocket.send(json.dumps({"type": "response.create"}))
@@ -213,6 +217,7 @@ async def test_prestop_commits_deadline_before_sigterm_and_cannot_reopen() -> No
                 async with connect(server.websocket_url):
                     pytest.fail("late WebSocket admission unexpectedly succeeded")
 
+            await websocket.send("complete")
             terminal = json.loads(await websocket.recv())
             assert terminal["type"] == "response.completed"
             with pytest.raises(ConnectionClosed):

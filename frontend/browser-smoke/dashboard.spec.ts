@@ -1,7 +1,18 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
 import { DashboardProjectionsSchema } from "../src/features/dashboard/schemas";
+import {
+  createAccountSummary,
+  createDashboardAuthSession,
+  createDashboardOverview,
+  createDashboardProjections,
+  createDashboardSettings,
+  createRequestLogEntry,
+  createRequestLogFilterOptions,
+  createRequestLogsResponse,
+  createTelemetryConsent,
+} from "../src/test/mocks/factories";
 
 const REQUIRED_API_PATHS = [
   "/api/dashboard-auth/session",
@@ -11,6 +22,106 @@ const REQUIRED_API_PATHS = [
   "/api/request-logs",
   "/api/settings/telemetry",
 ] as const;
+
+async function installMobileContainmentFixtures(page: Page, accounts = [
+    createAccountSummary({
+      accountId: "acc_primary",
+      email: "primary-operator@northstar",
+      displayName: "primary-operator@northstar",
+      usage: { primaryRemainingPercent: 82, secondaryRemainingPercent: 67 },
+    }),
+    createAccountSummary({
+      accountId: "acc_secondary",
+      email: "secondary-operator@northstar",
+      displayName: "secondary-operator@northstar",
+      usage: { primaryRemainingPercent: 45, secondaryRemainingPercent: 12 },
+    }),
+  ]): Promise<void> {
+  const fixtures: Record<string, unknown> = {
+    "/api/dashboard-auth/session": createDashboardAuthSession({ authenticated: true, passwordRequired: true }),
+    "/api/dashboard/overview": createDashboardOverview({ accounts }),
+    "/api/dashboard/projections": createDashboardProjections(),
+    "/api/request-logs/options": createRequestLogFilterOptions({ accountIds: accounts.map((account) => account.accountId) }),
+    "/api/request-logs": createRequestLogsResponse([createRequestLogEntry({ accountId: "acc_primary", requestId: "req_mobile_containment" })], 1, false),
+    "/api/settings/telemetry": createTelemetryConsent({ state: "enabled", source: "persisted", active: true }),
+    "/api/settings": createDashboardSettings(),
+    "/api/accounts": { accounts },
+  };
+
+  await page.route("**/api/**", async (route) => {
+    const payload = fixtures[new URL(route.request().url()).pathname];
+    if (payload === undefined) {
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "not_found", message: "Not found" } }),
+      });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(payload) });
+  });
+}
+
+async function acceptTelemetryConsent(page: Page, consentDialog: Locator): Promise<void> {
+  const consentDecision = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/settings/telemetry" && response.request().method() === "PUT",
+  );
+  await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
+  expect((await consentDecision).ok()).toBe(true);
+  await expect(consentDialog).toBeHidden();
+}
+
+async function acceptTelemetryConsentIfShown(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle");
+  const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
+  if (await consentDialog.isVisible()) {
+    await acceptTelemetryConsent(page, consentDialog);
+  }
+}
+
+async function openLongSettingsPage(page: Page, scrollTop: number): Promise<void> {
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await acceptTelemetryConsentIfShown(page);
+
+  const advancedTrigger = page.getByRole("button", { name: "Show advanced settings" });
+  await advancedTrigger.click();
+  await expect(page.getByRole("heading", { name: "Firewall", exact: true })).toBeVisible();
+
+  await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" }), scrollTop);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTop);
+}
+
+// `page.setViewportSize` resolves when the resize is dispatched, not when the
+// browser has finished reflowing for it. Reading geometry immediately after
+// has caught the 1440x900 case mid-reflow, reporting a 1488px document
+// scrollWidth that settles back to 1440 a frame later. Hold until the document
+// width stops moving, with a frame cap so a page that never settles fails on
+// its assertion instead of hanging.
+async function resizeViewportAndSettle(page: Page, size: { width: number; height: number }): Promise<void> {
+  await page.setViewportSize(size);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        let lastWidth = -1;
+        let stableFrames = 0;
+        let observedFrames = 0;
+        const measure = () => {
+          const width = document.documentElement.scrollWidth;
+          stableFrames = width === lastWidth ? stableFrames + 1 : 0;
+          lastWidth = width;
+          observedFrames += 1;
+          if (stableFrames >= 3 || observedFrames >= 120) {
+            resolve();
+            return;
+          }
+          requestAnimationFrame(measure);
+        };
+        requestAnimationFrame(measure);
+      }),
+  );
+}
 
 test("the built dashboard accepts real backend responses", async ({ page }) => {
   const apiFailures: string[] = [];
@@ -72,13 +183,7 @@ test("the built dashboard accepts real backend responses", async ({ page }) => {
   const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
   await expect(consentDialog).toBeVisible();
   await expect(consentDialog.getByText('"instance_id"').first()).toBeVisible();
-  const consentDecision = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === "/api/settings/telemetry" && response.request().method() === "PUT",
-  );
-  await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
-  expect((await consentDecision).ok()).toBe(true);
-  await expect(consentDialog).toBeHidden();
+  await acceptTelemetryConsent(page, consentDialog);
 
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
   await expect(page.getByText("No accounts connected yet", { exact: true })).toBeVisible();
@@ -89,4 +194,386 @@ test("the built dashboard accepts real backend responses", async ({ page }) => {
   expect(apiFailures).toEqual([]);
   expect(pageErrors).toEqual([]);
   expect(consoleErrors).toEqual([]);
+});
+
+test("dashboard usage donuts stay within supported viewports", async ({ page }) => {
+  const viewportCases = [
+    { size: { width: 320, height: 568 }, donutColumns: 1 },
+    { size: { width: 390, height: 844 }, donutColumns: 1 },
+    { size: { width: 1440, height: 900 }, donutColumns: 2 },
+  ] as const;
+
+  await installMobileContainmentFixtures(page);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize(viewportCases[0].size);
+  await page.goto("/dashboard", { waitUntil: "networkidle" });
+
+  // Match only the two usage donut headings ("5-Hour Credits" / "Weekly
+  // Credits"); the weekly runway card also carries a "Weekly credits pace"
+  // h3 now that a null backend pace falls back to the local projection.
+  const usageHeadings = page.getByRole("heading", { level: 3 }).filter({ hasText: /Credits$/ });
+  await expect(usageHeadings).toHaveCount(2);
+  const requestTable = page.getByRole("table").first();
+  await expect(requestTable).toBeVisible();
+
+  for (const viewportCase of viewportCases) {
+    await resizeViewportAndSettle(page, viewportCase.size);
+
+    const usageMetrics = await usageHeadings.evaluateAll((headings) =>
+      headings.map((heading) => {
+        const card = heading.parentElement?.parentElement;
+        const row = heading.parentElement?.nextElementSibling;
+        const chart = row?.querySelector("svg")?.parentElement;
+        const legend = row?.querySelector('[data-testid="donut-legend-list"]');
+        if (!card || !row || !chart || !legend) {
+          throw new Error("Expected the rendered donut card structure");
+        }
+        const bounds = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          return { left: box.left, right: box.right, width: box.width };
+        };
+        return {
+          card: bounds(card),
+          row: bounds(row),
+          chart: bounds(chart),
+          legend: bounds(legend),
+          gridColumns: getComputedStyle(card.parentElement!).gridTemplateColumns.split(" ").filter(Boolean).length,
+        };
+      }),
+    );
+    const documentMetrics = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    const summaryRight = await page
+      .getByTestId("dashboard-account-summary-line")
+      .evaluate((element) => element.getBoundingClientRect().right);
+    const tableMetrics = await requestTable.evaluate((table) => {
+      const scroller = table.closest('[data-slot="table-container"]');
+      if (!scroller) {
+        throw new Error("Expected the request table's local scroller");
+      }
+      const box = scroller.getBoundingClientRect();
+      return {
+        tableScrollWidth: table.scrollWidth,
+        scrollerClientWidth: scroller.clientWidth,
+        scrollerLeft: box.left,
+        scrollerRight: box.right,
+        overflowX: getComputedStyle(scroller).overflowX,
+      };
+    });
+
+    expect(documentMetrics.scrollWidth).toBeLessThanOrEqual(documentMetrics.clientWidth);
+    expect(summaryRight).toBeLessThanOrEqual(documentMetrics.clientWidth);
+    for (const metrics of usageMetrics) {
+      expect(metrics.gridColumns).toBe(viewportCase.donutColumns);
+      for (const bounds of [metrics.card, metrics.row, metrics.chart, metrics.legend]) {
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(documentMetrics.clientWidth);
+      }
+    }
+    expect(tableMetrics.overflowX).toBe("auto");
+    expect(tableMetrics.tableScrollWidth).toBeGreaterThan(tableMetrics.scrollerClientWidth);
+    expect(tableMetrics.scrollerLeft).toBeGreaterThanOrEqual(0);
+    expect(tableMetrics.scrollerRight).toBeLessThanOrEqual(documentMetrics.clientWidth);
+  }
+});
+
+test("desktop route navigation resets new pages without overriding query, history, or hash scrolling", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openLongSettingsPage(page, 1400);
+
+  const settingsHeadingTop = await page
+    .getByRole("heading", { name: "Settings", exact: true })
+    .evaluate((heading) => heading.getBoundingClientRect().top);
+  expect(settingsHeadingTop).toBeLessThan(0);
+
+  await page.getByRole("link", { name: "Dashboard", exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  const dashboardHeading = page.getByRole("heading", { name: "Dashboard", exact: true });
+  await expect(dashboardHeading).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+
+  await page.evaluate(() => {
+    document.body.style.minHeight = "3000px";
+    window.scrollTo({ top: 700, behavior: "instant" });
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(700);
+  await page.getByRole("button", { name: "Request Logs", exact: true }).click();
+  const conversationsItem = page.getByRole("menuitemradio", { name: "Conversations", exact: true });
+  await expect(conversationsItem).toBeVisible();
+  const queryScrollTop = await page.evaluate(() => window.scrollY);
+  expect(queryScrollTop).toBeGreaterThan(0);
+  await conversationsItem.click();
+  await expect(page).toHaveURL(/\/dashboard\?view=conversations$/);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(queryScrollTop);
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(queryScrollTop);
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1400);
+
+  await page.goto("/firewall", { waitUntil: "domcontentloaded" });
+  await expect(page).toHaveURL(/\/settings\?advanced=1#firewall$/);
+  const firewallHeading = page.getByRole("heading", { name: "Firewall", exact: true });
+  await expect(firewallHeading).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+});
+
+test("mobile top-level navigation opens the destination heading at the top", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openLongSettingsPage(page, 1400);
+
+  await page.getByRole("button", { name: "Open menu" }).click();
+  await page.getByRole("link", { name: "Dashboard", exact: true }).click();
+
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeInViewport();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+});
+
+test("the API key create dialog stays inside supported viewports", async ({ page }) => {
+  const viewportCases = [
+    { size: { width: 320, height: 568 }, columns: 1 },
+    { size: { width: 390, height: 844 }, columns: 1 },
+    { size: { width: 1440, height: 900 }, columns: 2 },
+  ] as const;
+
+  await page.goto("/apis", { waitUntil: "networkidle" });
+
+  const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
+  if (await consentDialog.isVisible()) {
+    await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
+    await expect(consentDialog).toBeHidden();
+  }
+
+  await expect(page.getByRole("heading", { name: "APIs", exact: true })).toBeVisible();
+  const openDialogButton = page.getByRole("button", { name: "Create API Key" });
+  const dialog = page.getByRole("dialog", { name: "Create API key" });
+  const title = dialog.getByRole("heading", { name: "Create API key" });
+  const closeButton = dialog.getByRole("button", { name: "Close" });
+  const createButton = dialog.getByRole("button", { name: "Create" });
+
+  for (const viewportCase of viewportCases) {
+    await page.setViewportSize(viewportCase.size);
+    await openDialogButton.click();
+
+    for (const element of [dialog, title, closeButton, createButton]) {
+      const box = await element.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) {
+        throw new Error("Expected dialog element to have a bounding box");
+      }
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewportCase.size.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewportCase.size.height);
+    }
+
+    const scrollRegion = dialog.getByTestId("api-key-create-scroll-region");
+    await expect(scrollRegion).toHaveCount(1);
+    const initialScrollState = await scrollRegion.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(initialScrollState.overflowY).toBe("auto");
+    expect(initialScrollState.scrollHeight).toBeGreaterThan(initialScrollState.clientHeight);
+
+    const columnCount = await scrollRegion.locator(":scope > div").evaluate((element) =>
+      getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+    );
+    expect(columnCount).toBe(viewportCase.columns);
+
+    const finalField = dialog.getByRole("spinbutton", { name: "Weekly cost limit ($)" });
+    await finalField.scrollIntoViewIfNeeded();
+    await expect(finalField).toBeInViewport();
+    await expect(title).toBeInViewport();
+    await expect(closeButton).toBeInViewport();
+    await expect(createButton).toBeInViewport();
+    if (viewportCase.columns === 1) {
+      expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+
+  await page.setViewportSize(viewportCases[0].size);
+  await openDialogButton.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
+  await expect(dialog).toBeHidden();
+});
+
+
+test("deactivated account actions stay inside list cells and responsive cards", async ({ page }) => {
+  const accounts = [
+    createAccountSummary({ accountId: "acc_recover", displayName: "Recovery account", status: "deactivated", availableResetCredits: 1 }),
+    createAccountSummary({ accountId: "acc_reauth", displayName: "Reauth account", status: "reauth_required" }),
+    createAccountSummary({ accountId: "acc_paused", displayName: "Paused account", status: "paused" }),
+  ];
+  await installMobileContainmentFixtures(page, accounts);
+  await page.goto("/dashboard", { waitUntil: "domcontentloaded" });
+  await page.getByRole("radio", { name: "View accounts as list" }).click();
+  const row = page.getByTestId("account-list-row").filter({ hasText: "Recovery account" });
+  await expect(row.getByRole("button", { name: "Resume Recovery account", exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Re-authenticate Recovery account", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume Reauth account", exact: true })).toHaveCount(0);
+  const actions = row.locator(":scope > div").last();
+  await expect.poll(() => actions.evaluate((el) => {
+    const parent = el.getBoundingClientRect();
+    return Array.from(el.querySelectorAll("button")).every((button) => {
+      const box = button.getBoundingClientRect();
+      return box.left >= parent.left - 1 && box.right <= parent.right + 1 && box.top >= parent.top - 1 && box.bottom <= parent.bottom + 1;
+    });
+  })).toBe(true);
+  for (const width of [640, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.getByRole("radio", { name: "View accounts as cards" }).click();
+    const card = page.getByTestId("dashboard-account-cards").locator(":scope > div").filter({ hasText: "Recovery account" });
+    await expect(card.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Re-auth", exact: true })).toBeVisible();
+    await expect.poll(() => card.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return Array.from(el.querySelectorAll("button")).every((button) => {
+        const action = button.getBoundingClientRect();
+        return action.left >= box.left - 1 && action.right <= box.right + 1;
+      });
+    })).toBe(true);
+  }
+});
+
+test("the model source dialogs stay inside supported viewports", async ({ page }) => {
+  const viewportSizes = [
+    { width: 320, height: 568 },
+    { width: 390, height: 844 },
+    { width: 1440, height: 900 },
+  ] as const;
+
+  await page.goto("/settings", { waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await acceptTelemetryConsentIfShown(page);
+
+  await page.getByRole("button", { name: "Show advanced settings" }).click();
+  await expect(page.getByRole("heading", { name: "Model sources", exact: true })).toBeVisible();
+
+  const openDialogButton = page.getByRole("button", { name: "Add source" });
+  const dialog = page.getByRole("dialog", { name: "Create model source" });
+  const title = dialog.getByRole("heading", { name: "Create model source" });
+  const closeButton = dialog.getByRole("button", { name: "Close" });
+  const createButton = dialog.getByRole("button", { name: "Create" });
+
+  for (const size of viewportSizes) {
+    await page.setViewportSize(size);
+    await openDialogButton.click();
+
+    // Enabling Reasoning reveals the effort fields, which is what pushed the
+    // form past the viewport: with the capability off the default form still
+    // fits on a desktop viewport. The capability checkboxes are Radix buttons
+    // with no accessible name, so drive the wrapping label instead. The draft
+    // survives closing the dialog, so toggle only when it is actually off.
+    const reasoningToggle = dialog.locator("label", { hasText: /^Reasoning$/ });
+    const reasoningCheckbox = reasoningToggle.locator('[role="checkbox"]');
+    if ((await reasoningCheckbox.getAttribute("data-state")) !== "checked") {
+      await reasoningToggle.click();
+    }
+    await expect(reasoningCheckbox).toHaveAttribute("data-state", "checked");
+    await expect(dialog.locator("#model-source-reasoning-efforts")).toBeVisible();
+
+    // The regression this covers: the dialog rendered taller than the viewport
+    // with no scroll container, so the submit button was unreachable. These are
+    // retrying assertions on purpose — the dialog opens with a zoom/fade
+    // animation and the Reasoning toggle relayouts it, so a single
+    // boundingBox() read can catch mid-animation geometry.
+    for (const element of [dialog, title, closeButton, createButton]) {
+      await expect(element).toBeInViewport({ ratio: 1 });
+    }
+
+    await expect(dialog).toHaveCSS("overflow-y", "clip");
+
+    const scrollRegion = dialog.getByTestId("model-source-create-scroll-region");
+    await expect(scrollRegion).toHaveCount(1);
+    await expect(scrollRegion).toHaveCSS("overflow-y", "auto");
+    await expect
+      .poll(async () =>
+        scrollRegion.evaluate((element) => element.scrollHeight - element.clientHeight),
+      )
+      .toBeGreaterThan(0);
+
+    // The numeric and capability inputs carry no accessible name, so prove
+    // reachability through the scroller itself: the end of the content must be
+    // scrollable into view.
+    const scrolled = await scrollRegion.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      return {
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    });
+    expect(scrolled.scrollTop).toBeGreaterThan(0);
+    expect(scrolled.scrollTop + scrolled.clientHeight).toBeGreaterThanOrEqual(
+      scrolled.scrollHeight - 1,
+    );
+
+    // Scrolling the body must not carry the header or footer out of view.
+    await expect(title).toBeInViewport({ ratio: 1 });
+    await expect(closeButton).toBeInViewport({ ratio: 1 });
+    await expect(createButton).toBeInViewport({ ratio: 1 });
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+});
+
+test("the model source edit dialog keeps Save visible in compact viewports", async ({ page, request }) => {
+  const created = await request.post("/api/model-sources/", {
+    data: {
+      name: "Viewport regression source",
+      baseUrl: "http://127.0.0.1:9/v1",
+      models: [{
+        model: "viewport-regression-model",
+        rawMetadataJson: JSON.stringify({ supports_reasoning: true, reasoning_efforts: ["low", "high"] }),
+      }],
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const source = await created.json() as { id: string };
+  try {
+    await page.goto("/settings", { waitUntil: "domcontentloaded" });
+    await acceptTelemetryConsentIfShown(page);
+    await page.getByRole("button", { name: "Show advanced settings" }).click();
+    for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(size);
+      await page.getByRole("button", { name: "Edit Viewport regression source model source", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Edit model source" });
+      const save = dialog.getByRole("button", { name: "Save", exact: true });
+      const title = dialog.getByRole("heading", { name: "Edit model source" });
+      const close = dialog.getByRole("button", { name: "Close" });
+      await expect(dialog).toHaveCSS("overflow-y", "clip");
+      const scroll = dialog.getByTestId("model-source-edit-scroll-region");
+      await expect(scroll).toHaveCount(1);
+      await expect(scroll).toHaveCSS("overflow-y", "auto");
+      for (const control of [dialog, title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      // Assert rendered spacing, so a missing utility fails this browser path.
+      await expect.poll(() => scroll.evaluate((el) => {
+        const first = el.children[0].getBoundingClientRect();
+        const second = el.children[1].getBoundingClientRect();
+        return second.top - first.bottom;
+      })).toBeGreaterThanOrEqual(15);
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeGreaterThan(0);
+      await scroll.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await expect.poll(() => scroll.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+      for (const control of [title, close, save]) await expect(control).toBeInViewport({ ratio: 1 });
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+    }
+  } finally {
+    expect((await request.delete(`/api/model-sources/${source.id}`)).ok()).toBe(true);
+  }
 });

@@ -797,6 +797,20 @@ async def test_settings_api_accepts_fill_first_routing_strategy(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_persists_subagent_account_preference(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={"subagentAccountPreference": "parent_bound_only"},
+    )
+    assert response.status_code == 200
+    assert response.json()["subagentAccountPreference"] == "parent_bound_only"
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["subagentAccountPreference"] == "parent_bound_only"
+
+
+@pytest.mark.asyncio
 async def test_settings_api_rejects_stream_recovery_reserve_above_bounded_stream_cap(async_client):
     response = await async_client.put(
         "/api/settings",

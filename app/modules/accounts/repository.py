@@ -48,6 +48,7 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_hard_delete_into_time_rollups,
     mirror_account_soft_delete_into_time_rollups,
 )
+from app.modules.proxy.sticky_repository import is_not_subagent_lineage_key
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
 from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -854,6 +855,7 @@ class AccountsRepository:
             .where(
                 StickySession.account_id == account_id,
                 StickySession.kind == StickySessionKind.CODEX_SESSION,
+                is_not_subagent_lineage_key(),
             )
             .values(updated_at=utcnow())
         )

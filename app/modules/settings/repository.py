@@ -85,6 +85,7 @@ class SettingsRepository:
             auto_redeem_reset_credits_before_expiry=False,
             show_reset_credit_expiry_badge=True,
             routing_strategy="capacity_weighted",
+            subagent_account_preference="off",
             relative_availability_power=2.0,
             relative_availability_top_k=5,
             single_account_id=None,
@@ -179,6 +180,7 @@ class SettingsRepository:
         auto_redeem_reset_credits_before_expiry: bool | None = None,
         show_reset_credit_expiry_badge: bool | None = None,
         routing_strategy: str | None = None,
+        subagent_account_preference: str | None = None,
         relative_availability_power: float | None = None,
         relative_availability_top_k: int | None = None,
         single_account_id: str | None = None,
@@ -344,6 +346,8 @@ class SettingsRepository:
             settings.show_reset_credit_expiry_badge = show_reset_credit_expiry_badge
         if routing_strategy is not None:
             settings.routing_strategy = routing_strategy
+        if subagent_account_preference is not None:
+            settings.subagent_account_preference = subagent_account_preference
         if relative_availability_power is not None:
             settings.relative_availability_power = relative_availability_power
         if relative_availability_top_k is not None:

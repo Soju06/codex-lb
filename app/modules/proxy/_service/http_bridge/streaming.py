@@ -462,7 +462,9 @@ class _VerifiedDurableFullResend:
             preserve_developer_message_ids=True,
         )
         pending_tool_calls = durable_lookup.latest_pending_tool_calls
-        if replay_projection is None:
+        if replay_projection is None or not _async_markers_match_pending_manifest(
+            replay_projection.input_items, pending_tool_calls
+        ):
             return None
         safe_fresh_context = responses_input_suffix_retains_prior_output(
             replay_projection.input_items,
@@ -495,6 +497,22 @@ def _pending_tool_calls_identity(
     pending_tool_calls: Mapping[str, str] | None,
 ) -> tuple[tuple[str, str], ...] | None:
     return None if pending_tool_calls is None else tuple(sorted(pending_tool_calls.items()))
+
+
+def _async_markers_match_pending_manifest(
+    input_items: list[JsonValue],
+    pending_tool_calls: Mapping[str, str] | None,
+) -> bool:
+    if pending_tool_calls is None:
+        return True
+    return not any(
+        isinstance(item, dict)
+        and item.get("type") in ("function_call", "custom_tool_call")
+        and item.get("async") is True
+        and isinstance(call_id := item.get("call_id"), str)
+        and call_id in pending_tool_calls
+        for item in input_items
+    )
 
 
 def _verify_durable_full_resend(
@@ -753,6 +771,17 @@ async def _iter_account_capacity_wait_sse(
         remaining_sleep_seconds -= chunk_seconds
 
 
+def _http_bridge_reset_pending_tools_for_anchor(
+    session: _HTTPBridgeSession,
+    *,
+    response_id: str | None,
+    account_id: str | None,
+) -> None:
+    if response_id != session.last_completed_response_id or account_id != session.last_completed_response_account_id:
+        session.last_pending_tool_calls = {}
+        session.pending_async_tool_calls.clear()
+
+
 def _http_bridge_interrupted_tool_outputs_input(
     session: _HTTPBridgeSession,
     *,
@@ -780,7 +809,9 @@ def _http_bridge_interrupted_tool_outputs_input(
     input_item_list = cast(list[JsonValue], input_items)
     missing_call_ids = _missing_function_call_outputs_for_previous_response(
         input_item_list,
-        pending_call_ids=list(session.last_pending_tool_calls),
+        pending_call_ids=[
+            call_id for call_id in session.last_pending_tool_calls if call_id not in session.pending_async_tool_calls
+        ],
     )
     if not missing_call_ids:
         return None
@@ -1594,6 +1625,10 @@ class _HTTPBridgeStreamingMixin:
             replay_projection: AccountNeutralReplayProjection,
             lookup: DurableBridgeLookup,
         ) -> bool:
+            if not _async_markers_match_pending_manifest(
+                replay_projection.input_items, lookup.latest_pending_tool_calls
+            ):
+                return False
             return responses_input_suffix_retains_prior_output(
                 replay_projection.input_items,
                 stored_count=replay_projection.stored_prefix_count,
@@ -2951,8 +2986,11 @@ class _HTTPBridgeStreamingMixin:
                             recovery_anchor_fence_response_id,
                             request_id,
                         )
-                        if durable_lookup.latest_response_id != session.last_completed_response_id:
-                            session.last_pending_tool_calls = {}
+                        _http_bridge_reset_pending_tools_for_anchor(
+                            session,
+                            response_id=durable_lookup.latest_response_id,
+                            account_id=durable_lookup.account_id,
+                        )
                         session.last_completed_response_id = durable_lookup.latest_response_id
                         session.last_completed_response_account_id = durable_lookup.account_id
                         session.last_completed_input_count = durable_full_resend_anchor_count
@@ -3072,11 +3110,14 @@ class _HTTPBridgeStreamingMixin:
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
         ):
-            if durable_lookup.latest_response_id != session.last_completed_response_id:
-                # The pending tool calls were recorded for the session's own
-                # last completed response; a durable anchor pointing elsewhere
-                # must not trigger interrupted-output injection.
-                session.last_pending_tool_calls = {}
+            # Pending tool calls belong to the session's last completed
+            # response and owner. A durable anchor with a different id or
+            # account must not trigger interrupted-output injection.
+            _http_bridge_reset_pending_tools_for_anchor(
+                session,
+                response_id=durable_lookup.latest_response_id,
+                account_id=durable_lookup.account_id,
+            )
             session.last_completed_response_id = durable_lookup.latest_response_id
             # The durable anchor is owned by the durable session's account, which
             # may differ from this session's account after a failover. Record the

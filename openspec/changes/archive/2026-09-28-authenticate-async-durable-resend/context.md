@@ -1,0 +1,7 @@
+# Durable async marker provenance
+
+The persisted pending-tool manifest is upstream-derived and contains only synchronous calls. A client-supplied `async: true` marker is not proof that an ID absent from replay settlement was asynchronous upstream. Where the manifest names that ID as synchronous, either durable recovery proof must reject the conflicting claim before removing the previous-response anchor.
+
+For example, account A emits synchronous `call_s` and a completed assistant message. A full resend on owner loss marks `call_s` asynchronous and adds a user message without `call_s`'s output. The completed message is not enough to authorize account B: the manifest contradiction rejects it. An actual asynchronous `call_a` is absent from the synchronous manifest and can remain pending across a completed assistant message; its eventual typed output may be fresh follow-up input if the prior assistant output is retained.
+
+Stateless self-contained replay has no previous-response owner, durable manifest or upstream-owned omission to contradict a client marker. Its strict item/body validation remains necessary; restricting to a model name is not a substitute for durable provenance. #1952 edits the same verified-full-resend requirement and #2088 consumes the prefix helper as a two-value tuple: a future landing order must reconcile these independent hunks without stacking the sibling branches.

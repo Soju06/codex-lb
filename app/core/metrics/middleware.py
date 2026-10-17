@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Awaitable, Callable
 
 from starlette._utils import get_route_path
+from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.metrics.prometheus import (
@@ -13,6 +16,27 @@ from app.core.metrics.prometheus import (
 )
 
 _SUPPORTED_METHODS = frozenset(("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"))
+logger = logging.getLogger(__name__)
+
+
+class MetricsRefreshMiddleware:
+    """Refresh shared inventory before exposing it, including on quiet replicas."""
+
+    def __init__(self, app: ASGIApp, *, refresh: Callable[[], Awaitable[None]]) -> None:
+        """Pair metrics exposition with an awaitable inventory refresh."""
+        self.app = app
+        self.refresh = refresh
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Refresh HTTP scrapes and fail closed when inventory cannot be read."""
+        if scope["type"] == "http" and scope.get("method") in {"GET", "HEAD"}:
+            try:
+                await self.refresh()
+            except Exception:
+                logger.warning("Account metrics snapshot refresh failed")
+                await PlainTextResponse("Metrics snapshot unavailable\n", status_code=503)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def _normalize_path(path: str) -> str:
@@ -71,4 +95,4 @@ class MetricsMiddleware:
             active_connections.dec()
 
 
-__all__ = ["MetricsMiddleware", "_normalize_path"]
+__all__ = ["MetricsMiddleware", "MetricsRefreshMiddleware", "_normalize_path"]

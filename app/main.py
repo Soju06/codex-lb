@@ -45,7 +45,7 @@ from app.core.config.spool_retention import (
     warn_spool_retention_below_floor,
 )
 from app.core.handlers import add_exception_handlers
-from app.core.metrics.middleware import MetricsMiddleware
+from app.core.metrics.middleware import MetricsMiddleware, MetricsRefreshMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
@@ -720,7 +720,9 @@ async def lifespan(app: FastAPI):
         scrape_registry = make_scrape_registry()
         prometheus_module = import_module("prometheus_client")
         make_asgi_app = getattr(prometheus_module, "make_asgi_app")
-        metrics_app = make_asgi_app(registry=scrape_registry)
+        metrics_app = MetricsRefreshMiddleware(
+            make_asgi_app(registry=scrape_registry), refresh=routing_availability_cache.refresh_from_db
+        )
         config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
         metrics_server = SignalNeutralServer(config)
 

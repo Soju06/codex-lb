@@ -131,7 +131,13 @@ if PROMETHEUS_AVAILABLE:
         "Total accounts by status",
         ["status"],
         registry=REGISTRY,
-        **({"multiprocess_mode": "liveall"} if MULTIPROCESS_MODE else {}),
+        **({"multiprocess_mode": "livemostrecent"} if MULTIPROCESS_MODE else {}),
+    )
+    accounts_available = Gauge(
+        "codex_lb_accounts_available",
+        "Accounts eligible by stored status and reauthentication token expiry, excluding request-specific constraints",
+        registry=REGISTRY,
+        **({"multiprocess_mode": "livemostrecent"} if MULTIPROCESS_MODE else {}),
     )
     bridge_instance_mismatch_total = Counter(
         "codex_lb_bridge_instance_mismatch_total",
@@ -472,6 +478,7 @@ else:
     rate_limit_hits_total: CounterLike | None = None
     circuit_breaker_state: GaugeLike | None = None
     accounts_total: GaugeLike | None = None
+    accounts_available: GaugeLike | None = None
     bridge_instance_mismatch_total: CounterLike | None = None
     prompt_cache_key_derivation_total: CounterLike | None = None
     bridge_prompt_cache_locality_miss_total: CounterLike | None = None
@@ -541,6 +548,7 @@ __all__ = [
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",
     "accounts_total",
+    "accounts_available",
     "api_key_fair_share_rejections_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",

@@ -53,7 +53,7 @@ _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
 # the shared reader hostage.
 _NATIVE_STREAM_QUEUE_LIMIT = 4096
 _NATIVE_STREAM_QUEUE_BYTES_LIMIT = 32 * 1024 * 1024
-_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
+_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = _NATIVE_STREAM_QUEUE_LIMIT
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
@@ -61,6 +61,18 @@ _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 def _event_payload_size(item: object) -> int:
     """Queued payload bytes of one helper event: its base64 ``data`` (ASCII, so
     the string length is the byte length) or UTF-8 SSE text and type metadata."""
+    if isinstance(item, NativeWebSocketMessage):
+        text_bytes = len(item.text.encode("utf-8")) if item.text is not None else 0
+        copies = 2 if item.responses_interpreted else 1
+        metadata_bytes = len(item.event_type.encode("utf-8")) if item.event_type is not None else 0
+        if item.routing is not None:
+            if item.routing.payload_response_id is not None:
+                metadata_bytes += len(item.routing.payload_response_id.encode("utf-8", errors="surrogatepass"))
+            if item.routing.sequence_number is not None:
+                metadata_bytes += len(str(item.routing.sequence_number))
+        if item.close_reason is not None:
+            metadata_bytes += len(item.close_reason.encode("utf-8"))
+        return copies * text_bytes + (len(item.data) if item.data is not None else 0) + metadata_bytes
     if not isinstance(item, dict):
         return 0
     data = item.get("data")
@@ -83,40 +95,49 @@ def _event_payload_size(item: object) -> int:
     return 0
 
 
-class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
-    """``asyncio.Queue`` whose ``full()`` also trips on a queued-bytes budget.
+class _ByteBoundedQueue[T](asyncio.Queue[T]):
+    """Nonblocking event queue with an additional accounted-payload budget.
 
-    ``put_nowait`` consults ``full()`` before enqueueing, so the reader's
-    existing ``QueueFull`` handling covers both the event cap and the byte
-    budget without any change to the put/get call sites.
+    Existing ``QueueFull`` handling covers both the event cap and projected
+    byte total without changing the put/get call sites.
     """
 
-    def __init__(self, *, max_events: int, max_bytes: int) -> None:
+    def __init__(self, *, max_events: int, max_bytes: int, allow_large_first_event: bool = True) -> None:
         super().__init__(maxsize=max_events)
         self._max_bytes = max_bytes
+        self._allow_large_first_event = allow_large_first_event
         self.queued_bytes = 0
 
-    def put_nowait(self, item: dict[str, object] | BaseException) -> None:
+    def put_nowait(self, item: T) -> None:
         # The byte budget is enforced against the projected total, so a queue
         # just under budget rejects an event that would carry it past, while a
         # zero-byte event (``end``/``error``/``cancelled`` or a failure object)
         # is always accepted as long as the event cap has room so a complete
         # response is never discarded at the boundary. An event arriving at an
-        # empty queue is always accepted (the SSE event size cap bounds it
-        # separately) so a lone large chunk is never a failure.
+        # empty HTTP queue is accepted (the SSE size cap bounds it separately).
+        # Decoded WebSocket queues disable that allowance to enforce their
+        # byte budget even for a single message.
         size = _event_payload_size(item)
-        if size and not self.empty() and self.queued_bytes + size > self._max_bytes:
+        if (
+            size
+            and self.queued_bytes + size > self._max_bytes
+            and (not self._allow_large_first_event or not self.empty())
+        ):
             raise asyncio.QueueFull
         super().put_nowait(item)
 
-    def _put(self, item: dict[str, object] | BaseException) -> None:
+    def _put(self, item: T) -> None:
         super()._put(item)
         self.queued_bytes += _event_payload_size(item)
 
-    def _get(self) -> dict[str, object] | BaseException:
+    def _get(self) -> T:
         item = super()._get()
         self.queued_bytes -= _event_payload_size(item)
         return item
+
+
+class _BoundedEventQueue(_ByteBoundedQueue[dict[str, object] | BaseException]):
+    pass
 
 
 def _new_stream_queue() -> _BoundedEventQueue:
@@ -450,8 +471,10 @@ class NativeEgressWebSocket:
         self._request_id = request_id
         self._generation = generation
         self._events = events
-        self._messages: asyncio.Queue[NativeWebSocketMessage | BaseException] = asyncio.Queue(
-            maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
+        self._messages = _ByteBoundedQueue[NativeWebSocketMessage | BaseException](
+            max_events=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT,
+            max_bytes=_NATIVE_STREAM_QUEUE_BYTES_LIMIT,
+            allow_large_first_event=False,
         )
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._command_sequence = 0

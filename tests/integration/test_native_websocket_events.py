@@ -339,3 +339,49 @@ async def test_native_websocket_routing_preserves_delivery_watermarks(
                 await upstream.close()
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interpret_responses", [False, True])
+async def test_native_websocket_buffers_burst_while_send_acknowledgements_progress(interpret_responses: bool) -> None:
+    binary = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
+    if not binary:
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native wire probe")
+
+    frames = [json.dumps({"type": "response.output_text.delta", "delta": str(i)}) for i in range(256)]
+
+    async def stream(websocket: Any) -> None:
+        async for text in websocket:
+            if text == "burst":
+                for frame in frames:
+                    await websocket.send(frame)
+            else:
+                await websocket.send(text)
+
+    client = SubprocessNativeEgressClient(Path(binary))
+    try:
+        async with serve(stream, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            socket = await client.websocket(
+                NativeWebSocketRequest(
+                    url=f"ws://127.0.0.1:{port}/responses",
+                    headers={},
+                    connect_timeout_seconds=5,
+                    max_message_bytes=1024 * 1024,
+                    interpret_responses=interpret_responses,
+                )
+            )
+            await socket.send_text("burst")
+            async with asyncio.timeout(5):
+                while socket._messages.qsize() < len(frames):
+                    if socket._pump_task.done():
+                        pytest.fail("burst terminated before all frames were buffered")
+                    await asyncio.sleep(0.001)
+            # No receive has run yet. The pump must still read command acks.
+            await asyncio.wait_for(socket.send_text("after-burst"), 2)
+            assert [(await socket.receive()).text for _ in frames] == frames
+            assert (await socket.receive()).text == "after-burst"
+            assert client._process is not None and client._process.returncode is None
+            await socket.close()
+    finally:
+        await client.aclose()

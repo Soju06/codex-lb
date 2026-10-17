@@ -12,7 +12,7 @@ The base is commit 72630bbfeee9e3b0d9acfb95e2b1e706b8b0188e. Its final direct We
 
 Related work was compared: #1255 provides the existing invalidation bus; #2115 concerns steering dispatch; #2117 concerns revoked credentials and retry eligibility; #2561 concerns warm HTTP-bridge admission caps. None implements this ordinary direct-socket per-turn check. The changes do not depend on those open PRs.
 
-The scoped OpenSpec delta passes strict validation. The repository-wide spec validation has the same 17 invalid specifications and 71 errors before and after this change, with no added errors.
+The scoped OpenSpec delta passes strict validation. The CI-pinned OpenSpec 1.11.0 validator passes all 67 canonical specifications. The newer locally installed validator reports the same 17 invalid specifications and 71 errors before and after this change, with no added errors.
 
 ## Review and limits
 

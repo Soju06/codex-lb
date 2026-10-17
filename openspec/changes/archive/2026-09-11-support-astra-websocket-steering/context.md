@@ -1,0 +1,60 @@
+# Support Astra WebSocket steering — change context
+
+## Purpose / scope
+
+Let an owned Astra Responses WebSocket submit `response.steer` without
+opening a new upstream connection.
+
+## Decisions
+
+- Split from #2089. Configuration-update and async tools are sibling PRs.
+- rust-v0.153.4 / openai/codex do not emit `response.steer`.
+
+## Constraints
+
+- Steering input is type + previous_response_id + nonempty user input.
+- Failed refund of a rejected steer must not kill the socket.
+
+## Failure modes
+
+- Releasing the placeholder before prepare succeeds drops the
+  continuation if prepare then fails.
+- FOR UPDATE on every finalize/release was rejected as out of scope.
+
+## Example
+
+Client sends `response.steer` against `resp_1` with a user correction.
+The proxy admits it on the same socket, queues it on one successor
+reservation, and records successor usage once.
+
+## Related
+
+- Split from #2089. Slices: #2097 (a), #2099 (b).
+
+## Review repair
+
+Final steering rejection uses the same socket-owned retired reservation collection as explicit replacement, including across upstream reconnects. Before a rejected unsent explicit request is released, its exact control-map entry is removed under the pending lock so a corrected request can retry. These are lifecycle repairs within the existing steering contract; no routing or policy expansion is introduced.
+
+A final rejected steer drops the active continuation but retains its parent ID on the upstream control. Without that correlation, a delayed automatic successor falls into generic FIFO and steals unrelated admission and accounting. Only the ID is retained for the connection lifetime, not the released request or payload. Explicit creates and already admitted continuations keep their matching priority; new steers for that retired parent are rejected before reservation or upstream dispatch.
+
+Registration alone does not allow an explicit replacement to receive an automatic successor's ID. Until the owned transport records handoff, matching suppresses that automatic lifecycle and preserves the explicit payload/reservation. The same guard applies after final rejection has converted the replacement into an ordinary anchored pending request. Deterministic WebSocket tests cover placeholder-release and account-cap waits, with and without a preceding final rejection.
+
+The dispatch timestamp remains the attempt-start metric used by existing timeout/retry accounting. Neither entering nor returning from an asynchronous send identifies when a frame reaches the transport: compression can await before writing, while flow control can await after the upstream has already received the frame. A flag covering the entire send was rejected because it suppresses legitimate explicit responses during the latter interval. For example, a real WebSocket peer can return both response.created and response.completed while the local connection still awaits drain. Tests must preserve that lifecycle as well as protect against an automatic successor before the explicit frame is written. Post-claim reservation reads use populate_existing so a retained ORM identity cannot conceal an extension's changed reserved delta.
+
+Steering admission preserves the public classifications of known API-key authentication, model/reasoning authorization, and quota failures. The steering envelope uses fixed route-owned messages and class-owned codes/types; exception-provided message, code, and parameter overrides are not forwarded. Caught application and payload-validation failures without a recognized public mapping keep the generic invalid_input response. The allowlist excludes upstream and other application errors whose steering reachability and public-message policy have not been established.
+
+Integration with the main-branch timing seams uses the owning proxy's Clock and Scheduler for steering revalidation and cancellation-safe release, transport attempt timing, and retirement polling. For example, after sender-side cleanup removes the final pending request with keepalives disabled, advancing the injected scheduler retires the upstream without another frame or a request-timeout error. The existing steering replay guards remain in front of the accepted-response replay preparation, while ordinary requests retain the main branch's downstream response identity across bounded retries.
+
+Steering uses the existing ResponsesRequest parent-ID normalization as its baseline: surrounding whitespace is removed for both ownership lookup and the forwarded frame. For example, `" r1 "` is sent as `"r1"`, so an upstream rejection echoes the same ID used by the local reservation owner. The input remains in its submitted string or structured-message form because rejection matching also uses that original representation.
+
+Required-tool response.create frames apply that same client-request normalization before looking up an owned steering continuation. A tool result anchored to `" r1 "` must replace the `"r1"` placeholder rather than enter ordinary-create admission: otherwise a draining connection rejects valid work, or the placeholder reservation remains pending until disconnect. Upstream-generated identifiers retain their existing exact-match behavior; this repair changes only client-request lookup ordering.
+
+Successful Astra completion retains the settings needed for another steer, without retaining historical input or serialized request/replay bodies for the lifetime of an idle socket. Configuration updates in the original input are folded into the effective settings first: for example, a request starting at high effort and ending with an xhigh update must still steer at xhigh after its input is discarded. The same boundary covers steered incomplete responses and the existing request-text fallback. Required tool identifiers, stream identity and accounting metadata remain available for subsequent work.
+
+Request expiry is a separate retention boundary: removing a steering placeholder from pending work must also detach its continuation and submissions. The connection retains only the existing parent-ID tombstone for late-response correlation, counted by normal history retirement. Cleanup compares the exact request owner under the pending lock, so it cannot detach a replacement registered for the same parent. Expiry still owns reservation finalization. For example, a timed-out steer can receive its first acknowledgment after a same-parent retry attempt: the retry is rejected locally, so that acknowledgment and a subsequent failure cannot claim or release a new reservation. An explicit response.create and other parents remain usable without retiring the whole connection.
+
+Steering snapshots belong to downstream WebSocket requests, not every request using an upstream WebSocket. An HTTP `/v1/responses` Astra request uses the bridge's existing serialized body and accounting state; retaining an additional recursive steering copy throughout that request serves no consumer. The transport boundary preserves ordinary HTTP forwarding while leaving direct WebSocket steering and its explicit continuations unchanged.
+
+Additional steering refreshes quota applicability as well as model/reasoning policy. A missing reservation is not evidence that the refreshed key is unlimited: for example, an administrator can add an exhausted input-token limit between two accepted client frames. The later frame must be rejected without detaching the earlier successor. For permitted input, create the first reservation on the existing successor or append missing current limit items under its reservation lock; never create a second settlement owner. The pending ownership lock protects attachment and heartbeat startup from concurrent reader finalization. New items use the existing bounded request-admission budget and remaining-capacity policy, while previously reserved items retain the existing incremental extension rule. This repair does not change ordinary admission, pricing, quota backfill, or terminal actual-usage accounting.
+
+A queued steer can reach upstream after the successor caused by an earlier steer has already started. Upstream acknowledges each steer before any successor it causes, so at successor assignment an unacknowledged later submission is exactly the frame that may still produce a late successor of its own. The proxy retires the parent at that point; a local send-window heuristic was rejected because a send returning is not the causal boundary (small frames are written without yielding, and the successor's created can already be inbound while the frame is written). A rejection or acknowledgment arriving for such a submission after the tombstone is forwarded downstream but not refunded locally; its reservation increment reconciles at the successor's terminal settlement, matching the existing post-retirement behavior. A later steer for that parent receives the retired-lifecycle rejection rather than the steer-the-successor hint.

@@ -114,7 +114,8 @@ async def test_drain_persistence_tasks_reports_timeout():
 
 
 @pytest.mark.asyncio
-async def test_failed_detached_settlement_retries_failed_release_until_persisted(raw_client, monkeypatch):
+@pytest.mark.parametrize("read_failure", ["database", "runtime"])
+async def test_failed_detached_settlement_retries_failed_release_until_persisted(raw_client, monkeypatch, read_failure):
     import asyncio
 
     _, app = raw_client
@@ -147,6 +148,21 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
         assert reservation is not None
 
     original_get_reservation = ApiKeysRepository.get_usage_reservation
+    original_claim = ApiKeysRepository.transition_usage_reservation_status
+    states_before_claim = []
+    claimed_states = []
+
+    async def observe_claim(self, reservation_id, **kwargs):
+        # Each retry gets a fresh repository scope. Neither the failed terminal
+        # claim nor its usage change may have escaped the preceding scope.
+        if reservation_id == reservation.reservation_id:
+            before = await original_get_reservation(self, reservation_id)
+            limits = await self.get_limits_by_key(created.id)
+            assert before is not None
+            states_before_claim.append((before.status, limits[0].current_value))
+        return await original_claim(self, reservation_id, **kwargs)
+
+    monkeypatch.setattr(ApiKeysRepository, "transition_usage_reservation_status", observe_claim)
     reservation_read_attempts = 0
     retry_started = asyncio.Event()
     allow_retry = asyncio.Event()
@@ -158,7 +174,14 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
         nonlocal reservation_read_attempts
         if reservation_id == reservation.reservation_id:
             reservation_read_attempts += 1
+            claimed = await original_get_reservation(self, reservation_id)
+            assert claimed is not None
+            claimed_states.append(claimed.status)
             if reservation_read_attempts <= 2:
+                if read_failure == "runtime":
+                    # Unlike OperationalError, this relies on the production
+                    # repository context closing the uncommitted transaction.
+                    raise RuntimeError("transient reservation read failure")
                 raise OperationalError(
                     "read usage reservation",
                     {},
@@ -209,7 +232,9 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
     assert stored.status == "released"
     assert len(limits) == 1
     assert limits[0].current_value == 0
-    assert reservation_read_attempts == 3
+    assert reservation_read_attempts == 3  # One read per attempt, after claiming.
+    assert states_before_claim == [("reserved", 10)] * 3
+    assert claimed_states == ["settling", "released", "released"]
     assert retry_was_tracked is True
 
 

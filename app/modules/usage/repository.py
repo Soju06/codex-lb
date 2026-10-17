@@ -697,7 +697,6 @@ class UsageRepository:
         account_id: str,
         *,
         window: str | None = None,
-        recorded_before: datetime | None = None,
     ) -> UsageHistory | None:
         stmt = (
             select(UsageHistory)
@@ -706,8 +705,6 @@ class UsageRepository:
             .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
             .limit(1)
         )
-        if recorded_before is not None:
-            stmt = stmt.where(UsageHistory.recorded_at < recorded_before)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 

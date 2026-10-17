@@ -19,8 +19,9 @@ The forced refresh reached `UsageUpdater._recover_quota_status_from_usage` and r
 
 Successful redemption with `code == "reset"` and `windows_reset > 0` proves that *some* quota window reset, not that the throttle behind this 429 ended. A 429 deadline can come from a Retry-After hint, a model-scoped throttle, or a different window. So the bypass is bound to the blocked window the same way the scheduler's #2405 recovery is:
 
-- the persisted `accounts.reset_at` must match, within five seconds, the `reset_at` of exactly one quota window (primary, secondary or monthly) as last recorded *before the redemption started*; no match or several matches means the deadline does not identify the window, and the cooldown stays. The bound matters because an ordinary refresh, or the in-flight refresh a forced refresh waits on through singleflight, can record the post-reset deadline first;
-- the fresh snapshot must report that same window with a deadline more than five seconds away from the persisted one, which is the evidence that this window, not another, reset;
+- each redemption path captures a baseline before it sends the consume request: the latest reset deadline of each quota window (primary, secondary, monthly), counting only rows from the newest usage fetch (within the 5 s sibling-fetch margin). Capturing it up front means no refresh recorded after the consume started, on any replica and whatever its clock says, can be read as the baseline; limiting it to the newest fetch keeps an older row left in another slot (for example a secondary row from before upstream moved the weekly window into the primary slot) from looking like a second matching window;
+- the persisted `accounts.reset_at` must match, within five seconds, the baseline deadline of exactly one window; no match or several matches means the deadline does not identify the window, and the cooldown stays;
+- the fresh snapshot must report that same window with a deadline more than five seconds away from its baseline deadline, which is the evidence that this window, not another, reset;
 - the existing availability checks then run unchanged, so an exhausted window (including a still-spent short window) keeps the account blocked.
 
 Ordering uses the time the redemption request was started, read before the consume call, not the time the response arrived: a 429 recorded while the request was in flight may postdate the reset. `blocked_at` is stored in whole seconds, so the block's second must be strictly earlier than the start time's second; a 429 in the same second as the start is conservatively kept blocked. The remaining gap is clock skew between replicas, which this does not correct. A redemption seconds after a 429 is unusual in practice (operators redeem by hand, and auto-redeem acts on credits about to expire), so the conservative edge costs little.
@@ -30,6 +31,16 @@ The dashboard redemption path also has a conditional status write keyed on the a
 For the reporter's timeline, the 429 persisted the weekly window's own reset deadline, so the block is bound to that window and the redemption's new weekly deadline releases it. Whether the persisted value matched within five seconds was not captured in the report.
 
 The reset-confirmation heuristic and the scheduler's five-second anchor remain unchanged. Warm-up shares `usage_reset_confirmed`, and loosening the anchor could let a reset in an unrelated window release an account blocked by another quota window.
+
+## Known limits
+
+All of these fail closed: the account stays `RATE_LIMITED` until its persisted cooldown ends, as before this change.
+
+- **Secondary-only payloads.** When upstream reports no primary (5h) window and the weekly window arrives in the secondary slot, the binding can hold, but the existing `primary is None and monthly is None` guard in `_recover_quota_status_from_usage` returns first. That guard predates this change and applies to every rate-limited recovery; the reported shape is weekly in the primary slot.
+- **A failed forced refresh.** The redemption evidence exists only for the one forced refresh after the consume. If that refresh fails (upstream 5xx, a route error, a failed token refresh, a workspace identity mismatch), the credit is spent and later refreshes do not carry the evidence. The scheduler's #2405 path still applies, but it needs a post-block baseline row.
+- **A 429 between the account load and the redemption start.** The dashboard and accounts-API paths work from the account loaded before the redemption. If a 429 lands in between, that copy still reads `ACTIVE`, so the refresh does not release the account. The scheduler path reloads the account and is not affected.
+- **Idempotent retries.** A retry after a lost consume response returns `already_redeemed`, which carries no reset confirmation, so it does not release the account even though the windows did reset.
+- **Clock skew on `blocked_at`.** The start-time fence compares the local clock against `blocked_at` written by whichever replica recorded the 429.
 
 The no-credit global-reset case represented by V2–V4 remains open. Diagnosing it requires the reporter's persisted `accounts.reset_at` value at block time and corresponding post-block usage history.
 

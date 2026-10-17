@@ -52,7 +52,6 @@ class UsageRepositoryPort(Protocol):
         account_id: str,
         *,
         window: str | None = None,
-        recorded_before: datetime | None = None,
     ) -> UsageHistory | None: ...
 
     async def add_account_snapshot(
@@ -130,6 +129,18 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_blocked_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ResetCreditRedemption:
+    """A confirmed reset-credit redemption, as evidence for the forced refresh.
+
+    ``started_at`` is read and ``baseline_reset_at`` captured (see
+    ``capture_reset_credit_baseline``) before the consume request is sent.
+    """
+
+    started_at: float
+    baseline_reset_at: Mapping[str, int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,13 +414,13 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
-        reset_credit_redeem_started_at: float | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         result = await self.force_refresh_result(
             account,
             access_token_override=access_token_override,
-            reset_credit_redeem_started_at=reset_credit_redeem_started_at,
+            reset_credit_redemption=reset_credit_redemption,
         )
         return result.usage_written
 
@@ -418,7 +429,7 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
-        reset_credit_redeem_started_at: float | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -430,7 +441,7 @@ class UsageUpdater:
                     account,
                     usage_account_id=account.chatgpt_account_id,
                     access_token_override=access_token_override,
-                    reset_credit_redeem_started_at=reset_credit_redeem_started_at,
+                    reset_credit_redemption=reset_credit_redemption,
                 ),
                 join_existing=False,
             )
@@ -599,7 +610,7 @@ class UsageUpdater:
         *,
         usage_account_id: str | None,
         access_token_override: str | None = None,
-        reset_credit_redeem_started_at: float | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> AccountRefreshResult:
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
@@ -796,24 +807,11 @@ class UsageUpdater:
                 )
             )
 
-        reset_credit_cleared_block = False
-        if reset_credit_redeem_started_at is not None:
-            # Bounded by the redemption start: another refresh (or the one this
-            # forced refresh waited on) may already have recorded the
-            # post-reset deadline, which no longer identifies the blocked window.
-            redeem_started = datetime.fromtimestamp(reset_credit_redeem_started_at, timezone.utc).replace(tzinfo=None)
-            pre_refresh_rows = {
-                window: await self._usage_repo.latest_entry_for_account(
-                    account.id, window=window, recorded_before=redeem_started
-                )
-                for window in _MAIN_USAGE_WINDOWS
-            }
-            reset_credit_cleared_block = _reset_credit_cleared_block(
-                account,
-                redeem_started_at=reset_credit_redeem_started_at,
-                pre_refresh_rows=pre_refresh_rows,
-                fresh_reset_at={write.window: write.reset_at for write in snapshot_windows},
-            )
+        reset_credit_cleared_block = reset_credit_redemption is not None and _reset_credit_cleared_block(
+            account,
+            redemption=reset_credit_redemption,
+            fresh_reset_at={write.window: write.reset_at for write in snapshot_windows},
+        )
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
@@ -1402,24 +1400,49 @@ _MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
 _RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS = 5
 
 
+async def capture_reset_credit_baseline(usage_repo: UsageRepositoryPort, account_id: str) -> dict[str, int | None]:
+    """Return each quota window's reset deadline from the newest usage fetch.
+
+    Called before the consume request is sent, so no refresh that might record
+    the post-reset deadline (on any replica, whatever its clock) can be read as
+    the baseline. Only rows from the newest fetch count: an older row left in
+    another slot (for example a secondary row from before upstream moved the
+    weekly window into the primary slot) can carry the same deadline and would
+    make the blocked window look ambiguous.
+    """
+
+    rows = {
+        window: await usage_repo.latest_entry_for_account(account_id, window=window) for window in _MAIN_USAGE_WINDOWS
+    }
+    present = [row for row in rows.values() if row is not None]
+    if not present:
+        return {}
+    newest = max(row.recorded_at for row in present)
+    return {
+        window: row.reset_at
+        for window, row in rows.items()
+        if row is not None and (newest - row.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
+    }
+
+
 def _reset_credit_cleared_block(
     account: Account,
     *,
-    redeem_started_at: float,
-    pre_refresh_rows: dict[str, UsageHistory | None],
+    redemption: ResetCreditRedemption,
     fresh_reset_at: dict[str, int | None],
 ) -> bool:
     """Return whether a confirmed reset credit reset the window this 429 came from.
 
     "Some window was reset" is not proof that this block ended: the deadline may
     come from a Retry-After hint, a model-scoped throttle, or a different window.
-    So the persisted ``reset_at`` must match the reset deadline of exactly one
-    quota window, as last recorded before the redemption started, and the fresh snapshot must show that
-    window's deadline moved. A deadline that matches no window, or more than one,
-    does not identify the blocked window and keeps the cooldown.
+    So the persisted ``reset_at`` must match the baseline deadline of exactly one
+    quota window, captured before the consume request, and the fresh snapshot
+    must show that window's deadline moved away from it. A deadline that matches
+    no window, or more than one, does not identify the blocked window and keeps
+    the cooldown.
 
-    ``redeem_started_at`` is read before the consume request is sent, and the
-    block's whole second must precede it (``blocked_at`` is stored in whole
+    ``redemption.started_at`` is read before the consume request is sent, and
+    the block's whole second must precede it (``blocked_at`` is stored in whole
     seconds). A 429 recorded during or after the redemption may postdate the
     reset, so it is never lifted here.
     """
@@ -1428,18 +1451,19 @@ def _reset_credit_cleared_block(
         return False
     if account.blocked_at is None or account.reset_at is None:
         return False
-    if math.floor(redeem_started_at) <= account.blocked_at:
+    if math.floor(redemption.started_at) <= account.blocked_at:
         return False
     tolerance = _RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS
-    matching_windows = [
-        window
-        for window, row in pre_refresh_rows.items()
-        if row is not None and row.reset_at is not None and abs(row.reset_at - account.reset_at) <= tolerance
+    matching = [
+        (window, baseline)
+        for window, baseline in redemption.baseline_reset_at.items()
+        if baseline is not None and abs(baseline - account.reset_at) <= tolerance
     ]
-    if len(matching_windows) != 1:
+    if len(matching) != 1:
         return False
-    fresh = fresh_reset_at.get(matching_windows[0])
-    return fresh is not None and abs(fresh - account.reset_at) > tolerance
+    window, baseline = matching[0]
+    fresh = fresh_reset_at.get(window)
+    return fresh is not None and abs(fresh - baseline) > tolerance
 
 
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:

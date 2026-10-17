@@ -227,8 +227,8 @@ async def test_account_usage_reset_consume_consumes_credit_and_refreshes(async_c
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, reset_credit_redeem_started_at: float | None = None) -> bool:
-            assert reset_credit_redeem_started_at is not None
+        async def force_refresh(self, account: Account, *, reset_credit_redemption: float | None = None) -> bool:
+            assert reset_credit_redemption is not None
             refreshed_account_ids.append(account.id)
             return True
 
@@ -306,8 +306,8 @@ async def test_account_usage_reset_consume_refreshes_usage_with_post_401_account
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, reset_credit_redeem_started_at: float | None = None) -> bool:
-            assert reset_credit_redeem_started_at is not None
+        async def force_refresh(self, account: Account, *, reset_credit_redemption: float | None = None) -> bool:
+            assert reset_credit_redemption is not None
             refreshed_access_tokens.append(encryptor.decrypt(account.access_token_encrypted))
             return True
 

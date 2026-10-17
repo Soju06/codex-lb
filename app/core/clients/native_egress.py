@@ -96,11 +96,10 @@ def _event_payload_size(item: object) -> int:
 
 
 class _ByteBoundedQueue[T](asyncio.Queue[T]):
-    """``asyncio.Queue`` whose ``full()`` also trips on a queued-bytes budget.
+    """Nonblocking event queue with an additional accounted-payload budget.
 
-    ``put_nowait`` consults ``full()`` before enqueueing, so the reader's
-    existing ``QueueFull`` handling covers both the event cap and the byte
-    budget without any change to the put/get call sites.
+    Existing ``QueueFull`` handling covers both the event cap and projected
+    byte total without changing the put/get call sites.
     """
 
     def __init__(self, *, max_events: int, max_bytes: int, allow_large_first_event: bool = True) -> None:

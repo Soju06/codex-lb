@@ -12,7 +12,7 @@ from app.core.clients.native_egress import (
     NativeEgressWebSocket,
     SubprocessNativeEgressClient,
 )
-from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+from app.core.clients.proxy_websocket import NativeUpstreamWebSocket, is_account_neutral_websocket_error_code
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio, pytest.mark.timeout(10)]
 
@@ -52,6 +52,7 @@ async def test_native_genuine_overflow_is_bounded_and_account_neutral():
     frame = await NativeUpstreamWebSocket(ws).receive()
     assert frame.kind == "error"
     assert frame.error_code == "upstream_consumer_backpressure"
+    assert is_account_neutral_websocket_error_code(frame.error_code)
     owner._abort_request.assert_awaited_once()
 
 

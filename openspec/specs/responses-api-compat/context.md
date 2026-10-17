@@ -328,3 +328,16 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Native WebSocket receive bursts
+
+The decoded native WebSocket receive queue shares byte accounting with the
+existing helper event queue. A 4096-event cap permits ordinary small-frame
+bursts; a 32 MiB accounted-payload cap bounds stalled consumers. Interpreted
+Responses frames retain text and a decoded representation, so both count.
+Overflow is a local consumer condition, not evidence of an unhealthy account.
+
+For example, a 256-frame reasoning burst can remain queued while a send
+acknowledgement completes. Sustained overflow still terminates that connection
+without stopping the shared helper reader or unrelated connections. No automatic
+replay is added because a dispatched request may already have had effects.

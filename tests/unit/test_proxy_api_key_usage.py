@@ -22,6 +22,21 @@ from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from tests.unit.hypothesis_strategies import json_arrays, json_objects
 
 
+def test_compact_source_projection_counts_retained_tool_definitions() -> None:
+    source_payload: JsonObject = {
+        "model": "external-compact-model",
+        "instructions": "Compact",
+        "input": [],
+        "tools": [{"type": "function", "name": "lookup", "description": "x" * 10_000}],
+    }
+    request = ResponsesCompactRequest.model_validate(source_payload)
+
+    budget = estimate_api_key_request_usage(request, upstream_payload=source_payload)
+
+    assert budget.input_tokens == 8_192
+    assert budget.output_tokens is None
+
+
 @pytest.mark.parametrize(
     ("budget", "expected"),
     [

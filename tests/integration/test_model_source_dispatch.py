@@ -1075,7 +1075,7 @@ async def test_admission_estimate_exception_is_covered_by_the_route_helper_latch
         max_concurrency=1,
     )
 
-    def exploding_estimate(_payload: object) -> object:
+    def exploding_estimate(_payload: object, *, upstream_payload: object = None) -> object:
         raise RuntimeError("estimate exploded")
 
     async def never_opened(*_args: object, **_kwargs: object) -> object:

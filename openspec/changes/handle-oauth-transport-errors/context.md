@@ -25,6 +25,11 @@ and never as a flow that stays `pending` forever.
   the target URL, and a proxy URL can carry credentials; the response body and the
   log line therefore carry no text from the exception. The full failure still reaches
   operators through the exception class and the request id.
+- **The cause chain stays, but stays internal.** `OAuthError` is raised `from exc`, so
+  the original aiohttp exception remains reachable through `__cause__` for debugging.
+  It may embed the request URL and proxy credentials, so it must never be rendered to
+  clients or logged with a full traceback at this boundary; the current handlers log
+  only the class name.
 - **Catch `aiohttp.ClientError` and `asyncio.TimeoutError` only.** Not `Exception`:
   a programming error inside the exchange must stay a 500, and
   `asyncio.CancelledError` (a `BaseException`) must keep propagating.

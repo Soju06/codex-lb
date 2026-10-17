@@ -2891,6 +2891,24 @@ class _RaisingOAuthPost:
         return None
 
 
+class _UnreadableBodyOAuthPost:
+    """Response whose headers arrived but whose body read fails mid-stream."""
+
+    status = 200
+
+    async def __aenter__(self) -> "_UnreadableBodyOAuthPost":
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        return None
+
+    async def json(self, **_kwargs: Any) -> dict[str, Any]:
+        raise aiohttp.ClientPayloadError("Response payload is not completed")
+
+    async def text(self, **_kwargs: Any) -> str:
+        raise aiohttp.ClientPayloadError("Response payload is not completed")
+
+
 class _JsonOAuthPost:
     """Minimal successful response object: enough for ``_safe_json`` callers."""
 
@@ -2927,7 +2945,31 @@ def _install_oauth_http_boundary(monkeypatch, respond: Callable[[str], Any]) -> 
 
 
 @pytest.mark.asyncio
-async def test_browser_callback_transport_failure_finalizes_error_page(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    ("make_post", "exception_name"),
+    [
+        pytest.param(lambda: _RaisingOAuthPost(_oauth_transport_failure()), "ClientConnectorError", id="connect"),
+        pytest.param(lambda: _RaisingOAuthPost(asyncio.TimeoutError()), "TimeoutError", id="timeout"),
+        pytest.param(
+            lambda: _RaisingOAuthPost(
+                aiohttp.ClientProxyConnectionError(_oauth_transport_failure().args[0], OSError())
+            ),
+            "ClientProxyConnectionError",
+            id="proxy",
+        ),
+        pytest.param(
+            lambda: _RaisingOAuthPost(
+                aiohttp.ClientConnectorSSLError(
+                    _oauth_transport_failure().args[0], OSError("certificate verify failed")
+                )
+            ),
+            "ClientConnectorSSLError",
+            id="tls",
+        ),
+        pytest.param(_UnreadableBodyOAuthPost, "ClientPayloadError", id="body-read"),
+    ],
+)
+async def test_browser_callback_transport_failure_finalizes_error_page(monkeypatch, caplog, make_post, exception_name):
     """A browser callback whose token exchange cannot reach the auth server must
     render the callback error page (not aiohttp's 500 page), finalize the flow as
     ``error`` so ``/api/oauth/status`` stops the dashboard polling, and leak
@@ -2946,7 +2988,7 @@ async def test_browser_callback_transport_failure_finalizes_error_page(monkeypat
 
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
     monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
-    _install_oauth_http_boundary(monkeypatch, lambda _url: _RaisingOAuthPost(_oauth_transport_failure()))
+    _install_oauth_http_boundary(monkeypatch, lambda _url: make_post())
 
     replica = _make_replica_service(oauth_module.OAuthStateStore())
     start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
@@ -2972,7 +3014,67 @@ async def test_browser_callback_transport_failure_finalizes_error_page(monkeypat
     assert code not in caplog.text
     assert state_token not in caplog.text
     # The class name is logged; the aiohttp message (which embeds the URL) is not.
-    assert "ClientConnectorError" in caplog.text
+    assert exception_name in caplog.text
+    assert "invalid_response" not in caplog.text
+
+    async with SessionLocal() as session:
+        record = await OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
+    assert record is not None and record.status == "error"
+    assert record.error_message == oauth_client_module.OAUTH_TRANSPORT_ERROR_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_browser_callback_transport_failure_does_not_leak_secrets(monkeypatch, caplog):
+    """The aiohttp exception text can embed the request URL and proxy credentials.
+    None of it, nor the code, state, or PKCE verifier, may reach the callback page,
+    the dashboard status envelope, the stored flow error, or the logs.
+    """
+
+    from aiohttp.test_utils import make_mocked_request
+
+    caplog.set_level(logging.INFO)
+
+    verifier = "synthetic-pkce-verifier-not-real"
+    proxy_url = "http://proxyuser:proxypass@proxy.invalid:3128"
+    request_url = "https://auth.invalid/oauth/token"
+    code = "synthetic-auth-code"
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    async def fake_oauth_route():
+        return None
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
+    monkeypatch.setattr(oauth_module, "generate_pkce_pair", lambda: (verifier, "synthetic-challenge"))
+    _install_oauth_http_boundary(
+        monkeypatch,
+        lambda _url: _RaisingOAuthPost(aiohttp.ClientError(f"Cannot connect to host {request_url} via {proxy_url}")),
+    )
+
+    replica = _make_replica_service(oauth_module.OAuthStateStore())
+    start = await replica.start_oauth(oauth_module.OauthStartRequest(force_method="browser"))
+    assert start.flow_id is not None
+    state_token = _oauth_state_token(start.authorization_url or "")
+
+    request = make_mocked_request("GET", f"/auth/callback?code={code}&state={state_token}")
+    response = await replica._handle_callback(request)
+    status = await replica.oauth_status(start.flow_id)
+    async with SessionLocal() as session:
+        record = await OAuthFlowRepository(session, TokenEncryptor()).get_by_flow_id(start.flow_id)
+    assert record is not None and record.status == "error"
+    assert status.status == "error"
+
+    surfaces = [
+        response.text or "",
+        status.model_dump_json(),
+        record.error_message or "",
+        caplog.text,
+    ]
+    for secret in (code, state_token, verifier, "proxyuser", "proxypass", proxy_url, request_url):
+        for surface in surfaces:
+            assert secret not in surface
 
 
 @pytest.mark.asyncio
@@ -3037,10 +3139,11 @@ async def test_device_poll_transport_failure_finalizes_error_status(async_client
     flow_id = start.json()["flowId"]
 
     payload = start.json()
-    for _ in range(20):
+    deadline = time.monotonic() + 10
+    while True:
         status = await async_client.get("/api/oauth/status", params={"flowId": flow_id})
         payload = status.json()
-        if payload["status"] == "error":
+        if payload["status"] == "error" or time.monotonic() >= deadline:
             break
         await asyncio.sleep(0.05)
 

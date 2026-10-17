@@ -26,7 +26,13 @@ describe("telemetry consent flow integration", () => {
     renderWithProviders(<App />);
 
     const dialog = await screen.findByRole("dialog", { name: "Anonymous telemetry" });
-    // The dialog renders the full transmitted envelope, not just the metrics.
+    // The envelope stays collapsed so the decision is not buried under it.
+    expect(dialog).not.toHaveTextContent('"schema_version": 1');
+
+    await user.click(screen.getByRole("button", { name: "View what is sent" }));
+
+    // Once opened, the dialog renders the full transmitted envelope, not just
+    // the metrics.
     expect(dialog).toHaveTextContent('"instance_id": "00000000-0000-4000-8000-000000000000"');
     expect(dialog).toHaveTextContent('"timestamp": "2026-08-06T00:00:00Z"');
     expect(dialog).toHaveTextContent('"schema_version": 1');

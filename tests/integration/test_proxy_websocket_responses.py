@@ -9314,7 +9314,8 @@ def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succe
     assert "historical tool output" in json.dumps(sent_payload["input"], ensure_ascii=True)
 
 
-def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_close(app_instance, monkeypatch):
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+def test_websocket_clean_idle_close_notifies_only_codex_clients(app_instance, monkeypatch, path):
     first_upstream = _FakeUpstreamWebSocket(
         [
             _FakeUpstreamMessage(
@@ -9439,16 +9440,21 @@ def test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_
     }
 
     with TestClient(app_instance) as client:
-        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+        with client.websocket_connect(path) as websocket:
             websocket.send_text(json.dumps(request_payload))
             first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
 
-            websocket.send_text(json.dumps(second_request))
-            second_events = [json.loads(websocket.receive_text()) for _ in range(2)]
+            if path == "/backend-api/codex/responses":
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_text()
+                assert closed.value.code == 1012
+            else:
+                websocket.send_text(json.dumps(second_request))
+                second_events = [json.loads(websocket.receive_text()) for _ in range(2)]
+                assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
 
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
-    assert connect_models == ["gpt-5.4", "gpt-5.5"]
+    assert connect_models == (["gpt-5.4"] if path == "/backend-api/codex/responses" else ["gpt-5.4", "gpt-5.5"])
 
 
 def test_backend_responses_websocket_reclaims_idle_downstream_session_and_upstream(app_instance, monkeypatch):

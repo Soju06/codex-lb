@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from app.core import shutdown as shutdown_state
+from app.core.config.settings import get_settings
 from app.core.shutdown import DRAIN_DEADLINE_HEADER
 from app.modules.health.api import router as health_router
 
@@ -19,6 +20,7 @@ _SPOOFED_LOOPBACK_HEADERS = {"X-Forwarded-For": "127.0.0.1"}
 
 def _trust_every_forwarding_peer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    get_settings.cache_clear()
 
 
 def _client(app: FastAPI, peer: tuple[str, int]) -> AsyncClient:

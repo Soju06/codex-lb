@@ -18,7 +18,8 @@ request *before* any upstream call is opened):
       3:1, and total pixel count is in ``[655_360, 8_294_400]``.
     * ``input_fidelity`` MUST NOT be sent (rejected on both generations and
       edits).
-    * ``background = "transparent"`` is rejected.
+    * ``background = "transparent"`` is supported with PNG or WebP output.
+      Transparent JPEG is rejected for every image model.
 - ``gpt-image-1.5`` / ``gpt-image-1`` / ``gpt-image-1-mini`` (legacy):
     * ``size`` in ``{1024x1024, 1536x1024, 1024x1536, auto}``.
     * ``input_fidelity`` in ``{low, high}`` is allowed but only on
@@ -212,6 +213,12 @@ def validate_image_request_parameters(
             param="output_format",
         )
 
+    if background == "transparent" and output_format == "jpeg":
+        raise _images_invalid(
+            "background='transparent' requires output_format='png' or 'webp'; use png or webp instead of jpeg",
+            param="output_format",
+        )
+
     if not 0 <= output_compression <= 100:
         raise _images_invalid(
             "output_compression must be between 0 and 100",
@@ -236,11 +243,6 @@ def validate_image_request_parameters(
             raise _images_invalid(
                 f"Invalid quality '{quality}' for gpt-image-2. Expected one of: low, medium, high, auto.",
                 param="quality",
-            )
-        if background == "transparent":
-            raise _images_invalid(
-                "background='transparent' is not supported by gpt-image-2",
-                param="background",
             )
         if input_fidelity is not None:
             raise _images_invalid(

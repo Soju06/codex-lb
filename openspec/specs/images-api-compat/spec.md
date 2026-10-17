@@ -23,7 +23,7 @@ The system SHALL expose `POST /v1/images/generations` and accept the OpenAI Imag
 
 #### Scenario: Per-model parameter rules are enforced for gpt-image-2
 
-- **WHEN** a client sends `gpt-image-2` with `background=transparent` or `input_fidelity=low|high`, or with `size` violating the gpt-image-2 size constraints (max edge ≤ 3840 px, both edges multiples of 16, ratio ≤ 3:1, total pixels in [655_360, 8_294_400])
+- **WHEN** a client sends `gpt-image-2` with `input_fidelity=low|high`, or with `size` violating the gpt-image-2 size constraints (max edge ≤ 3840 px, both edges multiples of 16, ratio ≤ 3:1, total pixels in [655_360, 8_294_400])
 - **THEN** the service returns 400 with OpenAI `invalid_request_error` describing the rejected parameter
 
 #### Scenario: Per-model parameter rules are enforced for legacy gpt-image models
@@ -287,3 +287,24 @@ Images generation and edit routes MUST select the first candidate with nonempty 
 #### Scenario: No candidate qualifies
 - **WHEN** neither candidate has plan visibility without suppression
 - **THEN** the selected host is `gpt-5.6-luna` and existing downstream error handling applies
+
+### Requirement: Transparent image output preserves settings and bytes
+
+The system SHALL accept GPT Image 2 transparent PNG/WebP generation and editing on public and Codex-native routes. It MUST forward requested image settings and preserve returned bytes without model substitution or synthetic transparency. Transparent JPEG MUST return HTTP 400 `invalid_request_error` with `param=output_format` before upstream calls. Existing per-model validations and upstream errors MUST remain enforced.
+
+#### Scenario: Transparent PNG or WebP reaches upstream
+
+- **WHEN** a client requests GPT Image 2 transparent PNG or WebP generation or editing
+- **THEN** the requested model, background, output format, quality, and size are forwarded unchanged
+- **AND** upstream image bytes are returned unchanged in JSON or streaming responses
+
+#### Scenario: Transparent JPEG is rejected before upstream
+
+- **WHEN** an Images request specifies `background=transparent` and `output_format=jpeg`
+- **THEN** the service returns HTTP 400 with OpenAI `invalid_request_error` and `param=output_format`
+- **AND** no upstream request is opened
+
+#### Scenario: Upstream transparency failure remains visible
+
+- **WHEN** upstream rejects a valid transparent GPT Image 2 request
+- **THEN** the existing status and error envelope are returned without substituting a model or stripping transparency settings

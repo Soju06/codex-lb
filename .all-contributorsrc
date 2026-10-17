@@ -22,6 +22,16 @@
       ]
     },
     {
+      "login": "loz100loz",
+      "name": "Ninjie",
+      "avatar_url": "https://avatars.githubusercontent.com/u/25230273?v=4",
+      "profile": "https://github.com/loz100loz",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
       "login": "Soju06",
       "name": "Soju06",
       "avatar_url": "https://avatars.githubusercontent.com/u/34199905?v=4",
@@ -1513,7 +1523,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
     },
     {
       "login": "nhdong1993",
@@ -1531,16 +1542,6 @@
       "profile": "https://github.com/tubededentifrice-dev",
       "contributions": [
         "code"
-      ]
-    },
-    {
-      "login": "loz100loz",
-      "name": "Ninjie",
-      "avatar_url": "https://avatars.githubusercontent.com/u/25230273?v=4",
-      "profile": "https://github.com/loz100loz",
-      "contributions": [
-        "code",
-        "test"
       ]
     }
   ],

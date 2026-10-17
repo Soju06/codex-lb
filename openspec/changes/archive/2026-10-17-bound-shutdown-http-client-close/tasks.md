@@ -5,4 +5,4 @@
 - [x] 1.3 Cover prompt completion, timeout, failure and self-cancellation.
 - [x] 1.4 Prove a stalled close no longer prevents lifespan process-death marking and database disposal; reproduce on the baseline.
 - [x] 1.5 Run focused lifecycle tests, lint and type checks.
-- [ ] 1.6 Complete independent review, local CI and scoped strict OpenSpec verification.
+- [x] 1.6 Complete independent review, run local CI and scoped strict OpenSpec verification; record the baseline local-gate limitation in verification.md.

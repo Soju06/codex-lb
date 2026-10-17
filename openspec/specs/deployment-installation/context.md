@@ -463,3 +463,19 @@ removed setting(s) ignored: CODEX_LB_LOG_UPSTREAM_REQUEST_PAYLOAD — values are
 and the equivalent incident-debugging behavior is re-enabled interactively
 with `CODEX_LB_TRACE=upstream_payload`. Startup never fails because of a
 removed setting, and the fixed built-in value is used.
+
+## Startup migration signal ownership
+
+Both container images use the Python entrypoint to supervise a startup migration.
+The shell image delegates there only when migration is enabled; its disabled
+path still starts the application directly. The distroless path always migrates.
+A SIGTERM or SIGINT is forwarded to the active migration child, which is reaped
+before exit. The first parent signal determines the exit status even if the child
+handles the signal and returns success, so an interrupted startup cannot launch
+the server. For example, SIGTERM during migration yields exit status 143 with no
+application handoff. The container runtime still owns any hard-kill deadline.
+
+The supervisor observes child exit without reaping before clearing its active
+reference, keeping the child PID reserved across signal-handler races. No
+migration SQL, Alembic transaction, schema, lock, or application shutdown behavior
+is changed. Per-revision migration progress is the separate concern in PR #2307.

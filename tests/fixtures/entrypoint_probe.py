@@ -34,6 +34,7 @@ class MigrationMode(StrEnum):
     SUCCESS = "success"
     BLOCK = "block"
     FAIL = "fail"
+    SIGNAL = "signal"
 
 
 class ProcessMarker(TypedDict):
@@ -135,6 +136,10 @@ def run_migration(
                     value=raw_exit_code,
                 )
             return exit_code
+        case MigrationMode.SIGNAL:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("migration survived its default SIGTERM handler")
         case unreachable:
             assert_never(unreachable)
 

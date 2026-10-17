@@ -96,3 +96,42 @@ def test_signal_after_exit_observation_does_not_target_stale_child_pid(
 
     assert status == 143
     assert harness.kill_attempts == [], f"stale os.kill attempts after child exit observation: {harness.kill_attempts}"
+
+
+def test_signals_during_spawn_are_forwarded_and_first_signal_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    namespace = runpy.run_path(str(ENTRYPOINT), run_name="distroless_entrypoint_under_test")
+    run_migration = namespace["run_migration"]
+    assert isinstance(run_migration, MigrationRunner)
+    harness = SignalHarness()
+
+    class CompletedChild:
+        pid = CHILD_PID
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_signal(
+        _signum: int,
+        handler: ParentSignalHandler | signal.Handlers,
+    ) -> ParentSignalHandler | signal.Handlers:
+        if callable(handler):
+            harness.parent_handler = handler
+        return signal.SIG_DFL
+
+    def fake_popen(_command: list[str]) -> CompletedChild:
+        handler = harness.parent_handler
+        assert handler is not None
+        handler(signal.SIGINT, None)
+        handler(signal.SIGTERM, None)
+        return CompletedChild()
+
+    def record_kill(pid: int, signum: int) -> None:
+        harness.kill_attempts.append((pid, signum))
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(os, "kill", record_kill)
+    monkeypatch.setattr(os, "waitid", lambda *_args: WaitObservation(si_pid=CHILD_PID))
+
+    assert run_migration() == 130
+    assert harness.kill_attempts == [(CHILD_PID, signal.SIGINT), (CHILD_PID, signal.SIGTERM)]

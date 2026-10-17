@@ -183,11 +183,13 @@ def _assert_app_handoff(running: RunningLauncher) -> None:
 
 
 @pytest.mark.parametrize("launcher", list(Launcher), ids=str)
+@pytest.mark.parametrize("incoming_migration", [None, "true"])
 def test_successful_migration_hands_off_to_exact_app_command(
     tmp_path: Path,
     launcher: Launcher,
+    incoming_migration: str | None,
 ) -> None:
-    running = _start_launcher(tmp_path, launcher)
+    running = _start_launcher(tmp_path, launcher, LaunchSettings(incoming_migration=incoming_migration))
     try:
         migration = _read_process_marker(running.markers / "migration-started.json")
         assert migration["argv"] == MIGRATION_ARGV
@@ -243,6 +245,18 @@ def test_positive_migration_failure_is_preserved_without_app(
         migration = _read_process_marker(running.markers / "migration-started.json")
         status = running.process.wait(timeout=WAIT_SECONDS)
         assert status == 23, f"{launcher} lost migration exit code: expected 23, got {status}"
+        assert not (running.markers / "app-started.json").exists()
+        assert _wait_for_pid_exit(migration["pid"])
+    finally:
+        _cleanup(running)
+
+
+@pytest.mark.parametrize("launcher", list(Launcher), ids=str)
+def test_signal_terminated_migration_is_normalized_without_app(tmp_path: Path, launcher: Launcher) -> None:
+    running = _start_launcher(tmp_path, launcher, LaunchSettings(migration_mode="signal"))
+    try:
+        migration = _read_process_marker(running.markers / "migration-started.json")
+        assert running.process.wait(timeout=WAIT_SECONDS) == 128 + signal.SIGTERM
         assert not (running.markers / "app-started.json").exists()
         assert _wait_for_pid_exit(migration["pid"])
     finally:

@@ -17,8 +17,22 @@ The forced refresh reached `UsageUpdater._recover_quota_status_from_usage` and r
 
 ## Decision and limits
 
-Successful redemption with `code == "reset"` and `windows_reset > 0` is direct upstream confirmation that a quota window reset. Its completion time is passed only into the resulting forced refresh. Recovery still requires the fetched quota to have availability; an exhausted window remains blocked. The marker must postdate `blocked_at`, preventing an earlier redemption from releasing a later block.
+Successful redemption with `code == "reset"` and `windows_reset > 0` proves that *some* quota window reset, not that the throttle behind this 429 ended. A 429 deadline can come from a Retry-After hint, a model-scoped throttle, or a different window. So the bypass is bound to the blocked window the same way the scheduler's #2405 recovery is:
 
-The reset-confirmation heuristic and five-second anchor remain unchanged. Warm-up shares `usage_reset_confirmed`, and loosening the anchor could let a reset in an unrelated window release an account blocked by another quota window.
+- the persisted `accounts.reset_at` must match, within five seconds, the latest pre-refresh `reset_at` of exactly one quota window (primary, secondary or monthly); no match or several matches means the deadline does not identify the window, and the cooldown stays;
+- the fresh snapshot must report that same window with a deadline more than five seconds away from the persisted one, which is the evidence that this window, not another, reset;
+- the existing availability checks then run unchanged, so an exhausted window (including a still-spent short window) keeps the account blocked.
+
+Ordering uses the time the redemption request was started, read before the consume call, not the time the response arrived: a 429 recorded while the request was in flight may postdate the reset. `blocked_at` is stored in whole seconds, so the block's second must be strictly earlier than the start time's second; a 429 in the same second as the start is conservatively kept blocked. The remaining gap is clock skew between replicas, which this does not correct. A redemption seconds after a 429 is unusual in practice (operators redeem by hand, and auto-redeem acts on credits about to expire), so the conservative edge costs little.
+
+The dashboard redemption path also has a conditional status write keyed on the account row it loaded before the consume, so a concurrent 429 already fails that write. The scheduler's auto-redeem refresh reloads the account first, so there the start-time fence is what keeps a newer 429 blocked.
+
+For the reporter's timeline, the 429 persisted the weekly window's own reset deadline, so the block is bound to that window and the redemption's new weekly deadline releases it. Whether the persisted value matched within five seconds was not captured in the report.
+
+The reset-confirmation heuristic and the scheduler's five-second anchor remain unchanged. Warm-up shares `usage_reset_confirmed`, and loosening the anchor could let a reset in an unrelated window release an account blocked by another quota window.
 
 The no-credit global-reset case represented by V2–V4 remains open. Diagnosing it requires the reporter's persisted `accounts.reset_at` value at block time and corresponding post-block usage history.
+
+## Example
+
+A weekly-in-primary account is blocked at 14:40 with `reset_at` = Oct 18 03:59, the weekly row's deadline. A credit redeemed at 14:54 returns `windows_reset=1`; the forced refresh reports the weekly window at 0% with deadline Oct 20. The persisted deadline matches only the weekly row before the refresh, that window's deadline moved, and quota is available: the account becomes `ACTIVE`. Had the block come from `Retry-After: 3600` (deadline 15:40), no window would match and the account would stay blocked until 15:40.

@@ -343,10 +343,12 @@ class AccountsService:
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
+        # Taken before the consume request: a 429 recorded after this point may
+        # postdate the reset, so it must not be lifted by this redemption.
+        reset_credit_redeem_started_at = time.time()
         upstream_response, account = await self._consume_usage_reset_credit(
             account, redeem_request_id=redeem_request_id
         )
-        upstream_reset_confirmed_at = time.time()
         if upstream_response.code in ("reset", "already_redeemed", "no_credit", "nothing_to_reset"):
             await get_rate_limit_reset_credits_store().invalidate(account_id)
 
@@ -354,8 +356,8 @@ class AccountsService:
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
             usage_written = await self._usage_updater.force_refresh(
                 account,
-                upstream_reset_confirmed_at=(
-                    upstream_reset_confirmed_at
+                reset_credit_redeem_started_at=(
+                    reset_credit_redeem_started_at
                     if upstream_response.code == "reset" and upstream_response.windows_reset > 0
                     else None
                 ),

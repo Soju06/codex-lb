@@ -1214,7 +1214,7 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
         account,
         usage_account_id=account.chatgpt_account_id,
         access_token_override=None,
-        upstream_reset_confirmed_at=None,
+        reset_credit_redeem_started_at=None,
     )
     sync_account.assert_awaited_once_with(account)
 
@@ -1265,7 +1265,7 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
         account,
         usage_account_id=account.chatgpt_account_id,
         access_token_override=None,
-        upstream_reset_confirmed_at=None,
+        reset_credit_redeem_started_at=None,
     )
     assert sync_account.await_count == 2
     sync_account.assert_awaited_with(account)
@@ -1336,7 +1336,7 @@ async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.
         account,
         usage_account_id=account.chatgpt_account_id,
         access_token_override=None,
-        upstream_reset_confirmed_at=None,
+        reset_credit_redeem_started_at=None,
     )
     sync_account.assert_awaited_once_with(account)
     assert usage_updater_module._is_usage_refresh_in_cooldown(account.id) is False

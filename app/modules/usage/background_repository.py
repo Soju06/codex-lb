@@ -14,9 +14,12 @@ class BackgroundUsageRepository:
         account_id: str,
         *,
         window: str | None = None,
+        recorded_before: datetime | None = None,
     ) -> UsageHistory | None:
         async with get_background_session() as session:
-            entry = await UsageRepository(session).latest_entry_for_account(account_id, window=window)
+            entry = await UsageRepository(session).latest_entry_for_account(
+                account_id, window=window, recorded_before=recorded_before
+            )
             detach_session_objects(session)
             return entry
 

@@ -246,6 +246,35 @@ async def _release_leader_lease_within(timeout: float) -> bool:
     return True
 
 
+_abandoned_http_client_closes: set[asyncio.Task[None]] = set()
+
+
+def _finish_abandoned_http_client_close(task: asyncio.Task[None]) -> None:
+    _abandoned_http_client_closes.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Managed HTTP client close finished with error", exc_info=exc)
+
+
+async def _close_http_client_within(timeout: float) -> None:
+    """Bound the wait without cancelling client-owned transport teardown."""
+    close_task = asyncio.create_task(close_http_client(), name="shutdown-http-client-close")
+    _abandoned_http_client_closes.add(close_task)
+    close_task.add_done_callback(_finish_abandoned_http_client_close)
+    done, _ = await asyncio.wait({close_task}, timeout=timeout)
+    if close_task not in done:
+        logger.warning(
+            "Managed HTTP client close did not finish within %.1fs; abandoning the wait so shutdown can proceed",
+            timeout,
+        )
+        return
+    # The callback consumes any exception and releases the strong reference.
+    if close_task.cancelled():
+        logger.warning("Managed HTTP client close was cancelled during shutdown")
+
+
 async def _drain_proxy_persistence_tasks(
     proxy_service: Any,
     timeout_seconds: float,
@@ -959,7 +988,7 @@ async def lifespan(app: FastAPI):
             try:
                 await close_discovered_native_egress_client()
             finally:
-                await close_http_client()
+                await _close_http_client_within(10)
         finally:
             try:
                 if metrics_server_task is not None:

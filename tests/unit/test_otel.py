@@ -844,9 +844,11 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispose_failure", [False, True], ids=["clean-dispose", "failed-dispose"])
+@pytest.mark.parametrize("http_close_stalls", [False, True], ids=["prompt-http-close", "stalled-http-close"])
 async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     dispose_failure: bool,
+    http_close_stalls: bool,
 ):
     import app.core.startup as startup_module
     import app.main as main
@@ -869,7 +871,28 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     api_key_limit_reset_scheduler = _DummyScheduler()
     model_scheduler = _DummyScheduler()
     sticky_scheduler = _DummyScheduler()
-    close_http_client = AsyncMock()
+    close_gate = asyncio.Event()
+    close_cancelled = False
+
+    async def waiting_close() -> None:
+        nonlocal close_cancelled
+        try:
+            await close_gate.wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
+
+    close_http_client = AsyncMock(side_effect=waiting_close if http_close_stalls else None)
+    actual_wait = asyncio.wait
+
+    async def short_http_close_wait(tasks, *, timeout):
+        if any(task.get_name() == "shutdown-http-client-close" for task in tasks):
+            assert timeout == 10
+            timeout = 0.01
+        return await actual_wait(tasks, timeout=timeout)
+
+    if http_close_stalls:
+        monkeypatch.setattr(asyncio, "wait", short_http_close_wait)
     shutdown_events: list[str] = []
 
     async def _close_db() -> bool:
@@ -933,7 +956,8 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
     monkeypatch.setattr(main, "_wait_for_bridge_advertise_endpoint", wait_for_reachable)
     validate_advertise = AsyncMock()
     monkeypatch.setattr(main, "_validate_bridge_advertise_endpoint_for_multi_replica", validate_advertise)
-    monkeypatch.setattr(main, "mark_process_dead", Mock())
+    mark_dead = Mock()
+    monkeypatch.setattr(main, "mark_process_dead", mark_dead)
     monkeypatch.setattr(
         "app.core.cache.invalidation.CacheInvalidationPoller",
         lambda session_factory: cache_poller,
@@ -943,15 +967,25 @@ async def test_lifespan_marks_bridge_membership_stale_and_records_clean_shutdown
         lambda: routing_availability_cache,
     )
 
-    if dispose_failure:
-        with pytest.raises(RuntimeError, match="dispose failed"):
-            async with main.lifespan(main.app):
-                await asyncio.sleep(0)
-                assert startup_module._startup_complete is True
-    else:
-        async with main.lifespan(main.app):
-            await asyncio.sleep(0)
-            assert startup_module._startup_complete is True
+    try:
+        async with asyncio.timeout(2):
+            if dispose_failure:
+                with pytest.raises(RuntimeError, match="dispose failed"):
+                    async with main.lifespan(main.app):
+                        await asyncio.sleep(0)
+                        assert startup_module._startup_complete is True
+            else:
+                async with main.lifespan(main.app):
+                    await asyncio.sleep(0)
+                    assert startup_module._startup_complete is True
+        mark_dead.assert_called_once()
+        close_db.assert_awaited_once()
+        assert close_cancelled is False
+    finally:
+        close_gate.set()
+        retained = set(getattr(main, "_abandoned_http_client_closes", ()))
+        if retained:
+            await asyncio.gather(*retained, return_exceptions=True)
 
     register.assert_awaited_once_with("pod-a", endpoint_base_url=None)
     wait_for_reachable.assert_not_awaited()

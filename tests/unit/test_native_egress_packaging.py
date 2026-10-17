@@ -91,5 +91,5 @@ def test_application_shutdown_closes_native_helper_before_shared_http_client() -
     source = (_REPO_ROOT / "app/main.py").read_text(encoding="utf-8")
 
     native_close = source.index("await close_discovered_native_egress_client()")
-    http_close = source.index("await close_http_client()")
+    http_close = source.index("await _close_http_client_within(10)")
     assert native_close < http_close

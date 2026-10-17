@@ -12,6 +12,7 @@ import pytest
 from app.core.shutdown import wait_for_tasks_to_drain
 from app.main import (
     InFlightMiddleware,
+    _close_http_client_within,
     _close_proxy_http_bridge_sessions_for_shutdown,
     _drain_detached_control_plane_tasks,
     _drain_proxy_persistence_tasks,
@@ -300,6 +301,111 @@ async def test_release_leader_lease_within_propagates_unsuccessful_release(
     # A completed release task can still report that detached work or the row
     # deletion was not durably completed; that result must suppress CLEAN.
     assert await _release_leader_lease_within(5) is False
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_within_returns_when_close_wedged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: close_http_client() force-closes every managed client and
+    # then waits on their closed events with no deadline. A stalled TLS or TCP
+    # teardown leaves one event unset, which stranded shutdown before
+    # mark_process_dead() and close_db() in the surrounding finally chain.
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    cancelled = False
+
+    async def wedged_close() -> None:
+        nonlocal cancelled
+        started.set()
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    monkeypatch.setattr(app_main, "close_http_client", wedged_close)
+
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await _close_http_client_within(0.2)
+    elapsed = loop.time() - start
+
+    assert 0.2 <= elapsed < 1.0
+    assert started.is_set()
+    # Abandoned rather than cancelled: each client owns its own close task, so
+    # cancelling the wait would only unwind the waiter.
+    assert cancelled is False
+
+    # The coordinator owns the abandoned wait until it completes.
+    retained = set(app_main._abandoned_http_client_closes)
+    assert len(retained) == 1
+    gate.set()
+    await asyncio.gather(*retained)
+    await asyncio.sleep(0)
+    assert not app_main._abandoned_http_client_closes
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_within_awaits_quick_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+
+    async def quick_close() -> None:
+        nonlocal closed
+        closed = True
+
+    monkeypatch.setattr(app_main, "close_http_client", quick_close)
+
+    await _close_http_client_within(5)
+
+    assert closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_within_swallows_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken_close() -> None:
+        raise RuntimeError("transport gone")
+
+    monkeypatch.setattr(app_main, "close_http_client", broken_close)
+
+    # Must not raise: a failed client close must never fail shutdown.
+    await _close_http_client_within(5)
+
+
+@pytest.mark.asyncio
+async def test_close_http_client_within_swallows_self_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def cancelled_close() -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(app_main, "close_http_client", cancelled_close)
+    await _close_http_client_within(1)
+    assert not app_main._abandoned_http_client_closes
+
+
+@pytest.mark.asyncio
+async def test_abandoned_http_client_close_reports_late_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    gate = asyncio.Event()
+
+    async def delayed_failure() -> None:
+        await gate.wait()
+        raise RuntimeError("late close failure")
+
+    monkeypatch.setattr(app_main, "close_http_client", delayed_failure)
+    await _close_http_client_within(0)
+    retained = set(app_main._abandoned_http_client_closes)
+    assert len(retained) == 1
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        gate.set()
+        await asyncio.gather(*retained, return_exceptions=True)
+        await asyncio.sleep(0)
+    assert "Managed HTTP client close finished with error" in caplog.text
+    assert not app_main._abandoned_http_client_closes
 
 
 @pytest.fixture(autouse=True)

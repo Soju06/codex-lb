@@ -4,6 +4,8 @@ The new route-level test fails on the unchanged base: the paused account receive
 
 The focused suite passes 245 tests covering the new route regressions, existing direct WebSocket transport contracts, routing-cache invalidation, terminal cancellation and model-source guards. Tests use isolated SQLite databases and controlled upstream transports; no external provider or deployment is required.
 
+A further focused run of `test_proxy_affinity_websocket_observation.py` and `test_websocket_paused_account.py` passes all 17 cases. Affinity fixtures that insert accounts directly after startup explicitly update routing availability, matching the normal import path.
+
 The new tests cover both public routes, fresh frames and previous-response deltas, pause before and during admission, same-socket reactivation, and rejection while another response drains. An account response-create cap of one makes continued admission after rejection prove that the rejected request releases its slot.
 
 ## Contract and related work

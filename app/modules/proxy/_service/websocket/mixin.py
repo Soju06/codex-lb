@@ -428,6 +428,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _sanitize_public_websocket_event_payload,
     _sanitize_websocket_connect_failure,
     _sanitize_websocket_previous_response_error,
+    _sanitize_websocket_previous_response_input_items,
     _sanitize_websocket_terminal_error_fields,
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
@@ -3235,14 +3236,16 @@ class _WebSocketMixin:
         client_full_resend_retry_safe = False
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
-            client_full_resend_input_items = previous_response_input_items
+            client_full_resend_input_items = _sanitize_websocket_previous_response_input_items(
+                previous_response_input_items
+            )
             client_full_resend_retry_safe = _websocket_client_previous_response_full_resend_is_retry_safe(
                 previous_response_id=responses_payload.previous_response_id,
                 input_value=responses_payload.input,
                 continuity_state=continuity_state,
             )
             trimmed_input_items = _trim_websocket_previous_response_input_items(previous_response_input_items)
-            if len(trimmed_input_items) != len(previous_response_input_items):
+            if trimmed_input_items != previous_response_input_items:
                 previous_response_trimmed_input_count = len(previous_response_input_items)
                 previous_response_trimmed_input_fingerprint = _facade()._fingerprint_input_items(
                     previous_response_input_items
@@ -3294,7 +3297,9 @@ class _WebSocketMixin:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
             original_input_fingerprint = _facade()._fingerprint_input_items(original_input_items)
-            original_full_resend_payload = responses_payload
+            original_full_resend_payload = responses_payload.model_copy(
+                update={"input": _sanitize_websocket_previous_response_input_items(original_input_items)}
+            )
             responses_payload = responses_payload.model_copy(
                 update={
                     "previous_response_id": session_anchor.previous_response_id,
@@ -3418,16 +3423,22 @@ class _WebSocketMixin:
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
-            _facade().logger.info(
-                "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
-                "previous_response_id=%s",
-                request_state.request_id,
-                previous_response_trimmed_input_count,
+            trimmed_to = (
                 len(cast(list[JsonValue], responses_payload.input))
                 if isinstance(responses_payload.input, list)
-                else None,
-                responses_payload.previous_response_id,
+                else None
             )
+            if trimmed_to != previous_response_trimmed_input_count:
+                # Stripping replayed tool-search ids keeps the item count; only a
+                # real prefix trim is worth an operator-visible log line.
+                _facade().logger.info(
+                    "websocket_previous_response_input_trimmed request_id=%s original_items=%s trimmed_to=%s "
+                    "previous_response_id=%s",
+                    request_state.request_id,
+                    previous_response_trimmed_input_count,
+                    trimmed_to,
+                    responses_payload.previous_response_id,
+                )
         if client_full_resend_payload is not None and not request_state.proxy_injected_previous_response_id:
             request_state.fresh_upstream_request_text = _facade()._response_create_text_with_size_guard(
                 client_full_resend_payload,

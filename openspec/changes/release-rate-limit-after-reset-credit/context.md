@@ -45,6 +45,16 @@ All of these fail closed: the account stays `RATE_LIMITED` until its persisted c
 
 The no-credit global-reset case represented by V2–V4 remains open. Diagnosing it requires the reporter's persisted `accounts.reset_at` value at block time and corresponding post-block usage history.
 
+## Follow-up gates for #2602
+
+This change does not resolve #2602 end to end, so the issue stays open. Each gate below is a separate piece of work, and none of them is a reason to relax the guard in this change.
+
+- **G1 Plan identity and model eligibility.** Plan normalization belongs to #2511 / #2512. This change releases a `self_serve_business_prolite` account with the raw value still stored (integration test `test_confirmed_reset_credit_releases_account_with_reported_raw_plan_type`). Once #2512 lands, the gate is an integration scenario with the raw plan type, weekly window in the primary slot, no secondary window, release, and restored model eligibility.
+- **G2 Credit-free global weekly reset (V2–V4).** This needs the reporter's persisted `accounts.reset_at` / `blocked_at` and the usage history before and after the reset. Its tests must reject releases for unrelated 429 and `Retry-After` deadlines.
+- **G3 Weekly window in the secondary slot with no primary.** The `primary is None and monthly is None` guard in `_recover_quota_status_from_usage` needs its own issue and test.
+- **G4 Durable redemption evidence.** This covers a failed forced refresh and an `already_redeemed` retry. It needs a recovery contract (for example evidence bound to the account and block, with a bounded lifetime) or a later-snapshot recovery shown to be safe.
+- **G5 Cross-replica ordering of `blocked_at`.** This needs either a shared ordering fence or skew simulation in the acceptance tests.
+
 ## Example
 
 A weekly-in-primary account is blocked at 14:40 with `reset_at` = Oct 18 03:59, the weekly row's deadline. A credit redeemed at 14:54 returns `windows_reset=1`; the forced refresh reports the weekly window at 0% with deadline Oct 20. The persisted deadline matches only the weekly row before the refresh, that window's deadline moved, and quota is available: the account becomes `ACTIVE`. Had the block come from `Retry-After: 3600` (deadline 15:40), no window would match and the account would stay blocked until 15:40.

@@ -1182,6 +1182,11 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    progress_logger = logging.getLogger("app.db.migration_progress")
+    progress_handler = logging.StreamHandler()
+    progress_handler.setLevel(logging.INFO)
+    progress_logger.addHandler(progress_handler)
+    progress_logger.setLevel(logging.INFO)
     database_url = get_settings().database_url if args.db_url is None else args.db_url
 
     if args.command == "upgrade":

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping, Protocol, cast
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
@@ -1409,11 +1411,19 @@ async def capture_reset_credit_baseline(usage_repo: UsageRepositoryPort, account
     another slot (for example a secondary row from before upstream moved the
     weekly window into the primary slot) can carry the same deadline and would
     make the blocked window look ambiguous.
+
+    A failed read returns no baseline instead of blocking the redemption: with
+    no baseline window to bind to, the refresh keeps the cooldown.
     """
 
-    rows = {
-        window: await usage_repo.latest_entry_for_account(account_id, window=window) for window in _MAIN_USAGE_WINDOWS
-    }
+    try:
+        rows = {
+            window: await usage_repo.latest_entry_for_account(account_id, window=window)
+            for window in _MAIN_USAGE_WINDOWS
+        }
+    except SQLAlchemyError:
+        logger.warning("Reset credit baseline read failed account_id=%s", account_id, exc_info=True)
+        return {}
     present = [row for row in rows.values() if row is not None]
     if not present:
         return {}

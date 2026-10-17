@@ -1123,6 +1123,22 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **THEN** its idle timeout and the derived upstream ping/pong liveness window use 45 seconds
 - **AND** connections accepted before the change keep the value they were bound with
 
+### Requirement: Idle upstream loss invalidates the Codex downstream transport
+When an ordinary Codex WebSocket upstream ends after completed work and there are no pending or replay-owned requests, the proxy MUST close the downstream with reconnect code 1012 and retire only the continuity anchor belonging to that physical upstream. It MUST NOT silently attach a later delta to a new physical upstream. Durable account ownership MUST remain unchanged. Active request termination and public OpenAI-compatible WebSocket behavior MUST retain their existing contracts.
+
+#### Scenario: Completed upstream disappears
+- **WHEN** an upstream closes or fails after a completed Codex response with no pending request
+- **THEN** the downstream receives close code 1012 before a subsequent turn
+- **AND** a full-context reconnect does not receive an injected anchor from the lost socket
+
+#### Scenario: Another connection owns the newer anchor
+- **WHEN** an idle upstream ends after another connection has established the shared continuity anchor
+- **THEN** the newer connection's anchor remains intact
+
+#### Scenario: Active work or public route
+- **WHEN** an upstream ends while work is pending, replay-owned, or on the public OpenAI-compatible route
+- **THEN** its existing terminal and replay behavior is preserved
+
 ### Requirement: Upstream websocket drops penalize affected accounts
 
 When an upstream websocket closes while one or more streamed response requests
@@ -10896,19 +10912,3 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
-
-### Requirement: Idle upstream loss invalidates the Codex downstream transport
-When an ordinary Codex WebSocket upstream ends after completed work and there are no pending or replay-owned requests, the proxy MUST close the downstream with reconnect code 1012 and retire only the continuity anchor belonging to that physical upstream. It MUST NOT silently attach a later delta to a new physical upstream. Durable account ownership MUST remain unchanged. Active request termination and public OpenAI-compatible WebSocket behavior MUST retain their existing contracts.
-
-#### Scenario: Completed upstream disappears
-- **WHEN** an upstream closes or fails after a completed Codex response with no pending request
-- **THEN** the downstream receives close code 1012 before a subsequent turn
-- **AND** a full-context reconnect does not receive an injected anchor from the lost socket
-
-#### Scenario: Another connection owns the newer anchor
-- **WHEN** an idle upstream ends after another connection has established the shared continuity anchor
-- **THEN** the newer connection's anchor remains intact
-
-#### Scenario: Active work or public route
-- **WHEN** an upstream ends while work is pending, replay-owned, or on the public OpenAI-compatible route
-- **THEN** its existing terminal and replay behavior is preserved

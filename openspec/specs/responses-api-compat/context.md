@@ -6,6 +6,21 @@ This capability implements OpenAI-compatible behavior for `POST /v1/responses`, 
 
 See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
+## Idle Codex upstream loss
+
+After a completed response, an idle physical upstream can lose the context
+that the client's next delta assumes. The proxy signals that loss by closing
+the Codex downstream with code 1012. A connection identity protects a newer
+shared continuity anchor from being retired by an older connection's close.
+Durable account ownership remains intact.
+
+For example, after response A completes, its upstream closes while no new
+request is pending. The downstream reconnects and sends the full conversation
+without an injected response-A anchor. This does not recover context that the
+client no longer has; a delta alone must still follow existing fail-closed
+continuity rules. Public OpenAI-compatible routes and active requests retain
+their existing lifecycle behavior.
+
 ## Rationale and Decisions
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
@@ -328,18 +343,3 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
-
-## Idle Codex upstream loss
-
-After a completed response, an idle physical upstream can lose the context
-that the client's next delta assumes. The proxy signals that loss by closing
-the Codex downstream with code 1012. A connection identity protects a newer
-shared continuity anchor from being retired by an older connection's close.
-Durable account ownership remains intact.
-
-For example, after response A completes, its upstream closes while no new
-request is pending. The downstream reconnects and sends the full conversation
-without an injected response-A anchor. This does not recover context that the
-client no longer has; a delta alone must still follow existing fail-closed
-continuity rules. Public OpenAI-compatible routes and active requests retain
-their existing lifecycle behavior.

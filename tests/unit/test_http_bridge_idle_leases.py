@@ -22,10 +22,21 @@ from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.load_balancer import AccountConcurrencyCaps, LoadBalancer
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _stub_reacquire_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unkeyed reacquisition now resolves the same caps snapshot as keyed work.
+    # These lifecycle unit tests use no database; failure tests override this.
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace())),
+    )
 
 
 class _RecordingVirtualScheduler(VirtualScheduler):
@@ -66,6 +77,14 @@ def _make_bridge_session(
 
 def _make_lease(lease_id: str) -> proxy_service.AccountLease:
     return proxy_service.AccountLease(lease_id=lease_id, account_id="acc-bridge", kind="stream", acquired_at=0.0)
+
+
+def _default_reacquire_snapshot() -> http_bridge_request_submit_module._HTTPBridgeReacquireSnapshot:
+    return http_bridge_request_submit_module._HTTPBridgeReacquireSnapshot(
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        fair_share_threshold_pct=0,
+        routing_tunables=RoutingTunables(),
+    )
 
 
 @pytest.mark.asyncio
@@ -141,8 +160,8 @@ async def test_next_turn_reacquires_stream_lease(monkeypatch: pytest.MonkeyPatch
     assert session.account_lease is None
     lease = _make_lease("l3")
     fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
-    # An unkeyed reacquire reads no settings: the balancer applies the snapshot
-    # of its most recent request (C2-2 routing/overload).
+    # A resolved snapshot keeps even an unkeyed reacquire settings-free while
+    # holding pending_lock.
     monkeypatch.setattr(
         http_bridge_request_submit_module,
         "_service_get_settings_cache",
@@ -150,7 +169,9 @@ async def test_next_turn_reacquires_stream_lease(monkeypatch: pytest.MonkeyPatch
     )
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self, session, snapshot=_default_reacquire_snapshot()
+        )
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
@@ -159,7 +180,8 @@ async def test_next_turn_reacquires_stream_lease(monkeypatch: pytest.MonkeyPatch
         estimated_tokens=0.0,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
 
 
@@ -191,7 +213,9 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
     assert expected_tokens > 0.0
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session, request_state=request_state)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self, session, request_state=request_state, snapshot=_default_reacquire_snapshot()
+        )
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
@@ -200,7 +224,8 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
         estimated_tokens=expected_tokens,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
 
 
@@ -243,9 +268,10 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
     fake_self = SimpleNamespace(_load_balancer=balancer)
 
     hot_session = _make_bridge_session(api_key_id="key-hot")
+    snapshot = await mixin._http_bridge_reacquire_snapshot(fake_self, hot_session)
     with pytest.raises(ProxyResponseError) as exc_info:
         async with hot_session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, hot_session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, hot_session, snapshot=snapshot)
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.payload["error"]["code"] == "api_key_stream_fair_share"
@@ -258,8 +284,9 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
     # A light key on the same congested pool is under the minimum guarantee:
     # its reacquire admits and is counted into the per-key map.
     light_session = _make_bridge_session(api_key_id="key-light")
+    snapshot = await mixin._http_bridge_reacquire_snapshot(fake_self, light_session)
     async with light_session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, light_session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, light_session, snapshot=snapshot)
 
     assert light_session.account_lease is not None
     assert light_session.account_lease.api_key_id == "key-light"
@@ -295,8 +322,11 @@ async def test_reacquire_with_snapshot_never_touches_settings_cache_under_lock(
         await mixin._ensure_http_bridge_session_stream_lease_locked(
             fake_self,
             session,
-            fair_share_threshold_pct=37,
-            routing_tunables=RoutingTunables(),
+            snapshot=http_bridge_request_submit_module._HTTPBridgeReacquireSnapshot(
+                concurrency_caps=AccountConcurrencyCaps(response_create_limit=32, stream_limit=128),
+                fair_share_threshold_pct=37,
+                routing_tunables=RoutingTunables(),
+            ),
         )
 
     settings_get.assert_not_awaited()
@@ -304,6 +334,7 @@ async def test_reacquire_with_snapshot_never_touches_settings_cache_under_lock(
     await_args = acquire_account_lease.await_args
     assert await_args is not None
     assert await_args.kwargs["api_key_stream_fair_share_threshold_pct"] == 37
+    assert await_args.kwargs["concurrency_caps"].stream_limit == 128
 
 
 @pytest.mark.asyncio
@@ -335,15 +366,17 @@ async def test_drain_retirement_defers_to_registered_admission_waiter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_keyed_submit_with_held_lease_never_reads_settings(
+@pytest.mark.parametrize("api_key_id", [None, "key-leased"])
+async def test_submit_with_held_lease_never_reads_settings(
     monkeypatch: pytest.MonkeyPatch,
+    api_key_id: str | None,
 ) -> None:
     """A keyed session already holding its stream lease admits turns without
     any settings-cache dependency — a stalled or unavailable settings DB must
     not block or fail requests that need no lease reacquisition."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    session = _make_bridge_session(api_key_id="key-leased")
+    session = _make_bridge_session(api_key_id=api_key_id)
     session.account_lease = _make_lease("l-held")
     monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
 
@@ -396,8 +429,12 @@ async def test_keyed_submit_with_held_lease_never_reads_settings(
 
 
 @pytest.mark.asyncio
-async def test_keyed_submit_resolves_fair_share_before_pending_lock(
+@pytest.mark.parametrize("api_key_id", [None, "key-stall"])
+@pytest.mark.parametrize("failure_kind", ["cancel", "read-error"])
+async def test_submit_resolves_snapshot_before_pending_lock(
     monkeypatch: pytest.MonkeyPatch,
+    api_key_id: str | None,
+    failure_kind: str,
 ) -> None:
     """Issue #1971 product path: a stalled settings-cache refresh must stall
     the submit BEFORE it acquires ``session.pending_lock``, so the session's
@@ -406,7 +443,7 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
     stall — cleanup tasks piled up on it for days in production."""
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    session = _make_bridge_session(api_key_id="key-stall")
+    session = _make_bridge_session(api_key_id=api_key_id)
     lease = _make_lease("l-stall")
     monkeypatch.setattr(service._load_balancer, "acquire_account_lease", AsyncMock(return_value=lease))
     monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
@@ -418,7 +455,7 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
     async def stalled_get() -> SimpleNamespace:
         settings_blocked.set()
         await release_settings.wait()
-        return SimpleNamespace(proxy_api_key_fair_share_congestion_threshold_pct=50)
+        raise RuntimeError("settings unavailable")
 
     monkeypatch.setattr(
         http_bridge_request_submit_module,
@@ -456,11 +493,17 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
             lock_acquired = True
     assert lock_acquired, "submit held pending_lock across the stalled settings refresh"
 
-    submit_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(submit_task, timeout=1)
+    if failure_kind == "cancel":
+        submit_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(submit_task, timeout=1)
+    else:
+        release_settings.set()
+        with pytest.raises(RuntimeError, match="settings unavailable"):
+            await asyncio.wait_for(submit_task, timeout=1)
     assert session.admission_waiter_count == 0
     assert session.account_lease is None
+    service._load_balancer.acquire_account_lease.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -471,7 +514,9 @@ async def test_reacquire_denial_raises_local_cap_envelope() -> None:
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self, session, snapshot=_default_reacquire_snapshot()
+            )
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.payload["error"]["code"] == "account_stream_cap"
@@ -506,7 +551,9 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self, session, snapshot=_default_reacquire_snapshot()
+            )
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
@@ -540,7 +587,9 @@ async def test_reacquire_racing_close_defers_cancellation_until_release() -> Non
 
     async def reacquire() -> None:
         async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self, session, snapshot=_default_reacquire_snapshot()
+            )
 
     reacquire_task = asyncio.create_task(reacquire())
     await release_started.wait()
@@ -566,7 +615,7 @@ async def test_reacquire_noop_when_lease_already_held() -> None:
     fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock()))
 
     async with session.pending_lock:
-        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session, snapshot=None)
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_not_awaited()
@@ -637,7 +686,8 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
         estimated_tokens=0.0,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
     prewarm.assert_awaited_once()
     release_account_lease.assert_awaited_once_with(lease)
@@ -784,7 +834,8 @@ async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
         estimated_tokens=0.0,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
     # The admission-failure cleanup settles the lease exactly once.
     release_account_lease.assert_awaited_once_with(lease)
@@ -850,7 +901,8 @@ async def test_prewarm_failure_retires_closed_session_after_last_waiter(
         estimated_tokens=0.0,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.admission_waiter_count == 0
@@ -1051,7 +1103,8 @@ async def test_prewarm_cancellation_cannot_interrupt_waiter_cleanup(
         estimated_tokens=0.0,
         api_key_id=None,
         api_key_stream_fair_share_threshold_pct=0,
-        routing_tunables=None,
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=8),
+        routing_tunables=RoutingTunables(),
     )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.admission_waiter_count == 0

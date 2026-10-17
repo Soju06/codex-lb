@@ -105,7 +105,7 @@ def test_rust_job_runs_native_routed_wire_probe_with_built_helper() -> None:
     assert build in rust_job
     assert probe in rust_job
     assert rust_job.index(build) < rust_job.index(probe)
-    assert "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in rust_job
+    assert "uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884" in rust_job
     assert "uv sync --dev --frozen" in rust_job
     assert (
         "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"

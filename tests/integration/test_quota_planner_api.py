@@ -82,6 +82,33 @@ async def test_quota_planner_settings_api_get_and_update(monkeypatch, async_clie
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["workingHoursStart", "workingHoursEnd"])
+@pytest.mark.parametrize("value", ["24:00", "12:60", "99:99", "９:００", "09:00\n"])
+async def test_quota_planner_rejects_invalid_clock_time_without_saving(monkeypatch, async_client, field, value):
+    monkeypatch.setattr("app.modules.quota_planner.api.AuditService.log_async", lambda *args, **kwargs: None)
+    before = (await async_client.get("/api/quota-planner/settings")).json()
+
+    response = await async_client.put("/api/quota-planner/settings", json={field: value, "maxWarmupsPerDay": 99})
+
+    assert response.status_code == 422
+    assert (await async_client.get("/api/quota-planner/settings")).json() == before
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_clock_time_boundaries_and_partial_updates(monkeypatch, async_client):
+    monkeypatch.setattr("app.modules.quota_planner.api.AuditService.log_async", lambda *args, **kwargs: None)
+    response = await async_client.put(
+        "/api/quota-planner/settings", json={"workingHoursStart": "00:00", "workingHoursEnd": "23:59"}
+    )
+    assert response.status_code == 200
+    for payload in ({}, {"workingHoursStart": None, "workingHoursEnd": None}):
+        response = await async_client.put("/api/quota-planner/settings", json=payload)
+        assert response.status_code == 200
+        assert response.json()["workingHoursStart"] == "00:00"
+        assert response.json()["workingHoursEnd"] == "23:59"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("timezone_name", ["/Europe/Stockholm", "Europe/../Stockholm", "Unknown/Timezone"])
 async def test_quota_planner_rejects_invalid_timezone_without_saving(monkeypatch, async_client, timezone_name):
     monkeypatch.setattr("app.modules.quota_planner.api.AuditService.log_async", lambda *args, **kwargs: None)

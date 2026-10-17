@@ -36,7 +36,7 @@
   "accounts.detail.emptyTitle": "Account를 선택하세요",
   "accounts.detail.saveAlias": "별칭 저장",
   "accounts.detail.unknownWorkspace": "Personal / 알 수 없는 workspace",
-  "accounts.importDialog.description": "Codex에서 export한 auth.json 파일을 업로드하세요.",
+  "accounts.importDialog.description": "Codex에서 export한 auth.json 파일을 하나 이상 업로드하세요.",
   "accounts.importDialog.fileLabel": "auth.json 파일",
   "accounts.importDialog.title": "Account 가져오기",
   "accounts.list.addAccount": "Account 추가",
@@ -52,6 +52,14 @@
   "accounts.list.statusEligibilityNote": "상태는 각 Account의 표시 상태입니다. cooldown, error backoff, quota 임계값, model 호환성, thread affinity 소유권 때문에 개별 요청은 Active Account도 건너뛸 수 있습니다.",
   "accounts.list.statusFilterAria": "상태로 Account 필터링",
   "accounts.list.statusPlaceholder": "상태로 필터",
+  "accounts.sort.status_asc": "상태 (활성 먼저)",
+  "accounts.sort.status_desc": "상태 (비활성 먼저)",
+  "accounts.sort.quota_5h_asc": "5시간 할당량 (잔여량 적은 순)",
+  "accounts.sort.quota_5h_desc": "5시간 할당량 (잔여량 많은 순)",
+  "accounts.sort.quota_7d_asc": "주간 할당량 (잔여량 적은 순)",
+  "accounts.sort.quota_7d_desc": "주간 할당량 (잔여량 많은 순)",
+  "accounts.sort.quota_monthly_asc": "월간 할당량 (잔여량 적은 순)",
+  "accounts.sort.quota_monthly_desc": "월간 할당량 (잔여량 많은 순)",
   "accounts.sort.most_reset_credits": "reset credit 많은 순",
   "accounts.sort.name_asc": "이름 (A-Z)",
   "accounts.sort.name_desc": "이름 (Z-A)",
@@ -2027,5 +2035,6 @@
   "organisation.automaticAccounts.secret.description": "“{{label}}”의 자격 증명입니다.",
   "organisation.automaticAccounts.secret.warning": "지금 복사하세요. 한 번만 표시되고 다시 볼 수 없습니다. 잃어버렸다면 자격 증명을 교체하세요.",
   "organisation.automaticAccounts.secret.copy": "자격 증명 복사",
-  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다."
+  "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다.",
+  "accounts.importDialog.selectedFiles": "선택한 파일"
 }

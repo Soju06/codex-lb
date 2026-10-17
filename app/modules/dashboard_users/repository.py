@@ -608,9 +608,32 @@ class DashboardUsersRepository:
     async def rollback(self) -> None:
         await self._session.rollback()
 
-    async def deactivate_owned_keys(self, user_id: str) -> list[str]:
-        """Turn off every active key the account owns, recording why (no commit); returns their hashes."""
+    async def _lock_owner(self, user_id: str) -> None:
+        """Take the owner's row before reading which of its keys the cascade must move.
 
+        Both directions of the cascade read ``api_keys`` and then write it,
+        while the API-key page's ``isActive: true`` reads the owner's status
+        (``FOR UPDATE`` on this same row) and then writes the key. Under
+        PostgreSQL's READ COMMITTED neither read is repeated, so with the two
+        rows taken in opposite orders a key switched on after the cascade's
+        scan — but committed before the disable — survives active on a
+        disabled owner. Taking the owner row first puts both sides in one
+        order: whoever loses the row reads the winner's committed state.
+
+        SQLite ignores ``FOR UPDATE`` and needs nothing here: its writers are
+        serialised by the database write lock the callers already hold.
+        """
+
+        await self._session.execute(select(DashboardUser.id).where(DashboardUser.id == user_id).with_for_update())
+
+    async def deactivate_owned_keys(self, user_id: str) -> list[str]:
+        """Turn off every active key the account owns, recording why (no commit); returns their hashes.
+
+        The owner's row is taken first so "which keys are active" is read under
+        the lock the API-key page holds while it re-enables one.
+        """
+
+        await self._lock_owner(user_id)
         result = await self._session.execute(
             update(ApiKey)
             .where(ApiKey.owner_user_id == user_id)
@@ -623,10 +646,14 @@ class DashboardUsersRepository:
     async def reactivate_owner_disabled_keys(self, user_id: str) -> list[str] | None:
         """Restore only the keys the owner cascade turned off; manual blocks stay off.
 
-        The UPDATE is conditional on the owner being active at that moment;
-        ``None`` means the owner is not active (nothing was written).
+        The owner's row is taken first (see :meth:`_lock_owner`) and the UPDATE
+        is conditional on the owner being active at that moment; a disable that
+        is already in flight therefore either commits first — and this reads
+        its ``disabled`` — or waits for this and then finds the restored keys
+        active. ``None`` means the owner is not active (nothing was written).
         """
 
+        await self._lock_owner(user_id)
         owner_active = (
             select(DashboardUser.id)
             .where(DashboardUser.id == ApiKey.owner_user_id)

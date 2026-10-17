@@ -377,6 +377,13 @@ class ApiKeysRepository:
         row = await self.get_by_id(key_id)
         if row is None:
             return None
+        if is_active is not _UNSET and is_active and not row.is_active and row.owner_user_id is not None:
+            # Before the first field is assigned: any assignment makes the key
+            # row dirty, and the next statement would autoflush its UPDATE --
+            # taking the key row before the owner row, the opposite order from
+            # the disable cascade, which is a deadlock rather than a refusal.
+            if await self._owner_is_disabled(row.owner_user_id):
+                raise ApiKeyOwnerDisabledError("The key's owner is disabled; re-enable the account first")
         if name is not _UNSET:
             assert isinstance(name, str)
             row.name = name
@@ -422,8 +429,7 @@ class ApiKeysRepository:
         if is_active is not _UNSET:
             assert isinstance(is_active, bool)
             if is_active and not row.is_active:
-                if row.owner_user_id is not None and await self._owner_is_disabled(row.owner_user_id):
-                    raise ApiKeyOwnerDisabledError("The key's owner is disabled; re-enable the account first")
+                # The owner gate already ran above, under its row lock.
                 row.deactivated_reason = None
             elif not is_active:
                 # An explicit revoke wins over the owner cascade: reactivate-keys

@@ -192,6 +192,7 @@ def test_client_mapping_table_and_unknown_family_are_allowlisted() -> None:
     for raw_group, expected_family in CLIENT_FAMILY_BY_RAW_GROUP.items():
         assert client_family(raw_group) == expected_family
     assert client_family("senpi") == "other"
+    assert client_family("codex_cli_rs") == "codex-cli"
 
     shares, other_ratio = client_shares(
         [
@@ -203,6 +204,20 @@ def test_client_mapping_table_and_unknown_family_are_allowlisted() -> None:
     assert shares == {"codex-cli": 0.833333, "other": 0.166667}
     assert other_ratio == 0.166667
     assert "senpi" not in str(shares)
+
+    # The interactive Codex CLI (TUI) sends `User-Agent: codex_cli_rs/<version>`,
+    # the same fingerprint the proxy itself treats as a native Codex CLI client
+    # (see `_NATIVE_CODEX_USER_AGENT_PREFIXES` in app/core/clients/proxy.py).
+    # It must collapse into the same `codex-cli` family as codex_exec/codex-tui
+    # rather than falling through to `other` (issue #1843).
+    rs_shares, rs_other_ratio = client_shares(
+        [
+            ClientCount("codex_cli_rs", 82),
+            ClientCount("codex_exec", 18),
+        ]
+    )
+    assert rs_shares == {"codex-cli": 1.0}
+    assert rs_other_ratio == 0.0
 
 
 def test_client_share_emission_rejects_noncanonical_mapping(monkeypatch) -> None:

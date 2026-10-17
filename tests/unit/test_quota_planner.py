@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.balancer import AccountState
 from app.db.models import Account, AccountStatus, RequestLog
@@ -22,8 +23,15 @@ from app.modules.quota_planner.logic import (
     simulate_pool,
 )
 from app.modules.quota_planner.repository import DemandBin, QuotaPlannerRepository, _to_db_naive_utc
+from app.modules.quota_planner.schemas import QuotaPlannerSettingsUpdateRequest
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("value", ["24:00", "12:60", "99:99", "０９:００", "09:00\n"])
+def test_settings_update_requires_real_clock_times(value: str) -> None:
+    with pytest.raises(ValidationError):
+        QuotaPlannerSettingsUpdateRequest(working_hours_start=value)
 
 
 def _forecast(

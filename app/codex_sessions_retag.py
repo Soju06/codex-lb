@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sqlite3
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,12 +14,29 @@ from tempfile import NamedTemporaryFile
 from typing import cast
 from urllib.parse import quote
 
+from app.codex_retag_metadata import read_metadata
+
 JsonObject = dict[str, object]
 ProgressLogger = Callable[[str], None]
 
 PROVIDER_RETAG_BACKUP_DIR = "provider-retag"
 _SUPPORTED_PROVIDERS = {"openai", "codex-lb"}
 _STATE_DB_PATTERN = "state_*.sqlite"
+
+
+@dataclass(frozen=True)
+class RetagProgress:
+    phase: str
+    completed: int
+    total: int | None = None
+
+
+ProgressCallback = Callable[[RetagProgress], None]
+
+
+def _progress(callback: ProgressCallback | None, phase: str, completed: int, total: int | None = None) -> None:
+    if callback is not None:
+        callback(RetagProgress(phase, completed, total))
 
 
 @dataclass(frozen=True)
@@ -68,6 +86,7 @@ def retag_codex_sessions(
     target_provider: str,
     dry_run: bool = False,
     progress_logger: ProgressLogger | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> RetagResult:
     logs: list[str] = []
 
@@ -87,12 +106,22 @@ def retag_codex_sessions(
 
     # Build the full write set before taking a backup so dry-runs and real
     # retags report the same targets.
+    _progress(progress_callback, "discovery", 0)
     jsonl_files = tuple(_find_jsonl_session_files(sessions_dir))
     state_dbs = tuple(_find_state_dbs(codex_home))
-    provider_counts_before = _provider_counts(codex_home)
-    jsonl_files_to_update = tuple(path for path in jsonl_files if _jsonl_contains_provider(path, source_provider))
-    sqlite_dbs_to_update = tuple(db for db in state_dbs if _sqlite_count_provider_rows(db, source_provider) > 0)
-    sqlite_rows_matched = sum(_sqlite_count_provider_rows(db, source_provider) for db in sqlite_dbs_to_update)
+    counts_by_path: dict[Path, Counter[str]] = {}
+    total = len(jsonl_files) + len(state_dbs)
+    for path in jsonl_files:
+        counts_by_path[path] = read_metadata(path).counts()
+        _progress(progress_callback, "discovery", len(counts_by_path), total)
+    for db in state_dbs:
+        counts_by_path[db] = _sqlite_provider_counts(db)
+        _progress(progress_callback, "discovery", len(counts_by_path), total)
+    _progress(progress_callback, "discovery", total, total)
+    provider_counts_before = _sum_counts(counts_by_path.values())
+    jsonl_files_to_update = tuple(path for path in jsonl_files if counts_by_path[path][source_provider])
+    sqlite_dbs_to_update = tuple(db for db in state_dbs if counts_by_path[db][source_provider])
+    sqlite_rows_matched = sum(counts_by_path[db][source_provider] for db in sqlite_dbs_to_update)
 
     methods_used = _methods_used(jsonl_files_to_update, sqlite_dbs_to_update)
     log(f"JSONL sessions method scanned {len(jsonl_files)} files under {sessions_dir}")
@@ -102,27 +131,50 @@ def retag_codex_sessions(
     jsonl_files_updated = 0
     sqlite_rows_updated = 0
 
-    if dry_run:
-        log("Dry run enabled; no files will be changed")
-    elif jsonl_files_to_update or sqlite_dbs_to_update:
-        backup_path = _create_backup(codex_home, jsonl_files_to_update, sqlite_dbs_to_update)
-        log(f"Created backup at {backup_path}")
+    try:
+        if dry_run:
+            log("Dry run enabled; no files will be changed")
+        elif jsonl_files_to_update or sqlite_dbs_to_update:
+            backup_path = _create_backup(codex_home, jsonl_files_to_update, sqlite_dbs_to_update, progress_callback)
+            log(f"Created backup at {backup_path}")
 
-        for path in jsonl_files_to_update:
-            if _retag_jsonl_file(path, source_provider, target_provider):
-                jsonl_files_updated += 1
-        if jsonl_files_to_update:
-            log(f"Updated {jsonl_files_updated} JSONL session file(s)")
+            total_targets = len(jsonl_files_to_update) + len(sqlite_dbs_to_update)
+            _progress(progress_callback, "rewrite", 0, total_targets)
+            for index, path in enumerate(jsonl_files_to_update, 1):
+                if _retag_jsonl_file(path, source_provider, target_provider):
+                    jsonl_files_updated += 1
+                _progress(progress_callback, "rewrite", index, total_targets)
+            if jsonl_files_to_update:
+                log(f"Updated {jsonl_files_updated} JSONL session file(s)")
 
-        for db_path in sqlite_dbs_to_update:
-            sqlite_rows_updated += _update_sqlite_provider(db_path, source_provider, target_provider)
-        if sqlite_dbs_to_update:
-            log(f"Updated {sqlite_rows_updated} SQLite thread row(s)")
-    else:
-        log(f"No {source_provider} Codex session tags were found")
+            for index, db_path in enumerate(sqlite_dbs_to_update, len(jsonl_files_to_update) + 1):
+                sqlite_rows_updated += _update_sqlite_provider(db_path, source_provider, target_provider)
+                _progress(progress_callback, "rewrite", index, total_targets)
+            if sqlite_dbs_to_update:
+                log(f"Updated {sqlite_rows_updated} SQLite thread row(s)")
+        else:
+            log(f"No {source_provider} Codex session tags were found")
 
-    provider_counts_after = provider_counts_before if dry_run else _provider_counts(codex_home)
+        if not dry_run:
+            total_targets = len(jsonl_files_to_update) + len(sqlite_dbs_to_update)
+            _progress(progress_callback, "verification", 0, total_targets)
+            for index, path in enumerate(jsonl_files_to_update, 1):
+                verified = read_metadata(path).counts()
+                _verify_counts(counts_by_path[path], verified, source_provider, target_provider, path)
+                counts_by_path[path] = verified
+                _progress(progress_callback, "verification", index, total_targets)
+            for index, db in enumerate(sqlite_dbs_to_update, len(jsonl_files_to_update) + 1):
+                verified = _sqlite_provider_counts(db)
+                _verify_counts(counts_by_path[db], verified, source_provider, target_provider, db)
+                counts_by_path[db] = verified
+                _progress(progress_callback, "verification", index, total_targets)
+    except Exception as exc:
+        if backup_path is not None:
+            raise ValueError(f"{exc}. Backup retained at {backup_path}; changes may be partial.") from exc
+        raise
+    provider_counts_after = _sum_counts(counts_by_path.values())
 
+    _progress(progress_callback, "complete", total, total)
     return RetagResult(
         codex_home=codex_home,
         source_provider=source_provider,
@@ -224,41 +276,31 @@ def _jsonl_contains_provider(path: Path, provider: str) -> bool:
 
 
 def _retag_jsonl_file(path: Path, source_provider: str, target_provider: str) -> bool:
-    changed = False
+    metadata = read_metadata(path)
+    if not metadata.counts()[source_provider]:
+        return False
     temp_path: Path | None = None
     try:
         with (
-            path.open("r", encoding="utf-8") as input_handle,
-            NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as output_handle,
+            path.open("rb") as input_handle,
+            NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, delete=False) as output_handle,
         ):
             temp_path = Path(output_handle.name)
-            for raw_line in input_handle:
-                line = raw_line.rstrip("\n")
-                if not line:
-                    output_handle.write(raw_line)
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    output_handle.write(raw_line)
-                    continue
-                if isinstance(record, dict) and _retag_jsonl_record_provider(record, source_provider, target_provider):
-                    # Preserve invalid or unrelated JSONL lines verbatim; only
-                    # matched session records are normalized through json.dumps.
-                    changed = True
+            while input_handle.tell() < metadata.end:
+                raw_line = input_handle.readline(metadata.end - input_handle.tell())
+                record = json.loads(raw_line)
+                if _retag_jsonl_record_provider(record, source_provider, target_provider):
                     output_handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
                 else:
-                    output_handle.write(raw_line)
+                    output_handle.write(raw_line.decode("utf-8"))
+            output_handle.flush()
+            shutil.copyfileobj(input_handle, output_handle.buffer)
+        shutil.copymode(path, temp_path)
+        temp_path.replace(path)
     except Exception:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
         raise
-    if not changed:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-        return False
-    assert temp_path is not None
-    temp_path.replace(path)
     return True
 
 
@@ -403,30 +445,45 @@ def _sqlite_has_model_provider_column(conn: sqlite3.Connection) -> bool:
     return any(row[1] == "model_provider" for row in rows)
 
 
-def _provider_counts(codex_home: Path) -> tuple[ProviderCount, ...]:
-    counts: dict[str, int] = {}
-    for path in _find_jsonl_session_files(codex_home / "sessions"):
-        for record in _read_jsonl_records(path):
-            provider = _jsonl_record_provider(record)
-            if isinstance(provider, str):
-                counts[provider] = counts.get(provider, 0) + 1
-    for db_path in _find_state_dbs(codex_home):
+def _verify_counts(
+    before: Counter[str],
+    after: Counter[str],
+    source: str,
+    target: str,
+    path: Path,
+) -> None:
+    expected = before.copy()
+    expected[target] += expected.pop(source, 0)
+    if after != expected:
+        raise ValueError(f"Retag verification failed: {path}")
+
+
+def _sum_counts(counts: Iterable[Counter[str]]) -> tuple[ProviderCount, ...]:
+    total: Counter[str] = Counter()
+    for count in counts:
+        total.update(count)
+    return tuple(ProviderCount(provider, count) for provider, count in sorted(total.items()) if count)
+
+
+def _sqlite_provider_counts(db_path: Path) -> Counter[str]:
+    try:
+        with _connect_sqlite(db_path, read_only=True) as conn:
+            if not _sqlite_has_threads_table(conn) or not _sqlite_has_model_provider_column(conn):
+                return Counter()
+            rows = conn.execute("SELECT model_provider, COUNT(*) FROM threads GROUP BY model_provider").fetchall()
+            return Counter({provider: int(count) for provider, count in rows if isinstance(provider, str)})
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc).casefold():
+            raise
+        temp_path = _copy_sqlite_to_temp(db_path)
         try:
-            with _connect_sqlite(db_path, read_only=True) as conn:
-                if not _sqlite_has_threads_table(conn):
-                    continue
-                if not _sqlite_has_model_provider_column(conn):
-                    continue
-                rows = conn.execute(
-                    "SELECT model_provider, COUNT(*) FROM threads GROUP BY model_provider",
-                ).fetchall()
-                for provider, count in rows:
-                    if isinstance(provider, str):
-                        counts[provider] = counts.get(provider, 0) + int(count)
-        except sqlite3.OperationalError as exc:
-            if "unable to open database file" not in str(exc).casefold():
-                raise
-    return tuple(ProviderCount(provider, count) for provider, count in sorted(counts.items()))
+            with _connect_sqlite(temp_path, read_only=True) as conn:
+                if not _sqlite_has_threads_table(conn) or not _sqlite_has_model_provider_column(conn):
+                    return Counter()
+                rows = conn.execute("SELECT model_provider, COUNT(*) FROM threads GROUP BY model_provider").fetchall()
+                return Counter({provider: int(count) for provider, count in rows if isinstance(provider, str)})
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 def _methods_used(jsonl_files: Sequence[Path], state_dbs: Sequence[Path]) -> tuple[str, ...]:
@@ -438,21 +495,37 @@ def _methods_used(jsonl_files: Sequence[Path], state_dbs: Sequence[Path]) -> tup
     return tuple(methods)
 
 
-def _create_backup(codex_home: Path, jsonl_files: Sequence[Path], state_dbs: Sequence[Path]) -> Path:
+def _create_backup(
+    codex_home: Path,
+    jsonl_files: Sequence[Path],
+    state_dbs: Sequence[Path],
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
     backup_dir = _next_backup_dir(codex_home / "backups" / PROVIDER_RETAG_BACKUP_DIR)
     backup_dir.mkdir(parents=True)
 
-    for db_path in state_dbs:
-        _backup_sqlite_db(db_path, backup_dir / db_path.name)
+    try:
+        total = len(state_dbs) + len(jsonl_files)
+        _progress(progress_callback, "backup", 0, total)
+        for index, db_path in enumerate(state_dbs, 1):
+            _backup_sqlite_db(db_path, backup_dir / db_path.name)
+            _progress(progress_callback, "backup", index, total)
 
-    session_index = codex_home / "session_index.jsonl"
-    if session_index.is_file():
-        shutil.copy2(session_index, backup_dir / session_index.name)
+        session_index = codex_home / "session_index.jsonl"
+        if session_index.is_file():
+            shutil.copy2(session_index, backup_dir / session_index.name)
 
-    for path in jsonl_files:
-        destination = backup_dir / path.relative_to(codex_home)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        for index, path in enumerate(jsonl_files, len(state_dbs) + 1):
+            destination = backup_dir / path.relative_to(codex_home)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(path, destination)
+            except OSError:
+                shutil.copy2(path, destination)
+            _progress(progress_callback, "backup", index, total)
+
+    except Exception as exc:
+        raise ValueError(f"Backup failed before mutation: {exc}. Partial backup retained at {backup_dir}") from exc
 
     return backup_dir
 

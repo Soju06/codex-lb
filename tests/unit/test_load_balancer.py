@@ -1807,6 +1807,16 @@ def test_handle_permanent_failure_sets_reason_for_account_deactivated():
     assert state.deactivation_reason == "Account has been deactivated"
 
 
+def test_handle_permanent_failure_scopes_deactivated_workspace_to_its_record():
+    unavailable = AccountState("workspace_a", AccountStatus.ACTIVE, used_percent=5.0)
+    healthy = AccountState("workspace_b", AccountStatus.ACTIVE, used_percent=5.0)
+    handle_permanent_failure(unavailable, "deactivated_workspace")
+    assert unavailable.status == AccountStatus.DEACTIVATED
+    assert unavailable.deactivation_reason == "Workspace has been deactivated"
+    assert healthy.status == AccountStatus.ACTIVE
+    assert healthy.deactivation_reason is None
+
+
 def test_apply_usage_quota_respects_runtime_reset_for_quota_exceeded(monkeypatch):
     now = 1_700_000_000.0
     future = now + 3600.0

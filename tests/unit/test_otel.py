@@ -23,7 +23,7 @@ from yarl import URL
 import app.core.tracing.otel as otel
 import app.modules.proxy.service as proxy_module
 from app.core.audit import service as audit_service_module
-from app.core.auth.dashboard_access import DashboardAuthMode, DashboardPrincipal, admin_principal
+from app.core.auth.dashboard_access import DashboardAuthMode, DashboardPrincipal, Permission, admin_principal
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import Settings
@@ -578,7 +578,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     import app.main as main
     from app.core import shutdown as shutdown_state
     from app.core.auth.dependencies import (
-        require_dashboard_write_access,
+        require_dashboard_permission,
         validate_dashboard_session,
         validate_usage_api_key,
     )
@@ -742,7 +742,9 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     monkeypatch.setattr(shutdown_state, "wait_for_in_flight_drain", _force_in_flight_timeout)
     monkeypatch.setattr(main, "_drain_detached_control_plane_tasks", _track_control_plane_drain)
     monkeypatch.setitem(main.app.dependency_overrides, validate_dashboard_session, _allow_dashboard_access)
-    monkeypatch.setitem(main.app.dependency_overrides, require_dashboard_write_access, _allow_dashboard_access)
+    monkeypatch.setitem(
+        main.app.dependency_overrides, require_dashboard_permission(Permission.ACCOUNTS_WRITE), _allow_dashboard_access
+    )
     monkeypatch.setitem(main.app.dependency_overrides, get_accounts_context, _accounts_context_override)
     monkeypatch.setitem(main.app.dependency_overrides, validate_usage_api_key, _fleet_api_key_override)
     caplog.set_level(logging.WARNING, logger=audit_service_module.__name__)

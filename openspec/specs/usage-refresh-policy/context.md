@@ -24,6 +24,18 @@ account locally; it does not globally de-route it or move owner-bound continuity
 to another account. At known expiry, selection and bridge reuse reject the
 account before upstream I/O.
 
+Auth Guardian keeps idle refresh material alive independently of request
+access-token freshness. Its fixed twelve-hour age gate protects idle and paused
+accounts; request preflight retains the separate eight-day `should_refresh()`
+window. Candidate selection and the fresh-row recheck use the guardian gate,
+then admitted work forces the exchange. The six-hour cadence bounds only the
+next scan; active backoff and the oldest-first 100-account batch can defer
+admission. For example, an account refreshed at Monday 00:00 is ineligible at
+12:00 exactly and is considered at the next scan after crossing twelve hours,
+without needing traffic. A peer refresh before the worker's recheck suppresses
+redundant exchange. Neither scan cadence nor keepalive guarantees upstream
+refresh-token survival during backoff or batch pressure.
+
 ## Upstream Usage Source
 
 codex-lb refreshes account usage by calling:

@@ -125,8 +125,8 @@ async def test_consume_active_account_returns_success_with_mocked_upstream(async
             }
         )
 
-    async def _noop_refresh(account, upstream_reset_confirmed_at=None) -> None:  # noqa: ANN001
-        del upstream_reset_confirmed_at
+    async def _noop_refresh(account, reset_credit_redeem_started_at=None) -> None:  # noqa: ANN001
+        del reset_credit_redeem_started_at
         return None
 
     monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fake_fetch)

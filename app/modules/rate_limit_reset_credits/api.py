@@ -397,6 +397,9 @@ async def _redeem_soonest_reset_credit_locked(
         # leaves a durable pin any replica can reuse.
         credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
 
+    # Taken before the consume request: a 429 recorded after this point may
+    # postdate the reset, so it must not be lifted by this redemption.
+    reset_credit_redeem_started_at = time.time()
     try:
         result = await effective_consume_fn(
             access_token,
@@ -409,7 +412,6 @@ async def _redeem_soonest_reset_credit_locked(
     except ConsumeResetCreditError as exc:
         raise _translate_consume_error(exc) from exc
 
-    upstream_reset_confirmed_at = time.time()
     redeemed_at = result.credit.redeemed_at if result.credit else None
     available_count_after = max(0, credits_response.available_count - 1)
     await store.invalidate(account.id)
@@ -419,7 +421,7 @@ async def _redeem_soonest_reset_credit_locked(
         try:
             await refresh_usage(
                 redeem_account,
-                upstream_reset_confirmed_at if result.code == "reset" and result.windows_reset > 0 else None,
+                reset_credit_redeem_started_at if result.code == "reset" and result.windows_reset > 0 else None,
             )
         except Exception:
             logger.warning(
@@ -465,10 +467,10 @@ def _build_refresh_usage_callback(context: AccountsContext) -> RefreshUsageFn | 
     if usage_updater is None:
         return None
 
-    async def refresh_usage(account: Account, upstream_reset_confirmed_at: float | None) -> None:
+    async def refresh_usage(account: Account, reset_credit_redeem_started_at: float | None) -> None:
         refreshed = await usage_updater.force_refresh(
             account,
-            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+            reset_credit_redeem_started_at=reset_credit_redeem_started_at,
         )
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")

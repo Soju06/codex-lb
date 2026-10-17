@@ -402,13 +402,13 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
-        upstream_reset_confirmed_at: float | None = None,
+        reset_credit_redeem_started_at: float | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
         result = await self.force_refresh_result(
             account,
             access_token_override=access_token_override,
-            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+            reset_credit_redeem_started_at=reset_credit_redeem_started_at,
         )
         return result.usage_written
 
@@ -417,7 +417,7 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
-        upstream_reset_confirmed_at: float | None = None,
+        reset_credit_redeem_started_at: float | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -429,7 +429,7 @@ class UsageUpdater:
                     account,
                     usage_account_id=account.chatgpt_account_id,
                     access_token_override=access_token_override,
-                    upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+                    reset_credit_redeem_started_at=reset_credit_redeem_started_at,
                 ),
                 join_existing=False,
             )
@@ -598,7 +598,7 @@ class UsageUpdater:
         *,
         usage_account_id: str | None,
         access_token_override: str | None = None,
-        upstream_reset_confirmed_at: float | None = None,
+        reset_credit_redeem_started_at: float | None = None,
     ) -> AccountRefreshResult:
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
@@ -795,6 +795,18 @@ class UsageUpdater:
                 )
             )
 
+        reset_credit_cleared_block = False
+        if reset_credit_redeem_started_at is not None:
+            pre_refresh_rows = {
+                window: await self._usage_repo.latest_entry_for_account(account.id, window=window)
+                for window in _MAIN_USAGE_WINDOWS
+            }
+            reset_credit_cleared_block = _reset_credit_cleared_block(
+                account,
+                redeem_started_at=reset_credit_redeem_started_at,
+                pre_refresh_rows=pre_refresh_rows,
+                fresh_reset_at={write.window: write.reset_at for write in snapshot_windows},
+            )
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
@@ -805,7 +817,7 @@ class UsageUpdater:
             primary=primary,
             secondary=secondary,
             monthly=monthly,
-            upstream_reset_confirmed_at=upstream_reset_confirmed_at,
+            reset_credit_cleared_block=reset_credit_cleared_block,
         )
         return AccountRefreshResult(usage_written=usage_written)
 
@@ -893,7 +905,7 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
         monthly: UsageWindow | None = None,
-        upstream_reset_confirmed_at: float | None = None,
+        reset_credit_cleared_block: bool = False,
     ) -> None:
         if not self._auth_manager:
             return
@@ -906,19 +918,18 @@ class UsageUpdater:
                 # account back to ACTIVE — erasing reset_at that peer replicas
                 # rely on — while the upstream cooldown is still running.
                 # Fresh usage showing quota is not evidence the 429 window
-                # ended: throttles are not always quota-based. A successful
-                # upstream reset-credit redemption completed after this block
-                # is that evidence, so it lifts the cooldown; the availability
-                # checks below still keep a still-exhausted window blocked.
-                # Rows without blocked_at are stale window-derived markings and
-                # keep the fresh-usage recovery below.
+                # ended: throttles are not always quota-based. A confirmed
+                # reset credit lifts the cooldown only when it reset the very
+                # window this block's deadline came from (see
+                # ``_reset_credit_cleared_block``); the availability checks
+                # below still keep a still-exhausted window blocked. Rows
+                # without blocked_at are stale window-derived markings and keep
+                # the fresh-usage recovery below.
                 now = time.time()
                 cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
                     float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
-                if now < cooldown_deadline and not (
-                    upstream_reset_confirmed_at is not None and upstream_reset_confirmed_at > account.blocked_at
-                ):
+                if now < cooldown_deadline and not reset_credit_cleared_block:
                     return
             long_window = monthly or secondary
             if primary is None and monthly is None:
@@ -1378,6 +1389,50 @@ def _latest_usage_is_fresh(
 
 
 _MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
+
+# Same tolerance the scheduler uses to bind a 429 deadline to a quota window's
+# reset metadata (``_BLOCK_RESET_MATCH_TOLERANCE_SECONDS``).
+_RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS = 5
+
+
+def _reset_credit_cleared_block(
+    account: Account,
+    *,
+    redeem_started_at: float,
+    pre_refresh_rows: dict[str, UsageHistory | None],
+    fresh_reset_at: dict[str, int | None],
+) -> bool:
+    """Return whether a confirmed reset credit reset the window this 429 came from.
+
+    "Some window was reset" is not proof that this block ended: the deadline may
+    come from a Retry-After hint, a model-scoped throttle, or a different window.
+    So the persisted ``reset_at`` must match the latest pre-refresh reset
+    deadline of exactly one quota window, and the fresh snapshot must show that
+    window's deadline moved. A deadline that matches no window, or more than one,
+    does not identify the blocked window and keeps the cooldown.
+
+    ``redeem_started_at`` is read before the consume request is sent, and the
+    block's whole second must precede it (``blocked_at`` is stored in whole
+    seconds). A 429 recorded during or after the redemption may postdate the
+    reset, so it is never lifted here.
+    """
+
+    if account.status != AccountStatus.RATE_LIMITED:
+        return False
+    if account.blocked_at is None or account.reset_at is None:
+        return False
+    if math.floor(redeem_started_at) <= account.blocked_at:
+        return False
+    tolerance = _RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS
+    matching_windows = [
+        window
+        for window, row in pre_refresh_rows.items()
+        if row is not None and row.reset_at is not None and abs(row.reset_at - account.reset_at) <= tolerance
+    ]
+    if len(matching_windows) != 1:
+        return False
+    fresh = fresh_reset_at.get(matching_windows[0])
+    return fresh is not None and abs(fresh - account.reset_at) > tolerance
 
 
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:

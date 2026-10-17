@@ -405,7 +405,7 @@ def _select_auto_redeem_target_credit(snapshot: RateLimitResetCreditsSnapshot) -
     return min(available, key=lambda credit: credit.expires_at)
 
 
-async def _refresh_usage_after_auto_redeem(account: Account, upstream_reset_confirmed_at: float | None) -> None:
+async def _refresh_usage_after_auto_redeem(account: Account, reset_credit_redeem_started_at: float | None) -> None:
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
@@ -418,7 +418,7 @@ async def _refresh_usage_after_auto_redeem(account: Account, upstream_reset_conf
             accounts_repo,
             additional_usage_repo,
             auth_manager=AuthManager(accounts_repo),
-        ).force_refresh(current, upstream_reset_confirmed_at=upstream_reset_confirmed_at)
+        ).force_refresh(current, reset_credit_redeem_started_at=reset_credit_redeem_started_at)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()

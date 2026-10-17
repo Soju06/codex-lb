@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -31,7 +32,19 @@ def _jwt(payload: dict[str, object]) -> str:
     return f"header.{encoded}.sig"
 
 
-async def _blocked_account(async_client, name: str) -> str:
+async def _blocked_account(
+    async_client,
+    name: str,
+    *,
+    window_reset_offset: int = 0,
+    extra_windows: tuple[str, ...] = (),
+) -> str:
+    """Import an account and persist a weekly-primary 429 block.
+
+    ``window_reset_offset`` shifts the usage row's ``reset_at`` away from the
+    account's persisted deadline (a block not derived from that window);
+    ``extra_windows`` adds rows in other slots carrying the same deadline.
+    """
     upstream_id = f"weekly-{name}"
     email = f"{name}@example.com"
     payload = {
@@ -68,21 +81,32 @@ async def _blocked_account(async_client, name: str) -> str:
                 recorded_at=datetime.fromtimestamp(blocked_at + 30, timezone.utc).replace(tzinfo=None),
                 window="primary",
                 used_percent=100.0,
-                reset_at=old_deadline,
+                reset_at=old_deadline + window_reset_offset,
                 window_minutes=10_080,
             )
         )
+        for window in extra_windows:
+            session.add(
+                UsageHistory(
+                    account_id=account_id,
+                    recorded_at=datetime.fromtimestamp(blocked_at + 30, timezone.utc).replace(tzinfo=None),
+                    window=window,
+                    used_percent=100.0,
+                    reset_at=old_deadline,
+                    window_minutes=43_200,
+                )
+            )
         await session.commit()
     return account_id
 
 
-async def _fresh_weekly_usage(*, used_percent: float = 0.0) -> UsagePayload:
+async def _fresh_weekly_usage(*, used_percent: float = 0.0, reset_at: int | None = None) -> UsagePayload:
     return UsagePayload(
         plan_type="pro",
         rate_limit=RateLimitPayload(
             primary_window=UsageWindow(
                 used_percent=used_percent,
-                reset_at=int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 7 * 24 * 3600,
+                reset_at=reset_at or int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 7 * 24 * 3600,
                 limit_window_seconds=604_800,
             ),
             secondary_window=None,
@@ -108,9 +132,20 @@ async def _assert_active(account_id: str) -> None:
         assert account.blocked_at is None
 
 
-async def _patch_usage_fetch(monkeypatch: pytest.MonkeyPatch, *, used_percent: float = 0.0) -> None:
+async def _patch_usage_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    used_percent: float = 0.0,
+    reset_at_from_account: str | None = None,
+) -> None:
     async def _fetch_usage(**_kwargs):
-        return await _fresh_weekly_usage(used_percent=used_percent)
+        reset_at = None
+        if reset_at_from_account is not None:
+            async with SessionLocal() as session:
+                account = await session.get(Account, reset_at_from_account)
+                assert account is not None
+                reset_at = account.reset_at
+        return await _fresh_weekly_usage(used_percent=used_percent, reset_at=reset_at)
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fetch_usage)
 
@@ -212,4 +247,105 @@ async def test_confirmed_reset_with_exhausted_usage_keeps_account_rate_limited(a
     await _prime_dashboard_credit(account_id)
     response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)
+
+
+@pytest.mark.parametrize(
+    "case,block_kwargs",
+    [
+        ("unanchored-deadline", {"window_reset_offset": 60}),
+        ("ambiguous-deadline", {"extra_windows": ("monthly",)}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_confirmed_reset_does_not_release_block_not_bound_to_one_window(
+    async_client, monkeypatch, case, block_kwargs
+) -> None:
+    # A deadline that matches no quota window (Retry-After, model-scoped
+    # throttle) or more than one does not identify the window the credit reset.
+    account_id = await _blocked_account(async_client, f"unbound-{case}", **block_kwargs)
+    await _patch_usage_fetch(monkeypatch)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reset_does_not_release_when_blocked_window_did_not_move(async_client, monkeypatch) -> None:
+    # Upstream reset some window, but the blocked window still reports the
+    # persisted deadline, so its 429 is not shown to have ended.
+    account_id = await _blocked_account(async_client, "window-unmoved")
+    await _patch_usage_fetch(monkeypatch, reset_at_from_account=account_id)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_429_recorded_during_redemption_is_not_released(async_client, monkeypatch) -> None:
+    # A newer 429 lands while the consume request is in flight; the redemption
+    # started before it, so it cannot prove that block ended.
+    account_id = await _blocked_account(async_client, "crossing-429")
+    await _patch_usage_fetch(monkeypatch)
+    await _prime_dashboard_credit(account_id)
+
+    async def _fetch_credits(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at="2030-01-01T00:00:00Z")],
+            available_count=1,
+        )
+
+    async def _consume_with_crossing_429(*_args, **_kwargs):
+        async with SessionLocal() as session:
+            await session.execute(update(Account).where(Account.id == account_id).values(blocked_at=int(time.time())))
+            await session.commit()
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume_with_crossing_429)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_429_recorded_during_scheduler_auto_redeem_is_not_released(async_client, monkeypatch) -> None:
+    # The scheduler's refresh reloads the account, so it sees the newer 429.
+    # Only the pre-consume fence keeps that block from being lifted.
+    account_id = await _blocked_account(async_client, "crossing-429-auto")
+    await _patch_usage_fetch(monkeypatch)
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=240)).isoformat().replace("+00:00", "Z")
+
+    async def _fetch_expiring_credit(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at=expires_at)],
+            available_count=1,
+        )
+
+    async def _consume_with_crossing_429(*_args, **_kwargs):
+        async with SessionLocal() as session:
+            await session.execute(update(Account).where(Account.id == account_id).values(blocked_at=int(time.time())))
+            await session.commit()
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume_with_crossing_429)
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+    await reset_credits_scheduler.refresh_reset_credits_for_accounts(
+        accounts=[account],
+        encryptor=TokenEncryptor(),
+        store=get_rate_limit_reset_credits_store(),
+        fetch_fn=_fetch_expiring_credit,
+        auto_redeem_before_expiry=True,
+        auto_redeem_window_seconds=300,
+    )
     await _assert_rate_limited(account_id)

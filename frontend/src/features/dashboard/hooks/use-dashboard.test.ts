@@ -2,11 +2,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import {
+  useDashboard,
+  useDashboardProjections,
+  useDashboardRequestActivity,
+} from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import { getBrowserReportsTimeZone } from "@/features/reports/date";
+
+vi.mock("@/features/reports/date", () => ({
+  getBrowserReportsTimeZone: vi.fn(() => "America/Los_Angeles"),
+}));
+
+const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -26,6 +37,11 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useDashboard", () => {
+  beforeEach(() => {
+    getBrowserReportsTimeZoneMock.mockReset();
+    getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
+  });
+
   it("loads dashboard overview via MSW and configures the selected refetch cadence", async () => {
     useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
     const queryClient = createTestQueryClient();
@@ -118,5 +134,97 @@ describe("useDashboard", () => {
     });
 
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+
+  it("keeps request activity lazy until heatmap mode is enabled", async () => {
+    let requestCount = 0;
+    server.use(
+      http.get("/api/dashboard/request-activity", () => {
+        requestCount += 1;
+        return HttpResponse.json({ days: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useDashboardRequestActivity(enabled),
+      {
+        initialProps: { enabled: false },
+        wrapper: createWrapper(queryClient),
+      },
+    );
+
+    expect(result.current.isPending).toBe(true);
+    expect(requestCount).toBe(0);
+
+    rerender({ enabled: true });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(requestCount).toBe(1);
+  });
+
+  it("forwards the browser timezone, keys its cache by timezone, and polls every 60 seconds", async () => {
+    const requestedTimezones: Array<string | null> = [];
+    server.use(
+      http.get("/api/dashboard/request-activity", ({ request }) => {
+        requestedTimezones.push(new URL(request.url).searchParams.get("timezone"));
+        return HttpResponse.json({ days: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useDashboardRequestActivity(enabled),
+      {
+        initialProps: { enabled: true },
+        wrapper: createWrapper(queryClient),
+      },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const firstQuery = queryClient.getQueryCache().find({
+      queryKey: ["dashboard", "request-activity", "America/Los_Angeles"],
+    });
+    expect(firstQuery).toBeDefined();
+    expect((firstQuery?.options as { refetchInterval?: unknown }).refetchInterval).toBe(60_000);
+    expect(requestedTimezones).toEqual(["America/Los_Angeles"]);
+
+    getBrowserReportsTimeZoneMock.mockReturnValue("America/New_York");
+    rerender({ enabled: true });
+
+    await waitFor(() => expect(requestedTimezones).toEqual([
+      "America/Los_Angeles",
+      "America/New_York",
+    ]));
+    expect(
+      queryClient.getQueryCache().find({
+        queryKey: ["dashboard", "request-activity", "America/New_York"],
+      }),
+    ).toBeDefined();
+  });
+
+  it("uses UTC consistently when browser timezone detection is unavailable", async () => {
+    const requestedTimezones: Array<string | null> = [];
+    getBrowserReportsTimeZoneMock.mockReturnValue(undefined);
+    server.use(
+      http.get("/api/dashboard/request-activity", ({ request }) => {
+        requestedTimezones.push(new URL(request.url).searchParams.get("timezone"));
+        return HttpResponse.json({ days: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useDashboardRequestActivity(true), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(requestedTimezones).toEqual(["UTC"]);
+    expect(
+      queryClient.getQueryCache().find({
+        queryKey: ["dashboard", "request-activity", "UTC"],
+      }),
+    ).toBeDefined();
   });
 });

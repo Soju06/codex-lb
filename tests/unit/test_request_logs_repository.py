@@ -220,6 +220,78 @@ async def test_aggregate_activity_counts_only_nonblank_conversation_requests(db_
 
 
 @pytest.mark.asyncio
+async def test_aggregate_request_activity_bounds_raw_tail_by_requested_at(monkeypatch) -> None:
+    session = AsyncMock()
+    session.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
+    since = datetime(2026, 7, 1)
+    until = datetime(2026, 7, 2)
+    session.execute.return_value = SimpleNamespace(all=lambda: [SimpleNamespace(label="2026-07-01", request_count=2)])
+    monkeypatch.setattr(
+        repository_module,
+        "sum_labeled_hourly_window",
+        AsyncMock(
+            return_value=(
+                {"2026-07-01": 3},
+                [("2026-07-01", (since, until))],
+            )
+        ),
+    )
+    hourly_reader = AsyncMock(side_effect=AssertionError("activity must not materialize hourly rows"))
+    monkeypatch.setattr(repository_module, "read_hourly_window", hourly_reader)
+
+    result = await RequestLogsRepository(session).aggregate_request_activity([("2026-07-01", since, until)])
+
+    assert [(day.date, day.requests) for day in result] == [("2026-07-01", 5)]
+    hourly_reader.assert_not_awaited()
+    statement = str(session.execute.await_args.args[0])
+    assert "request_logs.requested_at >=" in statement
+    assert "request_logs.requested_at <" in statement
+
+
+@pytest.mark.asyncio
+async def test_aggregate_request_activity_batches_folded_windows_and_merges_raw_complements(monkeypatch) -> None:
+    session = AsyncMock()
+    since = datetime(2026, 7, 1)
+    windows = [
+        (f"2026-07-{index + 1:03d}", since + timedelta(days=index), since + timedelta(days=index + 1))
+        for index in range(repository_module._REQUEST_ACTIVITY_SQL_BATCH_SIZE + 1)
+    ]
+    folded_batch_sizes: list[int] = []
+
+    async def _sum_labeled_hourly_window(_session, window_batch, *, filters):
+        del _session, filters
+        folded_batch_sizes.append(len(window_batch))
+        folded_counts = {}
+        if len(folded_batch_sizes) == 1:
+            folded_counts[windows[0][0]] = 2
+        else:
+            folded_counts[windows[-1][0]] = 5
+        return folded_counts, [(label, (start, end)) for label, start, end in window_batch]
+
+    monkeypatch.setattr(repository_module, "sum_labeled_hourly_window", _sum_labeled_hourly_window)
+    raw_rows = iter(
+        [
+            [SimpleNamespace(label=windows[0][0], request_count=4)],
+            [SimpleNamespace(label=windows[-1][0], request_count=6)],
+        ]
+    )
+
+    async def _execute(_statement):
+        return SimpleNamespace(all=lambda: next(raw_rows))
+
+    session.execute.side_effect = _execute
+
+    result = await RequestLogsRepository(session).aggregate_request_activity(windows)
+
+    assert folded_batch_sizes == [repository_module._REQUEST_ACTIVITY_SQL_BATCH_SIZE, 1]
+    assert session.execute.await_count == 2
+    assert [(day.date, day.requests) for day in result] == [
+        (windows[0][0], 6),
+        (windows[-1][0], 11),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_add_log_does_not_recalculate_unpriced_model_source_cost(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:

@@ -1,0 +1,13 @@
+- [x] Add OpenSpec requirements and design for the local display mode and request activity endpoint.
+- [x] Add the dashboard display-mode preference with localStorage persistence and Appearance controls.
+- [x] Add the bounded daily request-count backend endpoint using hourly rollups plus raw tail data.
+- [x] Add frontend schemas, query hook, heatmap component, theme-aware styling, and tooltips.
+- [x] Update dashboard composition so the selected mode replaces only Weekly credits pace.
+- [x] Add frontend and backend regression tests, including no-full-scan query-path coverage.
+- [x] Run OpenSpec validation, focused tests, typecheck, and lint.
+- [x] Extend the heatmap window to exactly 180 local calendar days ending today and remove month and weekday axis labels.
+- [x] Remove the unused request activity description translation.
+- [x] Update the backend endpoint to accept an optional IANA timezone with UTC fallback, capture the current instant once, calculate the rolling 180-day local range ending at the captured current local date rather than tomorrow's midnight, preserve independently converted next-midnight bounds for completed days and DST correctness, obtain whole folded UTC-hour totals and the watermark in each bounded, watermark-consistent `AccountUsageRollupState LEFT JOIN` rollup batch, and merge its per-day totals with separate bounded raw-complement reads including pre-watermark partial edge windows.
+- [x] Update the frontend request and calendar to use the browser IANA timezone in the query/cache key, use browser-local date components, and refresh on a fixed interval of at least 60 seconds.
+- [x] Add regression tests for timezone fallback, local-day/DST boundaries, captured-current-instant bounds without future time, rolling 180-day range selection, sparse SQL aggregation, watermark consistency, exact raw-complement bounds, pre-watermark partial edge windows, and retention-pruned non-hour-offset partial-hour undercounting.
+- [x] Run the assigned OpenSpec, backend, frontend, and focused regression validation checks.

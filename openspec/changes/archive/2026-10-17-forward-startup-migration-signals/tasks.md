@@ -19,3 +19,4 @@
 - [x] 3.5 Add a deterministic regression for a parent signal arriving after child exit observation but before reaping, proving no stale PID is signaled.
 - [x] 3.6 Make process-test cleanup own a separate process group and prove cleanup before migration marker publication leaves no child.
 - [x] 3.7 Re-run focused verification and independent Sensitive review after the race and cleanup fixes.
+- [x] 3.8 Revalidate on current main, sync both canonical specs, and record the full local gate's unchanged host-specific failure without claiming a green full gate.

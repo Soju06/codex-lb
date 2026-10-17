@@ -55,6 +55,19 @@ docker compose -f docker-compose.prod.yml up -d
 
 For PostgreSQL profiles and the Postgres 16 → 18 upgrade runbook, see [Database](../database.md).
 
+## Observing request persistence during drain
+
+From the application's loopback interface, `GET /internal/drain/status` reports request persistence separately from active requests and bridge sessions:
+
+| Check | Meaning |
+| --- | --- |
+| `request_persistence_state` | `pending`, `drained`, or `unknown` |
+| `request_persistence_pending` | Decimal count of registered persistence owners, present only when observation is known |
+
+A completed HTTP stream can report `in_flight=0`, bridge pending0 and bridge restart blockingfalse while its detached reservation finalizer still reports persistence `pending` with count1. Completed tasks remain counted until their callbacks finish transferring any follow-up ownership. Polling does not wait for settlement, query the database or change admission.
+
+Treat absent or unknown observation as unsupported, never as zero. `drained` with count0 means no registered request-persistence ownership at that instant. It does not certify historical write success or replace admission, bridge and graceful-shutdown controls. Updating a later candidate does not add this observation to an already-running predecessor.
+
 ## Auth mode examples
 
 **Authelia / trusted header**
@@ -84,4 +97,4 @@ For Helm, pass the same values through `extraEnv`. What these modes mean and whe
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking)*
+*Specs: [proxy-runtime-observability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-runtime-observability) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking)*

@@ -37,3 +37,37 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Astra configuration-update policy
+
+Subscription Astra can change reasoning effort within an input history, not
+only at the request level. Applying an API-key policy only to the outer
+`reasoning.effort` leaves that inner update as a bypass. Validation therefore
+checks explicit updates before upstream dispatch. A key that enforces an
+effort also inserts a leading update on anchored continuations, because the
+previous response may have retained a different setting; an allowlist key
+validates supplied efforts but does not invent a setting when none is given.
+The proxy keeps the client's Ultra identity through policy checks and maps it
+to Max only when serializing subscription traffic.
+
+For example, a previous response retained High, while the current key
+enforces Low. An anchored continuation with one new user item forwards a
+leading Low configuration update followed by that user item. Its stored
+client-history count remains one, so a later full resend still matches the
+original client prefix instead of counting the proxy's injected update.
+The ordering of stored historical updates and existing request cache prefix
+is preserved. See the
+[configuration-update policy requirement](spec.md#requirement-configuration-updates-obey-api-key-reasoning-controls).
+
+The proposed policy deliberately retains this reset only for enforced-effort
+keys: it makes the configured fixed effort apply even when the inherited
+upstream state is not visible in the new request. Allowlist-only keys preserve
+the client's choice of effort and never synthesize a default.
+
+Automatic truncation is compatible with the reset because subscription
+serialization removes that field before dispatch. For example, the same Low
+continuation with `truncation: "auto"` still forwards the Low update and user
+input, without `truncation`. Automatic `context_management` compaction remains
+incompatible with configuration updates and returns `invalid_request_error`
+for `context_management` before upstream work. These are separate controls;
+rejecting one does not imply rejecting the other.

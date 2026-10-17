@@ -194,6 +194,7 @@ def _responses_request_requires_image_bridge_bypass(payload: ResponsesRequest) -
             in (
                 "reasoning",
                 "function_call",
+                "file_search_call",
                 "custom_tool_call",
                 "apply_patch_call",
                 "tool_search_call",

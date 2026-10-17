@@ -19,9 +19,9 @@ stream path. A request carries such an image when any of the following holds:
 
 The current turn is the sequence of `input` items after the last model-output
 item. A model-output item is a message with `role = "assistant"` or an item
-whose `type` is `reasoning`, `function_call`, `custom_tool_call`,
-`apply_patch_call`, `tool_search_call`, `web_search_call`, `mcp_call`,
-`local_shell_call`, `image_generation_call`, `computer_call`, or
+whose `type` is `reasoning`, `function_call`, `file_search_call`,
+`custom_tool_call`, `apply_patch_call`, `tool_search_call`, `web_search_call`,
+`mcp_call`, `local_shell_call`, `image_generation_call`, `computer_call`, or
 `code_interpreter_call`. When `input` contains no model-output item, all of
 `input`
 is the current turn.

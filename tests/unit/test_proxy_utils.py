@@ -4798,6 +4798,7 @@ def test_responses_request_contains_input_image_detects_supported_shapes() -> No
         {"role": "assistant", "content": "seen"},
         {"type": "reasoning", "summary": []},
         {"type": "function_call", "name": "shot", "call_id": "call_shot", "arguments": "{}"},
+        {"type": "file_search_call", "results": []},
         {"type": "custom_tool_call", "name": "shot", "call_id": "call_shot", "input": ""},
         {"type": "apply_patch_call", "call_id": "call_shot", "operation": {}},
         {"type": "computer_call", "call_id": "call_shot", "action": {"type": "click", "x": 1, "y": 1}},

@@ -19,7 +19,7 @@ The forced refresh reached `UsageUpdater._recover_quota_status_from_usage` and r
 
 Successful redemption with `code == "reset"` and `windows_reset > 0` proves that *some* quota window reset, not that the throttle behind this 429 ended. A 429 deadline can come from a Retry-After hint, a model-scoped throttle, or a different window. So the bypass is bound to the blocked window the same way the scheduler's #2405 recovery is:
 
-- the persisted `accounts.reset_at` must match, within five seconds, the latest pre-refresh `reset_at` of exactly one quota window (primary, secondary or monthly); no match or several matches means the deadline does not identify the window, and the cooldown stays;
+- the persisted `accounts.reset_at` must match, within five seconds, the `reset_at` of exactly one quota window (primary, secondary or monthly) as last recorded *before the redemption started*; no match or several matches means the deadline does not identify the window, and the cooldown stays. The bound matters because an ordinary refresh, or the in-flight refresh a forced refresh waits on through singleflight, can record the post-reset deadline first;
 - the fresh snapshot must report that same window with a deadline more than five seconds away from the persisted one, which is the evidence that this window, not another, reset;
 - the existing availability checks then run unchanged, so an exhausted window (including a still-spent short window) keeps the account blocked.
 

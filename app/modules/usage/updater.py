@@ -52,6 +52,7 @@ class UsageRepositoryPort(Protocol):
         account_id: str,
         *,
         window: str | None = None,
+        recorded_before: datetime | None = None,
     ) -> UsageHistory | None: ...
 
     async def add_account_snapshot(
@@ -797,8 +798,14 @@ class UsageUpdater:
 
         reset_credit_cleared_block = False
         if reset_credit_redeem_started_at is not None:
+            # Bounded by the redemption start: another refresh (or the one this
+            # forced refresh waited on) may already have recorded the
+            # post-reset deadline, which no longer identifies the blocked window.
+            redeem_started = datetime.fromtimestamp(reset_credit_redeem_started_at, timezone.utc).replace(tzinfo=None)
             pre_refresh_rows = {
-                window: await self._usage_repo.latest_entry_for_account(account.id, window=window)
+                window: await self._usage_repo.latest_entry_for_account(
+                    account.id, window=window, recorded_before=redeem_started
+                )
                 for window in _MAIN_USAGE_WINDOWS
             }
             reset_credit_cleared_block = _reset_credit_cleared_block(
@@ -1406,8 +1413,8 @@ def _reset_credit_cleared_block(
 
     "Some window was reset" is not proof that this block ended: the deadline may
     come from a Retry-After hint, a model-scoped throttle, or a different window.
-    So the persisted ``reset_at`` must match the latest pre-refresh reset
-    deadline of exactly one quota window, and the fresh snapshot must show that
+    So the persisted ``reset_at`` must match the reset deadline of exactly one
+    quota window, as last recorded before the redemption started, and the fresh snapshot must show that
     window's deadline moved. A deadline that matches no window, or more than one,
     does not identify the blocked window and keeps the cooldown.
 

@@ -349,3 +349,42 @@ async def test_429_recorded_during_scheduler_auto_redeem_is_not_released(async_c
         auto_redeem_window_seconds=300,
     )
     await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_refresh_recorded_during_redemption_does_not_hide_blocked_window(async_client, monkeypatch) -> None:
+    # An ordinary refresh lands while the consume request is in flight and
+    # records the post-reset deadline first. The blocked window is still
+    # identified from rows recorded before the redemption started.
+    account_id = await _blocked_account(async_client, "intervening-refresh")
+    await _patch_usage_fetch(monkeypatch)
+    await _prime_dashboard_credit(account_id)
+
+    async def _fetch_credits(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at="2030-01-01T00:00:00Z")],
+            available_count=1,
+        )
+
+    async def _consume_with_intervening_refresh(*_args, **_kwargs):
+        async with SessionLocal() as session:
+            session.add(
+                UsageHistory(
+                    account_id=account_id,
+                    recorded_at=utcnow(),
+                    window="primary",
+                    used_percent=0.0,
+                    reset_at=int(time.time()) + 7 * 24 * 3600,
+                    window_minutes=10_080,
+                )
+            )
+            await session.commit()
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume_with_intervening_refresh)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_active(account_id)

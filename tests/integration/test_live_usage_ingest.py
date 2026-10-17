@@ -887,3 +887,41 @@ async def test_nested_lifespan_stop_does_not_orphan_or_kill_the_outer_ingestor(d
     assert live_ingest._ingestor is None
     assert live_hub._publisher is None
     assert _pending_consumers() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("minutes", [43200, 43800])
+@pytest.mark.parametrize("secondary_minutes", [None, 0])
+async def test_live_monthly_team_quota_reaches_account_summary(async_client, db_setup, minutes, secondary_minutes):
+    account = _make_account("acc_monthly_team", "monthly-team@example.com")
+    account.plan_type = "team"
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+    snapshot = LiveRateLimitSnapshot(
+        primary=LiveUsageWindow(used_percent=96, window_minutes=minutes, reset_at=1_900_000_000),
+        secondary=None
+        if secondary_minutes is None
+        else LiveUsageWindow(used_percent=0, window_minutes=0, reset_at=None),
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=None,
+    )
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0)
+    ingestor.start()
+    try:
+        ingestor.publish(snapshot, account_id=account.id)
+        deadline = asyncio.get_running_loop().time() + 2
+        while True:
+            response = await async_client.get("/api/accounts")
+            assert response.status_code == 200
+            summary = next(row for row in response.json()["accounts"] if row["accountId"] == account.id)
+            if summary["windowMinutesMonthly"] == minutes or asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.02)
+        assert summary["windowMinutesMonthly"] == minutes
+        assert summary["usage"]["monthlyRemainingPercent"] == 4
+        assert summary["windowMinutesPrimary"] is None
+        assert summary["windowMinutesSecondary"] is None
+        assert summary["remainingCreditsMonthly"] is None
+    finally:
+        await ingestor.stop()

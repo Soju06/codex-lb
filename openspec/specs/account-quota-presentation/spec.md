@@ -2,8 +2,10 @@
 
 ## Purpose
 Governs how account quota windows are presented across the dashboard when an account does not fit the paid 5h/7d shape. Free accounts report a single monthly window, and rendering it as weekly produced wrong bars, trends, donut totals, and assigned-account badges. This capability keeps monthly-only accounts labelled as such, omits zero-credit accounts from window totals they cannot contribute to, and keeps quota refreshes visually stable.
+
 ## Requirements
-### Requirement: Free-account quota surfaces are monthly-only
+
+### Requirement: Monthly-only account quota surfaces
 
 When an account's normalized quota model is monthly-only, account-facing quota surfaces SHALL present only the monthly window and MUST NOT render synthetic 5h or 7d bars for that account.
 
@@ -71,3 +73,22 @@ unchanged.
 - **WHEN** a fresh valid percentage replaces the displayed percentage
 - **THEN** the quota surface displays the fresh percentage without animation
 
+### Requirement: Observed monthly quota is independent of plan capacity
+The system SHALL normalize a lone primary quota of 40320 through 46080 minutes inclusive as monthly, whether its secondary window is absent or a zero-duration placeholder. Poll and live ingestion SHALL apply the same classification. Account summaries SHALL retain observed monthly duration and remaining percentage regardless of plan credit capacity, and SHALL leave unknown credit estimates null. A newer valid short or weekly quota sample SHALL supersede an older monthly sample for a plan without monthly credit capacity.
+
+#### Scenario: Team monthly observation
+- **WHEN** a Team account reports a lone primary quota of 43200 or 43800 minutes with 96 percent used
+- **THEN** its summary exposes 4 percent monthly remaining and the observed duration
+- **AND** it exposes no synthetic primary or secondary quota and no invented monthly credits
+
+#### Scenario: Zero-duration secondary placeholder
+- **WHEN** a monthly primary observation includes a secondary window with zero duration
+- **THEN** it is normalized to monthly only
+
+#### Scenario: Paid plan upgrade
+- **WHEN** a plan without monthly credit capacity has short or weekly quota observed after its monthly quota
+- **THEN** the summary uses the newer short or weekly quota and omits the stale monthly quota
+
+#### Scenario: Ordinary and out-of-band windows
+- **WHEN** primary duration is 300, 10080, 40319 or 46081 minutes, or a positive-duration secondary exists
+- **THEN** monthly-only normalization does not replace those windows

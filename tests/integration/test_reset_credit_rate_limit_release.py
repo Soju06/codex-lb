@@ -40,6 +40,7 @@ async def _blocked_account(
     *,
     window_reset_offset: int = 0,
     extra_windows: tuple[str, ...] = (),
+    plan_type: str = "pro",
 ) -> str:
     """Import an account and persist a weekly-primary 429 block.
 
@@ -52,7 +53,7 @@ async def _blocked_account(
     payload = {
         "email": email,
         "chatgpt_account_id": upstream_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": "pro"},
+        "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
     }
     auth = {
         "tokens": {
@@ -102,9 +103,11 @@ async def _blocked_account(
     return account_id
 
 
-async def _fresh_weekly_usage(*, used_percent: float = 0.0, reset_at: int | None = None) -> UsagePayload:
+async def _fresh_weekly_usage(
+    *, used_percent: float = 0.0, reset_at: int | None = None, plan_type: str = "pro"
+) -> UsagePayload:
     return UsagePayload(
-        plan_type="pro",
+        plan_type=plan_type,
         rate_limit=RateLimitPayload(
             primary_window=UsageWindow(
                 used_percent=used_percent,
@@ -139,6 +142,7 @@ async def _patch_usage_fetch(
     *,
     used_percent: float = 0.0,
     reset_at_from_account: str | None = None,
+    plan_type: str = "pro",
 ) -> None:
     async def _fetch_usage(**_kwargs):
         reset_at = None
@@ -147,7 +151,7 @@ async def _patch_usage_fetch(
                 account = await session.get(Account, reset_at_from_account)
                 assert account is not None
                 reset_at = account.reset_at
-        return await _fresh_weekly_usage(used_percent=used_percent, reset_at=reset_at)
+        return await _fresh_weekly_usage(used_percent=used_percent, reset_at=reset_at, plan_type=plan_type)
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", _fetch_usage)
 
@@ -518,3 +522,17 @@ async def test_failed_baseline_read_still_redeems_but_keeps_account_rate_limited
     assert failures["left"] == 0
     assert consumed == ["credit-weekly"]
     await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reset_credit_releases_account_with_reported_raw_plan_type(async_client, monkeypatch) -> None:
+    # The #2602 report's seat: raw plan type, weekly window in the primary
+    # slot, no secondary window. Plan normalization itself is #2511 / #2512.
+    raw_plan = "self_serve_business_prolite"
+    account_id = await _blocked_account(async_client, "raw-plan", plan_type=raw_plan)
+    await _patch_usage_fetch(monkeypatch, plan_type=raw_plan)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_active(account_id)

@@ -458,6 +458,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -2647,6 +2648,7 @@ class _WebSocketMixin:
                         )
                     )
 
+                unavailable_account_rejection = False
                 try:
                     if (
                         text_data is not None
@@ -2771,6 +2773,20 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
+                            # Admission can wait while the socket account is paused.
+                            # Reject this unsent frame without interrupting other responses.
+                            if account is not None and is_account_routing_unavailable(account.id):
+                                unavailable_account_rejection = True
+                                raise ProxyResponseError(
+                                    503,
+                                    openai_error(
+                                        "previous_response_owner_unavailable"
+                                        if request_state.previous_response_id is not None
+                                        else "preferred_account_unavailable",
+                                        "The socket account is unavailable; retry after it is reactivated.",
+                                        error_type="server_error",
+                                    ),
+                                )
                             if account is None or not _bind_websocket_request_dispatch_owner(
                                 request_state,
                                 account_id=account.id,
@@ -2802,6 +2818,14 @@ class _WebSocketMixin:
                                 request_state,
                                 response_create_gate,
                                 scheduler=scheduler_for(proxy),
+                            )
+                        if unavailable_account_rejection:
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id if account is not None else None,
+                                api_key=request_state.api_key or api_key,
+                                request_state=request_state,
+                                error_code=error_code,
+                                error_message=error_message,
                             )
                         await proxy._emit_websocket_terminal_error(
                             websocket,

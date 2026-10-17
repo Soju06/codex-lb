@@ -178,3 +178,16 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+## Pausing an already open direct WebSocket
+
+Selection-time eligibility does not protect later turns on an existing socket.
+The sender checks the shared routing-availability cache after admission waits,
+without a database query for each frame. The existing invalidation bus governs
+cross-replica convergence.
+
+For example, after account A completes response R, pausing A rejects a new
+`response.create` that references R, while an already dispatched response can
+finish. Reactivating A lets the client retry the same delta and parent on the
+same socket. The rejection releases only that request's reservations; it does
+not move the conversation to another account or add an account-health penalty.

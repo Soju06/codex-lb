@@ -19,6 +19,8 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     supportsResponses: false,
     supportsAudioTranscriptions: false,
     supportsEmbeddings: false,
+    supportsDecisions: false,
+    supportsSystemone: false,
     timeoutSeconds: null,
     maxConcurrency: null,
     createdAt: "2026-07-03T00:00:00Z",
@@ -125,6 +127,31 @@ describe("ModelSourceEditDialog", () => {
 
     const [, payload] = onSubmit.mock.calls[0];
     expect(payload.supportsEmbeddings).toBe(true);
+  });
+
+  it("carries enabled decision capabilities through submit", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource({ supportsDecisions: true, supportsSystemone: true })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const [, payload] = onSubmit.mock.calls[0];
+    expect(payload.supportsDecisions).toBe(true);
+    expect(payload.supportsSystemone).toBe(true);
   });
 
   it("preserves disabled model rows during edits", async () => {

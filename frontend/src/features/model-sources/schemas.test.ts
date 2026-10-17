@@ -64,6 +64,20 @@ describe("ModelSourceSchema", () => {
 
     expect(parsed.supportsEmbeddings).toBe(false);
   });
+
+  it("defaults the decision capabilities to false when absent", () => {
+    const parsed = ModelSourceSchema.parse(BASE_SOURCE);
+
+    expect(parsed.supportsDecisions).toBe(false);
+    expect(parsed.supportsSystemone).toBe(false);
+  });
+
+  it("parses enabled decision capabilities independently", () => {
+    const parsed = ModelSourceSchema.parse({ ...BASE_SOURCE, supportsDecisions: true, supportsSystemone: false });
+
+    expect(parsed.supportsDecisions).toBe(true);
+    expect(parsed.supportsSystemone).toBe(false);
+  });
 });
 
 describe("ModelSourcesResponseSchema", () => {

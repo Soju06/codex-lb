@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy import ColumnElement, and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import InstrumentedAttribute, selectinload
 
 from app.db.models import ModelSource, ModelSourceModel
+
+# JSON endpoints served only by model sources that opt in, with no
+# subscription fallback. Each maps to the source's persisted capability flag.
+SourceEndpointCapability = Literal["embeddings", "decisions", "systemone"]
+
+_ENDPOINT_CAPABILITY_COLUMNS: dict[SourceEndpointCapability, InstrumentedAttribute[bool]] = {
+    "embeddings": ModelSource.supports_embeddings,
+    "decisions": ModelSource.supports_decisions,
+    "systemone": ModelSource.supports_systemone,
+}
 
 
 def _enablement_filter(only_disabled: bool) -> ColumnElement[bool]:
@@ -128,10 +140,11 @@ class ModelSourcesRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def find_embeddings_source_for_model(
+    async def find_endpoint_source_for_model(
         self,
         model: str,
         *,
+        capability: SourceEndpointCapability,
         allowed_source_ids: set[str] | None = None,
     ) -> ModelSource | None:
         stmt = (
@@ -140,7 +153,7 @@ class ModelSourcesRepository:
             .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
             .where(ModelSource.kind == "openai_compatible")
             .where(ModelSource.is_enabled.is_(True))
-            .where(ModelSource.supports_embeddings.is_(True))
+            .where(_ENDPOINT_CAPABILITY_COLUMNS[capability].is_(True))
             .where(ModelSourceModel.model == model)
             .where(ModelSourceModel.is_enabled.is_(True))
             .order_by(ModelSource.name, ModelSource.id)

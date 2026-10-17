@@ -188,6 +188,8 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
+      supportsDecisions: draft.supportsDecisions,
+      supportsSystemone: draft.supportsSystemone,
     };
 
     if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {

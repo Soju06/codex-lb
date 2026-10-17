@@ -32,6 +32,8 @@ export type ModelSourceDraft = {
   supportsResponses: boolean;
   supportsAudioTranscriptions: boolean;
   supportsEmbeddings: boolean;
+  supportsDecisions: boolean;
+  supportsSystemone: boolean;
   supportsStreaming: boolean;
   supportsTools: boolean;
   supportsVision: boolean;
@@ -52,6 +54,8 @@ export const initialModelSourceDraft: ModelSourceDraft = {
   supportsResponses: false,
   supportsAudioTranscriptions: false,
   supportsEmbeddings: false,
+  supportsDecisions: false,
+  supportsSystemone: false,
   supportsStreaming: true,
   supportsTools: false,
   supportsVision: false,
@@ -264,6 +268,8 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
     supportsResponses: source.supportsResponses,
     supportsAudioTranscriptions: source.supportsAudioTranscriptions,
     supportsEmbeddings: source.supportsEmbeddings,
+    supportsDecisions: source.supportsDecisions,
+    supportsSystemone: source.supportsSystemone,
     supportsStreaming: firstModel?.supportsStreaming ?? true,
     supportsTools: firstModel?.supportsTools ?? false,
     supportsVision: firstModel?.supportsVision ?? false,

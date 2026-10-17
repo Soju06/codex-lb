@@ -24,6 +24,8 @@ const CAPABILITY_TOGGLES = [
   ["supportsResponses", "modelSources.capabilities.responses"] as const,
   ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
   ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
+  ["supportsDecisions", "modelSources.capabilities.decisions"] as const,
+  ["supportsSystemone", "modelSources.capabilities.systemone"] as const,
   ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
   ["supportsTools", "modelSources.capabilities.tools"] as const,
   ["supportsVision", "modelSources.capabilities.vision"] as const,

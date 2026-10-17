@@ -38,6 +38,8 @@ class ModelSourceCreateRequest(DashboardModel):
     supports_responses: bool = False
     supports_audio_transcriptions: bool = False
     supports_embeddings: bool = False
+    supports_decisions: bool = False
+    supports_systemone: bool = False
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
     models: list[ModelSourceModelInput] = Field(default_factory=list)
@@ -52,6 +54,8 @@ class ModelSourceUpdateRequest(DashboardModel):
     supports_responses: bool | None = None
     supports_audio_transcriptions: bool | None = None
     supports_embeddings: bool | None = None
+    supports_decisions: bool | None = None
+    supports_systemone: bool | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
     models: list[ModelSourceModelInput] | None = None
@@ -68,6 +72,8 @@ class ModelSourceResponse(DashboardModel):
     supports_responses: bool
     supports_audio_transcriptions: bool
     supports_embeddings: bool
+    supports_decisions: bool
+    supports_systemone: bool
     timeout_seconds: int | None
     max_concurrency: int | None
     created_at: datetime

@@ -221,6 +221,7 @@ from app.modules.model_sources.catalog import (
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
+    SourceJsonResult,
     SourceResponsesCompletion,
     SourceTimings,
     SourceUsage,
@@ -234,10 +235,16 @@ from app.modules.model_sources.forwarding import (
     forward_audio_transcription as forward_source_audio_transcription,
 )
 from app.modules.model_sources.forwarding import (
+    forward_decisions as forward_source_decisions,
+)
+from app.modules.model_sources.forwarding import (
     forward_embeddings as forward_source_embeddings,
 )
 from app.modules.model_sources.forwarding import (
     forward_responses as forward_source_responses,
+)
+from app.modules.model_sources.forwarding import (
+    forward_systemone as forward_source_systemone,
 )
 from app.modules.model_sources.forwarding import (
     stream_chat_completion as stream_source_chat_completion,
@@ -246,7 +253,7 @@ from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
 from app.modules.model_sources.projection import strip_source_telemetry
-from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.repository import ModelSourcesRepository, SourceEndpointCapability
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
     effective_model_for_api_key,
@@ -2717,6 +2724,38 @@ class V1EmbeddingsRequest(BaseModel):
     input: str | list[str] | list[int] | list[list[int]]
 
 
+class V1DecisionsRequest(BaseModel):
+    """OpenAI Decisions API request (``POST /v1/decisions``).
+
+    Only the presence of ``model`` (the routing key), ``input`` and
+    ``questions`` is validated here; their contents and every other field
+    (``safety_identifier``, …) pass through to the model source verbatim, and
+    the source owns the full schema.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    input: str | list[JsonValue]
+    questions: list[JsonValue]
+
+
+class V1SystemOneRequest(BaseModel):
+    """vLLM structured-decision request (``POST /v1/systemone``).
+
+    vLLM treats ``model`` as optional because a server hosts one model; the
+    proxy requires it because it is the routing key across sources. ``state``
+    and ``questions`` are required as upstream requires them; everything passes
+    through verbatim.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    state: JsonValue
+    questions: dict[str, JsonValue]
+
+
 @v1_router.post("/embeddings")
 async def v1_embeddings(
     request: Request,
@@ -2724,31 +2763,93 @@ async def v1_embeddings(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    return await _source_endpoint_request(
+        request,
+        payload=payload,
+        model=payload.model,
+        capability="embeddings",
+        forward=forward_source_embeddings,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@v1_router.post("/decisions")
+async def v1_decisions(
+    request: Request,
+    payload: V1DecisionsRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _source_endpoint_request(
+        request,
+        payload=payload,
+        model=payload.model,
+        capability="decisions",
+        forward=forward_source_decisions,
+        context=context,
+        api_key=api_key,
+    )
+
+
+@v1_router.post("/systemone")
+async def v1_systemone(
+    request: Request,
+    payload: V1SystemOneRequest = Body(...),
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+) -> Response:
+    return await _source_endpoint_request(
+        request,
+        payload=payload,
+        model=payload.model,
+        capability="systemone",
+        forward=forward_source_systemone,
+        context=context,
+        api_key=api_key,
+    )
+
+
+async def _source_endpoint_request(
+    request: Request,
+    *,
+    payload: BaseModel,
+    model: str,
+    capability: SourceEndpointCapability,
+    forward: Callable[[ModelSource, dict[str, JsonValue]], Awaitable[SourceJsonResult]],
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+) -> Response:
+    """Serve a JSON endpoint that only opted-in model sources implement.
+
+    Embeddings, decisions and structured decisions have no subscription-backed
+    fallback: a model no enabled capable source serves is ``model_not_found``.
+    """
+
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
-    model = payload.model
     rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
-    source = await _select_embeddings_model_source(model, api_key)
+    source = await _select_endpoint_model_source(model, api_key, capability)
     if source is None:
-        # Embeddings have no subscription-backed fallback: only configured
-        # model sources can serve them.
         return _logged_error_json_response(
             request,
             status_code=404,
             content=openai_error(
                 "model_not_found",
-                f"The model '{model}' does not exist or no enabled model source supports embeddings for it",
+                f"The model '{model}' does not exist or no enabled model source supports {capability} for it",
                 error_type="invalid_request_error",
             ),
             headers=rate_limit_headers,
         )
     validate_model_access(api_key, model)
-    return await _source_embeddings_response(
+    return await _source_endpoint_response(
         request=request,
         model=model,
         payload=payload,
         source=source,
+        capability=capability,
+        forward=forward,
         api_key=api_key,
         rate_limit_headers=rate_limit_headers,
     )
@@ -4828,14 +4929,19 @@ async def _disabled_model_source_denial(
     return _logged_error_json_response(request, 503, error, headers=headers)
 
 
-async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
+async def _select_endpoint_model_source(
+    model: str,
+    api_key: ApiKeyData | None,
+    capability: SourceEndpointCapability,
+) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
     if exact_allowed_models is not None and model not in exact_allowed_models:
         return None
     async with get_background_session() as session:
-        source = await ModelSourcesRepository(session).find_embeddings_source_for_model(
+        source = await ModelSourcesRepository(session).find_endpoint_source_for_model(
             model,
+            capability=capability,
             allowed_source_ids=assigned_source_ids,
         )
         detach_session_objects(session)
@@ -4887,12 +4993,14 @@ async def _parse_transcription_multipart(
         )
 
 
-async def _source_embeddings_response(
+async def _source_endpoint_response(
     *,
     request: Request,
     model: str,
-    payload: "V1EmbeddingsRequest",
+    payload: BaseModel,
     source: ModelSource,
+    capability: SourceEndpointCapability,
+    forward: Callable[[ModelSource, dict[str, JsonValue]], Awaitable[SourceJsonResult]],
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
@@ -4901,10 +5009,12 @@ async def _source_embeddings_response(
         request_model=model,
         request_service_tier=None,
     )
+    # ``exclude_unset`` keeps field presence: explicit nulls reach the source,
+    # omitted fields stay absent.
     outbound = payload.model_dump(exclude_unset=True)
     outbound["model"] = model
     try:
-        result = await forward_source_embeddings(source, outbound)
+        result = await forward(source, outbound)
     except asyncio.CancelledError:
         release_exc: BaseException | None = None
         if reservation is not None:
@@ -4914,7 +5024,8 @@ async def _source_embeddings_response(
                 release_exc = exc
         if release_exc is not None:
             logger.warning(
-                "Failed to release source embeddings reservation after request cancellation source_id=%s model=%s",
+                "Failed to release source %s reservation after request cancellation source_id=%s model=%s",
+                capability,
                 source.id,
                 model,
                 exc_info=release_exc,
@@ -4939,7 +5050,7 @@ async def _source_embeddings_response(
         await _release_reservation(reservation)
         error = openai_error(
             "usage_unavailable",
-            "OpenAI-compatible model source embeddings response did not include token usage for a limited API key",
+            f"OpenAI-compatible model source {capability} response did not include token usage for a limited API key",
             error_type="server_error",
         )
         await _log_source_chat_completion(
@@ -4949,7 +5060,7 @@ async def _source_embeddings_response(
             model=model,
             status="error",
             error_code="usage_unavailable",
-            error_message="source embeddings response missing token usage",
+            error_message=f"source {capability} response missing token usage",
             upstream_status_code=result.upstream_status_code,
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)

@@ -62,6 +62,8 @@ _FAIL_CLOSED_HTTP_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "POST", "/v1/chat/completions"),
         ("HTTP", "POST", "/v1/chat/completions/"),
         ("HTTP", "POST", "/v1/embeddings"),
+        ("HTTP", "POST", "/v1/decisions"),
+        ("HTTP", "POST", "/v1/systemone"),
         ("HTTP", "POST", "/v1/responses/compact"),
         ("HTTP", "POST", "/backend-api/transcribe"),
         ("HTTP", "POST", "/backend-api/files"),
@@ -187,6 +189,18 @@ _PROVIDER_ROUTING_CASES = [
         {"json": {"model": "text-embedding-3-small", "input": "inert"}},
         id="embeddings",
     ),
+    pytest.param(
+        "POST",
+        "/v1/decisions",
+        {"json": {"model": "clef-flash", "input": "inert", "questions": []}},
+        id="decisions",
+    ),
+    pytest.param(
+        "POST",
+        "/v1/systemone",
+        {"json": {"model": "clef-flash", "state": "inert", "questions": {}}},
+        id="systemone",
+    ),
 ]
 
 _PROVIDER_BINARY_ROUTE_CASES = [
@@ -236,7 +250,7 @@ async def test_daybreak_capability_fails_closed_on_unsupported_routing_http_surf
     monkeypatch.setattr(ProxyService, "codex_control_request", fail_before_routing)
     monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", fail_before_routing)
     monkeypatch.setattr(proxy_api_module, "_select_chat_model_source", fail_before_routing)
-    monkeypatch.setattr(proxy_api_module, "_select_embeddings_model_source", fail_before_routing)
+    monkeypatch.setattr(proxy_api_module, "_select_endpoint_model_source", fail_before_routing)
     key = await _create_api_key(f"Daybreak route guard {path}")
 
     response = await _request(
@@ -284,6 +298,8 @@ async def test_daybreak_capability_unsupported_http_authenticates_before_denial(
         "/v1/chat/completions",
         "/v1/chat/completions/",
         "/v1/embeddings",
+        "/v1/decisions",
+        "/v1/systemone",
         "/v1/images/generations",
         "/v1/warmup",
         "/v1/warmup/default",
@@ -866,6 +882,41 @@ async def test_metadata_only_capability_signal_is_rejected_on_every_responses_ro
     # models allow extra fields, so the signal survives parsing and would
     # otherwise enter ordinary account selection without the
     # security-work-authorized requirement.
+    key = await _create_api_key(f"Metadata-only capability signal {path}")
+
+    response = await async_client.post(
+        path,
+        headers={"Authorization": f"Bearer {key}"},
+        json={**body, "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        pytest.param("/v1/embeddings", {"model": "embed", "input": "hello"}, id="embeddings"),
+        pytest.param(
+            "/v1/decisions",
+            {"model": "decider", "input": "hello", "questions": [{"type": "predicate", "instructions": "?"}]},
+            id="decisions",
+        ),
+        pytest.param(
+            "/v1/systemone",
+            {"model": "decider", "state": "hello", "questions": {"q": {"type": "choice"}}},
+            id="systemone",
+        ),
+    ],
+)
+async def test_metadata_only_capability_signal_is_rejected_on_source_only_routes(
+    async_client: AsyncClient, path: str, body: dict[str, Any]
+) -> None:
+    # Source-only request models allow extra fields too, so a metadata-only
+    # capability signal must be denied before source selection rather than
+    # forwarded to a model source.
     key = await _create_api_key(f"Metadata-only capability signal {path}")
 
     response = await async_client.post(

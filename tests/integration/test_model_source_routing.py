@@ -427,6 +427,10 @@ async def _post_source_family_request(async_client, family: str, model: str):
         )
     if family == "embeddings":
         return await async_client.post("/v1/embeddings", json={"model": model, "input": "hello"})
+    if family == "decisions":
+        return await async_client.post("/v1/decisions", json={"model": model, "input": "hello", "questions": []})
+    if family == "systemone":
+        return await async_client.post("/v1/systemone", json={"model": model, "state": "hello", "questions": {}})
     assert family == "transcription"
     return await async_client.post(
         "/v1/audio/transcriptions",
@@ -435,7 +439,7 @@ async def _post_source_family_request(async_client, family: str, model: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", ["chat_stream", "chat", "embeddings", "transcription"])
+@pytest.mark.parametrize("family", ["chat_stream", "chat", "embeddings", "decisions", "systemone", "transcription"])
 async def test_every_source_route_relays_the_source_retry_after(async_client, source_upstream, family: str) -> None:
     """Honest passthrough (outbound-http-clients): a source ``429`` reaches the client with the source's status, its
     envelope and its ``Retry-After`` on every source route, not only on Responses dispatch."""
@@ -451,6 +455,8 @@ async def test_every_source_route_relays_the_source_retry_after(async_client, so
         model=model,
         base_url=base_url,
         supports_embeddings=family == "embeddings",
+        supports_decisions=family == "decisions",
+        supports_systemone=family == "systemone",
         supports_audio_transcriptions=family == "transcription",
     )
 

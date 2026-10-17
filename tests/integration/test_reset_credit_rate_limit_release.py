@@ -388,3 +388,93 @@ async def test_refresh_recorded_during_redemption_does_not_hide_blocked_window(a
     response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
     await _assert_active(account_id)
+
+
+@pytest.mark.asyncio
+async def test_backdated_refresh_recorded_during_redemption_does_not_hide_blocked_window(
+    async_client, monkeypatch
+) -> None:
+    # A replica with a slow clock records the post-reset deadline during the
+    # consume call, with a recorded_at earlier than the redemption start. The
+    # baseline is captured before the consume, so it is unaffected.
+    account_id = await _blocked_account(async_client, "backdated-refresh")
+    await _patch_usage_fetch(monkeypatch)
+    await _prime_dashboard_credit(account_id)
+
+    async def _fetch_credits(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at="2030-01-01T00:00:00Z")],
+            available_count=1,
+        )
+
+    async def _consume_with_backdated_refresh(*_args, **_kwargs):
+        async with SessionLocal() as session:
+            session.add(
+                UsageHistory(
+                    account_id=account_id,
+                    recorded_at=utcnow() - timedelta(seconds=30),
+                    window="primary",
+                    used_percent=0.0,
+                    reset_at=int(time.time()) + 7 * 24 * 3600,
+                    window_minutes=10_080,
+                )
+            )
+            await session.commit()
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume_with_backdated_refresh)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_active(account_id)
+
+
+@pytest.mark.asyncio
+async def test_stale_row_from_an_older_fetch_does_not_make_the_block_ambiguous(async_client, monkeypatch) -> None:
+    # Before upstream moved the weekly window into the primary slot it reported
+    # it as secondary, with the same deadline. That older row is not part of
+    # the newest fetch, so it does not count as a second matching window.
+    account_id = await _blocked_account(async_client, "stale-secondary")
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None and account.blocked_at is not None
+        session.add(
+            UsageHistory(
+                account_id=account_id,
+                recorded_at=datetime.fromtimestamp(account.blocked_at - 2 * 24 * 3600, timezone.utc).replace(
+                    tzinfo=None
+                ),
+                window="secondary",
+                used_percent=80.0,
+                reset_at=account.reset_at,
+                window_minutes=10_080,
+            )
+        )
+        await session.commit()
+    await _patch_usage_fetch(monkeypatch)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_active(account_id)
+
+
+@pytest.mark.parametrize("code,windows_reset", [("already_redeemed", 1), ("reset", 0)])
+@pytest.mark.asyncio
+async def test_unconfirmed_accounts_api_redemption_does_not_release_account(
+    async_client, monkeypatch, code, windows_reset
+) -> None:
+    from app.modules.accounts import service as accounts_service_module
+
+    account_id = await _blocked_account(async_client, f"svc-no-confirm-{code}-{windows_reset}")
+    await _patch_usage_fetch(monkeypatch)
+
+    async def _consume(*_args, **_kwargs):
+        return ConsumeRateLimitResetCreditResponse(code=code, windows_reset=windows_reset)
+
+    monkeypatch.setattr(accounts_service_module, "consume_rate_limit_reset_credit", _consume)
+    response = await async_client.post(f"/api/accounts/{account_id}/usage-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)

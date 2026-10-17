@@ -2,7 +2,7 @@
 
 ### Requirement: Confirmed reset-credit refresh may release the quota block it reset
 
-A forced usage refresh triggered by an upstream reset-credit redemption MUST receive the time the redemption request was started, read before the consume request is sent, and only when upstream reports `code == "reset"` and `windows_reset > 0`. The refresh MUST bypass a `RATE_LIMITED` account's persisted cooldown deadline only when all of the following hold: the whole second of `blocked_at` precedes that start time; the account's persisted `reset_at` matches, within five seconds, the reset deadline of exactly one quota window as last recorded before the redemption started; and the fresh usage snapshot reports that window with a reset deadline more than five seconds away from the persisted `reset_at`. After the bypass, the existing quota availability checks MUST still apply. In every other case the account MUST remain rate-limited until its cooldown ends. This exception MUST NOT change `QUOTA_EXCEEDED` recovery or ordinary usage refresh behavior.
+A forced usage refresh triggered by an upstream reset-credit redemption MUST receive the time the redemption request was started, read before the consume request is sent, and only when upstream reports `code == "reset"` and `windows_reset > 0`. The refresh MUST bypass a `RATE_LIMITED` account's persisted cooldown deadline only when all of the following hold: the whole second of `blocked_at` precedes that start time; the account's persisted `reset_at` matches, within five seconds, the baseline reset deadline of exactly one quota window, where the baseline is captured before the consume request is sent and includes only rows from the newest usage fetch; and the fresh usage snapshot reports that window with a reset deadline more than five seconds away from its baseline deadline. After the bypass, the existing quota availability checks MUST still apply. In every other case the account MUST remain rate-limited until its cooldown ends. This exception MUST NOT change `QUOTA_EXCEEDED` recovery or ordinary usage refresh behavior.
 
 #### Scenario: Confirmed reset credit releases a rate-limited account with available weekly quota
 
@@ -31,8 +31,15 @@ A forced usage refresh triggered by an upstream reset-credit redemption MUST rec
 - **GIVEN** a `RATE_LIMITED` account whose persisted `reset_at` equals its weekly window's reset deadline
 - **WHEN** another usage refresh records the post-reset weekly deadline while the redemption is in flight
 - **AND** the redemption returns `code="reset"` and `windows_reset > 0` and the forced refresh reports available quota
-- **THEN** the blocked window is still identified from rows recorded before the redemption started
+- **THEN** the blocked window is still identified from the baseline captured before the consume request, whatever that refresh's `recorded_at`
 - **AND** the account becomes `ACTIVE`
+
+#### Scenario: A row from an older fetch does not make the block ambiguous
+
+- **GIVEN** a `RATE_LIMITED` account whose persisted `reset_at` equals its weekly primary window's reset deadline
+- **AND** an older usage fetch left a secondary row carrying the same deadline
+- **WHEN** upstream confirms a reset credit and the forced usage refresh reports the weekly window with a new deadline and available quota
+- **THEN** only the newest fetch counts toward the baseline, and the account becomes `ACTIVE`
 
 #### Scenario: Block not bound to exactly one quota window stays blocked
 

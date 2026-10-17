@@ -139,27 +139,16 @@ class _HTTPBridgeSessionRegistryMixin:
         batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
         pending_operation_ids = getattr(batcher, "pending_operation_ids", None)
         if callable(pending_operation_ids):
-            try:
-                protected_operation_ids.update(await pending_operation_ids())
-            except Exception:
-                logger.warning(
-                    "Failed to snapshot HTTP bridge operation spool protection",
-                    exc_info=True,
-                )
-                return 0
+            protected_operation_ids.update(await pending_operation_ids())
 
         abandon_stale_operations = getattr(self._durable_bridge, "abandon_stale_operations", None)
         if not callable(abandon_stale_operations):
             return 0
-        try:
-            abandonments = await abandon_stale_operations(
-                cutoff=cutoff,
-                lease_expired_before=lease_expired_before,
-                protected_operation_ids=protected_operation_ids,
-            )
-        except Exception:
-            logger.warning("HTTP bridge stale operation abandonment failed", exc_info=True)
-            return 0
+        abandonments = await abandon_stale_operations(
+            cutoff=cutoff,
+            lease_expired_before=lease_expired_before,
+            protected_operation_ids=protected_operation_ids,
+        )
         for abandonment in abandonments:
             source_state = str(abandonment.source_state)
             if PROMETHEUS_AVAILABLE and http_bridge_operation_abandonment_total is not None:

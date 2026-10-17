@@ -125,6 +125,7 @@ def test_set_normal_clears_degraded_state() -> None:
 @pytest.mark.asyncio
 async def test_health_ready_succeeds_when_degraded() -> None:
     from app.modules.health.api import health_ready
+    from app.modules.health.schemas import HealthCheckResponse
 
     set_degraded("all upstream accounts are unavailable")
     mock_session = AsyncMock()
@@ -143,6 +144,7 @@ async def test_health_ready_succeeds_when_degraded() -> None:
 
         result = await health_ready()
 
+    assert isinstance(result, HealthCheckResponse)
     assert result.status == "ok"
 
 

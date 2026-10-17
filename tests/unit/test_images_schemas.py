@@ -219,6 +219,7 @@ class TestValidateImageRequestParameters:
         [("auto", True), ("opaque", True), ("transparent", True), ("plaid", False)],
     )
     def test_gpt_image_2_background_validation(self, background: str, expect_ok: bool) -> None:
+        """Accept supported backgrounds and identify invalid background values."""
         if expect_ok:
             _validate_default(background=background)
         else:
@@ -229,11 +230,13 @@ class TestValidateImageRequestParameters:
     @pytest.mark.parametrize("is_edit", [False, True])
     @pytest.mark.parametrize("output_format", ["png", "webp"])
     def test_gpt_image_2_transparent_formats(self, is_edit: bool, output_format: str) -> None:
+        """Allow alpha-capable PNG and WebP output for both generation and editing."""
         _validate_default(background="transparent", output_format=output_format, is_edit=is_edit)
 
     @pytest.mark.parametrize("model", ["gpt-image-2", "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini"])
     @pytest.mark.parametrize("is_edit", [False, True])
     def test_transparent_jpeg_rejected(self, model: str, is_edit: bool) -> None:
+        """Reject transparent JPEG output for every supported model and operation."""
         with pytest.raises(ClientPayloadError) as excinfo:
             _validate_default(model=model, background="transparent", output_format="jpeg", is_edit=is_edit)
         assert excinfo.value.param == "output_format"

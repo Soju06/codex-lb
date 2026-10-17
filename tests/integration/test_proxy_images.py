@@ -253,6 +253,7 @@ async def test_images_generations_trailing_slash_parity_between_v1_and_codex_ali
 
 @pytest.mark.asyncio
 async def test_images_generations_rejects_transparent_jpeg(async_client):
+    """Reject transparent JPEG requests with an output_format validation error."""
     response = await async_client.post(
         "/v1/images/generations",
         json={
@@ -2105,9 +2106,11 @@ async def test_image_routes_handoff_captured_usage_exactly_once(
 
 @pytest.fixture
 def transparent_upstream(monkeypatch):
+    """Capture forwarded image requests and return deterministic upstream image bytes."""
     captured: list[Any] = []
 
     async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        """Emit completed image events carrying the requested settings and fixed bytes."""
         del headers, access_token, account_id, kwargs
         captured.append(payload)
         tool = cast(dict[str, Any], payload.tools[0])
@@ -2130,6 +2133,7 @@ def transparent_upstream(monkeypatch):
         yield _sse({"type": "response.completed", "response": {"id": "resp_transparent"}})
 
     async def fake_ensure_fresh(self, account, **kwargs):
+        """Keep the fixture account usable without a network token refresh."""
         del self, kwargs
         return account
 
@@ -2139,6 +2143,7 @@ def transparent_upstream(monkeypatch):
 
 
 def assert_transparency_forwarding(payload, *, output_format: str, background: str, is_edit: bool) -> None:
+    """Verify image settings and edit input reach the existing Responses pipeline."""
     assert payload.model == "gpt-5.6-luna"
     tool = cast(dict[str, Any], payload.tools[0])
     assert tool["model"] == "gpt-image-2"
@@ -2154,6 +2159,7 @@ def assert_transparency_forwarding(payload, *, output_format: str, background: s
 
 
 def assert_unaltered_image_response(response, *, stream: bool, is_edit: bool, output_format: str, background: str):
+    """Verify JSON and SSE responses preserve upstream image bytes and metadata."""
     assert response.status_code == 200, response.text
     if stream:
         event_type = "image_edit.completed" if is_edit else "image_generation.completed"
@@ -2178,6 +2184,7 @@ def assert_unaltered_image_response(response, *, stream: bool, is_edit: bool, ou
 async def test_images_background_settings_round_trip(
     async_client, transparent_upstream, route, output_format, background, stream
 ):
+    """Preserve transparent and opaque generation settings across both route families."""
     await _import_account(async_client, "acc_transparency", "transparency@example.com")
     response = await async_client.post(
         route,
@@ -2205,6 +2212,7 @@ async def test_images_background_settings_round_trip(
 @pytest.mark.parametrize("output_format", ["png", "webp"])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_images_transparent_edits_round_trip(async_client, transparent_upstream, route, output_format, stream):
+    """Preserve transparent PNG and WebP edits through multipart and native JSON routes."""
     await _import_account(async_client, "acc_transparency_edit", "transparency-edit@example.com")
     fields = {
         "model": "gpt-image-2",
@@ -2245,6 +2253,7 @@ async def test_images_transparent_edits_round_trip(async_client, transparent_ups
     ],
 )
 async def test_transparent_jpeg_never_reaches_upstream(async_client, transparent_upstream, route):
+    """Reject unsupported transparent JPEG output before any upstream image request."""
     await _import_account(async_client, "acc_jpeg", "jpeg@example.com")
     fields = {"model": "gpt-image-2", "prompt": "ring", "background": "transparent", "output_format": "jpeg"}
     if route == "/v1/images/edits":
@@ -2265,12 +2274,14 @@ async def test_transparent_jpeg_never_reaches_upstream(async_client, transparent
 @pytest.mark.parametrize("route", ["/v1/images/generations", "/backend-api/codex/images/generations"])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_transparent_images_propagate_upstream_rejection(async_client, monkeypatch, route, stream):
+    """Preserve upstream transparency errors for JSON and streaming generation requests."""
     from app.core.clients.proxy import ProxyResponseError
 
     await _import_account(async_client, "acc_transparency_error", "transparency-error@example.com")
     calls = []
 
     async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        """Raise a deterministic upstream error before returning any image events."""
         del headers, access_token, account_id, kwargs
         calls.append(payload)
         if False:  # pragma: no cover - generator marker
@@ -2288,6 +2299,7 @@ async def test_transparent_images_propagate_upstream_rejection(async_client, mon
         )
 
     async def fake_ensure_fresh(self, account, **kwargs):
+        """Isolate upstream error handling from account token refreshes."""
         del self, kwargs
         return account
 

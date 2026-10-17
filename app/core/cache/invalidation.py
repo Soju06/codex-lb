@@ -16,6 +16,7 @@ from app.core.metrics.prometheus import (
     cache_invalidation_bump_failures_total,
     cache_invalidation_poll_failures_total,
 )
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.db.models import CacheInvalidation
 from app.db.session import close_session
 
@@ -150,11 +151,7 @@ class CacheInvalidationPoller:
         if not self._task:
             return
         self._stop.set()
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
+        await stop_task_after_grace(self._task)
         self._task = None
 
     def request_bump(self, namespace: str) -> None:

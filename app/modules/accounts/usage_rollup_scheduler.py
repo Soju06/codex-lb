@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass, field
 
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.modules.accounts.usage_rollup import run_fold_pass
 from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.reports.rollup import run_report_fold_pass
@@ -32,9 +32,7 @@ class AccountUsageRollupScheduler:
         if not self._task:
             return
         self._stop.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        await stop_task_after_grace(self._task)
         self._task = None
 
     async def _run_loop(self) -> None:

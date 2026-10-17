@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from app.core.config.settings_cache import get_settings_cache
 from app.core.resilience.toggles import resolve_resilience_toggles
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.core.utils.time import to_utc_naive
 from app.db.models import DashboardSettings
 from app.db.session import get_background_session
@@ -44,11 +45,7 @@ class QuotaPlannerScheduler:
         self._stopping.set()
         if self._task is None:
             return
-        self._task.cancel()
-        try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
+        await stop_task_after_grace(self._task)
         self._task = None
 
     async def _run_loop(self) -> None:

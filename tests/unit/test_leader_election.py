@@ -15,6 +15,8 @@ from sqlalchemy.sql.dml import Delete
 from sqlalchemy.sql.elements import TextClause
 
 leader_election_module = importlib.import_module("app.core.scheduling.leader_election")
+shutdown_module = importlib.import_module("app.core.shutdown")
+task_shutdown = importlib.import_module("app.core.scheduling.task_shutdown")
 
 pytestmark = pytest.mark.unit
 
@@ -1692,3 +1694,49 @@ async def test_best_effort_lease_writes_name_the_lock_mechanism(
         "release contended on a locked database" in message and f"sqlite_errorname={error_name}" in message
         for message in debug
     )
+
+
+@pytest.mark.asyncio
+async def test_release_waits_for_the_keeper_to_finish_when_no_drain_time_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A busy instance exhausts the drain deadline (streaming responses open at
+    # SIGTERM), so remaining_drain_timeout_seconds() is 0 when release() runs.
+    # release() must still stop the keeper first and wait for it to finish, so
+    # exactly one owner renews the lease at a time.
+    session = _FakeSession("sqlite", [1, 1])
+    _install(monkeypatch, session)
+    monkeypatch.setattr(shutdown_module, "remaining_drain_timeout_seconds", lambda: 0.0)
+    monkeypatch.setattr(task_shutdown, "DATABASE_TASK_STOP_GRACE_SECONDS", 0.05)
+    events: list[str] = []
+    renew_started = asyncio.Event()
+
+    async def renew_with_deferring_session_close(self: Any) -> bool:
+        events.append("renew-start")
+        renew_started.set()
+        teardown = asyncio.ensure_future(asyncio.sleep(0.2))
+        try:
+            await asyncio.Event().wait()  # renew in flight when stop arrives
+        finally:
+            while not teardown.done():  # session close defers cancellation until done
+                try:
+                    await asyncio.shield(teardown)
+                except asyncio.CancelledError:
+                    continue
+            events.append("renew-session-closed")
+        return True
+
+    async def drain_detached_bodies(self: Any) -> bool:
+        events.append("release-continues")
+        return True
+
+    monkeypatch.setattr(leader_election_module.LeaderElection, "_renew_lease_row", renew_with_deferring_session_close)
+    monkeypatch.setattr(leader_election_module.LeaderElection, "_drain_detached_bodies", drain_detached_bodies)
+
+    election = leader_election_module.LeaderElection(leader_id="node-a")
+    election.start_release_keeper()
+    await asyncio.wait_for(renew_started.wait(), timeout=5)
+
+    await election.release()
+
+    assert events == ["renew-start", "renew-session-closed", "release-continues"]

@@ -298,7 +298,7 @@ def test_cleanup_before_started_marker_removes_spawned_migration(
         migration_pid = spawned["pid"]
         assert not (running.markers / "migration-started.json").exists()
         _cleanup(running)
-        assert not _pid_exists(migration_pid), (
+        assert _wait_for_pid_exit(migration_pid), (
             f"migration PID {migration_pid} survived cleanup before migration-started marker"
         )
     finally:

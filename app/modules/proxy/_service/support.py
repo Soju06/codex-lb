@@ -11,6 +11,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, NoReturn, Protocol, cast
+from uuid import uuid4
 
 import anyio
 
@@ -1551,6 +1552,7 @@ def _http_bridge_session_supports_service_tier(
 
 @dataclass(slots=True)
 class _WebSocketContinuityState:
+    last_completed_connection_id: str | None = None
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
@@ -1568,6 +1570,8 @@ class _WebSocketContinuityAnchor:
 
 @dataclass(slots=True)
 class _WebSocketUpstreamControl:
+    connection_id: str = field(default_factory=lambda: uuid4().hex)
+    completed_response_delivered: bool = False
     reconnect_requested: bool = False
     retire_after_drain: bool = False
     suppress_downstream_event: bool = False

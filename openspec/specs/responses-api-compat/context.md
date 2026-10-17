@@ -6,6 +6,23 @@ This capability implements OpenAI-compatible behavior for `POST /v1/responses`, 
 
 See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
+## Idle Codex upstream loss
+
+After a completed response, an idle physical upstream can lose the context
+that the client's next delta assumes. The proxy signals that loss by closing
+the Codex downstream with code 1012. A connection identity protects a newer
+shared continuity anchor from being retired by an older connection's close.
+Durable account ownership remains intact.
+
+For example, after response A completes, its upstream closes while no new
+request is pending. The downstream reconnects and sends the full conversation
+without an injected response-A anchor. This does not recover context that the
+client no longer has; a delta alone must still follow existing fail-closed
+continuity rules. Public OpenAI-compatible routes and active requests retain
+their existing lifecycle behavior.
+
+A turn received during an idle close may still be awaiting preparation or admission. Registration shares the pending lock with the close decision and checks the disconnected state before dispatch; the registered state then uses normal scope cleanup.
+
 ## Rationale and Decisions
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.

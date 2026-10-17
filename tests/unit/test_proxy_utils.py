@@ -36397,6 +36397,8 @@ async def _run_websocket_clean_close_during_send_failure(
         upstream_control: proxy_service._WebSocketUpstreamControl,
         response_create_gate: asyncio.Semaphore,
         downstream_activity: proxy_service._DownstreamWebSocketActivity,
+        continuity_state: proxy_service._WebSocketContinuityState | None = None,
+        codex_session_affinity: bool = False,
     ) -> bool:
         result = await original_transport_end(
             proxy,
@@ -36412,6 +36414,8 @@ async def _run_websocket_clean_close_during_send_failure(
             upstream_control=upstream_control,
             response_create_gate=response_create_gate,
             downstream_activity=downstream_activity,
+            continuity_state=continuity_state,
+            codex_session_affinity=codex_session_affinity,
         )
         assert upstream_control.replay_request_state is not None
         reader_published_replay.set()

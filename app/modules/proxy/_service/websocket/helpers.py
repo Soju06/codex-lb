@@ -702,6 +702,7 @@ def _prepare_websocket_request_state_for_account_switch(
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
     """Drop the completed-response anchor and the state that only exists for it."""
     continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_connection_id = None
     continuity_state.last_completed_input_count = 0
     continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = []

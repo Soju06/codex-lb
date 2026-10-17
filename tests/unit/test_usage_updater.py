@@ -515,7 +515,8 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
         own_singleflight_sessions=True,
     )
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
+    assert refreshed.fetch_succeeded is False  # ineligible account: no upstream fetch was attempted
     assert refresh_called is False
 
 
@@ -1256,7 +1257,7 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
 
     force_refresh_account.assert_not_awaited()
     release_stale.set()
-    assert await stale_task is False
+    assert (await stale_task).usage_written is False
     refreshed = await force_task
 
     assert refreshed is True
@@ -1308,7 +1309,7 @@ async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refre
         await force_task
 
     release_stale.set()
-    assert await stale_task is False
+    assert (await stale_task).usage_written is False
     force_refresh_account.assert_not_awaited()
 
 
@@ -1895,7 +1896,7 @@ async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypa
 
     refreshed = await updater.refresh_accounts([account], latest_usage={})
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
     fetch_usage_mock.assert_not_called()
 
 
@@ -1932,7 +1933,7 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
 
     result = await updater.refresh_accounts([account], latest_usage={})
 
-    assert result is False
+    assert result.usage_written is False
     assert usage_repo.entries == []
     assert additional_repo.deleted_account_ids == []
     assert accounts_repo.status_updates == []
@@ -1980,7 +1981,7 @@ async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> 
 
     result = await updater.refresh_accounts([account], latest_usage={})
 
-    assert result is False
+    assert result.usage_written is False
     assert usage_repo.entries == []
     assert additional_repo.entries == []
     assert account.workspace_id is None
@@ -3007,7 +3008,7 @@ async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
             await updater.refresh_accounts([acc], latest_usage={}),
         ]
 
-    assert refresh_results == [False, False]
+    assert [result.usage_written for result in refresh_results] == [False, False]
     assert fetch_calls == 2
     assert acc.status == AccountStatus.ACTIVE
     assert accounts_repo.status_updates == []
@@ -3250,7 +3251,7 @@ async def test_usage_updater_retry_keeps_account_active_on_bare_404(
     with caplog.at_level(logging.WARNING, logger="app.core.clients.usage"):
         refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
     assert fetch_calls == 2
     ensure_fresh.assert_awaited_once_with(acc, force=True)
     assert acc.status == AccountStatus.ACTIVE
@@ -3474,7 +3475,7 @@ async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_miss
 
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
     assert len(usage_repo.entries) == 0
 
 
@@ -3501,7 +3502,7 @@ async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure
     accounts_repo.accounts_by_id[acc.id] = acc
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
-    assert refreshed is False
+    assert refreshed.usage_written is False
     assert len(usage_repo.entries) == 0
 
 
@@ -3545,7 +3546,7 @@ async def test_usage_updater_refresh_accounts_returns_true_when_any_window_writt
 
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
-    assert refreshed is True
+    assert refreshed.usage_written is True
     assert len(usage_repo.entries) == 1
 
 
@@ -3576,7 +3577,7 @@ async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(mo
 
     refreshed = await updater.refresh_accounts([acc_skip, acc_write], latest_usage={})
 
-    assert refreshed is True
+    assert refreshed.usage_written is True
     assert len(usage_repo.entries) == 1
 
 
@@ -3624,8 +3625,8 @@ async def test_usage_updater_singleflights_concurrent_refreshes(monkeypatch) -> 
     first_refreshed, second_refreshed = await asyncio.gather(first, second)
 
     assert fetch_calls == 1
-    assert first_refreshed is True
-    assert second_refreshed is True
+    assert first_refreshed.usage_written is True
+    assert second_refreshed.usage_written is True
     assert len(usage_repo.entries) == 1
 
 
@@ -3912,7 +3913,7 @@ async def test_additional_rate_limits_sync_even_when_main_rate_limit_missing(mon
 
     # Additional-only accounts write additional data and mark themselves as fresh
     # to prevent tight re-polling (R6-F1).
-    assert refreshed is True
+    assert refreshed.usage_written is True
     assert usage_repo.entries == []
     assert len(additional_repo.entries) == 1
     assert additional_repo.entries[0].limit_name == "o-pro"

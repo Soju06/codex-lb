@@ -129,11 +129,12 @@ async def _refresh_fleet_usage_with_owned_session(visible_account_ids: list[str]
         )
         eligible_accounts = [account for account in accounts if account.status not in _REFRESH_SKIP_STATUSES]
         latest_primary = await usage_repo.latest_by_account(window="primary", account_ids=visible_account_ids)
-        usage_written = await UsageUpdater(
+        refresh_result = await UsageUpdater(
             usage_repo,
             accounts_repo,
             additional_usage_repo,
         ).refresh_accounts(eligible_accounts, latest_primary, own_singleflight_sessions=True)
+        usage_written = refresh_result.usage_written
         if usage_written:
             await get_rate_limit_headers_cache().invalidate()
             get_account_selection_cache().invalidate()

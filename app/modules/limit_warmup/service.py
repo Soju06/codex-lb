@@ -44,7 +44,13 @@ _IDLE_PRIMARY_WINDOW = "primary_idle"
 _RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
 # Persist the upstream value, but treat nearby values as the same reset. This
 # avoids duplicate attempts when reset_at jitters between refresh cycles.
-_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
+RESET_AT_JITTER_TOLERANCE_SECONDS = 5
+
+
+@dataclass(frozen=True, slots=True)
+class UsageResetEvidence:
+    before: UsageHistory
+    after: UsageHistory
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,13 +353,15 @@ class LimitWarmupService:
         previous_plan_types: dict[str, str | None] | None = None,
         refresh_started_at: datetime | None = None,
         usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
+        reset_evidence: dict[tuple[str, str], UsageResetEvidence] | None = None,
+        usage_written: bool = True,
     ) -> None:
         if not settings.limit_warmup_enabled:
             return
         # C2-3 resilience toggles: bound before the warmup fan-out so the
         # upstream probes gate their breaker on the dashboard value.
         bind_resilience_toggles(settings)
-        selected_windows = _selected_windows(settings.limit_warmup_windows)
+        selected_windows = selected_warmup_windows(settings.limit_warmup_windows)
         if not selected_windows:
             return
 
@@ -380,7 +388,7 @@ class LimitWarmupService:
             latest_attempt = latest_attempts.get(account.id)
 
             windows_to_evaluate = list(selected_windows)
-            if settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
+            if usage_written and settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
                 windows_to_evaluate.append("primary")
             for window in windows_to_evaluate:
                 candidate = None
@@ -393,8 +401,9 @@ class LimitWarmupService:
                         after_primary=after_primary,
                         after_secondary=after_secondary,
                         min_available_percent=settings.limit_warmup_min_available_percent,
+                        reset_evidence=reset_evidence,
                     )
-                if candidate is None and window == "secondary":
+                if usage_written and candidate is None and window == "secondary":
                     candidate = _build_paid_to_free_transition_candidate(
                         account=account,
                         previous_plan_type=(previous_plan_types or {}).get(account.id),
@@ -402,7 +411,7 @@ class LimitWarmupService:
                         refresh_started_at=refresh_started_at,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
-                if candidate is None and window == "secondary":
+                if usage_written and candidate is None and window == "secondary":
                     candidate = _build_initial_free_quota_candidate(
                         account=account,
                         previous_plan_type=(previous_plan_types or {}).get(account.id),
@@ -411,7 +420,8 @@ class LimitWarmupService:
                         refresh_started_at=refresh_started_at,
                     )
                 if (
-                    candidate is None
+                    usage_written
+                    and candidate is None
                     and _account_is_safe_candidate(account)
                     and settings.limit_warmup_staggered_idle_enabled
                     and window == "primary"
@@ -695,7 +705,7 @@ class _WarmupCandidate:
     require_no_prior_attempt: bool = False
 
 
-def _selected_windows(value: str) -> tuple[str, ...]:
+def selected_warmup_windows(value: str) -> tuple[str, ...]:
     normalized = value.strip().lower()
     if normalized == "both":
         return ("primary", "secondary")
@@ -723,24 +733,34 @@ def _build_candidate(
     after_primary: dict[str, UsageHistory],
     after_secondary: dict[str, UsageHistory],
     min_available_percent: float,
+    reset_evidence: dict[tuple[str, str], UsageResetEvidence] | None = None,
 ) -> _WarmupCandidate | None:
-    before = _effective_usage_entry(
+    before = effective_warmup_usage_entry(
         account.id,
         window=window,
         primary=before_primary,
         secondary=before_secondary,
     )
-    after = _effective_usage_entry(
+    after = effective_warmup_usage_entry(
         account.id,
         window=window,
         primary=after_primary,
         secondary=after_secondary,
     )
-    if before is None or after is None:
+    if after is None:
         return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
+    evidence = (reset_evidence or {}).get((account.id, after.window or "primary"))
+    if (
+        evidence is not None
+        and after.used_percent < 100.0
+        and after.reset_at is not None
+        and evidence.after.reset_at is not None
+        and abs(after.reset_at - evidence.after.reset_at) <= RESET_AT_JITTER_TOLERANCE_SECONDS
+    ):
+        before, after = evidence.before, evidence.after
     if not usage_reset_confirmed(before=before, after=after):
         return None
     assert after.reset_at is not None
@@ -952,7 +972,7 @@ def _usage_entry_refreshed_for_cycle(
     return entry.recorded_at >= refresh_started_at
 
 
-def _effective_usage_entry(
+def effective_warmup_usage_entry(
     account_id: str,
     *,
     window: str,
@@ -998,4 +1018,4 @@ def _truncate(value: str | None, limit: int = 1000) -> str | None:
 
 
 def _attempt_reset_at_tolerance(candidate: _WarmupCandidate) -> int:
-    return _RESET_AT_JITTER_TOLERANCE_SECONDS
+    return RESET_AT_JITTER_TOLERANCE_SECONDS

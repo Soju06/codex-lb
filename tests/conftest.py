@@ -267,13 +267,13 @@ def _disable_request_path_usage_refresh(request, monkeypatch):
     """
     if request.node.get_closest_marker("usage_refresh_request_path") is not None:
         return
-    from app.modules.usage.updater import UsageUpdater
+    from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
 
     async def _noop_refresh_accounts(
         self, accounts, latest_usage, *, own_singleflight_sessions=False, join_existing=None
     ):
         del self, accounts, latest_usage, own_singleflight_sessions, join_existing
-        return False
+        return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
 
     monkeypatch.setattr(UsageUpdater, "refresh_accounts", _noop_refresh_accounts)
     monkeypatch.setattr(UsageUpdater, "request_refresh", staticmethod(lambda account_id: None))

@@ -18,6 +18,7 @@ from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.limit_warmup.service import LimitWarmupSendResult
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +136,7 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
             latest_usage: dict[str, UsageHistory],
         ) -> bool:
             updater_calls.append(([account.id for account in accounts], set(latest_usage)))
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     class _WarmupService:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -250,7 +251,7 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
                     reset_at=after_reset_at,
                     window_minutes=43_200,
                 )
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     class _Sender:
         def __init__(self) -> None:
@@ -351,7 +352,7 @@ async def test_scheduler_warms_confirmed_paid_to_free_plan_transition(
                     reset_at=monthly_reset_at,
                     window_minutes=43_200,
                 )
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     class _Sender:
         def __init__(self) -> None:
@@ -501,7 +502,7 @@ async def test_scheduler_restart_uses_anchored_persisted_evidence(
                     reset_at=latest_reset_at,
                     window_minutes=43_200,
                 )
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     class _Sender:
         def __init__(self) -> None:
@@ -602,7 +603,7 @@ async def test_scheduler_recovers_rate_limited_pro_after_early_weekly_reset(
                     reset_at=after_reset_at,
                     window_minutes=10_080,
                 )
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
     monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())

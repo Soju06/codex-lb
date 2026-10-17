@@ -7,6 +7,7 @@ from dataclasses import dataclass
 CLIENT_FAMILY_BY_RAW_GROUP: dict[str, str] = {
     "codex_exec": "codex-cli",
     "codex-tui": "codex-cli",
+    "codex_cli_rs": "codex-cli",
     "Codex Desktop": "codex-desktop",
     "codex_vscode": "codex-vscode",
     "AsyncOpenAI": "openai-sdk-python",

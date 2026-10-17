@@ -64,3 +64,15 @@ Password login and TOTP verification: max 8 attempts per 60-second window per cl
 ## Audit Logging
 
 Events: `login_success`, `login_failed`, `totp_enabled`, `totp_disabled`, `settings_changed`. Stored in `audit_logs` table via `AuditService.log_async()`.
+
+## Trusted proxy transport provenance
+
+Dashboard identity headers are authorized using the server-captured socket peer.
+The separately projected client address remains available for request attribution
+and does not establish which proxy supplied an identity. For example, a trusted
+proxy can forward a public client address without losing its authority to assert
+the configured identity header. Missing captured provenance fails closed.
+
+This applies the existing raw-peer trust model from proxy locality and API
+firewall checks to dashboard header authentication. Identity cardinality, group
+parsing, role mapping, and password fallback keep their existing contracts.

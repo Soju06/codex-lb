@@ -481,7 +481,15 @@ async def test_automations_run_now_aliases_ultra_reasoning_to_max_on_wire(async_
 
     async def _fake_compact(request, *_args, **_kwargs):
         compact_requests.append(request)
-        return SimpleNamespace(id="resp-ultra-wire-alias")
+        return SimpleNamespace(
+            id="resp-ultra-wire-alias",
+            usage=SimpleNamespace(
+                input_tokens=100_000,
+                output_tokens=0,
+                input_tokens_details=SimpleNamespace(cached_tokens=20_000, cache_write_tokens=37_000),
+                output_tokens_details=None,
+            ),
+        )
 
     monkeypatch.setattr("app.modules.automations.service.core_compact_responses", _fake_compact)
 
@@ -539,6 +547,8 @@ async def test_automations_run_now_aliases_ultra_reasoning_to_max_on_wire(async_
         assert len(matching_logs) == 1
         assert matching_logs[0].model == "gpt-5.6-sol"
         assert matching_logs[0].reasoning_effort == "max"
+        assert matching_logs[0].cache_write_input_tokens == 37_000
+        assert matching_logs[0].cost_usd == pytest.approx(0.365)
 
 
 @pytest.mark.asyncio

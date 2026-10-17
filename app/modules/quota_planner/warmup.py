@@ -81,6 +81,7 @@ class WarmupUsage:
     output_tokens: int
     cached_input_tokens: int
     reasoning_tokens: int | None
+    cache_write_input_tokens: int | None = None
 
 
 class QuotaWarmupService:
@@ -281,6 +282,7 @@ class QuotaWarmupService:
                         input_tokens=usage.input_tokens,
                         output_tokens=usage.output_tokens,
                         cached_input_tokens=usage.cached_input_tokens,
+                        cache_write_input_tokens=usage.cache_write_input_tokens or 0,
                     )
                 )
                 reservation_finalized = True
@@ -294,6 +296,7 @@ class QuotaWarmupService:
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
+                cache_write_input_tokens=usage.cache_write_input_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
                 latency_ms=int((time.monotonic() - started) * 1000),
                 status="success",
@@ -628,6 +631,9 @@ class QuotaWarmupService:
                     raw_usage.input_tokens_details.cached_tokens if raw_usage.input_tokens_details else 0
                 )
                 or 0,
+                cache_write_input_tokens=(
+                    raw_usage.input_tokens_details.cache_write_tokens if raw_usage.input_tokens_details else None
+                ),
                 reasoning_tokens=(
                     raw_usage.output_tokens_details.reasoning_tokens if raw_usage.output_tokens_details else None
                 ),

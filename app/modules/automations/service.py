@@ -1228,6 +1228,7 @@ class AutomationsService:
                     input_tokens,
                     output_tokens,
                     cached_input_tokens,
+                    cache_write_input_tokens,
                     reasoning_tokens,
                     service_tier,
                 ) = _extract_compact_usage_fields(compact_response)
@@ -1241,6 +1242,7 @@ class AutomationsService:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     cached_input_tokens=cached_input_tokens,
+                    cache_write_input_tokens=cache_write_input_tokens,
                     reasoning_tokens=reasoning_tokens,
                     service_tier=service_tier,
                 )
@@ -2105,6 +2107,7 @@ class AutomationsService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         cached_input_tokens: int | None = None,
+        cache_write_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         service_tier: str | None = None,
     ) -> None:
@@ -2118,6 +2121,7 @@ class AutomationsService:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cached_input_tokens=cached_input_tokens,
+                cache_write_input_tokens=cache_write_input_tokens,
                 reasoning_tokens=reasoning_tokens,
                 reasoning_effort=reasoning_effort,
                 latency_ms=latency_ms,
@@ -2521,13 +2525,14 @@ def _elapsed_ms(started_at: float | None) -> int | None:
 
 def _extract_compact_usage_fields(
     compact_response: object,
-) -> tuple[int | None, int | None, int | None, int | None, str | None]:
+) -> tuple[int | None, int | None, int | None, int | None, int | None, str | None]:
     usage = getattr(compact_response, "usage", None)
     input_tokens = _coerce_int(getattr(usage, "input_tokens", None))
     output_tokens = _coerce_int(getattr(usage, "output_tokens", None))
     input_details = getattr(usage, "input_tokens_details", None)
     output_details = getattr(usage, "output_tokens_details", None)
     cached_input_tokens = _coerce_int(getattr(input_details, "cached_tokens", None))
+    cache_write_input_tokens = _coerce_int(getattr(input_details, "cache_write_tokens", None))
     reasoning_tokens = _coerce_int(getattr(output_details, "reasoning_tokens", None))
 
     service_tier: str | None = None
@@ -2539,7 +2544,7 @@ def _extract_compact_usage_fields(
             if normalized:
                 service_tier = normalized
 
-    return input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, service_tier
+    return input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, service_tier
 
 
 def _coerce_int(value: object) -> int | None:

@@ -3298,6 +3298,73 @@ async def test_compact_cost_limit_prefers_response_service_tier_over_request(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_v1_responses_cache_writes_charge_logs_and_cost_limit(async_client, monkeypatch, stream):
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cache-write-cost",
+            "limits": [{"limitType": "cost_usd", "limitWindow": "weekly", "maxValue": 1_100_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()
+    await _import_account(async_client, "acc_cache_write", "cache-write@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_cache_write_cost",
+                "model": "gpt-6-astra",
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "output_tokens": 0,
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 100_000},
+                },
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    body = {"model": "gpt-6-astra", "input": "hi", "stream": stream}
+    response = await async_client.post("/v1/responses", headers=headers, json=body)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        log = (await session.scalars(select(RequestLog))).one()
+        assert log.cost_usd == pytest.approx(1.25)
+        assert log.cache_write_input_tokens == 100_000
+        reservation = (await session.scalars(select(ApiKeyUsageReservation))).one()
+        assert reservation.status == "finalized"
+        assert reservation.cache_write_input_tokens == 100_000
+        assert reservation.cost_microdollars == 1_250_000
+        service = ApiKeysService(ApiKeysRepository(session))
+        await service.finalize_usage_reservation(
+            reservation.id,
+            model="gpt-6-astra",
+            input_tokens=100_000,
+            output_tokens=0,
+            cache_write_input_tokens=100_000,
+        )
+        limits = await ApiKeysRepository(session).get_limits_by_key(key["id"])
+        assert limits[0].current_value == 1_250_000
+
+    logs = await async_client.get("/api/request-logs?limit=1")
+    assert logs.status_code == 200
+    assert logs.json()["requests"][0]["costUsd"] == pytest.approx(1.25)
+    assert logs.json()["requests"][0]["costBreakdown"]["inputUsd"] == pytest.approx(1.25)
+    assert logs.json()["requests"][0]["costBreakdown"]["totalUsd"] == pytest.approx(1.25)
+    blocked = await async_client.post("/v1/responses", headers=headers, json=body)
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_non_stream_finalizes_cost_limit(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

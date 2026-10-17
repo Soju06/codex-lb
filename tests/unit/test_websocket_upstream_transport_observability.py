@@ -222,6 +222,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "input_tokens": None,
             "output_tokens": None,
             "cached_input_tokens": None,
+            "cache_write_input_tokens": None,
             "reasoning_tokens": None,
             "reasoning_effort": None,
             "transport": "http",

@@ -407,6 +407,9 @@ class _ApiKeyUsageMixin:
         input_tokens = usage.input_tokens if usage else None
         output_tokens = usage.output_tokens if usage else None
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else 0
+        cache_write_input_tokens = (
+            usage.input_tokens_details.cache_write_tokens if usage and usage.input_tokens_details else 0
+        )
         model_name = api_key_reservation.model or (getattr(response, "model", None) or "")
         response_service_tier = _service_tier_from_response(response)
         service_tier = (
@@ -430,6 +433,7 @@ class _ApiKeyUsageMixin:
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens or 0,
+                            cache_write_input_tokens=cache_write_input_tokens or 0,
                             service_tier=service_tier,
                         )
                     else:
@@ -550,6 +554,7 @@ class _ApiKeyUsageMixin:
                             input_tokens=settlement.input_tokens,
                             output_tokens=settlement.output_tokens,
                             cached_input_tokens=settlement.cached_input_tokens or 0,
+                            cache_write_input_tokens=settlement.cache_write_input_tokens or 0,
                             service_tier=settlement.service_tier,
                         )
                     else:

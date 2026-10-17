@@ -117,6 +117,7 @@ class LimitWarmupRequestLogRepository(Protocol):
         error_message: str | None = None,
         requested_at: datetime | None = None,
         cached_input_tokens: int | None = None,
+        cache_write_input_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
@@ -659,6 +660,11 @@ class LimitWarmupService:
             if usage is not None and usage.input_tokens_details is not None
             else None
         )
+        cache_write_input_tokens = (
+            usage.input_tokens_details.cache_write_tokens
+            if usage is not None and usage.input_tokens_details is not None
+            else None
+        )
         reasoning_tokens = (
             usage.output_tokens_details.reasoning_tokens
             if usage is not None and usage.output_tokens_details is not None
@@ -671,6 +677,7 @@ class LimitWarmupService:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
             reasoning_tokens=reasoning_tokens,
             latency_ms=result.latency_ms,
             status="success" if result.success else "error",

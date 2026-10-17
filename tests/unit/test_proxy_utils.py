@@ -34781,12 +34781,12 @@ async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
     assert service._background_cleanup_tasks
 
     await started.wait()
+    cleanup_done = asyncio.Event()
+    (cleanup_task,) = service._background_cleanup_tasks
+    cleanup_task.add_done_callback(lambda _: cleanup_done.set())
     release.set()
     await asyncio.wait_for(closed.wait(), timeout=1.0)
-    for _ in range(20):
-        if not service._background_cleanup_tasks:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(cleanup_done.wait(), timeout=1.0)
 
     assert service._background_cleanup_tasks == set()
     assert finalized == [
@@ -34796,6 +34796,7 @@ async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
             "input_tokens": 12,
             "output_tokens": 34,
             "cached_input_tokens": 5,
+            "cache_write_input_tokens": 0,
             "service_tier": "default",
         }
     ]
@@ -41979,6 +41980,7 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
         input_tokens=7,
         output_tokens=3,
         cached_input_tokens=0,
+        cache_write_input_tokens=0,
         service_tier=None,
     )
     primary_service.release_usage_reservation.assert_not_awaited()

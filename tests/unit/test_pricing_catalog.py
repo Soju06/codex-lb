@@ -50,6 +50,42 @@ def test_models_dev_units_context_threshold_and_priority():
     assert calculate_cost_from_usage(UsageTokens(300000, 1000, 100000), price) == 4.275
 
 
+@pytest.mark.parametrize("source", ["models_dev", "litellm"])
+def test_cache_write_prices_survive_catalog_snapshot_roundtrip(source):
+    if source == "models_dev":
+        prices = catalog.parse_models_dev(models_dev({"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5}))
+    else:
+        prices = catalog.parse_litellm(
+            {
+                "gpt-test": {
+                    "litellm_provider": "openai",
+                    "mode": "chat",
+                    "input_cost_per_token": 1e-5,
+                    "output_cost_per_token": 5e-5,
+                    "cache_read_input_token_cost": 1e-6,
+                    "cache_creation_input_token_cost": 1.25e-5,
+                }
+            }
+        )
+    restored = catalog.decode_snapshot(json.loads(catalog.encode_snapshot(prices)))
+    usage = UsageTokens(100_000, 1000, 20_000, 50_000)
+    assert calculate_cost_from_usage(usage, restored["gpt-test"]) == pytest.approx(0.995)
+
+
+@pytest.mark.parametrize("bad", [-1, float("nan"), float("inf"), True, "12.5"])
+def test_invalid_cache_write_price_rejects_catalog(bad):
+    with pytest.raises(ValueError):
+        catalog.parse_models_dev(models_dev({"input": 10, "output": 50, "cache_write": bad}))
+
+
+def test_conflicting_write_price_does_not_mix_tier_groups():
+    primary = ModelPrice(10, 50, 1, cache_write_input_per_1m=12.5)
+    secondary = replace(primary, cache_write_input_per_1m=15, priority_input_per_1m=20, priority_output_per_1m=100)
+    merged = catalog.merge_catalogs({"gpt-test": primary}, {"gpt-test": secondary})["gpt-test"]
+    usage = UsageTokens(100_000, 0, cache_write_input_tokens=100_000)
+    assert calculate_cost_from_usage(usage, merged, service_tier="priority") == pytest.approx(1.25)
+
+
 @pytest.mark.parametrize("bad", [-1, float("nan"), float("inf"), True, "10"])
 def test_invalid_source_cannot_install_prices(bad):
     with pytest.raises(ValueError):

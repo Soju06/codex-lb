@@ -78,6 +78,44 @@ async def fold():
     await run_report_fold_pass(now=NOW)
 
 
+async def test_backfill_uses_persisted_writes_without_repricing_historical_costs(async_client):
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    request_id="write-count",
+                    requested_at=BASE,
+                    model="gpt-6-astra",
+                    input_tokens=100_000,
+                    output_tokens=0,
+                    cached_input_tokens=0,
+                    cache_write_input_tokens=100_000,
+                    status="success",
+                ),
+                RequestLog(
+                    request_id="historical",
+                    requested_at=BASE,
+                    model="gpt-6-astra",
+                    input_tokens=100_000,
+                    output_tokens=0,
+                    cached_input_tokens=0,
+                    cost_usd=1.0,
+                    status="success",
+                ),
+            ]
+        )
+        await session.commit()
+    async with SessionLocal() as session:
+        assert (await backfill_missing_costs(session)).updated == 1
+    async with SessionLocal() as session:
+        logs = {log.request_id: log for log in (await session.scalars(select(RequestLog))).all()}
+        assert logs["write-count"].cache_write_input_tokens == 100_000
+        assert logs["write-count"].cost_usd == pytest.approx(1.25)
+        assert logs["historical"].cache_write_input_tokens is None
+        assert logs["historical"].cost_usd == 1.0
+        assert (await backfill_missing_costs(session)).updated == 0
+
+
 async def test_backfill_preserves_folded_history_filters_and_idempotency(async_client):
     await seed()
     await fold()

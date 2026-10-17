@@ -12,6 +12,19 @@ from app.modules.usage.schemas import MetricsTrends, UsageWindow, UsageWindowRes
 DashboardOverviewTimeframeKey = Literal["1d", "7d", "30d"]
 
 
+class DashboardModelEntry(DashboardModel):
+    id: str
+    name: str
+    source_only: bool
+    image_only: bool = False
+    supported_reasoning_efforts: list[str] = Field(default_factory=list)
+    default_reasoning_effort: str | None = None
+
+
+class DashboardModelsResponse(DashboardModel):
+    models: list[DashboardModelEntry]
+
+
 class DashboardOverviewTimeframe(DashboardModel):
     key: DashboardOverviewTimeframeKey
     window_minutes: int = Field(alias="windowMinutes")

@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
+import i18n from "@/i18n";
 
 /** Helper to build a minimal RemainingItem for tests. */
 function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string }) {
@@ -9,6 +10,43 @@ function item(overrides: { accountId: string; label: string; value: number; rema
 }
 
 describe("UsageDonuts", () => {
+  it("renders an unknown allowance instead of zero credit totals for Max-only windows", async () => {
+    render(
+      <UsageDonuts
+        primaryItems={[]}
+        secondaryItems={[]}
+        primaryTotal={0}
+        secondaryTotal={0}
+        unquantifiedAccountCountSecondary={2}
+      />,
+    );
+
+    const unknown = await screen.findByTestId("usage-allowance-unknown");
+    expect(within(unknown).getByText(i18n.t("dashboard.usage.allowanceUnknown"))).toBeInTheDocument();
+    expect(within(unknown).getByText(i18n.t("dashboard.usage.excludedAccounts", { count: 2 }))).toBeInTheDocument();
+    expect(within(unknown).queryByTestId("donut-center-capacity")).not.toBeInTheDocument();
+    expect(within(unknown).queryByTestId("donut-used-value")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("donut-center-capacity")).toHaveLength(1);
+  });
+
+  it("labels incomplete mixed-pool subtotals with their excluded account count", async () => {
+    render(
+      <UsageDonuts
+        primaryItems={[]}
+        secondaryItems={[item({ accountId: "known", label: "known", value: 80, remainingPercent: 40, color: "#aaa" })]}
+        primaryTotal={0}
+        secondaryTotal={200}
+        secondaryCenterValue={80}
+        unquantifiedAccountCountSecondary={3}
+      />,
+    );
+
+    expect(await screen.findByText(i18n.t("dashboard.usage.excludedAccounts", { count: 3 }))).toBeInTheDocument();
+    expect(screen.queryByTestId("usage-allowance-unknown")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent)).toEqual(["0", "80"]);
+    expect(screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent)).toEqual(["0", "200"]);
+  });
+
   it("renders primary and secondary donut panels with legends", async () => {
     render(
       <UsageDonuts

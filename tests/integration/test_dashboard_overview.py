@@ -244,6 +244,46 @@ async def test_dashboard_overview_omits_weekly_pace_value_without_weekly_data(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/dashboard/overview", "/api/dashboard/projections"])
+@pytest.mark.parametrize(
+    "max_window,max_window_minutes",
+    [("primary", 10080), ("secondary", 10080), ("secondary", None), ("secondary", 0)],
+)
+async def test_dashboard_omits_fleet_pace_with_reported_max_secondary_usage(
+    async_client,
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    max_window: str,
+    max_window_minutes: int | None,
+):
+    now = datetime(2026, 8, 17, 12, 0, 0)
+    monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: now)
+    reset_at = int(naive_utc_to_epoch(now + timedelta(days=1)))
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("pro-pace", "pro-pace@example.com", plan_type="pro"))
+        await accounts_repo.upsert(_make_account("max-pace", "max-pace@example.com", plan_type="promax"))
+        for account_id, used in (("pro-pace", 40.0), ("max-pace", 20.0)):
+            await usage_repo.add_entry(
+                account_id,
+                used,
+                window=max_window if account_id == "max-pace" else "secondary",
+                window_minutes=max_window_minutes if account_id == "max-pace" else 10080,
+                reset_at=reset_at,
+                recorded_at=now - timedelta(minutes=1),
+            )
+
+    response = await async_client.get(endpoint)
+
+    assert response.status_code == 200
+    if endpoint == "/api/dashboard/overview":
+        assert response.json()["summary"]["secondaryWindow"]["unquantifiedAccountCount"] == 1
+    assert response.json()["weeklyCreditPace"] is None
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_timeframe(
     async_client,
     db_setup,

@@ -268,6 +268,8 @@ class AccountPoolUsageResponse(BaseModel):
 
     primary: float | None = None
     secondary: float | None = None
+    unquantified_account_count_primary: int = 0
+    unquantified_account_count_secondary: int = 0
 
 
 class V1UsageResponse(BaseModel):
@@ -279,6 +281,7 @@ class V1UsageResponse(BaseModel):
     total_cost_usd: float
     limits: list[V1UsageLimitResponse]
     upstream_limits: list[V1UsageLimitResponse] = []
+    upstream_limits_unquantified_windows: list[str] = Field(default_factory=list)
     account_pool_usage: AccountPoolUsageResponse | None = None
 
 

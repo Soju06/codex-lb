@@ -64,6 +64,44 @@ describe("AccountList", () => {
     expect(onSelect).toHaveBeenCalledWith("acc-2");
   });
 
+  it.each(["Pro 500", "promax"])("finds Pro Max by its plan name %s", async (query) => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "max",
+            email: "max@example.com",
+            displayName: "Max",
+            planType: "promax",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+          {
+            accountId: "pro",
+            email: "pro@example.com",
+            displayName: "Pro",
+            planType: "pro",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId="pro"
+        onSelect={onSelect}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("Search accounts..."), query);
+    expect(screen.queryByText("pro@example.com")).not.toBeInTheDocument();
+    await user.click(screen.getByText("max@example.com"));
+    expect(onSelect).toHaveBeenCalledWith("max");
+  });
+
   it("sorts accounts by the rows actually rendered", () => {
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "weekly" });
 

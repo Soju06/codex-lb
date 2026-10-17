@@ -120,6 +120,7 @@ _BOOTSTRAP_AVAILABLE_IN_PLANS = frozenset(
         "plus",
         "pro",
         "prolite",
+        "promax",
         "team",
         "business",
         "enterprise",

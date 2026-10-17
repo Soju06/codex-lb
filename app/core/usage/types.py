@@ -41,6 +41,7 @@ class UsageWindowSummary:
     used_credits: float
     reset_at: int | None
     window_minutes: int | None
+    unquantified_account_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class UsageWindowSnapshot:
     used_credits: float
     reset_at: int | None
     window_minutes: int | None
+    unquantified_account_count: int = 0
 
 
 @dataclass(frozen=True)

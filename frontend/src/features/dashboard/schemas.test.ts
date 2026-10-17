@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createDashboardOverview } from "@/test/mocks/factories";
 
 import {
   AccountSummarySchema,
@@ -28,6 +29,39 @@ const EMPTY_TRENDS = {
 };
 
 describe("DashboardOverviewSchema", () => {
+  it("defaults legacy coverage metadata and preserves incomplete window coverage", () => {
+    const legacy = createDashboardOverview();
+    expect(legacy.summary.primaryWindow.unquantifiedAccountCount).toBe(0);
+    expect(legacy.windows.primary.accounts[0]?.capacityKnown).toBe(true);
+    const parsed = DashboardOverviewSchema.parse({
+      ...legacy,
+      summary: {
+        ...legacy.summary,
+        secondaryWindow: { ...legacy.summary.secondaryWindow, unquantifiedAccountCount: 2 },
+      },
+      windows: {
+        ...legacy.windows,
+        secondary: {
+          ...legacy.windows.secondary,
+          accounts: [{
+            accountId: "max",
+            remainingPercentAvg: 80,
+            capacityCredits: 0,
+            remainingCredits: 0,
+            capacityKnown: false,
+          }],
+        },
+      },
+    });
+    expect(parsed.summary.secondaryWindow?.unquantifiedAccountCount).toBe(2);
+    expect(parsed.windows.secondary?.accounts[0]?.capacityKnown).toBe(false);
+    expect(parsed.windows.secondary?.accounts[0]?.remainingPercentAvg).toBe(80);
+    expect(UsageWindowSchema.safeParse({
+      ...parsed.windows.secondary,
+      accounts: [{ ...parsed.windows.secondary?.accounts[0], capacityKnown: "false" }],
+    }).success).toBe(false);
+  });
+
   it("parses overview payload without request_logs", () => {
     const parsed = DashboardOverviewSchema.parse({
       lastSyncAt: ISO,

@@ -282,6 +282,71 @@ async def test_rate_limit_payload_detaches_pre_refresh_rows() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("used_percent", [20.0, 100.0])
+@pytest.mark.parametrize("include_pro,pro_has_usage", [(False, False), (True, True), (True, False)])
+async def test_rate_limit_payload_handles_promax_percentage_only_windows(
+    monkeypatch, used_percent, include_pro, pro_has_usage
+):
+    monkeypatch.setattr("time.time", lambda: _NOW_EPOCH)
+    guard = _SharedSessionGuard()
+    account = _account("max", plan_type="promax")
+    accounts = [account]
+    weekly = _usage(
+        1,
+        account_id=account.id,
+        window="primary",
+        used_percent=used_percent,
+        reset_after=604800,
+        window_minutes=10080,
+    )
+    rows = {"primary": {account.id: weekly}, "secondary": {}, "monthly": {}, None: {account.id: weekly}}
+    if include_pro:
+        pro = _account("pro", plan_type="pro")
+        accounts.append(pro)
+        if pro_has_usage:
+            pro_weekly = _usage(
+                2,
+                account_id=pro.id,
+                window="secondary",
+                used_percent=40.0,
+                reset_after=604800,
+                window_minutes=10080,
+            )
+            rows["secondary"][pro.id] = pro_weekly
+            rows[None][pro.id] = pro_weekly
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        yield ProxyRepositories(
+            accounts=cast(AccountsRepository, _GuardedAccountsRepository(guard, accounts)),
+            usage=cast(UsageRepository, _GuardedUsageRepository(guard, rows)),
+            request_logs=cast(RequestLogsRepository, object()),
+            sticky_sessions=cast(StickySessionsRepository, object()),
+            api_keys=cast(ApiKeysRepository, object()),
+            additional_usage=cast(AdditionalUsageRepository, _GuardedAdditionalUsageRepository(guard)),
+            quota_planner=cast(QuotaPlannerRepository, object()),
+        )
+
+    service = _TestRateLimitService(repo_factory)
+    payload = await service.get_rate_limit_payload()
+    headers = await service._compute_rate_limit_headers()
+
+    assert payload.plan_type == "promax"
+    if include_pro:
+        assert payload.rate_limit is None
+        assert "x-codex-secondary-used-percent" not in headers
+    else:
+        assert payload.rate_limit is not None
+        assert payload.rate_limit.allowed is (used_percent < 100)
+        assert payload.rate_limit.limit_reached is (used_percent >= 100)
+        assert payload.rate_limit.primary_window is None
+        assert payload.rate_limit.secondary_window is not None
+        assert payload.rate_limit.secondary_window.used_percent == int(used_percent)
+        assert payload.rate_limit.secondary_window.limit_window_seconds == 604800
+        assert headers["x-codex-secondary-used-percent"] == str(used_percent)
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_usage_refresh_owns_and_joins_singleflight_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

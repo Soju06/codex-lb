@@ -96,6 +96,12 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
             row.pooled_credits.remaining_percent_secondary if row.pooled_credits else None
         ),
         pooled_capacity_credits_primary=(row.pooled_credits.capacity_credits_primary if row.pooled_credits else 0.0),
+        unquantified_account_count_primary=(
+            row.pooled_credits.unquantified_account_count_primary if row.pooled_credits else 0
+        ),
+        unquantified_account_count_secondary=(
+            row.pooled_credits.unquantified_account_count_secondary if row.pooled_credits else 0
+        ),
     )
 
 

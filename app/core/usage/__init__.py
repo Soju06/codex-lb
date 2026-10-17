@@ -141,6 +141,7 @@ def normalize_usage_window(summary: UsageWindowSummary) -> UsageWindowSnapshot:
         used_credits=float(summary.used_credits),
         reset_at=summary.reset_at,
         window_minutes=summary.window_minutes,
+        unquantified_account_count=summary.unquantified_account_count,
     )
 
 
@@ -151,6 +152,7 @@ def summarize_usage_window(
 ) -> UsageWindowSummary:
     total_capacity = 0.0
     total_used = 0.0
+    unquantified_count = 0
     reset_candidates: list[int] = []
     window_minutes_values: set[int] = set()
 
@@ -161,6 +163,17 @@ def summarize_usage_window(
             window_minutes_values.add(row.window_minutes)
         account = account_map.get(row.account_id)
         capacity = capacity_for_plan(account.plan_type if account else None, window)
+        if (
+            account is not None
+            and normalize_account_plan_type(account.plan_type) == "promax"
+            and capacity is None
+            and row.used_percent is not None
+            and (
+                row.recorded_at is not None
+                or (row.window_minutes is not None and row.window_minutes > 0 and row.reset_at is not None)
+            )
+        ):
+            unquantified_count += 1
         if row.used_percent is None or capacity is None:
             continue
         total_capacity += capacity
@@ -178,6 +191,7 @@ def summarize_usage_window(
         used_credits=float(total_used),
         reset_at=reset_at_value,
         window_minutes=window_minutes,
+        unquantified_account_count=unquantified_count,
     )
 
 

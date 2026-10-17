@@ -13,6 +13,7 @@ EXPECTED_CORE_MODEL_PLANS = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "team",
     "business",
     "enterprise",
@@ -26,7 +27,7 @@ EXPECTED_CORE_MODEL_PLANS = {
     "enterprise_cbp_usage_based",
 }
 
-# The 21-plan list upstream advertises for GPT-5.6
+# The upstream GPT-5.6 plan list plus recognized Pro-family plans.
 # (codex-rs/models-manager/models.json at rust-v0.145.0).
 EXPECTED_GPT56_MODEL_PLANS = {
     "business",
@@ -46,6 +47,7 @@ EXPECTED_GPT56_MODEL_PLANS = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "quorum",
     "sci",
     "self_serve_business_usage_based",

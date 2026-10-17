@@ -471,6 +471,14 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
+          {(overview?.summary.secondaryWindow?.unquantifiedAccountCount ?? 0) > 0 ? (
+            <p className="text-sm text-muted-foreground" data-testid="weekly-allowance-incomplete">
+              {t("dashboard.usage.forecastUnavailable", {
+                count: overview?.summary.secondaryWindow?.unquantifiedAccountCount,
+              })}
+            </p>
+          ) : null}
+
           {view.weeklyCreditPace ? (
             <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
               <UsageDonuts
@@ -482,6 +490,8 @@ export function DashboardPage() {
                 secondaryCenterValue={view.secondaryTotal}
                 safeLinePrimary={view.safeLinePrimary}
                 safeLineSecondary={view.safeLineSecondary}
+                unquantifiedAccountCountPrimary={overview?.summary.primaryWindow.unquantifiedAccountCount}
+                unquantifiedAccountCountSecondary={overview?.summary.secondaryWindow?.unquantifiedAccountCount}
               />
               <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
             </div>
@@ -495,6 +505,8 @@ export function DashboardPage() {
               secondaryCenterValue={view.secondaryTotal}
               safeLinePrimary={view.safeLinePrimary}
               safeLineSecondary={view.safeLineSecondary}
+              unquantifiedAccountCountPrimary={overview?.summary.primaryWindow.unquantifiedAccountCount}
+              unquantifiedAccountCountSecondary={overview?.summary.secondaryWindow?.unquantifiedAccountCount}
             />
           )}
 

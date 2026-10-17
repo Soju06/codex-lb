@@ -58,6 +58,14 @@ _CODEX_CLIENT_CONFIG = Path(__file__).resolve().parents[2] / "docs/examples/code
 _CODEX_DAYBREAK_PROFILE = Path(__file__).resolve().parents[2] / "docs/examples/codex/daybreak-blue.config.toml"
 
 
+@pytest.fixture(autouse=True)
+def _mock_selected_accounts_are_available(monkeypatch):
+    # These transport tests select invented accounts without persisting them.
+    # Real pause/deletion visibility is exercised with the database and routing
+    # cache in test_websocket_paused_account.py and test_cache_invalidation_bus.py.
+    monkeypatch.setattr(websocket_mixin_module, "is_account_routing_unavailable", lambda _account_id: False)
+
+
 @pytest.mark.asyncio
 async def test_real_websockets_keepalive_expiry_preserves_liveness_classification() -> None:
     async def accept_without_answering_frames(

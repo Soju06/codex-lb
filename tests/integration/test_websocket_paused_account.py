@@ -56,7 +56,7 @@ class _OpenSocketFixture:
 
         class SettingsCache:
             async def get(self):
-                return _websocket_settings()
+                return _websocket_settings(proxy_account_response_create_limit=1)
 
         async def allow_firewall(_websocket):
             return None

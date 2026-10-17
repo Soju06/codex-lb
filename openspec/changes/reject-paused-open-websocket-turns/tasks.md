@@ -1,7 +1,7 @@
 ## 1. Regression and implementation
 
-- [ ] 1.1 Add route-level pause, admission-race, reactivation and concurrent-response regression tests; demonstrate baseline failure.
-- [ ] 1.2 Add the final dispatch availability check and preserve existing socket ownership and settlement.
+- [x] 1.1 Add route-level pause, admission-race, reactivation and concurrent-response regression tests; demonstrate baseline failure.
+- [x] 1.2 Add the final dispatch availability check and preserve existing socket ownership and settlement.
 
 ## 2. Verification and delivery
 

@@ -421,6 +421,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _record_websocket_responses_lite_acceptance,
     _record_websocket_stale_anchor_failure,
     _release_websocket_response_create_gate,
+    _retire_websocket_continuity_anchor,
     _rewrite_websocket_continuity_corruption_event,
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
@@ -1160,6 +1161,8 @@ async def _process_and_forward_upstream_websocket_text(
                     exc_info=True,
                 )
             return True
+    if not suppress_downstream_event and parsed_frame.event_type == "response.completed":
+        upstream_control.completed_response_delivered = True
     if upstream_control.reconnect_requested:
         should_reconnect = upstream_control.replay_request_state is not None
         if not should_reconnect:
@@ -1265,6 +1268,8 @@ async def _process_upstream_websocket_transport_end(
     upstream_control: _WebSocketUpstreamControl,
     response_create_gate: asyncio.Semaphore,
     downstream_activity: _DownstreamWebSocketActivity,
+    continuity_state: _WebSocketContinuityState | None = None,
+    codex_session_affinity: bool = False,
 ) -> bool:
     """Finalize only requests that crossed this transport's send boundary."""
 
@@ -1282,6 +1287,30 @@ async def _process_upstream_websocket_transport_end(
         pending_requests,
         pending_lock=pending_lock,
     )
+    if codex_session_affinity and not reader_owned and upstream_control.completed_response_delivered:
+        async with client_send_lock:
+            async with pending_lock:
+                idle_codex_loss = not pending_requests and upstream_control.replay_request_state is None
+                if idle_codex_loss:
+                    if (
+                        continuity_state is not None
+                        and continuity_state.last_completed_connection_id == upstream_control.connection_id
+                    ):
+                        _retire_websocket_continuity_anchor(continuity_state)
+                    # Publish the disconnect before yielding to the close handshake.
+                    downstream_was_connected = not downstream_activity.disconnected
+                    downstream_activity.mark_disconnected()
+            if idle_codex_loss and downstream_was_connected:
+                try:
+                    await websocket.close(code=1012, reason="Upstream connection lost; reconnect with full context")
+                except Exception:
+                    _facade().logger.debug("Downstream already closed after idle upstream loss", exc_info=True)
+        if idle_codex_loss:
+            try:
+                await upstream.close()
+            except Exception:
+                _facade().logger.debug("Failed to close lost idle upstream websocket", exc_info=True)
+            return True
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
@@ -5293,6 +5322,8 @@ class _WebSocketMixin:
                         upstream_control=upstream_control,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
+                        continuity_state=continuity_state,
+                        codex_session_affinity=codex_session_affinity,
                     ),
                     name=f"proxy-websocket-transport-end-{account_id_value}",
                 )
@@ -6087,6 +6118,7 @@ class _WebSocketMixin:
             and completed_usage.output_tokens == 0
         )
         if event_type == "response.completed" and continuity_state is not None and not completed_empty_prewarm:
+            continuity_state.last_completed_connection_id = upstream_control.connection_id
             _record_websocket_continuity_completion(
                 continuity_state,
                 request_state=request_state,

@@ -1171,12 +1171,14 @@ async def _init_db() -> None:
         if migration_state.needs_upgrade:
             current_revision = migration_state.current_revision or "none"
             if migration_state.is_ahead:
+                from app.db.migrate import schema_ahead_recovery_hint
+
                 unknown_revisions = ",".join(migration_state.unknown_revisions)
                 message = (
                     "Startup database migration is disabled and database schema revision(s) "
                     f"{unknown_revisions} are not known to this build (head={migration_state.head_revision}). "
-                    "The schema was likely migrated by a newer version; deploy a matching or newer image, "
-                    "or run an Alembic downgrade to a revision this build knows."
+                    "The schema was likely migrated by a newer version. "
+                    f"{schema_ahead_recovery_hint()}"
                 )
             else:
                 message = (

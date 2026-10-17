@@ -548,9 +548,9 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     queue_waiting = asyncio.Event()
     terminal_claimed = asyncio.Event()
     release_terminal = asyncio.Event()
-    parse_sse_data_json_text = Mock(wraps=http_bridge_upstream_events.parse_sse_data_json_text)
+    parse_websocket_event_payload = Mock(wraps=http_bridge_upstream_events.parse_websocket_event_payload)
     parse_sse_event_payload = Mock(wraps=http_bridge_upstream_events.parse_sse_event_payload)
-    monkeypatch.setattr(http_bridge_upstream_events, "parse_sse_data_json_text", parse_sse_data_json_text)
+    monkeypatch.setattr(http_bridge_upstream_events, "parse_websocket_event_payload", parse_websocket_event_payload)
     monkeypatch.setattr(http_bridge_upstream_events, "parse_sse_event_payload", parse_sse_event_payload)
 
     class ObservedQueue(asyncio.Queue[str | None]):
@@ -652,7 +652,7 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
         finalize_request.assert_not_awaited()
     assert request_state.completed_delivery_scope is not None
     assert request_state.completed_delivery_scope.active is False
-    assert parse_sse_data_json_text.call_count == 1
+    assert parse_websocket_event_payload.call_count == 1
     assert parse_sse_event_payload.call_count == 1
     suppression_messages = [
         record.getMessage()

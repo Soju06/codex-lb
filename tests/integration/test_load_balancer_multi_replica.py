@@ -268,13 +268,19 @@ async def test_peer_replica_honors_metadata_free_rate_limit_cooldown(db_setup):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("credits_has", "credits_unlimited", "credits_balance"),
-    [(True, None, None), (None, True, None), (None, None, 25.0)],
+    ("credits_has", "credits_unlimited", "credits_balance", "should_recover"),
+    [(True, None, None, False), (None, True, None, True), (None, None, 25.0, True)],
     ids=["has_credits", "unlimited", "positive_balance"],
 )
 @pytest.mark.parametrize("has_secondary", [False, True])
 async def test_peer_replica_requires_post_block_credits_to_recover_quota(
-    db_setup, monkeypatch, credits_has, credits_unlimited, credits_balance, has_secondary
+    db_setup,
+    monkeypatch,
+    credits_has,
+    credits_unlimited,
+    credits_balance,
+    should_recover,
+    has_secondary,
 ):
     blocked_time = float(int(time.time())) + 0.8
     now = blocked_time
@@ -327,11 +333,16 @@ async def test_peer_replica_requires_post_block_credits_to_recover_quota(
         )
 
     selection = await LoadBalancer(_repo_factory).select_account(account_ids={limited.id})
-    assert selection.account is not None
-    assert selection.account.id == limited.id
     recovered = await _fetch_account(limited.id)
-    assert recovered.status == AccountStatus.ACTIVE
-    assert recovered.blocked_at is None
+    if should_recover:
+        assert selection.account is not None
+        assert selection.account.id == limited.id
+        assert recovered.status == AccountStatus.ACTIVE
+        assert recovered.blocked_at is None
+    else:
+        assert selection.account is None
+        assert recovered.status == AccountStatus.QUOTA_EXCEEDED
+        assert recovered.blocked_at == blocked.blocked_at
 
 
 @pytest.mark.asyncio

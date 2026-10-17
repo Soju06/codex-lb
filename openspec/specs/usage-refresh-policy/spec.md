@@ -536,12 +536,12 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 
 ### Requirement: Operators can probe an account to wake the upstream limiter
 
-The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe `responses.create` MUST set `max_output_tokens` to `16`, the current Codex token floor; values below that floor MUST NOT be used. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
+The dashboard MUST expose an admin-only endpoint that sends a single minimal `responses.create` directly to upstream pinned to one account, bypassing load-balancer scoring, then immediately refreshes that account's `/wham/usage` snapshot. The probe request MUST omit `max_output_tokens`, which the Codex Responses endpoint rejects. The endpoint MUST surface the before/after usage and account status so operators can verify whether the upstream limiter re-evaluated.
 
 #### Scenario: Probe wakes the upstream limiter and refreshes usage state
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** the account is `active`, `rate_limited`, or `quota_exceeded`
-- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `max_output_tokens=16`, `stream=true`, `store=false`
+- **THEN** the service sends one `responses.create` request directly to `{upstream_base_url}/codex/responses` with `stream=true`, `store=false`, and no `max_output_tokens` field
 - **AND** the service triggers an immediate `UsageUpdater.refresh_accounts` for that account
 - **AND** the response body carries `probe_status_code`, `primary_used_percent_before`, `primary_used_percent_after`, `secondary_used_percent_before`, `secondary_used_percent_after`, `account_status_before`, `account_status_after`
 
@@ -1599,7 +1599,7 @@ On the HTTP bridge / forwarded compact path the caller passes an `api_key_reserv
 
 ### Requirement: Force Probe settles replica-local probing health
 
-After the operator Force Probe request and its immediate usage refresh complete, the system MUST report the result to the process-local load balancer. Before settling an HTTP 2xx response, the load balancer MUST reload the refreshed standard usage rows and apply the same elapsed-window, weekly-only-primary, zero-primary-capacity, plan-applicable monthly-window, and long-window normalization used by ordinary account selection. The settlement MUST apply only when replica-local runtime state has not changed since snapshot loading began, so a newer failure or other health observation cannot be cleared by an older probe result. An accepted 2xx settlement MUST count as one successful probe observation, clear replica-local transient error state, and advance the existing fixed probe-success state machine only when the normalized status and usage remain eligible to probe. Reaching the fixed success-streak requirement MUST return the account to `HEALTHY` routing.
+After the operator Force Probe request and its immediate usage refresh complete, the system MUST report the result to the process-local load balancer. Before settling an HTTP 2xx response, the load balancer MUST reload the refreshed standard usage rows and apply the same elapsed-window, weekly-only-primary, zero-primary-capacity, plan-applicable monthly-window, and long-window normalization used by ordinary account selection. The loaded account and usage snapshot MUST remain usable after its repository session rolls back and closes, without lazy database reads during settlement. The settlement MUST apply only when the replica-local health-observation version has not changed since snapshot loading began, so a newer failure or other health observation cannot be cleared by an older probe result. An accepted 2xx settlement MUST count as one successful probe observation, clear replica-local transient error state, and advance the existing fixed probe-success state machine only when the normalized status and usage remain eligible to probe. Reaching the fixed success-streak requirement MUST return the account to `HEALTHY` routing.
 
 A non-2xx upstream response or the network-failure sentinel MUST NOT count as a successful observation and MUST reset an in-progress probe-success streak. Probe settlement MUST NOT override a persisted hard-blocked status or usage condition, invent a persistent account error, or change the Force Probe response schema.
 
@@ -1653,6 +1653,22 @@ A non-2xx upstream response or the network-failure sentinel MUST NOT count as a 
 - **WHEN** the older successful probe attempts to settle
 - **THEN** settlement is rejected as stale
 - **AND** the newer transient error state and reset success streak remain intact
+
+#### Scenario: Repository teardown does not discard accepted probe settlement
+
+- **GIVEN** an accepted Force Probe has completed its usage refresh
+- **AND** its settlement read session rolls back and closes before the account lock is reacquired
+- **WHEN** refreshed usage is absent, partially populated, or includes both short and applicable long windows
+- **THEN** settlement uses loaded account and usage snapshots without accessing expired ORM attributes
+- **AND** eligible probing accounts advance the existing success streak
+- **AND** blocked or draining accounts retain the existing status and usage protections
+
+#### Scenario: Lease-only activity preserves accepted probe settlement
+
+- **GIVEN** an accepted Force Probe has loaded its account and usage snapshot
+- **AND** another request acquires and releases a lease without recording new health evidence
+- **WHEN** Force Probe settles after its repository session closes
+- **THEN** the lease-only version changes do not discard the successful probe observation
 
 ### Requirement: Implausible persisted rate-limit deadlines do not block recovery
 

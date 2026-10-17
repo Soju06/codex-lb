@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.exc import OperationalError
 
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditResponse,
@@ -23,6 +24,7 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits import api as reset_credits_api
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+from app.modules.usage.background_repository import BackgroundUsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -477,4 +479,42 @@ async def test_unconfirmed_accounts_api_redemption_does_not_release_account(
     monkeypatch.setattr(accounts_service_module, "consume_rate_limit_reset_credit", _consume)
     response = await async_client.post(f"/api/accounts/{account_id}/usage-reset-credits/consume")
     assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_baseline_read_still_redeems_but_keeps_account_rate_limited(async_client, monkeypatch) -> None:
+    account_id = await _blocked_account(async_client, "baseline-read-failed")
+    await _patch_usage_fetch(monkeypatch)
+    consumed: list[str] = []
+
+    async def _fetch_credits(*_args, **_kwargs):
+        return ResetCreditsResponse(
+            credits=[ResetCreditItem(id="credit-weekly", status="available", expires_at="2030-01-01T00:00:00Z")],
+            available_count=1,
+        )
+
+    async def _consume(_access_token, _account_id, credit_id, **_kwargs):
+        consumed.append(credit_id)
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    real_latest = BackgroundUsageRepository.latest_entry_for_account
+    failures = {"left": 1}
+
+    async def _latest_failing_once(self, *args, **kwargs):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OperationalError("SELECT usage_history", {}, Exception("database is locked"))
+        return await real_latest(self, *args, **kwargs)
+
+    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume)
+    monkeypatch.setattr(BackgroundUsageRepository, "latest_entry_for_account", _latest_failing_once)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    assert failures["left"] == 0
+    assert consumed == ["credit-weekly"]
     await _assert_rate_limited(account_id)

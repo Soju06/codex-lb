@@ -40,6 +40,7 @@ All of these fail closed: the account stays `RATE_LIMITED` until its persisted c
 - **A failed forced refresh.** The redemption evidence exists only for the one forced refresh after the consume. If that refresh fails (upstream 5xx, a route error, a failed token refresh, a workspace identity mismatch), the credit is spent and later refreshes do not carry the evidence. The scheduler's #2405 path still applies, but it needs a post-block baseline row.
 - **A 429 between the account load and the redemption start.** The dashboard and accounts-API paths work from the account loaded before the redemption. If a 429 lands in between, that copy still reads `ACTIVE`, so the refresh does not release the account. The scheduler path reloads the account and is not affected.
 - **Idempotent retries.** A retry after a lost consume response returns `already_redeemed`, which carries no reset confirmation, so it does not release the account even though the windows did reset.
+- **A failed baseline read.** If reading the usage rows before the consume raises a database error, the redemption still goes ahead with an empty baseline. No window can then match the block, so the refresh keeps the cooldown.
 - **Clock skew on `blocked_at`.** The start-time fence compares the local clock against `blocked_at` written by whichever replica recorded the 429.
 
 The no-credit global-reset case represented by V2–V4 remains open. Diagnosing it requires the reporter's persisted `accounts.reset_at` value at block time and corresponding post-block usage history.

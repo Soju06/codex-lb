@@ -65,6 +65,7 @@ anything else belongs in `app/core/config/settings.py`.
 
 | Environment variable(s) | Consumer |
 | --- | --- |
+| `SQLITE_TMPDIR`, `TMPDIR` | SQLite temporary-file directory precedence; the stopped-instance compaction CLI reads these through the configuration module to check space on the filesystem SQLite will use. |
 | `HOST`, `PORT`, `SSL_CERTFILE`, `SSL_KEYFILE`, `UVICORN_TIMEOUT_KEEP_ALIVE`, `UVICORN_WS_MAX_SIZE` | Uvicorn launch defaults read once by the `codex-lb` CLI (`app/cli.py`); host runs only. |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `WS_PROXY`, `NO_PROXY` (and lowercase) | Outbound proxy conventions honored by httpx/aiohttp/websockets for upstream egress. |
 | `REQUEST_METHOD` | CGI marker; when present `HTTP_PROXY` is ignored (httpoxy guard, mirrors the httpx/requests rule). |

@@ -5,13 +5,14 @@ import glob
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
 from app.core.config.settings import get_settings
+from app.db.compact import acquire_sqlite_maintenance_lock, release_sqlite_maintenance_lock
 from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
 
 logger = logging.getLogger(__name__)
@@ -169,38 +170,45 @@ def recover_sqlite_db(options: RecoveryOptions) -> RecoveryOutcome:
     if options.output.exists():
         raise FileExistsError(f"output database already exists: {options.output}")
 
-    integrity = check_sqlite_integrity(options.source)
-    if not integrity.ok:
-        logger.warning("SQLite integrity check failed details=%s", integrity.details)
-    else:
-        logger.info("SQLite integrity check OK. Proceeding with export/import.")
+    with ExitStack() as cleanup:
+        if options.replace:
+            lock_path, lock_descriptor = acquire_sqlite_maintenance_lock(options.source)
+            cleanup.callback(release_sqlite_maintenance_lock, lock_path, lock_descriptor)
 
-    _remove_sqlite_sidecars(options.output)
-    with _sqlite_recovery_lock(options.source) as source_connection:
-        dump = _load_dump(source_connection)
-        _write_dump(options.output, dump)
+        integrity = check_sqlite_integrity(options.source)
+        if not integrity.ok:
+            logger.warning("SQLite integrity check failed details=%s", integrity.details)
+        else:
+            logger.info("SQLite integrity check OK. Proceeding with export/import.")
 
-    if options.replace:
-        # Recovery-owned SQLite handles are closed before any sidecar unlink.
         _remove_sqlite_sidecars(options.output)
-        _remove_sqlite_sidecars(options.source)
-        backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
-        _replace_recovered_database(options.source, options.output, backup)
+        with _sqlite_recovery_lock(options.source) as source_connection:
+            dump = _load_dump(source_connection)
+            _write_dump(options.output, dump)
+
+        if options.replace:
+            if not options.source.exists():
+                raise FileNotFoundError(f"sqlite database not found: {options.source}")
+            # Recovery-owned SQLite handles are closed before any sidecar unlink.
+            _remove_sqlite_sidecars(options.output)
+            _remove_sqlite_sidecars(options.source)
+            backup = options.source.with_name(f"{options.source.name}.corrupt-{_timestamp()}")
+            _replace_recovered_database(options.source, options.output, backup)
+            return RecoveryOutcome(
+                source=backup,
+                output=options.source,
+                replaced=True,
+                integrity=integrity,
+            )
+
+        _remove_sqlite_sidecars(options.output)
+
         return RecoveryOutcome(
-            source=backup,
-            output=options.source,
-            replaced=True,
+            source=options.source,
+            output=options.output,
+            replaced=False,
             integrity=integrity,
         )
-
-    _remove_sqlite_sidecars(options.output)
-
-    return RecoveryOutcome(
-        source=options.source,
-        output=options.output,
-        replaced=False,
-        integrity=integrity,
-    )
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

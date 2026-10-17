@@ -7,6 +7,7 @@ import logging
 import math
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import aiohttp
@@ -34,7 +35,7 @@ def _rates(data: dict[str, JsonValue], names: dict[str, str], scale: float = 1.0
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise ValueError(f"Invalid price field: {source}")
-        scaled = float(value) * scale
+        scaled = float(Decimal(str(value)) * Decimal(str(scale)))
         if not math.isfinite(scaled):
             raise ValueError(f"Invalid scaled price: {source}")
         result[target] = scaled
@@ -44,7 +45,15 @@ def _rates(data: dict[str, JsonValue], names: dict[str, str], scale: float = 1.0
 def _price(values: dict[str, float]) -> ModelPrice:
     if not {"input_per_1m", "output_per_1m"} <= values.keys():
         raise ValueError("Incomplete base prices")
-    for prefix in ("priority_", "flex_", "long_context_", "priority_long_context_", "flex_long_context_"):
+    for prefix in (
+        "priority_",
+        "flex_",
+        "ultrafast_",
+        "long_context_",
+        "priority_long_context_",
+        "flex_long_context_",
+        "ultrafast_long_context_",
+    ):
         group = {prefix + part + "_per_1m" for part in ("input", "output")}
         present = (group | {prefix + "cached_input_per_1m"}) & values.keys()
         if present and not group <= values.keys():
@@ -83,8 +92,23 @@ def parse_models_dev(payload: JsonValue) -> dict[str, ModelPrice]:
             for raw_mode in modes.values():
                 mode = _object(raw_mode)
                 tier_name = _object(_object(mode.get("provider")).get("body")).get("service_tier")
-                if tier_name in ("priority", "flex"):
-                    values.update(_rates(_object(mode.get("cost")), {k: f"{tier_name}_{v}" for k, v in names.items()}))
+                if tier_name in ("priority", "flex", "ultrafast"):
+                    mode_cost = _object(mode.get("cost"))
+                    values.update(_rates(mode_cost, {k: f"{tier_name}_{v}" for k, v in names.items()}))
+                    if tier_name == "ultrafast":
+                        mode_tiers = mode_cost.get("tiers", [])
+                        if not isinstance(mode_tiers, list) or len(mode_tiers) > 1:
+                            raise ValueError("Unsupported mode context tiers")
+                        if mode_tiers:
+                            mode_tier = _object(mode_tiers[0])
+                            descriptor = _object(mode_tier.get("tier"))
+                            if descriptor.get("type") != "context" or descriptor.get("size") != values.get(
+                                "long_context_threshold_tokens"
+                            ):
+                                raise ValueError("Mode context threshold differs from base")
+                            values.update(
+                                _rates(mode_tier, {k: f"{tier_name}_long_context_{v}" for k, v in names.items()})
+                            )
             result[model.lower()] = _price(values)
         except (ValueError, OverflowError):
             logger.debug("Ignoring unsupported models.dev price for %s", model)
@@ -108,7 +132,7 @@ def parse_litellm(payload: JsonValue) -> dict[str, ModelPrice]:
             continue
         try:
             values = _rates(entry, base, 1_000_000)
-            for tier in ("priority", "flex"):
+            for tier in ("priority", "flex", "ultrafast"):
                 values.update(_rates(entry, {f"{k}_{tier}": f"{tier}_{v}" for k, v in base.items()}, 1_000_000))
             thresholds = {
                 int(key.split("_above_")[1].split("k_tokens")[0]) * 1000
@@ -120,7 +144,7 @@ def parse_litellm(payload: JsonValue) -> dict[str, ModelPrice]:
             if thresholds:
                 threshold = thresholds.pop()
                 values["long_context_threshold_tokens"] = float(threshold)
-                for tier in ("", "priority", "flex"):
+                for tier in ("", "priority", "flex", "ultrafast"):
                     suffix = f"_above_{threshold // 1000}k_tokens" + (f"_{tier}" if tier else "")
                     prefix = f"{tier}_long_context_" if tier else "long_context_"
                     values.update(_rates(entry, {k + suffix: prefix + v for k, v in base.items()}, 1_000_000))

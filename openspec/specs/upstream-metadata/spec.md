@@ -24,3 +24,45 @@ The service SHALL persist successful stable Codex release resolutions across res
 #### Scenario: Offline restart
 - **WHEN** GitHub and npm are unavailable after a successful version resolution and restart
 - **THEN** the service uses the persisted stable version without repeated immediate retries
+
+### Requirement: Ultrafast API-equivalent token pricing
+
+The service MUST recognize explicit Ultrafast input, cached-input and output
+prices, including long-context groups, in validated catalogs and persisted
+snapshots. It MUST retain known Ultrafast fields during compatible partial
+refreshes and provide current Astra prices without network access.
+Malformed or incomplete tier groups MUST NOT replace valid model pricing.
+
+#### Scenario: Astra short-context Ultrafast estimate
+- **WHEN** Astra bills Ultrafast with 100000 uncached input and 10000 output tokens
+- **THEN** the calculated API-equivalent cost is 9.00 USD
+- **AND** subscription quota percentages and plan capacities are unchanged
+
+#### Scenario: Astra long-context boundary
+- **WHEN** Astra bills Ultrafast with more than 272000 input tokens
+- **THEN** input, cached-input and output rates are 120, 12 and 450 USD per million
+- **AND** at exactly 272000 input tokens the rates remain 60, 6 and 300
+
+#### Scenario: Offline startup and compatible refresh
+- **WHEN** startup has only the bundled snapshot or an older compatible persistent snapshot
+- **THEN** Astra Ultrafast prices are available
+- **AND** a compatible standard-only update retains them
+
+#### Scenario: Invalid Ultrafast metadata
+- **WHEN** a catalog contains incomplete, negative or non-finite Ultrafast prices
+- **THEN** those prices do not replace previously valid model pricing
+
+### Requirement: Decimal catalog unit conversion
+
+The service MUST preserve validated decimal token-price values while converting
+source units for monetary accounting. Conversion MUST NOT round a genuinely
+fractional final microdollar cost upward.
+
+#### Scenario: Small LiteLLM input price
+- **WHEN** a valid LiteLLM input price is 0.0000002 USD per token
+- **AND** a request consumes 100 uncached input tokens and no output tokens
+- **THEN** API-key settlement is exactly 20 microdollars
+
+#### Scenario: Fractional final cost
+- **WHEN** valid source prices produce a final cost below one microdollar
+- **THEN** integer monetary settlement remains zero

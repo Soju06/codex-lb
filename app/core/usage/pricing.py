@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from decimal import Decimal
 from fnmatch import fnmatchcase
 from typing import Iterable, Mapping
 
@@ -22,6 +23,9 @@ class ModelPrice:
     flex_input_per_1m: float | None = None
     flex_output_per_1m: float | None = None
     flex_cached_input_per_1m: float | None = None
+    ultrafast_input_per_1m: float | None = None
+    ultrafast_output_per_1m: float | None = None
+    ultrafast_cached_input_per_1m: float | None = None
     long_context_threshold_tokens: float | None = None
     long_context_input_per_1m: float | None = None
     long_context_output_per_1m: float | None = None
@@ -32,6 +36,9 @@ class ModelPrice:
     flex_long_context_input_per_1m: float | None = None
     flex_long_context_output_per_1m: float | None = None
     flex_long_context_cached_input_per_1m: float | None = None
+    ultrafast_long_context_input_per_1m: float | None = None
+    ultrafast_long_context_output_per_1m: float | None = None
+    ultrafast_long_context_cached_input_per_1m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +439,7 @@ def _effective_rates(
     *,
     service_tier: str | None,
 ) -> tuple[float, float, float]:
+    is_ultrafast = _normalize_service_tier(service_tier) == "ultrafast"
     is_long_context = (
         price.long_context_threshold_tokens is not None
         and price.long_context_threshold_tokens > 0
@@ -445,13 +453,29 @@ def _effective_rates(
     output_rate = price.output_per_1m
 
     if is_long_context:
-        tier = "priority" if _uses_priority_tier(service_tier) else "flex" if _uses_flex_tier(service_tier) else None
+        tier = (
+            "ultrafast"
+            if is_ultrafast
+            else "priority"
+            if _uses_priority_tier(service_tier)
+            else "flex"
+            if _uses_flex_tier(service_tier)
+            else None
+        )
         if tier is not None:
             long_input = getattr(price, f"{tier}_long_context_input_per_1m")
             long_output = getattr(price, f"{tier}_long_context_output_per_1m")
             long_cached = getattr(price, f"{tier}_long_context_cached_input_per_1m")
             if long_input is not None and long_output is not None:
                 return long_input, long_cached if long_cached is not None else long_input, long_output
+
+    if is_ultrafast and price.ultrafast_input_per_1m is not None and price.ultrafast_output_per_1m is not None:
+        ultrafast_cached = (
+            price.ultrafast_cached_input_per_1m
+            if price.ultrafast_cached_input_per_1m is not None
+            else price.ultrafast_input_per_1m
+        )
+        return price.ultrafast_input_per_1m, ultrafast_cached, price.ultrafast_output_per_1m
 
     if _uses_priority_tier(service_tier):
         if price.priority_input_per_1m is not None and price.priority_output_per_1m is not None:
@@ -499,6 +523,25 @@ def calculate_cost_from_usage(
     if breakdown is None:
         return None
     return breakdown.total_usd
+
+
+def calculate_cost_microdollars_from_usage(
+    usage: UsageTokens | ResponseUsage | None,
+    price: ModelPrice,
+    *,
+    service_tier: str | None = None,
+) -> int | None:
+    normalized = _normalize_usage(usage)
+    if normalized is None:
+        return None
+    input_rate, cached_rate, output_rate = _effective_rates(normalized, price, service_tier=service_tier)
+    billable_input = max(0.0, normalized.input_tokens - normalized.cached_input_tokens)
+    # USD per million tokens is also microdollars per token. Avoid a float USD roundtrip.
+    return int(
+        Decimal(str(billable_input)) * Decimal(str(input_rate))
+        + Decimal(str(normalized.cached_input_tokens)) * Decimal(str(cached_rate))
+        + Decimal(str(max(0.0, normalized.output_tokens))) * Decimal(str(output_rate))
+    )
 
 
 def calculate_cost_breakdown_from_usage(

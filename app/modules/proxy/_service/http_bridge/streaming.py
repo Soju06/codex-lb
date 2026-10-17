@@ -93,6 +93,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_explicit_previous_response_rejection,
     _http_bridge_is_previous_response_owner_unavailable,
+    _http_bridge_local_turn_state_alias_is_synthesized_locked,
     _http_bridge_models_compatible,
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_payload_looks_like_full_resend,
@@ -927,6 +928,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         suppress_text_done_events: bool = False,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -952,6 +954,7 @@ class _HTTPBridgeStreamingMixin:
             api_key_reservation=api_key_reservation,
             suppress_text_done_events=suppress_text_done_events,
             downstream_turn_state=downstream_turn_state,
+            downstream_turn_state_synthesized=downstream_turn_state_synthesized,
             forwarded_request=forwarded_request,
             forwarded_original_request_unanchored=forwarded_original_request_unanchored,
             forwarded_legacy_signature=forwarded_legacy_signature,
@@ -978,6 +981,7 @@ class _HTTPBridgeStreamingMixin:
         api_key_reservation: ApiKeyUsageReservationData | None,
         suppress_text_done_events: bool,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1114,6 +1118,7 @@ class _HTTPBridgeStreamingMixin:
                     queue_limit=runtime_config.queue_limit,
                     prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
                     downstream_turn_state=downstream_turn_state,
+                    downstream_turn_state_synthesized=downstream_turn_state_synthesized,
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=forwarded_original_request_unanchored,
                     forwarded_legacy_signature=forwarded_legacy_signature,
@@ -1292,6 +1297,7 @@ class _HTTPBridgeStreamingMixin:
         queue_limit: int,
         prompt_cache_idle_ttl_seconds: float | None = None,
         downstream_turn_state: str | None = None,
+        downstream_turn_state_synthesized: bool | None = None,
         forwarded_request: bool = False,
         forwarded_original_request_unanchored: bool = False,
         forwarded_legacy_signature: bool = False,
@@ -1407,6 +1413,25 @@ class _HTTPBridgeStreamingMixin:
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
+        if downstream_turn_state_synthesized is None:
+            # Single owner of origin-side provenance: a turn-state minted for
+            # this request (no client header) is generated; a client-echoed
+            # value is generated only when the local alias records it so.
+            # Forwarded requests arrive with the signed flag already set.
+            downstream_turn_state_synthesized = (
+                downstream_turn_state is not None and not forwarded_request and incoming_turn_state_header is None
+            )
+            if (
+                downstream_turn_state is not None
+                and not downstream_turn_state_synthesized
+                and incoming_turn_state_header == downstream_turn_state
+            ):
+                async with self._http_bridge_lock:
+                    downstream_turn_state_synthesized = _http_bridge_local_turn_state_alias_is_synthesized_locked(
+                        self,
+                        downstream_turn_state,
+                        api_key.id if api_key is not None else None,
+                    )
         explicit_prompt_cache_key = _prompt_cache_key_from_request_model(payload)
         affinity = _sticky_key_for_responses_request(
             payload,
@@ -1438,6 +1463,7 @@ class _HTTPBridgeStreamingMixin:
             allow_forwarded_affinity_headers=forwarded_request,
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
+            synthesized_turn_state=downstream_turn_state if downstream_turn_state_synthesized else None,
         )
         durable_lookup_turn_state = (
             downstream_turn_state
@@ -1920,6 +1946,7 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             incoming_turn_state_header=incoming_turn_state_header,
         )
+        request_state.downstream_turn_state_synthesized = downstream_turn_state_synthesized
         if previous_response_trimmed_input_count is not None:
             request_state.input_item_count = previous_response_trimmed_input_count
             request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
@@ -2412,6 +2439,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             if downstream_turn_state is not None:
                 request_state.session_id = _normalize_session_id(downstream_turn_state)
+            request_state.downstream_turn_state_synthesized = downstream_turn_state_synthesized
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -2628,6 +2656,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=api_key_reservation,
                     codex_session_affinity=codex_session_affinity,
                     downstream_turn_state=downstream_turn_state,
+                    downstream_turn_state_synthesized=downstream_turn_state_synthesized,
                     file_owner_account_id=rewritten_file_account_id,
                     request_started_at=request_state.started_at,
                     proxy_api_authorization=proxy_api_authorization,
@@ -3001,6 +3030,7 @@ class _HTTPBridgeStreamingMixin:
                         downstream_turn_state=downstream_turn_state,
                         incoming_turn_state_header=incoming_turn_state_header,
                     )
+                    retry_request_state.downstream_turn_state_synthesized = downstream_turn_state_synthesized
                     retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                     retry_request_state.request_stage = (
                         request_state.request_stage if owner_forward_fresh_replay else "reattach"
@@ -3310,6 +3340,7 @@ class _HTTPBridgeStreamingMixin:
                 downstream_turn_state=downstream_turn_state,
                 incoming_turn_state_header=incoming_turn_state_header,
             )
+            request_state.downstream_turn_state_synthesized = downstream_turn_state_synthesized
             request_state.transport = _REQUEST_TRANSPORT_HTTP
             request_state.request_stage = _http_bridge_request_stage(
                 headers=headers,
@@ -4221,6 +4252,7 @@ class _HTTPBridgeStreamingMixin:
                     downstream_turn_state=downstream_turn_state,
                     incoming_turn_state_header=incoming_turn_state_header,
                 )
+                retry_request_state.downstream_turn_state_synthesized = downstream_turn_state_synthesized
                 retry_request_state.transport = _REQUEST_TRANSPORT_HTTP
                 retry_request_state.request_stage = retry_request_stage
                 retry_request_state.preferred_account_id = retry_preferred_account_id
@@ -4751,7 +4783,11 @@ class _HTTPBridgeStreamingMixin:
         idle_settlement_task: asyncio.Task[None] | None = None
         try:
             if downstream_turn_state is not None and not account_neutral_recovery:
-                await self._register_http_bridge_turn_state(session, downstream_turn_state)
+                await self._register_http_bridge_turn_state(
+                    session,
+                    downstream_turn_state,
+                    synthesized=request_state.downstream_turn_state_synthesized,
+                )
             _signal_propagated_capacity_startup_ready()
             if request_state.capacity_startup_wait_event is not None:
                 request_state.capacity_startup_wait_event.clear()

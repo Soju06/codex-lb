@@ -1030,6 +1030,7 @@ class _WebSocketRequestState:
     # recovery paths re-prepare request states with a fresh started_at, so
     # budget clamps must use this instead of recomputing from started_at.
     bridge_request_deadline: float | None = None
+    downstream_turn_state_synthesized: bool = False
     prewarm_status: str | None = None
     prewarm_latency_ms: int | None = None
     session_previous_gap_ms: int | None = None
@@ -1322,6 +1323,7 @@ class _HTTPBridgeSessionKey:
     affinity_key: str
     api_key_id: str | None
     strength: Literal["hard", "soft"] | None = None
+    synthesized_turn_state: bool = field(default=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         strength = self.strength
@@ -1369,6 +1371,7 @@ class _HTTPBridgeSession:
     upstream_turn_state: str | None = None
     downstream_turn_state: str | None = None
     downstream_turn_state_aliases: set[str] = field(default_factory=set)
+    synthesized_downstream_turn_state_aliases: set[str] = field(default_factory=set)
     previous_response_ids: set[str] = field(default_factory=set)
     # The live session keeps only its current denial tombstone.  Historical
     # ids remain in the process-local fence ledger while prepared requests pin

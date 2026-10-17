@@ -62,6 +62,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
@@ -432,6 +433,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _serialize_websocket_error_event,
     _trim_websocket_previous_response_input_items,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_accepted_replay_can_switch_account,
     _websocket_accepted_replay_may_exclude_account,
     _websocket_auth_failure_requires_reauth,
@@ -1285,6 +1287,9 @@ async def _process_upstream_websocket_transport_end(
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
+    payload_too_large_close = is_upstream_message_too_big_close_code(message.close_code)
+    if payload_too_large_close:
+        message_error_code = "payload_too_large"
     # A classified local transport failure says nothing about whether an
     # already-sent response.create was accepted. Keep it account-neutral and
     # terminal: replay here could duplicate work, billing, or tool side effects.
@@ -1292,7 +1297,7 @@ async def _process_upstream_websocket_transport_end(
     if account_neutral:
         if any(state.last_downstream_sequence_number is not None for state in reader_owned):
             replay_refusal_reasons.append("sequenced_downstream_frame")
-    else:
+    elif not payload_too_large_close:
         replay_request_state = await _pop_replayable_precreated_websocket_request_state(
             reader_owned,
             pending_lock=anyio.Lock(),
@@ -1330,13 +1335,17 @@ async def _process_upstream_websocket_transport_end(
         pending_requests=reader_owned,
         pending_lock=anyio.Lock(),
         error_code=message_error_code or "stream_incomplete",
-        error_message=_upstream_websocket_disconnect_message(message),
+        error_message=(
+            _upstream_websocket_payload_too_large_message()
+            if payload_too_large_close
+            else _upstream_websocket_disconnect_message(message)
+        ),
         api_key=api_key,
         websocket=websocket,
         client_send_lock=client_send_lock,
         response_create_gate=response_create_gate,
         downstream_activity=downstream_activity,
-        penalize_account=not account_neutral,
+        penalize_account=not account_neutral and not payload_too_large_close,
         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
     )
     # A terminal receive can race the outer session cleanup, especially when
@@ -7016,6 +7025,13 @@ class _WebSocketMixin:
                 error_type=request_error_type,
                 error_param=request_error_param,
             )
+            if request_error_code == "payload_too_large":
+                if request_state.error_http_status_override is None:
+                    request_state.error_http_status_override = 400
+                if request_state.error_type_override is None:
+                    request_error_type = "invalid_request_error"
+                if request_state.error_param_override is None:
+                    request_error_param = "input"
             if index == last_index:
                 try:
                     _facade()._maybe_dump_oversized_response_create_request(

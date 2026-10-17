@@ -221,6 +221,11 @@ def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> 
     )
 
 
+def is_upstream_message_too_big_close_code(close_code: int | None) -> bool:
+    """Recognize a surfaced RFC 6455 message-too-big close, not arbitrary errors."""
+    return close_code == 1009
+
+
 def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
     """Return whether transport provenance rules out an account-health penalty."""
 

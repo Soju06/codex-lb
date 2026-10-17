@@ -128,6 +128,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_get_settings,
     _service_tier_from_event_payload,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_auth_request_can_switch_account,
     _websocket_downstream_response_id,
     _websocket_event_error_code,
@@ -2343,6 +2344,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
+                payload_too_large_close = message.kind in ("close", "error") and (
+                    _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
+                    == "payload_too_large"
+                )
                 # Account-neutral transport failures do not prove that the
                 # upstream rejected response.create. The request may still be
                 # executing, so replay could duplicate work, billing, or tool
@@ -2352,7 +2357,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # Only a terminal transport message (close or error) may replay
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.
-                if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
+                if (
+                    not account_neutral
+                    and not payload_too_large_close
+                    and (message.kind in {"close", "error"} or not accepted_response_pending)
+                ):
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -2389,8 +2398,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
-                        error_code=message.error_code or "stream_incomplete",
-                        error_message=_upstream_websocket_disconnect_message(message),
+                        error_code=(
+                            "payload_too_large"
+                            if payload_too_large_close
+                            else message.error_code or "stream_incomplete"
+                        ),
+                        error_message=(
+                            _upstream_websocket_payload_too_large_message()
+                            if payload_too_large_close
+                            else _upstream_websocket_disconnect_message(message)
+                        ),
                         upstream_close_code=message.close_code,
                         response_events_seen=response_events_seen,
                         transport_classification=(
@@ -2400,7 +2417,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         retry_circuit_attempt_selection=reader_failure_retry_circuit_attempt_selection,
                         penalize_account=(
-                            not account_neutral
+                            not payload_too_large_close
+                            and not account_neutral
                             and not account_neutral_transport_drop
                             and not (message.kind == "close" and close_classification == "clean")
                         ),

@@ -36,6 +36,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
+    is_upstream_message_too_big_close_code,
 )
 from app.core.clock import Clock
 from app.core.errors import (
@@ -610,7 +611,9 @@ def _classify_upstream_close(
     close_code: int | None,
     *,
     response_events_seen: int,
-) -> Literal["clean", "transient"]:
+) -> Literal["clean", "transient", "payload_too_large"]:
+    if is_upstream_message_too_big_close_code(close_code):
+        return "payload_too_large"
     if close_code == 1000 and response_events_seen == 0:
         # A clean websocket close before response.created does not prove that
         # the request was invalid.  The upstream can close a socket during a

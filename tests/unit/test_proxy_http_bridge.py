@@ -24789,9 +24789,16 @@ async def test_process_http_bridge_upstream_text_retries_precreated_usage_limit(
 
 
 @pytest.mark.asyncio
-async def test_process_http_bridge_upstream_text_masks_failed_replay_usage_limit(
+async def test_process_http_bridge_upstream_text_preserves_failed_replay_usage_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failed pre-created replay must not hide a quota terminal behind a synthetic 502.
+
+    The upstream already answered with a status-bearing 429 quota envelope before
+    the replay ran, so the original terminal (code and reset metadata) is what
+    the client observes; no override is left behind for the terminal renderer to
+    rewrite.
+    """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-precreated-replay-failed",
@@ -24865,8 +24872,100 @@ async def test_process_http_bridge_upstream_text_masks_failed_replay_usage_limit
     assert isinstance(error, dict)
 
     assert payload["type"] == "response.failed"
+    assert error["code"] == "usage_limit_reached"
+    assert error["type"] == "usage_limit_reached"
+    assert error["resets_at"] == 1_778_790_595
+    assert error["resets_in_seconds"] == 14_555
+    # No synthetic rewrite survives: the terminal renderer keeps the upstream
+    # 429 contract instead of turning the quota answer into a 502.
+    assert request_state.error_http_status_override == 429
+    assert request_state.error_code_override is None
+    assert request_state.error_message_override is None
+    assert session.pending_requests == deque()
+    assert session.queued_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_masks_failed_replay_without_quota_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay failures without a status-bearing quota terminal stay fail-closed.
+
+    Same staging as the quota case, but the upstream terminal is a replayable
+    capacity/overload code that is not a status-bearing 429 quota answer: the
+    synthetic ``stream_incomplete`` 502 remains the only safe answer because
+    the original terminal proves nothing about the account.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-precreated-replay-failed-nonquota",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_limit_nonquota", None),
+        headers={"x-codex-turn-state": "http_turn_limit_nonquota"},
+        affinity=proxy_service._AffinityPolicy(
+            key="http_turn_limit_nonquota",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.5",
+        account=cast(Any, SimpleNamespace(id="acc-nonquota", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    handle_stream_error = AsyncMock()
+
+    async def failed_replay(target_session: proxy_service._HTTPBridgeSession) -> bool:
+        target_session.account = cast(Any, SimpleNamespace(id="acc-replacement", status=AccountStatus.ACTIVE))
+        return False
+
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", failed_replay)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 503,
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "Upstream is temporarily overloaded",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    event_block = await event_queue.get()
+    assert event_block is not None
+    assert await event_queue.get() is None
+    payload = proxy_service.parse_sse_data_json(event_block)
+    assert isinstance(payload, dict)
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+
+    assert payload["type"] == "response.failed"
     assert error["code"] == "stream_incomplete"
-    assert "usage_limit_reached" not in json.dumps(payload)
     assert request_state.error_http_status_override == 502
     assert session.pending_requests == deque()
     assert session.queued_request_count == 0

@@ -8,4 +8,4 @@ Only when a completed response was delivered and no pending or replay-owned requ
 
 ## Risks and boundaries
 
-Physical loss requires the client to reconnect with sufficient context; the proxy must not fabricate it. A concurrent unsent request retains its existing sender ownership and is not treated as idle. The connection identity is internal and has no wire, settings or database representation.
+Physical loss requires the client to reconnect with sufficient context; the proxy must not fabricate it. A registered unsent request retains its existing sender ownership and prevents an idle close. A received turn can still be awaiting asynchronous preparation or admission before registration. If the idle close wins that race, registration checks the disconnected state under the same pending lock, keeps the request in scope-cleanup ownership and exits before dispatch. The connection identity is internal and has no wire, settings or database representation.

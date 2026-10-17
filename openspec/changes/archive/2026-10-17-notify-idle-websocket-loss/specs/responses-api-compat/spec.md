@@ -8,6 +8,11 @@ When an ordinary Codex WebSocket upstream ends after completed work and there ar
 - **THEN** the downstream receives close code 1012 before a subsequent turn
 - **AND** a full-context reconnect does not receive an injected anchor from the lost socket
 
+#### Scenario: Preparation overlaps the idle close
+- **WHEN** a new turn is received but request preparation or admission has not completed when the idle close commits
+- **THEN** that turn MUST NOT be dispatched upstream after the downstream reconnect notification
+- **AND** its reservation and admission ownership MUST be finalized
+
 #### Scenario: Another connection owns the newer anchor
 - **WHEN** an idle upstream ends after another connection has established the shared continuity anchor
 - **THEN** the newer connection's anchor remains intact

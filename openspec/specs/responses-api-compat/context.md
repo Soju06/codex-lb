@@ -21,6 +21,8 @@ client no longer has; a delta alone must still follow existing fail-closed
 continuity rules. Public OpenAI-compatible routes and active requests retain
 their existing lifecycle behavior.
 
+A turn received during an idle close may still be awaiting preparation or admission. Registration shares the pending lock with the close decision and checks the disconnected state before dispatch; the registered state then uses normal scope cleanup.
+
 ## Rationale and Decisions
 
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.

@@ -2443,6 +2443,12 @@ class _WebSocketMixin:
                         )
                         async with pending_lock:
                             pending_requests.append(response_create_request_state)
+                            if downstream_activity.disconnected:
+                                # The idle reader may close while preparation or
+                                # admission waits. Keep cleanup ownership, but
+                                # never dispatch after the reconnect notification.
+                                request_state_registered = True
+                                break
                             if shutdown_state.is_draining():
                                 # Register-first makes this barrier fail-closed
                                 # against a synchronous shutdown signal between

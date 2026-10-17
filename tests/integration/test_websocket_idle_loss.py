@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from collections import deque
@@ -10,7 +11,7 @@ from starlette.websockets import WebSocket
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
@@ -169,3 +170,76 @@ def test_idle_upstream_loss_signals_reconnect_and_preserves_full_context(app_ins
             assert sent["input"] == full_context
             assert not sent.get("previous_response_id")
     assert fixture.released_leases == ["retained-test-0", "retained-test-1"]
+
+
+@pytest.mark.parametrize("pause_at", ["preparation", "admission"])
+def test_idle_loss_during_request_preparation_never_dispatches_the_late_turn(app_instance, monkeypatch, pause_at):
+    first = _SequencedUpstreamWebSocket([], deferred_message_batches=[_completed_first_turn_upstream_batch(_PARENT)])
+    replacement = _SequencedUpstreamWebSocket([])
+    fixture = _IdleSocketFixture(monkeypatch, [first, replacement], limited=True)
+    preparing = threading.Event()
+    closed = threading.Event()
+    finished = threading.Event()
+    resume = asyncio.Event()
+    states = []
+    reservation_ids = []
+    original_prepare = proxy_module.ProxyService._prepare_websocket_response_create_request
+    original_admit = proxy_module.ProxyService._acquire_request_state_response_create_admission
+    original_proxy = proxy_module.ProxyService.proxy_responses_websocket
+    original_close = WebSocket.close
+
+    async def prepare(service, *args, **kwargs):
+        result = await original_prepare(service, *args, **kwargs)
+        states.append(result.request_state)
+        assert result.request_state.api_key_reservation is not None
+        reservation_ids.append(result.request_state.api_key_reservation.reservation_id)
+        if len(states) == 2 and pause_at == "preparation":
+            preparing.set()
+            await resume.wait()
+        return result
+
+    async def admit(service, state, **kwargs):
+        await original_admit(service, state, **kwargs)
+        if len(states) == 2 and pause_at == "admission":
+            preparing.set()
+            await resume.wait()
+
+    async def proxy(service, *args, **kwargs):
+        try:
+            await original_proxy(service, *args, **kwargs)
+        finally:
+            finished.set()
+
+    async def assert_reservation_released():
+        async with SessionLocal() as session:
+            row = await session.get(ApiKeyUsageReservation, reservation_ids[1])
+            assert row is not None and row.status == "released"
+
+    async def close(ws, code=1000, reason=None):
+        await original_close(ws, code, reason)
+        if code == 1012:
+            closed.set()
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_prepare_websocket_response_create_request", prepare)
+    monkeypatch.setattr(proxy_module.ProxyService, "_acquire_request_state_response_create_admission", admit)
+    monkeypatch.setattr(proxy_module.ProxyService, "proxy_responses_websocket", proxy)
+    monkeypatch.setattr(WebSocket, "close", close)
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        client.portal.call(fixture.prepare)
+        with client.websocket_connect(_PATH, headers=fixture.headers()) as downstream:
+            _complete(downstream, _create([_FIRST]), _PARENT)
+            downstream.send_json(_create([_DELTA]))
+            assert preparing.wait(2)
+            client.portal.call(first._messages.put_nowait, _FakeUpstreamMessage(kind="close", close_code=1000))
+            assert closed.wait(2)
+            client.portal.call(resume.set)
+            stopped = finished.wait(2)
+            assert len(first.sent_text) + len(replacement.sent_text) == 1, (
+                "late turn dispatched after the client was told to reconnect"
+            )
+            assert stopped, "disconnected scope retained the prepared turn"
+            assert states[1].api_key_reservation is None
+            assert not states[1].response_create_gate_acquired
+            client.portal.call(assert_reservation_released)
+    assert fixture.released_leases == ["retained-test-0"]

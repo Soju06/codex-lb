@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry, ReasoningLevel, UpstreamModel
 
 pytestmark = pytest.mark.unit
@@ -52,7 +53,34 @@ EXPECTED_GPT56_MODEL_PLANS = {
     "team",
 }
 
+EXPECTED_GPT6_ASTRA_MODEL_PLANS = {
+    "business",
+    "edu",
+    "edu_plus",
+    "edu_pro",
+    "education",
+    "enterprise",
+    "enterprise_cbp_automation",
+    "enterprise_cbp_trial",
+    "enterprise_cbp_usage_based",
+    "finserv",
+    "free",
+    "free_workspace",
+    "go",
+    "hc",
+    "k12",
+    "plus",
+    "pro",
+    "prolite",
+    "quorum",
+    "sci",
+    "self_serve_business_prolite",
+    "self_serve_business_usage_based",
+    "team",
+}
+
 EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS = {
+    "gpt-6-astra": "0.153.0",
     "gpt-5.6-sol": "0.144.0",
     "gpt-5.6-terra": "0.144.0",
     "gpt-5.6-luna": "0.144.0",
@@ -223,6 +251,8 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.6-sol") is True
     assert registry.prefers_websockets("gpt-5.6-terra") is True
     assert registry.prefers_websockets("gpt-5.6-luna") is True
+    assert registry.prefers_websockets("gpt-6-astra") is True
+    assert registry.prefers_websockets("gpt-6-future") is True
     assert registry.prefers_websockets("gpt-5.4") is True
     assert registry.prefers_websockets("gpt-5.4-2026") is True
     assert registry.prefers_websockets("gpt-5.3-codex") is True
@@ -232,6 +262,18 @@ def test_prefers_websockets_uses_bootstrap_fallback_when_uninitialized():
     assert registry.prefers_websockets("gpt-5.1") is False
 
 
+def test_fallback_client_version_covers_every_bootstrap_minimal_client_version():
+    """Degraded-startup refresh must still request Astra (spec: Fallback client version requirement)."""
+    from app.core.clients.codex_version_snapshot import CODEX_VERSION
+
+    def as_tuple(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("."))
+
+    highest = max(as_tuple(v) for v in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.values() if v)
+    assert as_tuple(CODEX_VERSION) >= highest
+    assert as_tuple(Settings().model_registry_client_version) >= highest
+
+
 def test_bootstrap_models_include_representative_upstream_metadata():
     registry = ModelRegistry(ttl_seconds=60.0)
     models = registry.get_models_with_fallback()
@@ -239,6 +281,54 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert set(models) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert models[slug].minimal_client_version == expected_version
+
+    astra = models["gpt-6-astra"]
+    assert astra.display_name == "GPT-6-Astra"
+    assert astra.description == "Our most capable model for complex, demanding work."
+    assert astra.context_window == 272_000
+    assert astra.raw["max_context_window"] == 872_000
+    assert astra.priority == 1
+    assert astra.prefer_websockets is True
+    assert astra.default_reasoning_level == "low"
+    assert [level.effort for level in astra.supported_reasoning_levels] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra",
+    ]
+    assert astra.raw["tool_mode"] == "code_mode_only"
+    assert astra.raw["multi_agent_version"] == "v2"
+    assert astra.raw["multi_agent_reasoning_effort"] == "xhigh"
+    assert astra.raw["use_responses_lite"] is True
+    assert astra.raw["apply_patch_tool_type"] == "freeform"
+    assert astra.raw["web_search_tool_type"] == "text_and_image"
+    assert astra.raw["supports_image_detail_original"] is True
+    assert astra.raw["truncation_policy"] == {"mode": "tokens", "limit": 10_000}
+    assert astra.raw["experimental_supported_tools"] == ["send_user_message_async", "clock"]
+    assert astra.raw["include_skills_usage_instructions"] is False
+    assert astra.raw["include_apps_usage_instructions"] is False
+    assert astra.raw["include_plugin_usage_instructions"] is False
+    assert astra.raw["node_repl_auto_review_required"] is True
+    assert astra.raw["node_repl_disabled"] is False
+    assert astra.raw["requires_sandboxed_review"] is False
+    assert astra.raw["auto_review_model_override"] is None
+    assert astra.raw["model_specialty"] is None
+    assert astra.raw["auto_compact_token_limit"] is None
+    assert astra.raw["comp_hash"] == "3000"
+    assert astra.raw["default_reasoning_summary"] == "none"
+    assert astra.raw["shell_type"] == "unified_exec"
+    assert astra.raw["availability_nux"] is None
+    assert astra.raw["upgrade"] is None
+    assert astra.raw["supports_search_tool"] is True
+    assert astra.raw["default_service_tier"] is None
+    assert astra.raw["service_tiers"] == [
+        {"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}
+    ]
+    assert astra.raw["additional_speed_tiers"] == ["fast"]
+    assert astra.raw["supports_reasoning_summary_parameter"] is True
+    assert astra.available_in_plans == EXPECTED_GPT6_ASTRA_MODEL_PLANS
 
     sol = models["gpt-5.6-sol"]
     assert sol.display_name == "GPT-5.6-Sol"

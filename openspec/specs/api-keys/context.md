@@ -37,3 +37,9 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Compact cleanup when persistence fails
+
+Compact keeps shielded settlement and immediate fail-safe release, including existing bounded SQLite contention retries. If both fail, no extra detached retry is retained: the durable reservation stays counted until existing stale reclamation can release it. The scheduler runs hourly with a six-hour idle cutoff and a 24-hour hard age ceiling. Quota can remain reserved for hours after a storage outage; the response remains `usage_settlement_failed`, release is unconfirmed and account-health writes remain suppressed.
+
+For example, repeated compact requests that each encounter two failed cleanup writes leave accounted reservations, not an unbounded collection of sleeping retry tasks. The process drain observer reports registered process work, not unresolved durable rows or historical write success.

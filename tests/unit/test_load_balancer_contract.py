@@ -320,6 +320,63 @@ async def test_public_selection_applies_candidate_gates(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("account_ids", "expected_ids"),
+    [(None, ["paused", "unauthorized", "ineligible"]), ([], []), (["ineligible"], ["ineligible"])],
+)
+async def test_list_continuity_owner_candidates_filters_only_assignment(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+    account_ids: list[str] | None,
+    expected_ids: list[str],
+) -> None:
+    paused = _account("paused", security_work_authorized=True)
+    paused.status = AccountStatus.PAUSED
+    unauthorized = _account("unauthorized")
+    ineligible = _account("ineligible")
+    ineligible.plan_type = "free"
+    ineligible.status = AccountStatus.QUOTA_EXCEEDED
+    balancer, accounts_repo, usage_repo, sticky_repo = _balancer([paused, unauthorized, ineligible], selection_cache)
+    load_inputs = AsyncMock(side_effect=AssertionError("Owner lookup must not load routing inputs"))
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_inputs)
+    acquire_lease = AsyncMock(side_effect=AssertionError("Owner lookup must not acquire leases"))
+    monkeypatch.setattr(balancer, "acquire_account_lease", acquire_lease)
+
+    candidates = await balancer.list_continuity_owner_candidates(account_ids=account_ids)
+
+    assert [account.id for account in candidates] == expected_ids
+    assert all(candidate is not original for candidate in candidates for original in accounts_repo.accounts)
+    load_inputs.assert_not_awaited()
+    acquire_lease.assert_not_awaited()
+    assert usage_repo.calls == {"primary": 0, "secondary": 0, "monthly": 0}
+    assert sticky_repo.get_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_list_continuity_owner_candidates_returns_fresh_detached_snapshots(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    owner = _account("owner")
+    balancer, accounts_repo, _, _ = _balancer([owner], selection_cache)
+
+    first = await balancer.list_continuity_owner_candidates()
+    first[0].status = AccountStatus.DEACTIVATED
+    assert owner.status == AccountStatus.ACTIVE
+
+    owner.status = AccountStatus.PAUSED
+    second_owner = _account("second")
+    accounts_repo.accounts.append(second_owner)
+    second = await balancer.list_continuity_owner_candidates()
+
+    assert accounts_repo.list_calls == 2
+    assert [account.id for account in second] == ["owner", "second"]
+    assert second[0].status == AccountStatus.PAUSED
+    assert first[0].status == AccountStatus.DEACTIVATED
+    assert second[0] is not owner
+    assert second[0] is not first[0]
+
+
+@pytest.mark.asyncio
 async def test_required_continuity_owner_miss_does_not_mark_healthy_pool_degraded(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,

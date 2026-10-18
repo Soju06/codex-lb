@@ -45,3 +45,9 @@ For wiring keys into each client, see [Client Setup](client-setup.md).
 ---
 
 *Spec: [api-keys](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys)*
+
+## Compact cleanup failures
+
+If compact settlement and its immediate fallback release both fail, the request reports `usage_settlement_failed`. Its reserved quota remains counted until the existing stale-reservation cleanup releases it; no endless retry task is retained. The cleanup scheduler runs hourly and normally requires six hours without a reservation update, with a 24-hour hard age limit. Recovery can therefore take hours after a storage outage. A process reporting no pending persistence tasks does not prove that all durable reservations were settled.
+
+See the [API-key specification](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys) for the cleanup contract.

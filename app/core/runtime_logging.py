@@ -436,7 +436,7 @@ class JsonAccessFormatter(logging.Formatter):
             client_addr, method, full_path, http_version, status_code = args
             client = str(client_addr)
             request_line = f"{method} {full_path} HTTP/{http_version}"
-            status = int(str(status_code))
+            status = status_code if isinstance(status_code, int) else str(status_code)
         log_entry: dict[str, JsonValue] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname,

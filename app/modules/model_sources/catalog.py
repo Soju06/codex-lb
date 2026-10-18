@@ -70,10 +70,12 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     default_reasoning_level = (
         _default_reasoning_level_from_metadata(raw, reasoning_levels) if reasoning_opted_in else None
     )
+    base_instructions = raw.get("base_instructions")
     return UpstreamModel(
         slug=source_model.model,
         display_name=display_name,
         description=display_name,
+        base_instructions=base_instructions if isinstance(base_instructions, str) else "",
         context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,

@@ -11,10 +11,10 @@
   "commitConvention": "angular",
   "contributors": [
     {
-      "login": "ngallodev",
-      "name": "ngallodev",
-      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
-      "profile": "https://github.com/ngallodev",
+      "login": "solid-pixel",
+      "name": "Alessandro Benassi",
+      "avatar_url": "https://avatars.githubusercontent.com/u/18260178?v=4",
+      "profile": "https://github.com/solid-pixel",
       "contributions": [
         "code"
       ]
@@ -1522,7 +1522,8 @@
       "avatar_url": "https://avatars.githubusercontent.com/u/104075208?v=4",
       "profile": "https://github.com/uniskela",
       "contributions": [
-        "doc"      ]
+        "doc"
+      ]
     },
     {
       "login": "nhdong1993",
@@ -1538,6 +1539,35 @@
       "name": "Vincent Dev",
       "avatar_url": "https://avatars.githubusercontent.com/u/246649517?v=4",
       "profile": "https://github.com/tubededentifrice-dev",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "drakeo338",
+      "name": "Younes Beriane",
+      "avatar_url": "https://avatars.githubusercontent.com/u/328244157?v=4",
+      "profile": "https://github.com/drakeo338",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "TheFoolThatDoesntBelongToThisEra",
+      "name": "⃟",
+      "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
+      "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
+    },
+    {
+      "login": "ngallodev",
+      "name": "ngallodev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
+      "profile": "https://github.com/ngallodev",
       "contributions": [
         "code"
       ]

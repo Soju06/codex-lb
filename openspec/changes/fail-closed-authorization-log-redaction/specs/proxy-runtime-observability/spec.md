@@ -9,12 +9,14 @@ Unterminated JSON secret values MUST be redacted through the end of the
 current line. A Bearer credential MUST treat a glued `:` tail on the same
 line as credential material. Same-line comma and ampersand separators MUST
 keep their existing truncation behavior for keyed values and for
-authorization values whose Bearer or Basic token has already been replaced
-with `[REDACTED]`. Every other authorization value, including one whose
-scheme is not Bearer or Basic, one that only begins with `Bearer` or `Basic`
-without a redacted token, and one whose key is followed by a closing double
-quote before the separator, MUST be redacted through the end of the current
-line. Records below WARNING MUST still skip these keyed patterns.
+authorization values whose Bearer or Basic token is redacted by the token
+patterns. Whether a value qualifies MUST be decided from the value as it
+arrived, before the token patterns run. Every other authorization value,
+including one whose scheme is not Bearer or Basic, one that only begins with
+`Bearer` or `Basic` without a token, one that arrives already reading
+`Bearer [REDACTED]` or `Basic [REDACTED]`, and one whose key is followed by a
+closing double quote before the separator, MUST be redacted through the end of
+the current line. Records below WARNING MUST still skip these keyed patterns.
 
 #### Scenario: Authorization does not swallow the next traceback line
 
@@ -90,6 +92,14 @@ line. Records below WARNING MUST still skip these keyed patterns.
 
 - **GIVEN** a WARNING or higher record contains
   `Authorization: Bearer-x a, response=SECRET`
+- **WHEN** the text formatter renders the record
+- **THEN** the rendered text contains `Authorization: [REDACTED]`
+- **AND** neither `response=` nor `SECRET` appears
+
+#### Scenario: A value that arrives already redacted fails closed
+
+- **GIVEN** a WARNING or higher record contains
+  `Authorization: Bearer [REDACTED], response=SECRET`
 - **WHEN** the text formatter renders the record
 - **THEN** the rendered text contains `Authorization: [REDACTED]`
 - **AND** neither `response=` nor `SECRET` appears

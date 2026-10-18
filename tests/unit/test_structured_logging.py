@@ -534,6 +534,9 @@ _FAIL_CLOSED_AUTHORIZATION_CASES = [
     ("Authorization: Bearer-x a, response=QA_SECRET", "Authorization: [REDACTED]"),
     ("Authorization: Bearer, response=QA_SECRET", "Authorization: [REDACTED]"),
     ('Authorization: Bearer "QA_SECRET", status=failed', "Authorization: [REDACTED]"),
+    # A value that arrives already reading [REDACTED] was not redacted by any pass.
+    ("Authorization: Bearer [REDACTED], response=QA_SECRET", "Authorization: [REDACTED]"),
+    ("Authorization: Basic [REDACTED], response=QA_SECRET", "Authorization: [REDACTED]"),
 ]
 _FAIL_CLOSED_LEAK_MARKERS = ("QA_SECRET", "response=", "Signature=", "6629fae4", "fe5f80f7")
 

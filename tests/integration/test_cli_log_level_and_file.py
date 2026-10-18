@@ -8,6 +8,7 @@ start and cannot be observed through an in-process ASGI client.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import socket
@@ -235,3 +236,20 @@ def test_single_handler_owns_rotation(tmp_path: Path) -> None:
     access_ids = re.findall(r"/access-record-(\d{4})", combined)
     assert app_ids == sorted(app_ids) and len(app_ids) == len(set(app_ids))
     assert access_ids == sorted(access_ids) and len(access_ids) == len(set(access_ids))
+
+
+def test_json_log_file_access_line_has_client_request_and_status(tmp_path: Path) -> None:
+    log_file = tmp_path / "logs" / "codex-lb.log"
+
+    stream_output, _ = _run_server(tmp_path, "--log-file", str(log_file), extra_env={"CODEX_LB_LOG_FORMAT": "json"})
+
+    file_text = log_file.read_text(encoding="utf-8")
+    assert _SECRET not in file_text
+    assert _SECRET not in stream_output
+    for text in (file_text, stream_output):
+        entries = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+        access = next(e for e in entries if e.get("type") == "access" and "next=" in str(e["request"]))
+        assert access["client"]
+        assert access["request"].startswith("GET /health?next=")
+        assert access["request"].endswith(" HTTP/1.1")
+        assert access["status"] == 200

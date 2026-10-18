@@ -426,14 +426,25 @@ class JsonFormatter(logging.Formatter):
 
 class JsonAccessFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        client: JsonValue = getattr(record, "client_addr", None)
+        request_line: str | None = getattr(record, "request_line", None)
+        status: JsonValue = getattr(record, "status_code", None)
+        # uvicorn derives these attributes on a copy of the record only; the
+        # original carries (client_addr, method, full_path, http_version, status).
+        args = record.args
+        if request_line is None and isinstance(args, tuple) and len(args) == 5:
+            client_addr, method, full_path, http_version, status_code = args
+            client = str(client_addr)
+            request_line = f"{method} {full_path} HTTP/{http_version}"
+            status = int(str(status_code))
         log_entry: dict[str, JsonValue] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "level": record.levelname,
             "logger": record.name,
             "type": "access",
-            "client": getattr(record, "client_addr", None),
-            "request": cast(JsonValue, _redact_json_log_value(record, getattr(record, "request_line", None))),
-            "status": getattr(record, "status_code", None),
+            "client": client,
+            "request": cast(JsonValue, _redact_json_log_value(record, request_line)),
+            "status": status,
         }
         return json.dumps(log_entry, default=str)
 

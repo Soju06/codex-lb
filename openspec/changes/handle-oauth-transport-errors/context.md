@@ -47,9 +47,9 @@ and never as a flow that stays `pending` forever.
 
 ## Example
 
-Operator enables account proxy binding, the default pool's only endpoint is down, and a browser `POST /api/oauth/start` starts a browser flow. The auth redirect comes back with a valid `code` and `state`; `exchange_authorization_code` cannot connect through the pool endpoint. Before this change the callback server answered aiohttp's stock 500 page and `/api/oauth/status` stayed `pending` until the flow TTL. After it, the callback renders "Login failed — Could not reach the OpenAI auth server; check network/proxy egress", the durable flow status is `error` with that same message, the status poll stops, and the logs show one
+Operator runs without account proxy binding (direct egress), the host's outbound path to the auth server is down (a firewall rule or a failed egress proxy), and `POST /api/oauth/start` starts a browser flow. The auth redirect comes back with a valid `code` and `state`; `exchange_authorization_code` cannot connect. (With proxy binding, the pool route goes through `_codex_post`, which already maps transport failures and logs its own line.) Before this change the callback server answered aiohttp's stock 500 page and `/api/oauth/status` stayed `pending` until the flow TTL. After it, the callback renders "Login failed — Could not reach the OpenAI auth server; check network/proxy egress", the durable flow status is `error` with that same message, the status poll stops, and the logs show one
 `OAuth transport failure request_id=... exception_type=ClientConnectorError` line
-without the URL, the pool endpoint, the authorization code, or the PKCE verifier.
+without the URL, any proxy address or credentials, the authorization code, or the PKCE verifier.
 
 Reproduction needs no production credentials: the regression tests patch only the
 leased outbound HTTP session of `app.core.clients.oauth` so the real client

@@ -2859,19 +2859,10 @@ async def test_loser_browser_callback_honors_durable_success_not_error(monkeypat
 def _oauth_transport_failure() -> aiohttp.ClientConnectorError:
     """The failure aiohttp raises when the auth host cannot be reached."""
 
-    return aiohttp.ClientConnectorError(
-        ConnectionKey(
-            host="auth.openai.com",
-            port=443,
-            is_ssl=True,
-            ssl=None,
-            proxy=None,
-            proxy_auth=None,
-            proxy_headers_hash=None,
-            server_hostname=None,
-        ),
-        OSError("Connection refused"),
-    )
+    # Built from ``_fields``: the key's fields differ across supported aiohttp
+    # versions (``server_hostname`` is newer than the 3.13.4 floor).
+    key_fields = dict.fromkeys(ConnectionKey._fields) | {"host": "auth.openai.com", "port": 443, "is_ssl": True}
+    return aiohttp.ClientConnectorError(ConnectionKey(**key_fields), OSError("Connection refused"))
 
 
 class _RaisingOAuthPost:
@@ -3035,7 +3026,11 @@ async def test_browser_callback_transport_failure_does_not_leak_secrets(monkeypa
     caplog.set_level(logging.INFO)
 
     verifier = "synthetic-pkce-verifier-not-real"
-    proxy_url = "http://proxyuser:proxypass@proxy.invalid:3128"
+    # Synthetic credential markers, kept out of ``user:password@host`` URI form
+    # so secret scanners do not flag the fixture.
+    proxy_user = "synthetic-proxy-user-marker"
+    proxy_secret = "synthetic-proxy-secret-marker"
+    proxy_host = "proxy.invalid:3128"
     request_url = "https://auth.invalid/oauth/token"
     code = "synthetic-auth-code"
 
@@ -3050,7 +3045,11 @@ async def test_browser_callback_transport_failure_does_not_leak_secrets(monkeypa
     monkeypatch.setattr(oauth_module, "generate_pkce_pair", lambda: (verifier, "synthetic-challenge"))
     _install_oauth_http_boundary(
         monkeypatch,
-        lambda _url: _RaisingOAuthPost(aiohttp.ClientError(f"Cannot connect to host {request_url} via {proxy_url}")),
+        lambda _url: _RaisingOAuthPost(
+            aiohttp.ClientError(
+                f"Cannot connect to host {request_url} via proxy {proxy_host} as {proxy_user} with {proxy_secret}"
+            )
+        ),
     )
 
     replica = _make_replica_service(oauth_module.OAuthStateStore())
@@ -3072,7 +3071,7 @@ async def test_browser_callback_transport_failure_does_not_leak_secrets(monkeypa
         record.error_message or "",
         caplog.text,
     ]
-    for secret in (code, state_token, verifier, "proxyuser", "proxypass", proxy_url, request_url):
+    for secret in (code, state_token, verifier, proxy_user, proxy_secret, proxy_host, request_url):
         for surface in surfaces:
             assert secret not in surface
 

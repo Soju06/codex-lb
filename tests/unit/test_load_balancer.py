@@ -5028,7 +5028,7 @@ def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallbac
     assert counts["plus"] > counts["unknown-plan"]
 
 
-@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise"])
+@pytest.mark.parametrize("plan_type", ["pro", "prolite", "promax", "team", "business", "enterprise"])
 def test_additional_quota_applies_to_quota_enforced_and_unmapped_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is True
 
@@ -5074,6 +5074,37 @@ def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():
 
     education_ratio = counts["education"] / n
     assert 0.45 <= education_ratio <= 0.55
+
+
+@pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
+def test_select_account_promax_uses_pro_capacity_not_unknown_plan_fallback(routing_strategy):
+    random.seed(36)
+    n = 2000
+    promax = AccountState(
+        "promax",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="promax",
+        capacity_credits=None,
+    )
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=0.0,
+        secondary_used_percent=0.0,
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+
+    counts = {"promax": 0, "pro": 0}
+    for _ in range(n):
+        result = select_account([promax, pro], routing_strategy=routing_strategy)
+        assert result.account is not None
+        counts[result.account.account_id] += 1
+
+    promax_ratio = counts["promax"] / n
+    assert 0.45 <= promax_ratio <= 0.55
 
 
 def test_select_account_capacity_weighted_three_tiers_distribution_matches_capacity():

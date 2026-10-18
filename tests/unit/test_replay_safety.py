@@ -2091,6 +2091,130 @@ def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_stored_prefi
     )
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        (
+            "<heartbeat><automation_id>follow-pr</automation_id>"
+            "<current_time_iso>2026-09-04T13:58:17Z</current_time_iso></heartbeat>"
+        ),
+    ],
+)
+def test_host_automation_heartbeat_is_account_neutral_fresh_input(output: str) -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": output,
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+    assert responses_input_suffix_retains_prior_output(
+        [
+            {"role": "user", "content": "monitor this"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Still waiting."}],
+            },
+            heartbeat,
+        ],
+        stored_count=1,
+    )
+
+
+@pytest.mark.parametrize("heartbeat_before_tool_pair", [True, False])
+def test_full_resend_tool_loop_manifest_rejects_host_automation_heartbeat(
+    heartbeat_before_tool_pair: bool,
+) -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    tool_pair: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_pending",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_pending", "output": "result"},
+    ]
+    suffix = [heartbeat, *tool_pair] if heartbeat_before_tool_pair else [*tool_pair, heartbeat]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        [{"role": "user", "content": "look that up"}, *suffix],
+        stored_count=1,
+        pending_tool_calls={"call_pending": "function_call"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "other_tool"),
+        ("namespace", "other_host"),
+        ("output", "ordinary tool output"),
+        ("output", "<heartbeat></heartbeat>"),
+        ("output", "<heartbeat><automation_id></automation_id></heartbeat>"),
+        ("output", "<heartbeat><message>not a host trigger</message></heartbeat>"),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><current_time_iso></current_time_iso></heartbeat>",
+        ),
+        (
+            "output",
+            "<heartbeat><automation_id>follow-pr</automation_id><message>not a host trigger</message></heartbeat>",
+        ),
+        ("output", " <heartbeat><automation_id>follow-pr</automation_id></heartbeat>"),
+        ("output", "<heartbeat></heartbeat>trailing-data"),
+        ("output", "<heartbeat></heartbeat></heartbeat>"),
+        ("call_id", "call_owner_bound"),
+    ],
+)
+def test_noncanonical_host_automation_output_is_not_account_neutral(field: str, value: str) -> None:
+    heartbeat: dict[str, JsonValue] = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 1_788_526_697.25,
+        },
+    }
+    heartbeat[field] = value
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+
+
+def test_host_automation_heartbeat_rejects_oversized_create_time() -> None:
+    heartbeat: JsonValue = {
+        "type": "function_call_output",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": "<heartbeat><automation_id>follow-pr</automation_id></heartbeat>",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "turn_current",
+            "create_time": 10**400,
+        },
+    }
+
+    assert not responses_payload_is_account_neutral_fresh_replay({"input": [heartbeat]})
+
+
 def test_full_resend_tool_loop_manifest_rejects_call_id_reused_from_unsupported_prefix_item() -> None:
     stored_input: list[JsonValue] = [
         {"role": "user", "content": "first question"},

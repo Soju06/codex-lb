@@ -32,7 +32,7 @@ from app.modules.rate_limit_reset_credits.store import (
 )
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import UsageUpdater, _resolve_upstream_route_for_account
+from app.modules.usage.updater import ResetCreditRedemption, UsageUpdater, _resolve_upstream_route_for_account
 
 logger = logging.getLogger(__name__)
 
@@ -405,7 +405,9 @@ def _select_auto_redeem_target_credit(snapshot: RateLimitResetCreditsSnapshot) -
     return min(available, key=lambda credit: credit.expires_at)
 
 
-async def _refresh_usage_after_auto_redeem(account: Account) -> None:
+async def _refresh_usage_after_auto_redeem(
+    account: Account, reset_credit_redemption: ResetCreditRedemption | None
+) -> None:
     async with get_background_session() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
@@ -418,7 +420,7 @@ async def _refresh_usage_after_auto_redeem(account: Account) -> None:
             accounts_repo,
             additional_usage_repo,
             auth_manager=AuthManager(accounts_repo),
-        ).force_refresh(current)
+        ).force_refresh(current, reset_credit_redemption=reset_credit_redemption)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()

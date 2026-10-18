@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final, Mapping, Protocol, cast
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import (
@@ -129,6 +131,18 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
         expected_blocked_at: int | None = None,
         expected_refresh_token_encrypted: bytes | None = None,
     ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ResetCreditRedemption:
+    """A confirmed reset-credit redemption, as evidence for the forced refresh.
+
+    ``started_at`` is read and ``baseline_reset_at`` captured (see
+    ``capture_reset_credit_baseline``) before the consume request is sent.
+    """
+
+    started_at: float
+    baseline_reset_at: Mapping[str, int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,9 +416,14 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> bool:
         """Refresh one account regardless of cached/fresh usage rows."""
-        result = await self.force_refresh_result(account, access_token_override=access_token_override)
+        result = await self.force_refresh_result(
+            account,
+            access_token_override=access_token_override,
+            reset_credit_redemption=reset_credit_redemption,
+        )
         return result.usage_written
 
     async def force_refresh_result(
@@ -412,6 +431,7 @@ class UsageUpdater:
         account: Account,
         *,
         access_token_override: str | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> AccountRefreshResult:
         """Refresh one account and expose whether the upstream fetch completed."""
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -423,6 +443,7 @@ class UsageUpdater:
                     account,
                     usage_account_id=account.chatgpt_account_id,
                     access_token_override=access_token_override,
+                    reset_credit_redemption=reset_credit_redemption,
                 ),
                 join_existing=False,
             )
@@ -591,6 +612,7 @@ class UsageUpdater:
         *,
         usage_account_id: str | None,
         access_token_override: str | None = None,
+        reset_credit_redemption: ResetCreditRedemption | None = None,
     ) -> AccountRefreshResult:
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
@@ -787,12 +809,23 @@ class UsageUpdater:
                 )
             )
 
+        reset_credit_cleared_block = reset_credit_redemption is not None and _reset_credit_cleared_block(
+            account,
+            redemption=reset_credit_redemption,
+            fresh_reset_at={write.window: write.reset_at for write in snapshot_windows},
+        )
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
+        await self._recover_quota_status_from_usage(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
+            reset_credit_cleared_block=reset_credit_cleared_block,
+        )
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
@@ -879,6 +912,7 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
         monthly: UsageWindow | None = None,
+        reset_credit_cleared_block: bool = False,
     ) -> None:
         if not self._auth_manager:
             return
@@ -891,14 +925,18 @@ class UsageUpdater:
                 # account back to ACTIVE — erasing reset_at that peer replicas
                 # rely on — while the upstream cooldown is still running.
                 # Fresh usage showing quota is not evidence the 429 window
-                # ended: throttles are not always quota-based. Rows without
-                # blocked_at are stale window-derived markings and keep the
-                # fresh-usage recovery below.
+                # ended: throttles are not always quota-based. A confirmed
+                # reset credit lifts the cooldown only when it reset the very
+                # window this block's deadline came from (see
+                # ``_reset_credit_cleared_block``); the availability checks
+                # below still keep a still-exhausted window blocked. Rows
+                # without blocked_at are stale window-derived markings and keep
+                # the fresh-usage recovery below.
                 now = time.time()
                 cooldown_deadline = plausible_rate_limit_reset_at(account.reset_at, now=now) or (
                     float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
-                if now < cooldown_deadline:
+                if now < cooldown_deadline and not reset_credit_cleared_block:
                     return
             long_window = monthly or secondary
             if primary is None and monthly is None:
@@ -1358,6 +1396,84 @@ def _latest_usage_is_fresh(
 
 
 _MAIN_USAGE_WINDOWS = ("primary", "secondary", "monthly")
+
+# Same tolerance the scheduler uses to bind a 429 deadline to a quota window's
+# reset metadata (``_BLOCK_RESET_MATCH_TOLERANCE_SECONDS``).
+_RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS = 5
+
+
+async def capture_reset_credit_baseline(usage_repo: UsageRepositoryPort, account_id: str) -> dict[str, int | None]:
+    """Return each quota window's reset deadline from the newest usage fetch.
+
+    Called before the consume request is sent, so no refresh that might record
+    the post-reset deadline (on any replica, whatever its clock) can be read as
+    the baseline. Only rows from the newest fetch count: an older row left in
+    another slot (for example a secondary row from before upstream moved the
+    weekly window into the primary slot) can carry the same deadline and would
+    make the blocked window look ambiguous.
+
+    A failed read returns no baseline instead of blocking the redemption: with
+    no baseline window to bind to, the refresh keeps the cooldown.
+    """
+
+    try:
+        rows = {
+            window: await usage_repo.latest_entry_for_account(account_id, window=window)
+            for window in _MAIN_USAGE_WINDOWS
+        }
+    except SQLAlchemyError:
+        logger.warning("Reset credit baseline read failed account_id=%s", account_id, exc_info=True)
+        return {}
+    present = [row for row in rows.values() if row is not None]
+    if not present:
+        return {}
+    newest = max(row.recorded_at for row in present)
+    return {
+        window: row.reset_at
+        for window, row in rows.items()
+        if row is not None and (newest - row.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
+    }
+
+
+def _reset_credit_cleared_block(
+    account: Account,
+    *,
+    redemption: ResetCreditRedemption,
+    fresh_reset_at: dict[str, int | None],
+) -> bool:
+    """Return whether a confirmed reset credit reset the window this 429 came from.
+
+    "Some window was reset" is not proof that this block ended: the deadline may
+    come from a Retry-After hint, a model-scoped throttle, or a different window.
+    So the persisted ``reset_at`` must match the baseline deadline of exactly one
+    quota window, captured before the consume request, and the fresh snapshot
+    must show that window's deadline moved away from it. A deadline that matches
+    no window, or more than one, does not identify the blocked window and keeps
+    the cooldown.
+
+    ``redemption.started_at`` is read before the consume request is sent, and
+    the block's whole second must precede it (``blocked_at`` is stored in whole
+    seconds). A 429 recorded during or after the redemption may postdate the
+    reset, so it is never lifted here.
+    """
+
+    if account.status != AccountStatus.RATE_LIMITED:
+        return False
+    if account.blocked_at is None or account.reset_at is None:
+        return False
+    if math.floor(redemption.started_at) <= account.blocked_at:
+        return False
+    tolerance = _RESET_CREDIT_BLOCK_MATCH_TOLERANCE_SECONDS
+    matching = [
+        (window, baseline)
+        for window, baseline in redemption.baseline_reset_at.items()
+        if baseline is not None and abs(baseline - account.reset_at) <= tolerance
+    ]
+    if len(matching) != 1:
+        return False
+    window, baseline = matching[0]
+    fresh = fresh_reset_at.get(window)
+    return fresh is not None and abs(fresh - baseline) > tolerance
 
 
 def _quota_recovery_should_bypass_freshness(account: Account, *, latest: UsageHistory | None) -> bool:

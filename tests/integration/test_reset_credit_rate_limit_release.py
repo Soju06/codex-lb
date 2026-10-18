@@ -486,9 +486,14 @@ async def test_unconfirmed_accounts_api_redemption_does_not_release_account(
     await _assert_rate_limited(account_id)
 
 
+@pytest.mark.parametrize("path", ["service", "reset_credits_api"])
 @pytest.mark.asyncio
-async def test_failed_baseline_read_still_redeems_but_keeps_account_rate_limited(async_client, monkeypatch) -> None:
-    account_id = await _blocked_account(async_client, "baseline-read-failed")
+async def test_failed_baseline_read_still_redeems_but_keeps_account_rate_limited(
+    async_client, monkeypatch, path: str
+) -> None:
+    # The baseline read runs in its own session on both paths, so a failed
+    # read cannot abort the request transaction the consume still uses.
+    account_id = await _blocked_account(async_client, f"baseline-read-failed-{path}")
     await _patch_usage_fetch(monkeypatch)
     consumed: list[str] = []
 
@@ -513,11 +518,21 @@ async def test_failed_baseline_read_still_redeems_but_keeps_account_rate_limited
             raise OperationalError("SELECT usage_history", {}, Exception("database is locked"))
         return await real_latest(self, *args, **kwargs)
 
-    monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
-    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume)
     monkeypatch.setattr(BackgroundUsageRepository, "latest_entry_for_account", _latest_failing_once)
-    await _prime_dashboard_credit(account_id)
-    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    if path == "service":
+        from app.modules.accounts import service as accounts_service_module
+
+        async def _consume_account_reset(*_args, **_kwargs):
+            consumed.append("credit-weekly")
+            return ConsumeRateLimitResetCreditResponse(code="reset", windows_reset=1)
+
+        monkeypatch.setattr(accounts_service_module, "consume_rate_limit_reset_credit", _consume_account_reset)
+        response = await async_client.post(f"/api/accounts/{account_id}/usage-reset-credits/consume")
+    else:
+        monkeypatch.setattr(reset_credits_api, "fetch_reset_credits", _fetch_credits)
+        monkeypatch.setattr(reset_credits_api, "consume_reset_credit", _consume)
+        await _prime_dashboard_credit(account_id)
+        response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
     assert failures["left"] == 0
     assert consumed == ["credit-weekly"]

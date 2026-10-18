@@ -392,12 +392,8 @@ from app.modules.proxy._service.rate_limit import (
     _RateLimitMixin,
 )
 from app.modules.proxy._service.realtime_live import LiveWebSocketConnector, _RealtimeLiveMixin
-from app.modules.proxy._service.refresh import (
-    ensure_fresh_with_auth_error,
-)
-from app.modules.proxy._service.refresh import (
-    ensure_fresh_with_budget as _recover_fresh_account,
-)
+from app.modules.proxy._service.refresh import ensure_fresh_with_auth_error
+from app.modules.proxy._service.refresh import ensure_fresh_with_budget as _recover_fresh_account
 from app.modules.proxy._service.request_log import (
     _normalize_session_id as _normalize_session_id,
 )
@@ -446,6 +442,7 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _input_image_request_requires_http_upstream,  # noqa: F401
     _responses_request_contains_input_image,  # noqa: F401
+    _responses_request_requires_image_bridge_bypass,  # noqa: F401
     _responses_request_uses_image_generation,  # noqa: F401
 )
 from app.modules.proxy._service.response_create import (

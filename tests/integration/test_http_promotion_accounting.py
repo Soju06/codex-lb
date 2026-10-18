@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -135,15 +136,91 @@ async def test_promoted_image_bypass_is_counted_without_pinning_http(async_clien
 
 @pytest.mark.asyncio
 async def test_historical_image_does_not_pin_later_turns_to_http(async_client, promotion_transport):
-    # The reported production shape: Codex keeps earlier screenshots in the
-    # input, so before #2363 one historical image pinned every later turn of the
-    # thread to the degraded upstream HTTP path.
+    # Replayed inline images must retain bridge admission on later text turns.
     upstreams, raw_calls, _ = promotion_transport
     history = _image_history("data:image/png;base64,aGVsbG8=", position=0)
     response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
     assert response.status_code == 200, response.text
+    assert not raw_calls
+    assert len(upstreams) == 1
+    assert json.loads(upstreams[0].sent_text[0])["input"][0] == history[0]
+
+
+@pytest.mark.asyncio
+async def test_replayed_history_inline_image_stays_on_http_bridge(async_client, promotion_transport, monkeypatch):
+    upstreams, raw_calls, _ = promotion_transport
+    routing_counter = Mock()
+    monkeypatch.setattr(observability, "http_bridge_routing_total", routing_counter)
+    history = [
+        {"role": "user", "content": "take a screenshot"},
+        {"type": "function_call", "name": "screenshot", "call_id": "call_shot", "arguments": "{}"},
+        {
+            "type": "function_call_output",
+            "call_id": "call_shot",
+            "output": [{"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}],
+        },
+        {"role": "assistant", "content": "screenshot received"},
+        {"role": "user", "content": "continue"},
+    ]
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not raw_calls
+    assert len(upstreams) == 1
+    sent = json.loads(upstreams[0].sent_text[0])
+    assert sent["type"] == "response.create"
+    assert sent["input"][2] == history[2]
+    assert not any(
+        call.kwargs == {"stage": "bypass", "reason": "image"} for call in routing_counter.labels.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_output", [False, True])
+async def test_current_turn_image_still_bypasses_http_bridge(async_client, promotion_transport, tool_output):
+    upstreams, raw_calls, _ = promotion_transport
+    history = _image_history("data:image/png;base64,aGVsbG8=")
+    if tool_output:
+        history[-1:] = [
+            {"type": "function_call", "name": "screenshot", "call_id": "call_shot", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_shot", "output": history[-1]["content"]},
+        ]
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
     assert not upstreams
-    assert raw_calls[-1]["upstream_transport"] == "auto"
+    assert raw_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("historical", [False, True])
+async def test_external_image_url_bypasses_http_bridge_even_in_history(async_client, promotion_transport, historical):
+    upstreams, raw_calls, _ = promotion_transport
+    image = {"type": "input_image", "image_url": "HtTpS://example.com/shot.png"}
+    history = _promotion_history()
+    output = {"type": "function_call_output", "call_id": "call_shot", "output": [{"nested": [image]}]}
+    if historical:
+        history.insert(1, output)
+    else:
+        history[-1] = output
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": history})
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls[-1]["upstream_transport"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_image_generation_tool_still_bypasses_http_bridge(async_client, promotion_transport):
+    upstreams, raw_calls, _ = promotion_transport
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.4",
+            "input": _promotion_history(),
+            "tools": [{"type": "image_generation"}],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert not upstreams
+    assert raw_calls
 
 
 @pytest.mark.asyncio

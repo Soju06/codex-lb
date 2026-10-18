@@ -75,6 +75,7 @@ class _OpenHarness(websocket_mixin._WebSocketMixin):
         headers: Any,
         *,
         request_state: Any = None,
+        use_native_egress: bool = True,
         connect_progress: Any = None,
     ) -> Any:
         del account, headers, request_state

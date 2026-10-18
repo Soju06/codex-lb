@@ -76,6 +76,7 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.background_repository import BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import (
     AdditionalUsageRepositoryPort,
@@ -353,7 +354,9 @@ class AccountsService:
         # carry the post-reset deadline, so neither can count as evidence.
         redeem_started_at = time.time()
         reset_credit_baseline = (
-            await capture_reset_credit_baseline(self._usage_repo, account_id) if self._usage_repo else {}
+            # Own session: a failed read must not abort the request transaction
+            # (PostgreSQL), which the consume and the later reads still use.
+            await capture_reset_credit_baseline(BackgroundUsageRepository(), account_id) if self._usage_repo else {}
         )
         upstream_response, account = await self._consume_usage_reset_credit(
             account, redeem_request_id=redeem_request_id

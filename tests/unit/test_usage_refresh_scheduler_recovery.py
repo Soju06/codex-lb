@@ -81,6 +81,29 @@ def _reset_evidence(
     )
 
 
+def test_short_window_guard_preserves_unknown_alias_capacity() -> None:
+    now = 1_700_000_000.0
+    account = _make_account(
+        "acc_go_short_window",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="go",
+    )
+    exhausted_primary = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=int(now + 3600),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=300,
+    )
+
+    assert refresh_scheduler_module._short_window_blocks_recovery(
+        exhausted_primary,
+        account=account,
+        now=now,
+    )
+
+
 def test_historical_reset_recovery_scans_adjacent_sliding_samples() -> None:
     now = 1_700_000_000
     legacy_reset_at = now + 7 * 24 * 60 * 60
@@ -224,10 +247,12 @@ class StubUsageRepository:
         primary: dict[str, UsageHistory] | None = None,
         secondary: dict[str, UsageHistory] | None = None,
         monthly: dict[str, UsageHistory] | None = None,
+        history: dict[str, list[UsageHistory]] | None = None,
     ) -> None:
         self._primary = primary or {}
         self._secondary = secondary or {}
         self._monthly = monthly or {}
+        self._history = history or {}
         self.queries: list[tuple[str | None, tuple[str, ...] | None]] = []
 
     async def latest_by_account(
@@ -248,6 +273,13 @@ class StubUsageRepository:
             return rows
         allowed = set(normalized_account_ids)
         return {account_id: entry for account_id, entry in rows.items() if account_id in allowed}
+
+    async def history_since(self, account_id: str, window: str, since: datetime) -> list[UsageHistory]:
+        return [
+            entry
+            for entry in self._history.get(account_id, [])
+            if entry.window == window and entry.recorded_at >= since
+        ]
 
 
 class MutatingAccountsRepository(StubAccountsRepository):
@@ -1156,6 +1188,60 @@ async def test_reconcile_recoverable_account_statuses_restores_quota_exceeded_fr
 
 
 @pytest.mark.asyncio
+async def test_reconcile_keeps_elapsed_reset_when_secondary_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 7200)
+    past_reset = int(now - 300)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_scheduler_exhausted_secondary",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=past_reset,
+        blocked_at=blocked_at,
+    )
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(
+        primary={
+            account.id: _make_usage(
+                account.id,
+                window="primary",
+                used_percent=10.0,
+                reset_at=int(now + 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+                window_minutes=300,
+            )
+        },
+        secondary={
+            account.id: _make_usage(
+                account.id,
+                window="secondary",
+                used_percent=100.0,
+                reset_at=int(now + 5 * 24 * 3600),
+                recorded_at=_epoch_to_naive_utc(now - 30),
+                window_minutes=10080,
+            )
+        },
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == past_reset
+    assert account.blocked_at == blocked_at
+
+
+@pytest.mark.asyncio
 async def test_reconcile_recoverable_account_statuses_recovers_quota_exceeded_and_clears_advisory_primary_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1644,9 +1730,11 @@ class StubHistoryUsageRepository(StubUsageRepository):
         self,
         *,
         history: dict[str, list[UsageHistory]] | None = None,
-        **latest: dict[str, UsageHistory] | None,
+        primary: dict[str, UsageHistory] | None = None,
+        secondary: dict[str, UsageHistory] | None = None,
+        monthly: dict[str, UsageHistory] | None = None,
     ) -> None:
-        super().__init__(**latest)
+        super().__init__(primary=primary, secondary=secondary, monthly=monthly)
         self._history = history or {}
         self.history_windows: list[str] = []
 

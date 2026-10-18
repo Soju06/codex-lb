@@ -36,8 +36,7 @@
   back. Record the order here and in `context.md`:
   `narrow-input-image-upstream-transport-pin` is archived first (2026-10-16, as
   `openspec/changes/archive/2026-10-16-narrow-input-image-upstream-transport-pin`),
-  this change's requirement sync second. A PR-body note is proposed wording for
-  the maintainer; the fixing agent cannot edit PR bodies.
+  this change's requirement sync second.
 - [x] 3.2 On sync, replace the requirement in place in
   `openspec/specs/responses-api-compat/spec.md`. Do not append a dated
   correction. Move the stable part of `context.md` into the capability

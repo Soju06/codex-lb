@@ -28,10 +28,12 @@ import app.core.clients.http as http_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.native_egress import (
+    NativeEgressProtocolError,
     NativeEgressTransportError,
     NativeEgressUnavailable,
     NativeWebSocketMessage,
     NativeWebSocketRequest,
+    _websocket_error_from_event,
 )
 from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
 from app.core.clients.proxy_websocket import (
@@ -277,7 +279,9 @@ async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() ->
     assert message.kind == "close"
     assert message.close_code == 1011
     assert message.close_reason == "server restart"
+    assert message.close_frame_received is True
     assert message.error is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -292,6 +296,8 @@ async def test_direct_adapter_classifies_keepalive_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.close_frame_received is False
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -310,6 +316,8 @@ async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> 
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.close_frame_received is True
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -327,6 +335,60 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_marks_peer_close_as_transport_ended() -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            return NativeWebSocketMessage(kind="close", close_code=None, close_frame_received=True)
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "close"
+    assert message.close_code is None
+    assert message.close_frame_received is True
+    assert message.transport_ended is True
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_keeps_protocol_error_distinct_from_transport_end() -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise NativeEgressProtocolError("native websocket event is invalid")
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+    assert message.transport_ended is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["transport", "protocol"])
+async def test_native_error_event_retains_reset_vs_protocol_provenance(phase: str) -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise _websocket_error_from_event(
+                {
+                    "message": "native websocket failed",
+                    "failure_phase": phase,
+                    "retryable_same_contract": False,
+                    "is_tls_verification_failure": False,
+                    "status": None,
+                    "headers": [],
+                    "body": None,
+                }
+            )
+
+    message = await NativeUpstreamWebSocket(cast(Any, NativeConnection())).receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+    assert message.close_code is None
+    assert message.close_frame_received is False
+    assert message.transport_ended is (phase == "transport")
 
 
 @pytest.mark.asyncio
@@ -345,6 +407,7 @@ async def test_direct_adapter_does_not_trust_peer_keepalive_timeout_marker() -> 
 
     assert message.kind == "error"
     assert message.error_code is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -357,6 +420,7 @@ async def test_routed_adapter_classifies_heartbeat_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -376,6 +440,25 @@ async def test_routed_adapter_classifies_heartbeat_timeout_stored_between_receiv
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_type", "expected_close_frame_received"),
+    [(aiohttp.WSMsgType.CLOSE, True), (aiohttp.WSMsgType.CLOSED, False)],
+)
+async def test_routed_adapter_preserves_close_frame_provenance(
+    message_type: aiohttp.WSMsgType,
+    expected_close_frame_received: bool,
+) -> None:
+    class ClosedWebSocket(_FakeCodexWebSocket):
+        async def receive(self) -> aiohttp.WSMessage:
+            return aiohttp.WSMessage(message_type, None, None)
+
+    message = await CodexUpstreamWebSocket(ClosedWebSocket()).receive()
+
+    assert message.kind == "close"
+    assert message.close_frame_received is expected_close_frame_received
 
 
 @pytest.mark.asyncio
@@ -1473,6 +1556,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
     assert "proxy.local:8080" not in message.error
     assert message.error == "Codex upstream websocket receive failed via proxy endpoint ep_1: OSError"
     assert message.error_code is None
+    assert message.transport_ended is True
 
 
 @pytest.mark.asyncio
@@ -1486,6 +1570,18 @@ async def test_routed_websocket_error_message_defers_ordinary_code_to_relay(with
 
     assert message.kind == "error"
     assert message.error_code is None
+    assert message.transport_ended is True
+
+
+@pytest.mark.asyncio
+async def test_routed_websocket_protocol_error_remains_account_attributable() -> None:
+    websocket = CodexUpstreamWebSocket(_FakeCodexErrorWebSocket(aiohttp.WebSocketError(1002, "invalid frame")))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.close_code == 1002
+    assert message.transport_ended is False
 
 
 @pytest.mark.asyncio

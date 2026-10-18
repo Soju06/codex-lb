@@ -74,6 +74,7 @@ name = "openai"  # 必填 —— 启用远程 /responses/compact。自 Codex 202
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
+supports_standalone_web_search = true # 需要 codex-lb >= 1.22.0
 requires_openai_auth = true # codex 应用需要
 ```
 

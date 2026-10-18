@@ -28,7 +28,7 @@ def test_python_adapter_matches_shared_native_handshake_fixture() -> None:
 def test_linux_container_builds_and_installs_locked_native_egress(dockerfile_name: str) -> None:
     dockerfile = (_REPO_ROOT / dockerfile_name).read_text(encoding="utf-8")
 
-    assert "FROM rust:1.96.0-slim-bookworm AS native-egress-build" in dockerfile
+    assert "FROM rust:1.99.0-slim-bookworm AS native-egress-build" in dockerfile
     assert "COPY Cargo.toml Cargo.lock ./" in dockerfile
     assert "COPY crates ./crates" in dockerfile
     assert "cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress" in dockerfile
@@ -48,7 +48,7 @@ def test_native_egress_lockfile_pins_codex_release_family() -> None:
         ("reqwest", "0.12.28"),
         ("hyper", "1.8.1"),
         ("hyper-util", "0.1.20"),
-        ("rustls", "0.23.45"),
+        ("rustls", "0.23.46"),
         ("tokio-rustls", "0.26.4"),
         ("hyper-rustls", "0.27.7"),
         ("aws-lc-rs", "1.18.1"),

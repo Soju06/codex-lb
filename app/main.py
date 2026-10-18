@@ -721,7 +721,16 @@ async def lifespan(app: FastAPI):
         prometheus_module = import_module("prometheus_client")
         make_asgi_app = getattr(prometheus_module, "make_asgi_app")
         metrics_app = make_asgi_app(registry=scrape_registry)
-        config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
+        # log_config/log_level None: uvicorn applies both process-wide, and the
+        # stock config would replace the main server's handlers (including the
+        # log file) on uvicorn.* loggers and raise uvicorn.access to WARNING.
+        config = uvicorn.Config(
+            metrics_app,
+            host="0.0.0.0",
+            port=settings.metrics_port,
+            log_config=None,
+            log_level=None,
+        )
         metrics_server = SignalNeutralServer(config)
 
         async def _serve_metrics(srv: _MetricsServer) -> None:

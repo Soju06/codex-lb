@@ -1562,6 +1562,15 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "ngallodev",
+      "name": "ngallodev",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49315035?v=4",
+      "profile": "https://github.com/ngallodev",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

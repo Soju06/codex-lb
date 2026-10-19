@@ -27,6 +27,13 @@ Fast Mode, Ultrafast, and service-tier behavior is documented in the
 Four host commands act on the database directly to re-open local sign-in, reset a password, or turn a sign-in provider off — see
 [Company Sign-In and Recovery](sso.md#host-recovery-commands).
 
+**Forgot the password on Docker v1.24.0 with SQLite?** That release has no `admin reset-password` command. Download the
+[v1.24.0 recovery script](assets/recover-dashboard-password-1.24.sh) to the Docker host, inspect it, and run
+`bash recover-dashboard-password-1.24.sh` from an interactive terminal. It backs up the database before prompting
+for a new password and restarting the container. Existing dashboard sessions remain valid until they expire.
+The initial bootstrap token cannot reset an existing password. See the [admin-auth specification](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth)
+for the current authentication contract.
+
 ## After upgrading, old pods fail every settings read
 
 **Symptom.** The migration succeeded and the new pods are healthy, but pods still running the

@@ -179,7 +179,7 @@ async def test_manual_callback_service_sanitizes_unexpected_exception(monkeypatc
             )
         )
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     async def fake_exchange_authorization_code(**_kwargs):
@@ -1915,7 +1915,7 @@ async def test_browser_oauth_flow_completes_on_replica_that_did_not_start_it(mon
             id_token=_encode_jwt(payload),
         )
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
@@ -2270,7 +2270,7 @@ async def test_superseded_device_poller_does_not_persist_account(monkeypatch):
             ),
         )
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
@@ -2338,7 +2338,7 @@ async def test_concurrent_device_starts_leave_exactly_one_current_flow(monkeypat
     async def fake_exchange_device_token(**_):
         await asyncio.Event().wait()
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
@@ -2443,7 +2443,7 @@ async def test_entry_points_honor_durable_terminal_over_local_pending(monkeypatc
     async def fake_callback_server_start(self) -> None:
         return None
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     exchange_calls: list[str | None] = []
@@ -2539,7 +2539,7 @@ async def test_browser_callback_replay_on_origin_does_not_reexchange_consumed_co
     async def fake_callback_server_start(self) -> None:
         return None
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     exchange_calls: list[str | None] = []
@@ -2599,7 +2599,7 @@ async def test_overlapping_same_replica_device_starts_later_start_wins_slot_and_
     async def fake_exchange_device_token(**_):
         await asyncio.Event().wait()  # never completes; keep pollers pending
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
@@ -2666,7 +2666,7 @@ async def test_loser_device_poller_writes_no_terminal_during_winner_persist(monk
     later success is the durable outcome.
     """
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module, "_oauth_route", fake_oauth_route)
@@ -2735,7 +2735,7 @@ async def test_non_originating_complete_reports_durable_status_without_second_po
     async def fake_exchange_device_token(**_):
         await asyncio.Event().wait()
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
@@ -2794,7 +2794,7 @@ async def test_loser_browser_callback_honors_durable_success_not_error(monkeypat
     async def fake_callback_server_start(self) -> None:
         return None
 
-    async def fake_oauth_route():
+    async def fake_oauth_route(*, account_id=None):
         return None
 
     async def fake_exchange_authorization_code(**_kwargs):

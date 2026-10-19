@@ -43,6 +43,80 @@ from app.modules.oauth.service import OAuthError
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize(
+    ("target_id", "default_enabled", "expected_pool"),
+    [
+        ("bound", False, "bound_pool"),
+        ("bound", True, "bound_pool"),
+        ("direct", False, None),
+        ("direct", True, "default_pool"),
+    ],
+)
+async def test_targeted_oauth_uses_local_account_routing_policy(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    target_id: str,
+    default_enabled: bool,
+    expected_pool: str | None,
+) -> None:
+    @asynccontextmanager
+    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    monkeypatch.setattr(oauth_service_module, "get_background_session", fake_background_session)
+    encryptor = _encryptor()
+    async with session_factory() as session:
+        bound = _account(encryptor, "bound")
+        direct = _account(encryptor, "direct")
+        bound.chatgpt_account_id = direct.chatgpt_account_id = "shared-workspace"
+        await _pool_with_endpoints(session, encryptor, "bound_pool")
+        await _pool_with_endpoints(session, encryptor, "default_pool")
+        session.add_all(
+            [
+                bound,
+                direct,
+                AccountProxyBinding(id="target-binding", account=bound, pool_id="bound_pool"),
+                DashboardSettings(
+                    id=1,
+                    upstream_proxy_routing_enabled=default_enabled,
+                    upstream_proxy_default_pool_id="default_pool" if default_enabled else None,
+                ),
+            ]
+        )
+        await session.commit()
+
+    route = await oauth_service_module._oauth_route(account_id=target_id)
+
+    if expected_pool is None:
+        assert route is None
+    else:
+        assert route is not None
+        assert route.pool_id == expected_pool
+        assert route.mode == ("account_bound" if target_id == "bound" else "default_pool")
+
+
+async def test_targeted_oauth_rejects_unknown_account_before_resolving_route(
+    session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @asynccontextmanager
+    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+        async with session_factory() as session:
+            yield session
+
+    async def unexpected_resolve(*args, **kwargs):
+        raise AssertionError("Unknown account must fail before route resolution")
+
+    monkeypatch.setattr(oauth_service_module, "get_background_session", fake_background_session)
+    monkeypatch.setattr(oauth_service_module, "resolve_upstream_route", unexpected_resolve)
+
+    with pytest.raises(OAuthError) as exc_info:
+        await oauth_service_module._oauth_route(account_id="missing")
+
+    assert exc_info.value.code == "oauth_account_not_found"
+    assert exc_info.value.status_code == 404
+
+
 def _encryptor() -> TokenEncryptor:
     return TokenEncryptor(key=Fernet.generate_key())
 

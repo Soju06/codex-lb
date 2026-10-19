@@ -3,7 +3,9 @@
 ## Purpose
 
 Define outbound HTTP client behavior so upstream OAuth and API calls use stable headers, personas, and proxy handling.
+
 ## Requirements
+
 ### Requirement: OAuth authorize requests use a configurable originator persona
 Browser OAuth authorize requests MUST include an `originator` query parameter. The service MUST default that parameter to `codex_chatgpt_desktop` and MUST let operators override it through configuration when they need a different first-party Codex persona.
 
@@ -406,27 +408,51 @@ SHALL track the current public Codex CLI release.
 - **WHEN** its model refresh loop ticks
 - **THEN** the failure is logged, the cached or fallback version is kept, and the leader-gated refresh (or non-leader reconcile) still runs
 
-### Requirement: OAuth token exchange must use a proxy pool when active proxy bindings exist
+### Requirement: OAuth routing distinguishes targeted accounts from bootstrap flows
 
-When any active `AccountProxyBinding` records exist in the database, OAuth token exchange (authorization code exchange, device code request, and device token poll) MUST resolve a route from the configured default pool before opening a network connection. If no default pool can be resolved, the OAuth operation MUST fail closed with a descriptive error instead of silently falling back to direct egress. When no active proxy bindings exist, direct egress or environment proxy MAY be used as before.
+Targeted OAuth operations MUST resolve the intended local account's current route: its active binding, or normal default/direct policy if unbound. Unknown targets and unusable active bindings MUST fail before upstream I/O. Untargeted OAuth MUST retain bootstrap policy: when active account bindings exist, use the default pool or fail closed if unavailable.
+
+#### Scenario: Targeted bound account needs no default pool
+- **GIVEN** the intended local account has an active bound proxy pool and no global default exists
+- **WHEN** browser callback exchange, manual callback exchange, device-code initialization, or device-token polling is performed
+- **THEN** the operation MUST use the intended account's bound route
+- **AND** direct egress MUST be disabled for that operation
+
+#### Scenario: Targeted unbound account retains direct routing
+- **GIVEN** a targeted local account has no binding and global proxy routing is disabled
+- **AND** another local account has an active binding
+- **WHEN** the targeted account reauthenticates
+- **THEN** its server-side OAuth operations MAY use the existing direct route
+- **AND** MUST NOT use the other account's proxy
+
+#### Scenario: Bound route failure prevents token exchange
+- **GIVEN** the targeted account's bound pool is inactive or has no active endpoint
+- **WHEN** a server-side OAuth operation is attempted
+- **THEN** no token exchange or device request MUST be dispatched
+
+#### Scenario: Unknown target fails before network I/O
+- **GIVEN** the intended local account does not exist
+- **WHEN** a server-side OAuth operation is attempted
+- **THEN** it MUST fail before upstream I/O
 
 #### Scenario: OAuth fails closed when bindings exist but no default pool is configured
-- **GIVEN** one or more active `AccountProxyBinding` records exist
+- **GIVEN** an OAuth flow has no intended local account and active account bindings exist
 - **AND** no default pool is configured
-- **WHEN** the OAuth token exchange is attempted
-- **THEN** the operation MUST fail before opening any network connection
+- **WHEN** a server-side OAuth operation is attempted
+- **THEN** it MUST fail before upstream I/O
 - **AND** the error MUST indicate that no upstream proxy route is available
 
 #### Scenario: OAuth uses default pool when bindings exist and pool is configured
-- **GIVEN** one or more active `AccountProxyBinding` records exist
+- **GIVEN** an OAuth flow has no intended local account and active account bindings exist
 - **AND** a default pool is configured with an active endpoint
-- **WHEN** the OAuth token exchange is attempted
+- **WHEN** a server-side OAuth operation is attempted
 - **THEN** the request MUST go through the default pool's endpoint
 
 #### Scenario: OAuth preserves direct egress when no proxy bindings exist
-- **GIVEN** no active `AccountProxyBinding` records exist in the database
-- **WHEN** the OAuth token exchange is attempted
-- **THEN** the request MAY use direct egress or environment proxy as before
+- **GIVEN** an OAuth flow has no intended local account
+- **AND** no active account proxy bindings exist and global proxy routing is disabled
+- **WHEN** a server-side OAuth operation is attempted
+- **THEN** the request MAY use direct egress or an environment proxy as before
 
 ### Requirement: Token refresh must fail closed when account binding exists but route is unavailable
 

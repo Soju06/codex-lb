@@ -309,6 +309,11 @@ async def probe_account(
             f"Probe could not refresh account credentials: {exc.message}",
             code="account_probe_refresh_failed",
         ) from exc
+    except UpstreamProxyRouteError as exc:
+        raise DashboardUpstreamError(
+            f"Unable to resolve upstream proxy route for account probe: {exc.reason}",
+            code="upstream_proxy_unavailable",
+        ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     probe_succeeded = 200 <= result.probe_status_code < 300

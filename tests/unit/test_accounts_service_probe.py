@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -9,12 +10,69 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.core.crypto import TokenEncryptor
+from app.core.upstream_proxy.types import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountNotProbableError, AccountsService
 from app.modules.usage.updater import AccountRefreshResult
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("cancel_during", ["request", "response_release", "client_close"])
+async def test_routed_probe_finishes_cleanup_before_propagating_cancellation(monkeypatch, cancel_during):
+    service = _build_service(_make_account())
+    entered = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    released = []
+    closed = []
+
+    async def release_response():
+        if cancel_during == "response_release":
+            entered.set()
+            await finish_cleanup.wait()
+        released.append(True)
+
+    async def request(*args, **kwargs):
+        if cancel_during == "request":
+            entered.set()
+            await asyncio.Event().wait()
+        return SimpleNamespace(status=200, aclose=release_response)
+
+    async def close_client():
+        if cancel_during == "client_close":
+            entered.set()
+            await finish_cleanup.wait()
+        closed.append(True)
+
+    client = SimpleNamespace(request=request, close=close_client)
+    monkeypatch.setattr("app.modules.accounts.service.CodexClient", lambda session: client)
+    monkeypatch.setattr("app.modules.accounts.service.create_codex_session", lambda: object())
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="test-pool",
+        endpoint=ResolvedProxyEndpoint(
+            id="test-endpoint", scheme="http", host="proxy.example.test", port=8080, username=None, password=None
+        ),
+    )
+    task = asyncio.create_task(
+        service._send_probe_request(
+            access_token="synthetic-access", chatgpt_account_id="test-workspace", model="gpt-5.4-mini", route=route
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    task.cancel()
+    if cancel_during != "request":
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finish_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert closed == [True]
+    assert released == ([] if cancel_during == "request" else [True])
 
 
 _ACCOUNT_ID = "acc_test"

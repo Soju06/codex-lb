@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-16T12:10:23.860021+00:00",
+  "updated_at": "2026-10-20T11:52:03.866852+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -792,7 +792,7 @@
       "priority_cached_input_per_1m": 0.5,
       "flex_input_per_1m": 0.55,
       "flex_output_per_1m": 2.2,
-      "flex_cached_input_per_1m": 0.138
+      "flex_cached_input_per_1m": 0.1375
     },
     "o4-mini-2025-04-16": {
       "input_per_1m": 1.1,

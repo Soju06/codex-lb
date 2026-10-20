@@ -28,8 +28,22 @@ name = "openai"  # required — enables remote /responses/compact. Lowercase sin
 base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 supports_websockets = true
+supports_standalone_web_search = true # requires codex-lb >= 1.22.0
 requires_openai_auth = true # required for codex app
 ```
+
+### Native web search
+
+`supports_standalone_web_search = true` declares that the custom provider supports
+Codex's standalone search endpoint; it requires codex-lb >= 1.22.0.
+Custom providers default this capability to `false`, so `--search` alone may not
+make native search available. Use `codex --search` for live search in one session,
+or set `web_search = "live"` at the top level of `config.toml` for a persistent
+preference. This provider capability is separate from the experimental
+`[features].standalone_web_search` flag; enabling that feature flag is not part
+of this setup. The Codex version and selected model must also support standalone
+search. See [OpenAI's web-search documentation](https://learn.chatgpt.com/docs/web-search)
+and the [standalone search proxy specification](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/spec.md#requirement-standalone-codex-web-search-is-forwarded-faithfully).
 
 ### Opting into the 872k context window
 
@@ -173,6 +187,7 @@ base_url = "http://127.0.0.1:2455/backend-api/codex"
 wire_api = "responses"
 env_key = "CODEX_LB_API_KEY"
 supports_websockets = true
+supports_standalone_web_search = true # requires codex-lb >= 1.22.0
 requires_openai_auth = true # required for codex app
 ```
 

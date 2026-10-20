@@ -6,14 +6,14 @@ import contextlib
 import json
 import re
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from fastapi.responses import JSONResponse
 from sqlalchemy import exc as sqlalchemy_exc
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
@@ -4053,6 +4053,78 @@ async def test_reset_expired_limits_background_fallback_processes_batches(async_
         assert by_window[LimitWindow.WEEKLY].reset_at == now + timedelta(days=7)
         assert by_window[LimitWindow.MONTHLY].current_value == 0
         assert by_window[LimitWindow.MONTHLY].reset_at == now + timedelta(days=30)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", [1, 2])
+async def test_reset_expired_limits_skips_legacy_sqlite_timestamps(async_client, monkeypatch, batch_size):
+    monkeypatch.setattr(api_keys_repository_module, "_EXPIRED_LIMIT_RESET_BATCH_SIZE", batch_size)
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "legacy-timestamp-reset",
+            "allowedModels": [],
+            "limits": [
+                {"limitType": limit_type, "limitWindow": "daily", "maxValue": 1000}
+                for limit_type in ("total_tokens", "input_tokens", "output_tokens", "cost_usd", "credits")
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    now = datetime(2026, 10, 19)
+    expired_at = datetime(2026, 9, 19, 10, 30, 18)
+    future_reset_at = now + timedelta(days=1)
+
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "sqlite":
+            pytest.skip("Second-precision DateTime text comparison is SQLite-specific")
+        repo = ApiKeysRepository(session)
+        limits = sorted(await repo.get_limits_by_key(key_id), key=lambda limit: limit.id)
+        assert len(limits) == 5
+        skipped_ids = [limit.id for limit in limits[:2]]
+        resettable_ids = [limit.id for limit in limits[2:4]]
+        future_id = limits[4].id
+        for limit in limits:
+            limit.current_value = 42
+            limit.reset_at = future_reset_at if limit.id == future_id else expired_at
+        await session.commit()
+        # Bypass SQLAlchemy's datetime binder to reproduce legacy SQLite text.
+        for limit_id in skipped_ids:
+            await session.execute(
+                text("UPDATE api_key_limits SET reset_at = :reset_at WHERE id = :id"),
+                {"reset_at": "2026-09-19 10:30:18", "id": limit_id},
+            )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        select_count = 0
+        expected_selects = 4 // batch_size + 1
+        execute = session.execute
+
+        async def bounded_execute(statement, *args, **kwargs):
+            nonlocal select_count
+            if statement.is_select:
+                select_count += 1
+                assert select_count <= expected_selects, "Expired-limit sweep reselected guarded misses"
+            return await execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", bounded_execute)
+        reset_count = await ApiKeysRepository(session).reset_expired_limits(now=now)
+        assert reset_count == 2
+        assert select_count == expected_selects
+
+    async with SessionLocal() as session:
+        limits = {limit.id: limit for limit in await ApiKeysRepository(session).get_limits_by_key(key_id)}
+        for limit_id in skipped_ids:
+            assert limits[limit_id].current_value == 42
+            assert limits[limit_id].reset_at == expired_at
+        for limit_id in resettable_ids:
+            assert limits[limit_id].current_value == 0
+            assert limits[limit_id].reset_at == datetime(2026, 10, 19, 10, 30, 18)
+        assert limits[future_id].current_value == 42
+        assert limits[future_id].reset_at == future_reset_at
 
 
 @pytest.mark.asyncio

@@ -7,4 +7,4 @@
 - [x] Add migration, lifecycle, permissions, report and frontend regressions in a separate test commit.
 - [x] Validate OpenSpec, static checks and affected backend/frontend consumers.
 - [x] Measure matched before/after browser navigation to complete rendered Dashboard and Reports.
-- [ ] Review public diff and publish a focused upstream PR.
+- [x] Review public diff and publish a focused upstream PR (#2659).

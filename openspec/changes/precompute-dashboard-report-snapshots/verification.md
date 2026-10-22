@@ -20,7 +20,8 @@ English locale, and a 1440 × 1000 viewport.
 
 The first-navigation median decreases by 24.3% for Dashboard and 9.2% for
 Reports. Repeat Reports is 0.9% slower in this run; there is no repeat-load
-speedup claim for that page. Its chart/render time still dominates this fixture.
+speedup claim for that page. The fixed scrolling and render-stability waits
+limit how much this small-workload comparison can show.
 
 ### Startup cost is separate
 

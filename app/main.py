@@ -126,6 +126,7 @@ from app.modules.proxy.ring_membership import (
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
 from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits_api
+from app.modules.read_snapshots.scheduler import build_read_snapshot_scheduler
 from app.modules.reports import api as reports_api
 from app.modules.reports.cache import ReportsCaches
 from app.modules.request_logs import api as request_logs_api
@@ -212,7 +213,7 @@ def _log_abandoned_lease_release(task: asyncio.Task[bool]) -> None:
         logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
 
 
-async def _release_leader_lease_within(timeout: float) -> bool:
+async def _release_leader_lease_within(timeout: float, release: Awaitable[bool] | None = None) -> bool:
     """Release the scheduler leader lease without ever pinning shutdown.
 
     ``release()`` uses a background DB session whose rollback/close shield and
@@ -223,7 +224,9 @@ async def _release_leader_lease_within(timeout: float) -> bool:
     outcome from a done callback) so shutdown always proceeds within the
     deadline; the lease then expires after its TTL, which is acceptable.
     """
-    release_task: asyncio.Task[bool] = asyncio.ensure_future(get_leader_election().release())
+    release_task: asyncio.Task[bool] = asyncio.ensure_future(
+        get_leader_election().release() if release is None else release
+    )
     done, _ = await asyncio.wait({release_task}, timeout=timeout)
     if release_task not in done:
         logger.warning(
@@ -691,6 +694,7 @@ async def lifespan(app: FastAPI):
     automations_scheduler = build_automations_scheduler()
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
+    read_snapshot_scheduler = build_read_snapshot_scheduler()
     account_deletion_scheduler = build_account_deletion_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     telemetry_scheduler = build_telemetry_scheduler()
@@ -709,6 +713,7 @@ async def lifespan(app: FastAPI):
     await automations_scheduler.start()
     await rate_limit_reset_credits_scheduler.start()
     await account_usage_rollup_scheduler.start()
+    await read_snapshot_scheduler.start()
     await account_deletion_scheduler.start()
     await data_retention_scheduler.start()
     await telemetry_scheduler.start()
@@ -917,6 +922,7 @@ async def lifespan(app: FastAPI):
         # and is stopped by release(), which then owns renewal for its bounded
         # drain. It is a no-op when leader election is disabled.
         get_leader_election().start_release_keeper()
+        snapshot_lease_release_completed = await _release_leader_lease_within(10, read_snapshot_scheduler.stop())
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
@@ -955,6 +961,7 @@ async def lifespan(app: FastAPI):
         # enforced by abandoning the release task rather than awaiting a
         # potentially wedged cancellation, so shutdown always proceeds.
         leader_lease_release_completed = await _release_leader_lease_within(10)
+        leader_lease_release_completed = leader_lease_release_completed and snapshot_lease_release_completed
         try:
             try:
                 await close_discovered_native_egress_client()

@@ -18,6 +18,7 @@ from app.modules.dashboard.schemas import (
 )
 from app.modules.model_sources.catalog import source_models_to_upstream_models
 from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.read_snapshots.service import SnapshotReader
 
 router = APIRouter(
     prefix="/api",
@@ -33,13 +34,16 @@ router = APIRouter(
 )
 async def get_overview(
     timeframe: DashboardOverviewTimeframeKey = Query("7d"),
+    timezone_hint: str | None = Query(None, alias="timezone", max_length=100),
     principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardOverviewResponse:
-    return await context.service.get_overview(
-        timeframe,
+    payload = await SnapshotReader(context.session).dashboard(
+        timeframe=timeframe,
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+        timezone_hint=timezone_hint,
     )
+    return DashboardOverviewResponse.model_validate(payload)
 
 
 @router.get(
@@ -50,7 +54,8 @@ async def get_overview(
 async def get_projections(
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardProjectionsResponse:
-    return await context.service.get_projections()
+    payload = await SnapshotReader(context.session).dashboard(timeframe=None)
+    return DashboardProjectionsResponse.model_validate(payload)
 
 
 @router.get("/models", dependencies=[Depends(require_dashboard_permission(Permission.DASHBOARD_READ))])

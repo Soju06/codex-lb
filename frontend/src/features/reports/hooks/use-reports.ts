@@ -1,3 +1,4 @@
+import { isSnapshotWarming } from "@/schemas/read-snapshot";
 import { useQuery } from "@tanstack/react-query";
 import { getReports, getReportsOptions, getThreadIdentity } from "../api";
 import { isReportDateRangeValid } from "../date";
@@ -32,7 +33,8 @@ export function useReports(
         timezone: timeZone,
       }),
     staleTime: 5 * 60_000,
-    refetchInterval: false,
+    refetchInterval: (query) => isSnapshotWarming(query.state.error) ? 2_000 : 60_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -51,7 +53,8 @@ export function useReportsOptions(filters: ReportsFilterState, timeZone: string 
     enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
     queryFn: () => getReportsOptions(scope),
     staleTime: 5 * 60_000,
-    refetchInterval: false,
+    refetchInterval: (query) => isSnapshotWarming(query.state.error) ? 2_000 : 60_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -76,7 +79,8 @@ export function useThreadIdentity(
     queryKey: ["reports-thread-identity", scope],
     queryFn: () => getThreadIdentity(scope),
     staleTime: THREAD_IDENTITY_STALE_TIME_MS,
-    refetchInterval: false,
+    refetchInterval: (query) => isSnapshotWarming(query.state.error) ? 2_000 : 60_000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: false,
     retry: false,
   });

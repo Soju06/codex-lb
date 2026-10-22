@@ -90,8 +90,8 @@ def _validate_existing(inspector: sa.Inspector, columns: list[sa.Column]) -> boo
 
 
 def upgrade() -> None:
-    # Interrupted DDL may leave a process loss after CREATE TABLE or
-    # CREATE INDEX but before Alembic's revision write must be retryable.
+    # Retry interrupted DDL after CREATE TABLE or CREATE INDEX, including a
+    # process loss before Alembic writes its revision.
     columns = _columns()
     inspector = sa.inspect(op.get_bind())
     index_exists = False

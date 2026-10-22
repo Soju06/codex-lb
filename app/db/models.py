@@ -735,9 +735,7 @@ class ReadSnapshot(Base):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
-    payload_json: Mapped[str | None] = mapped_column(
-        Text(), nullable=True
-    )
+    payload_json: Mapped[str | None] = mapped_column(Text(), nullable=True)
     generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     published_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

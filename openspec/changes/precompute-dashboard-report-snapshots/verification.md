@@ -61,8 +61,11 @@ registered timezones can still return a warming response and require a retry.
 - Imported application `utcnow` functions use one fixed evaluation instant for
   both arms. Monotonic performance clocks, HTTP, SQL, and rendering remain real.
   This keeps moving-window totals comparable while avoiding live provider calls.
-- Dashboard and Reports summary payloads match exactly across all 20 matched
-  page pairs. The benchmark does not test every filter, timezone, or database.
+- Page-specific business-summary parity is being rechecked. The initial recorder
+  could let a Dashboard prefetch overwrite the Reports summary. Completion
+  timing still waited for the required routes, but the earlier claim of 20
+  matched page-summary pairs is withdrawn until route-specific capture passes.
+  The corrected recorder binds each summary to the page being measured.
 
 ## Completion boundary
 

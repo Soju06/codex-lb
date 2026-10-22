@@ -39,8 +39,8 @@ try {
       try {
         if (!response.ok()) failures.push(`${pathname}: HTTP ${response.status()}`);
         const payload = await response.json();
-        if (pathname === "/api/dashboard/overview") business.summary = payload.summary;
-        if (pathname === "/api/reports") business.summary = payload.summary;
+        if (name === "dashboard" && pathname === "/api/dashboard/overview") business.summary = payload.summary;
+        if (name === "reports" && pathname === "/api/reports") business.summary = payload.summary;
         completed.add(pathname);
       } catch (error) {
         failures.push(`${pathname}: ${String(error)}`);

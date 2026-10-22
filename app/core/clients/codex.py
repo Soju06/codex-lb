@@ -249,8 +249,11 @@ class CodexClient:
         if native_sse is not None and buffer_response:
             raise ValueError("Native SSE framing requires buffer_response=False")
         _reject_reserved(kwargs)
-        native_request = _prepare_native_request(url, kwargs)
-        aiohttp_kwargs = dict(kwargs)
+        request_kwargs = dict(kwargs)
+        if native_sse is not None:
+            request_kwargs["headers"] = _normalize_stream_response_encoding(request_kwargs.get("headers"))
+        native_request = _prepare_native_request(url, request_kwargs)
+        aiohttp_kwargs = dict(request_kwargs)
         _normalize_aiohttp_request_kwargs(aiohttp_kwargs)
         endpoints = (route.endpoint, *route.fallbacks)
         _reject_credentialed_plaintext_target(url, endpoints)
@@ -660,6 +663,23 @@ def _prepare_native_request(
         connect_timeout_seconds=connect_timeout_seconds,
         response_head_timeout_seconds=response_head_timeout_seconds,
     )
+
+
+def _normalize_stream_response_encoding(headers: Any) -> Any:
+    if not isinstance(headers, Mapping):
+        return headers
+    normalized: dict[Any, Any] = {}
+    replaced = False
+    for name, value in headers.items():
+        if str(name).lower() == "accept-encoding":
+            if not replaced:
+                normalized[name] = "identity"
+                replaced = True
+            continue
+        normalized[name] = value
+    if not replaced:
+        normalized["Accept-Encoding"] = "identity"
+    return normalized
 
 
 def _native_timeout_parts(value: Any) -> tuple[float | None, float | None, float | None] | None:

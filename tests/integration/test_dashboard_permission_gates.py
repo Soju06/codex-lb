@@ -26,6 +26,7 @@ from app.core.auth.dashboard_access import (
     legacy_permissions,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -221,6 +222,7 @@ async def test_admin_preset_is_unaffected(
     _use_principal(app_instance, monkeypatch, admin_principal(auth_mode=DashboardAuthMode.STANDARD))
 
     assert (await async_client.get("/api/audit-logs")).status_code == 200
+    await prepare_read_snapshot("/api/dashboard/overview")
     assert (await async_client.get("/api/dashboard/overview")).status_code == 200
     assert (await async_client.put("/api/settings", json={"stickyThreadsEnabled": True})).status_code == 200
     assert (await async_client.post("/api/accounts/missing/export/auth")).status_code == 404
@@ -274,6 +276,7 @@ async def test_guest_reads_masked_account_identity(
     assert "alice" not in listing.text
     assert "chatgpt-account-123" not in listing.text
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     overview = await async_client.get("/api/dashboard/overview")
     assert overview.status_code == 200, overview.text
     assert "alice" not in overview.text
@@ -440,6 +443,7 @@ async def test_guest_cannot_read_inventory_and_topology_surfaces(
         _assert_permission_required(await async_client.get(path), permission)
 
     # Guest-safe aggregate reads keep working.
+    await prepare_read_snapshot("/api/reports")
     for path in ("/api/usage/summary", "/api/reports", "/api/request-logs", "/api/models"):
         response = await async_client.get(path)
         assert response.status_code == 200, (path, response.text)

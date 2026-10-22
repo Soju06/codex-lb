@@ -7,6 +7,7 @@ import pytest
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -62,6 +63,13 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": start_at.date().isoformat(),
+            "end_date": start_at.date().isoformat(),
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -185,6 +193,7 @@ async def test_reports_api_aggregates_reasoning_tokens_for_unfiltered_window(asy
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-03"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
@@ -274,6 +283,16 @@ async def test_reports_api_reasoning_tokens_honor_filters_without_double_countin
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "account_id": "acc_reports_reasoning_filter",
+            "model": "gpt-5.1",
+            "useragent_group": "opencode",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -348,6 +367,16 @@ async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_c
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-02",
+            "account_id": "acc_reports_conversations",
+            "model": "gpt-5.1",
+            "useragent_group": "opencode",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -369,6 +398,13 @@ async def test_reports_api_returns_distinct_nonblank_conversation_counts(async_c
 
 
 async def test_reports_api_rejects_oversized_date_ranges(async_client, db_setup):
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2024-01-01",
+            "end_date": "2026-01-01",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -381,6 +417,12 @@ async def test_reports_api_rejects_oversized_date_ranges(async_client, db_setup)
 
 
 async def test_reports_api_rejects_oversized_date_ranges_with_default_end_date(async_client, db_setup):
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2020-01-01",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -413,9 +455,13 @@ async def test_reports_api_rejects_inverted_range_and_preserves_valid_one_day(
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-07", "end_date": "2026-06-01"})
     inverted_response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-07", "end_date": "2026-06-01"},
+    )
+    await prepare_read_snapshot(
+        "/api/reports", params={"start_date": report_day.isoformat(), "end_date": report_day.isoformat()}
     )
     valid_response = await async_client.get(
         "/api/reports",
@@ -441,6 +487,9 @@ async def test_reports_api_accepts_inclusive_730_day_range(async_client, db_setu
     end_date = date(2026, 1, 1)
     start_date = end_date - timedelta(days=729)
 
+    await prepare_read_snapshot(
+        "/api/reports", params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+    )
     response = await async_client.get(
         "/api/reports",
         params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
@@ -469,6 +518,13 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": start_at.date().isoformat(),
+            "end_date": start_at.date().isoformat(),
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -545,6 +601,7 @@ async def test_reports_api_includes_end_date_until_next_midnight(async_client, d
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-01"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
@@ -614,6 +671,14 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "timezone": "America/Los_Angeles",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -681,6 +746,14 @@ async def test_reports_api_falls_back_to_utc_for_invalid_timezone(async_client, 
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "timezone": "Mars/Olympus_Mons",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -731,6 +804,14 @@ async def test_reports_api_falls_back_to_utc_for_malformed_timezone(async_client
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "timezone": "../etc/passwd",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -803,6 +884,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days(async_cli
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports")
     response = await async_client.get("/api/reports")
     assert response.status_code == 200
 
@@ -870,6 +952,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"timezone": "America/Los_Angeles"})
     response = await async_client.get(
         "/api/reports",
         params={"timezone": "America/Los_Angeles"},
@@ -973,6 +1056,14 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-03-08",
+            "end_date": "2026-03-08",
+            "timezone": "America/New_York",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1038,6 +1129,14 @@ async def test_reports_api_returns_previous_window_comparison_for_complete_histo
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-05",
+            "end_date": "2026-06-12",
+            "timezone": "UTC",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1090,6 +1189,14 @@ async def test_reports_api_suppresses_comparison_when_previous_window_is_incompl
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-05",
+            "end_date": "2026-06-12",
+            "timezone": "UTC",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1142,6 +1249,14 @@ async def test_reports_api_comparison_uses_requested_timezone_boundaries(async_c
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-05",
+            "end_date": "2026-06-12",
+            "timezone": "Asia/Hong_Kong",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1221,6 +1336,16 @@ async def test_reports_api_comparison_completeness_honors_active_filters(async_c
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-05",
+            "end_date": "2026-06-12",
+            "timezone": "UTC",
+            "account_id": "acc_reports_compare_filters",
+            "model": "gpt-5.1",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1287,6 +1412,16 @@ async def test_reports_api_comparison_ignores_warmup_traffic_for_coverage(async_
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-05",
+            "end_date": "2026-06-12",
+            "timezone": "UTC",
+            "account_id": "acc_reports_compare_warmup",
+            "model": "gpt-5.1",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1370,6 +1505,7 @@ async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-01"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
@@ -1439,6 +1575,15 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "account_id": "acc_reports_filter_a",
+            "model": "gpt-5.1",
+        },
+    )
     response = await async_client.get(
         "/api/reports",
         params={
@@ -1496,6 +1641,7 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-01"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
@@ -1554,6 +1700,7 @@ async def test_reports_api_summary_counts_range_accounts_and_calendar_days(async
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-03"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
@@ -1636,6 +1783,7 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-01"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-01"},
@@ -1650,6 +1798,14 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7},
     ]
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "opencode",
+        },
+    )
     filtered_response = await async_client.get(
         "/api/reports",
         params={
@@ -1668,6 +1824,14 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
     ]
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Unknown",
+        },
+    )
     unknown_filtered_response = await async_client.get(
         "/api/reports",
         params={
@@ -1688,6 +1852,14 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
         {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
     ]
 
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "useragent_group": "Missing User-Agent",
+        },
+    )
     missing_useragent_filtered_response = await async_client.get(
         "/api/reports",
         params={
@@ -1751,6 +1923,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/reports", params={"start_date": "2026-06-01", "end_date": "2026-06-03"})
     response = await async_client.get(
         "/api/reports",
         params={"start_date": "2026-06-01", "end_date": "2026-06-03"},
@@ -1847,6 +2020,14 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
         await session.commit()
 
     # Test filtering by single key-1
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1"],
+        },
+    )
     response1 = await async_client.get(
         "/api/reports",
         params={
@@ -1863,6 +2044,14 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     assert payload1["byAccount"][0]["requests"] == 1
 
     # Test filtering by multiple keys (key-1 and key-2)
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1", "key-2"],
+        },
+    )
     response2 = await async_client.get(
         "/api/reports",
         params={
@@ -1877,6 +2066,14 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     assert payload2["summary"]["totalCostUsd"] == 1.50
 
     # Test filtering by non-matching key returns 0 metrics
+    await prepare_read_snapshot(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["nonexistent-key"],
+        },
+    )
     response3 = await async_client.get(
         "/api/reports",
         params={

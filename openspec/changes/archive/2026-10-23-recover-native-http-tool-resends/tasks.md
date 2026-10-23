@@ -11,6 +11,6 @@
 
 ## 3. Verify and document
 
-- [ ] 3.1 Run focused regressions, lint and typing plus the full local gate; record actual limitations.
-- [ ] 3.2 Independently review the final diff and address actionable findings.
-- [ ] 3.3 Synchronize and validate requirements/context, then verify and archive the change.
+- [x] 3.1 Run focused regressions, lint and typing plus the full local gate; record actual limitations.
+- [x] 3.2 Independently review the final diff and address actionable findings.
+- [x] 3.3 Synchronize and validate requirements/context, then verify and archive the change.

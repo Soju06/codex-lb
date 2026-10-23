@@ -274,6 +274,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.request_policy import client_reasoning_effort_for_log
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 logger = logging.getLogger("app.modules.proxy.service")
@@ -1201,7 +1202,7 @@ class _HTTPBridgeStreamingMixin:
                             start=bridge_attempt_started_at,
                             error_code=bridge_error_code,
                             error_message=bridge_error_message or "Continuity owner account is unavailable",
-                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            reasoning_effort=client_reasoning_effort_for_log(payload),
                             service_tier=payload.service_tier,
                             useragent=useragent,
                             useragent_group=useragent_group,

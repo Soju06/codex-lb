@@ -152,14 +152,48 @@ def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | N
     )
 
 
+def _client_configuration_update_effort(input_value: JsonValue | None) -> str | None:
+    """Return the effort from the last ``configuration_update`` input item.
+
+    Mid-conversation effort changes arrive as ``configuration_update`` input
+    items while the request-level ``reasoning.effort`` stays stable so the
+    prompt prefix remains cacheable (OpenAI reasoning guide, "Change
+    reasoning mid-conversation"). An update applies from its position
+    onward, so the last one in the input is the client's effective
+    selection.
+    """
+    if not is_json_list(input_value):
+        return None
+    effort: str | None = None
+    for item in input_value:
+        if not is_json_mapping(item) or item.get("type") != "configuration_update":
+            continue
+        item_reasoning = item.get("reasoning")
+        if not is_json_mapping(item_reasoning):
+            continue
+        item_effort = item_reasoning.get("effort")
+        if isinstance(item_effort, str) and item_effort.strip():
+            effort = item_effort.strip().lower()
+    return effort
+
+
 def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
     """Return the effort selected by the client before wire normalization.
+
+    A ``configuration_update`` input item is the client's most recent
+    selection and outranks everything on the request itself: the upstream
+    keeps the request-level ``reasoning.effort`` stable while an update
+    overrides the effort from its position onward.
 
     Cursor encodes its effort in an accepted model alias, where ``xhigh`` is
     later lowered to the upstream's ``high`` value. API-key policies are an
     operator-facing client-plane control, so they must compare against the
     original selection rather than that wire representation.
     """
+    update_effort = _client_configuration_update_effort(payload.input)
+    if update_effort is not None:
+        return update_effort
+
     model_effort = _client_reasoning_effort_from_model(payload.model)
     if model_effort is not None:
         return model_effort
@@ -189,6 +223,29 @@ def _client_reasoning_effort_from_provider_aliases(
                 return extra_effort.strip().lower()
 
     return None
+
+
+def client_reasoning_effort_for_log(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return the effective client effort for observability consumers.
+
+    ``payload._codex_lb_client_reasoning_effort`` carries the configured
+    selection for policy and source decisions, while the request-level
+    ``reasoning.effort`` stays at the value the client sent at conversation
+    start. An item-driven selection is reported in wire form; every other
+    request reports the request-level field, which already holds the value
+    sent upstream (alias materialization, enforcement and the
+    unsupported-effort fallback all land there).
+    """
+    update_effort = payload._codex_lb_configuration_update_effort
+    if update_effort is None:
+        return payload.reasoning.effort if payload.reasoning else None
+    normalized_effort = update_effort.strip().lower()
+    wire_effort = resolve_wire_reasoning_effort(normalized_effort)
+    if wire_effort != normalized_effort:
+        return wire_effort
+    if normalized_effort in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
+        return _DEFAULT_REASONING_EFFORT_FALLBACK
+    return normalized_effort
 
 
 def _materialize_provider_reasoning_effort(
@@ -280,6 +337,8 @@ def apply_api_key_enforcement(
     """
     client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
     payload._codex_lb_client_reasoning_effort = client_reasoning_effort
+    update_effort = _client_configuration_update_effort(payload.input)
+    payload._codex_lb_configuration_update_effort = update_effort
     provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)
     normalize_upstream_model_alias(payload)
 
@@ -319,11 +378,30 @@ def apply_api_key_enforcement(
             )
 
     if api_key.enforced_reasoning_effort is not None:
+        enforced_effort = api_key.enforced_reasoning_effort.strip().lower()
+        # Update items stay verbatim on the wire, so an item that selects a
+        # different effort would still apply upstream after enforcement. Fail
+        # closed instead of reporting an enforced value the backend overrides.
+        if update_effort is not None and update_effort != enforced_effort:
+            logger.info(
+                "api_key_reasoning_conflicts_with_update request_id=%s key_id=%s update_effort=%s enforced_effort=%s",
+                get_request_id(),
+                api_key.id,
+                update_effort,
+                enforced_effort,
+            )
+            raise ProxyReasoningEffortNotAllowed(
+                f"This API key enforces reasoning effort '{enforced_effort}'; "
+                f"the configuration update asks for '{update_effort}'",
+                param="reasoning.effort",
+            )
         requested_effort = payload.reasoning.effort if payload.reasoning else None
         if payload.reasoning is None:
             payload.reasoning = ResponsesReasoning(effort=api_key.enforced_reasoning_effort)
         else:
             payload.reasoning.effort = api_key.enforced_reasoning_effort
+        client_reasoning_effort = api_key.enforced_reasoning_effort
+        payload._codex_lb_client_reasoning_effort = client_reasoning_effort
         if requested_effort != api_key.enforced_reasoning_effort:
             logger.info(
                 "api_key_reasoning_enforced request_id=%s key_id=%s requested_effort=%s enforced_effort=%s",

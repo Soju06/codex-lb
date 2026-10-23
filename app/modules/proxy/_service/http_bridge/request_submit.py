@@ -245,6 +245,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
 )
 from app.modules.proxy.load_balancer import effective_account_concurrency_caps, effective_routing_tunables
+from app.modules.proxy.request_policy import client_reasoning_effort_for_log
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -812,7 +813,7 @@ class _HTTPBridgeRequestSubmitMixin:
             archive_request_id=request_log_id or resolved_request_id,
             model=payload.model,
             service_tier=forwarded_service_tier,
-            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+            reasoning_effort=client_reasoning_effort_for_log(payload),
             api_key_reservation=api_key_reservation,
             started_at=clock_for(self).monotonic(),
             thread_affinity_last_touch_at=clock_for(self).monotonic(),

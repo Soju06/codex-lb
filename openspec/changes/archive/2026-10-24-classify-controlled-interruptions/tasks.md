@@ -6,4 +6,4 @@
 ## 2. Verification
 
 - [x] 2.1 Cover the WebSocket route, bridge settlement, and dashboard API with regressions.
-- [ ] 2.2 Run focused checks, verify and archive the OpenSpec change.
+- [x] 2.2 Run focused checks, verify and archive the OpenSpec change.

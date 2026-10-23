@@ -17,6 +17,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.core.usage.logs import (
     CANCELLED_STATUS,
     CLIENT_DISCONNECT_ERROR_CODE,
+    CONTROLLED_INTERRUPTION_ERROR_CODE,
     NON_ERROR_STATUSES,
     RequestLogLike,
     calculated_cost_from_log,
@@ -1313,7 +1314,14 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        if search is None and not error_codes_in and not error_codes_excluding:
+        if (
+            search is None
+            and not error_codes_in
+            and not error_codes_excluding
+            # Legacy interrupted rows were stored as errors. Demand rollups
+            # lack the error-code grain needed to split them from errors.
+            and include_cancelled == include_error_other
+        ):
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1698,11 +1706,25 @@ class RequestLogsRepository:
         if include_success:
             status_conditions.append(RequestLog.status == "success")
         if include_cancelled:
-            status_conditions.append(RequestLog.status == CANCELLED_STATUS)
+            status_conditions.append(
+                or_(
+                    RequestLog.status == CANCELLED_STATUS,
+                    and_(
+                        RequestLog.status == "error",
+                        RequestLog.error_code == CONTROLLED_INTERRUPTION_ERROR_CODE,
+                    ),
+                )
+            )
         if error_codes_in:
             status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
         if include_error_other:
-            error_clause = [RequestLog.status == "error"]
+            error_clause = [
+                RequestLog.status == "error",
+                or_(
+                    RequestLog.error_code.is_(None),
+                    RequestLog.error_code != CONTROLLED_INTERRUPTION_ERROR_CODE,
+                ),
+            ]
             if error_codes_excluding:
                 error_clause.append(
                     or_(

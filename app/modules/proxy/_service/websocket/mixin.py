@@ -92,6 +92,7 @@ from app.core.resilience.network_recovery import (
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
+from app.core.usage.logs import CANCELLED_STATUS, CONTROLLED_INTERRUPTION_ERROR_CODE
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event
@@ -6444,6 +6445,8 @@ class _WebSocketMixin:
             if incomplete_reason is not None:
                 error_code = incomplete_reason
                 error_message = incomplete_reason
+                if incomplete_reason == CONTROLLED_INTERRUPTION_ERROR_CODE:
+                    status = CANCELLED_STATUS
             if event_type == "response.failed":
                 error_payload = _upstream_error_from_openai(error)
             usage = event.response.usage if event and event.response else None

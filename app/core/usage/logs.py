@@ -17,6 +17,7 @@ from app.core.usage.pricing import (
 # so only statuses outside this tuple count as errors.
 SUCCESS_STATUS = "success"
 CANCELLED_STATUS = "cancelled"
+CONTROLLED_INTERRUPTION_ERROR_CODE = "interrupted"
 NON_ERROR_STATUSES: tuple[str, ...] = (SUCCESS_STATUS, CANCELLED_STATUS)
 # The error code cancelled rows carry; excluded read-side from historical
 # error-satellite rollup rows that were folded under the legacy

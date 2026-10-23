@@ -28,6 +28,9 @@ from app.modules.proxy.replay_safety import responses_payload_is_account_neutral
         "malformed_metadata",
         "unknown_preamble_field",
         "agent_message",
+        "leading_text",
+        "leading_image",
+        "leading_unknown_call",
     ],
 )
 def test_owner_proof_is_complete_immutable_and_separate_from_account_neutral(fault):
@@ -60,6 +63,12 @@ def test_owner_proof_is_complete_immutable_and_separate_from_account_neutral(fau
         },
         {"type": "function_call_output", "call_id": "call_current", "output": "done"},
     ]
+    if fault == "leading_text":
+        prefix.insert(0, {"type": "input_text", "text": "Existing conversation"})
+    elif fault == "leading_image":
+        prefix.insert(0, {"type": "input_image", "image_url": "https://example.invalid/image.png"})
+    elif fault == "leading_unknown_call":
+        prefix.insert(0, {"type": "computer_call", "call_id": "call_other"})
     lookup = DurableBridgeLookup(
         session_id="s",
         canonical_kind="session_header",

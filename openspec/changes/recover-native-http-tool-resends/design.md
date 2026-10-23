@@ -8,7 +8,7 @@ Recover complete HTTP tool loops on their original account, preserving the origi
 
 ## Decisions
 
-- Add a pure HTTP-specific context verifier. Use the existing namespace normalization and tool-manifest checker on a temporary view. Remove native metadata from that view only after checking it is an object. Skip shape-valid historical developer controls only within the fingerprint-verified prefix, and completed shape-valid assistant preambles only before the complete tool batch.
+- Add a pure HTTP-specific context verifier. Use the existing namespace normalization and tool-manifest checker on a temporary view. Remove native metadata from that view only after checking it is an object. Skip leading shape-valid historical developer controls only before conversation or tool items within the fingerprint-verified prefix, and completed shape-valid assistant preambles only before the complete tool batch.
 - Feed the result into the immutable durable full-resend proof. Do not feed it into the account-neutral classifier. At stale-anchor recovery require the proof still matches the payload/durable row and the active session account is its owner.
 - For a proved owner-bound resend, disable implicit preferred-account fallback and owner retirement. Existing explicit account-neutral recovery retains its independent validation.
 - Reuse existing operation fencing, no-visible-output and single-replay limits. The verification view never becomes an upstream payload.

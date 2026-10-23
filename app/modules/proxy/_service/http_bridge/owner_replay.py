@@ -43,13 +43,21 @@ def retains_owner_bound_tool_context(
         items.append(item)
     boundary = projection.stored_prefix_count
     prefix: list[JsonValue] = []
+    leading_controls = True
     for item in items[:boundary]:
-        if isinstance(item, dict) and item.get("role") == "developer" and item.get("type") in (None, "message"):
+        if (
+            leading_controls
+            and isinstance(item, dict)
+            and item.get("role") == "developer"
+            and item.get("type") in (None, "message")
+        ):
             if not _input_item_has_only_known_fields(item, "message") or not (
                 _message_has_valid_account_neutral_content(item)
             ):
                 return False
             continue
+        if not isinstance(item, dict) or item.get("type") not in ("additional_tools", "compaction"):
+            leading_controls = False
         prefix.append(item)
     end = boundary
     while end < len(items):

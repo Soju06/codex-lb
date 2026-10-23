@@ -44,3 +44,19 @@ def test_to_conversations_only_emits_api_key_fields_for_resolved_safe_name(
     assert entry.api_key_name == expected_name
     assert entry.first_request == datetime(2026, 7, 23)
     assert entry.request_count == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "expected"),
+    [
+        ("error", "interrupted", "cancelled"),
+        ("error", "max_output_tokens", "error"),
+        ("error", "stream_incomplete", "error"),
+        ("success", "interrupted", "ok"),
+        ("cancelled", "client_disconnected", "cancelled"),
+    ],
+)
+def test_controlled_interruption_status_mapping(status, code, expected):
+    from app.modules.request_logs.mappers import normalize_log_status
+
+    assert normalize_log_status(status, code) == expected

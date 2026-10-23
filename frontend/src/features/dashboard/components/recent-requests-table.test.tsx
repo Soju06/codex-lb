@@ -361,7 +361,7 @@ describe("RecentRequestsTable", () => {
     expect(writeText).toHaveBeenCalledWith(longError);
   });
 
-  it("renders cancelled requests with a distinct non-error badge", () => {
+  it.each(["client_disconnected", "interrupted"])("renders cancelled %s requests with a distinct non-error badge", (errorCode) => {
     render(
       <RecentRequestsTable
         {...PAGINATION_PROPS}
@@ -384,7 +384,7 @@ describe("RecentRequestsTable", () => {
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "cancelled",
-            errorCode: "client_disconnected",
+            errorCode,
             errorMessage: null,
             ...NULL_FAILURE_METADATA,
             tokens: 1,

@@ -2445,12 +2445,14 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
         ),
     ],
 )
+@pytest.mark.parametrize("incomplete_reason", [None, "interrupted", "max_output_tokens"])
 def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     app_instance,
     monkeypatch,
     output_event_type: str,
     output_event_fields: dict[str, object],
     followup_events: list[tuple[str, dict[str, object]]],
+    incomplete_reason: str | None,
 ):
     upstream_messages = [
         _FakeUpstreamMessage(
@@ -2494,11 +2496,12 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
             "text",
             text=json.dumps(
                 {
-                    "type": "response.completed",
+                    "type": "response.incomplete" if incomplete_reason else "response.completed",
                     "response": {
                         "id": "resp_ws_1",
                         "object": "response",
-                        "status": "completed",
+                        "status": "incomplete" if incomplete_reason else "completed",
+                        "incomplete_details": {"reason": incomplete_reason} if incomplete_reason else None,
                         "service_tier": "fast",
                         "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8},
                     },
@@ -2619,7 +2622,9 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
         assert event["response_id"] == "resp_ws_1"
         for field, expected_value in expected_fields.items():
             assert event[field] == expected_value
-    assert events[-1]["type"] == "response.completed"
+    assert events[-1]["type"] == ("response.incomplete" if incomplete_reason else "response.completed")
+    if incomplete_reason:
+        assert events[-1]["response"]["incomplete_details"] == {"reason": incomplete_reason}
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
@@ -2666,7 +2671,11 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     assert log["model"] == "gpt-5.6-sol"
     assert log["service_tier"] == "priority"
     assert log["transport"] == "websocket"
-    assert log["status"] == "success"
+    assert log["status"] == (
+        "cancelled" if incomplete_reason == "interrupted" else "error" if incomplete_reason else "success"
+    )
+    assert log["error_code"] == incomplete_reason
+    assert log["error_message"] == incomplete_reason
     assert log["conversation_id"] == "conv-ws-response-create"
     assert log["input_tokens"] == 3
     assert log["output_tokens"] == 5

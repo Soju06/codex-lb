@@ -4,6 +4,7 @@ from typing import cast as typing_cast
 
 from app.core.usage.logs import (
     CANCELLED_STATUS,
+    CONTROLLED_INTERRUPTION_ERROR_CODE,
     RequestLogLike,
     cached_input_tokens_from_log,
     cost_breakdown_from_log,
@@ -20,7 +21,7 @@ QUOTA_CODES = {"insufficient_quota", "usage_not_included", "quota_exceeded"}
 def normalize_log_status(status: str, error_code: str | None) -> str:
     if status == "success":
         return "ok"
-    if status == CANCELLED_STATUS:
+    if status == CANCELLED_STATUS or (status == "error" and error_code == CONTROLLED_INTERRUPTION_ERROR_CODE):
         return "cancelled"
     if error_code in RATE_LIMIT_CODES:
         return "rate_limit"

@@ -7,7 +7,7 @@ from sqlalchemy import update
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey
+from app.db.models import Account, AccountStatus, ApiKey, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -1196,3 +1196,75 @@ async def test_request_logs_conversation_summary_does_not_mix_cached_count_with_
     assert body["hasMore"] is True
     assert [entry["requestId"] for entry in body["requests"]] == ["req_conv_snapshot_new"]
     logs_repository_module._clear_recent_count_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (
+            "",
+            {
+                "req_legacy_interrupted": "cancelled",
+                "req_cancelled_error_control": "error",
+                "req_cancelled_filter": "cancelled",
+            },
+        ),
+        ("&status=cancelled", {"req_legacy_interrupted": "cancelled", "req_cancelled_filter": "cancelled"}),
+        ("&status=error", {"req_cancelled_error_control": "error"}),
+    ],
+)
+async def test_legacy_controlled_interruption_dashboard_status(async_client, db_setup, query, expected):
+    await _seed_cancelled_and_error_logs()
+    async with SessionLocal() as session:
+        session.add(
+            RequestLog(
+                account_id="acc_cancelled_filter",
+                request_id="req_legacy_interrupted",
+                model="gpt-5.1",
+                status="error",
+                error_code="interrupted",
+                error_message="interrupted",
+                input_tokens=12,
+                output_tokens=7,
+                requested_at=utcnow(),
+                transport="websocket",
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get(f"/api/request-logs?limit=10{query}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == len(expected)
+    assert {row["requestId"]: row["status"] for row in payload["requests"]} == expected
+    for row in payload["requests"]:
+        if row["requestId"] == "req_legacy_interrupted":
+            assert row["errorCode"] == "interrupted"
+            assert row["inputTokens"] == 12
+            assert row["outputTokens"] == 7
+    options = await async_client.get("/api/request-logs/options")
+    assert options.status_code == 200
+    assert "cancelled" in options.json()["statuses"]
+
+
+@pytest.mark.asyncio
+async def test_controlled_interruption_metrics_use_cancelled_bucket(db_setup):
+    await _seed_cancelled_and_error_logs()
+    async with SessionLocal() as session:
+        repo = RequestLogsRepository(session)
+        await repo.add_log(
+            account_id="acc_cancelled_filter",
+            request_id="req_controlled_cancelled",
+            model="gpt-5.1",
+            input_tokens=12,
+            output_tokens=7,
+            latency_ms=10,
+            status="cancelled",
+            error_code="interrupted",
+        )
+        metrics = await repo.aggregate_activity_since(utcnow() - timedelta(hours=1))
+        assert metrics.request_count == 3
+        assert metrics.cancelled_count == 2
+        assert metrics.error_count == 1
+        assert await repo.top_error_since(utcnow() - timedelta(hours=1)) == "upstream_error"

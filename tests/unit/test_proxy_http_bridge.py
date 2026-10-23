@@ -27416,6 +27416,7 @@ async def test_http_bridge_recovery_releases_origin_after_terminal_event_followi
     )
 
     write_log.assert_awaited_once()
+    assert write_log.await_args is not None
     log = write_log.await_args.kwargs
     assert log["status"] == ("cancelled" if incomplete_reason == "interrupted" else "error")
     assert log["error_code"] == incomplete_reason

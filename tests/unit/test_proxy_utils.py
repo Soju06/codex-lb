@@ -2965,6 +2965,27 @@ def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
     assert any("reasoning_effort_normalized" in record.message for record in caplog.records)
 
 
+def test_log_effort_reports_the_normalized_request_level_fallback():
+    """A normalized request-level effort is what reaches upstream, so log that."""
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["medium", "high"])
+
+    proxy_request_policy.apply_api_key_enforcement(payload, None, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "medium"
+    assert proxy_request_policy.client_reasoning_effort_for_log(payload) == "medium"
+
+
 def test_normalize_unsupported_reasoning_effort_rewrites_a_model_absent_from_the_snapshot():
     """Snapshot membership must not decide whether the workaround applies.
 

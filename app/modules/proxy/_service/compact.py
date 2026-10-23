@@ -86,6 +86,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.request_policy import client_reasoning_effort_for_log
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
@@ -2163,7 +2164,7 @@ class _CompactMixin:
             raise
         finally:
             usage = response.usage if response else None
-            reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+            reasoning_effort = client_reasoning_effort_for_log(payload)
             await proxy._write_request_log(
                 affinity_observation=affinity_observation,
                 account_id=account_id_value,

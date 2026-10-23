@@ -812,6 +812,164 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_api_key_rejects_disallowed_configuration_update_effort(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "allowlist-update-effort", "allowedReasoningEfforts": ["low", "medium"]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    await _import_account(async_client, "acc_allowlist_update", "allowlist-update@example.com")
+
+    upstream_calls: list[object] = []
+
+    async def fake_stream(*args, **kwargs):
+        upstream_calls.append(args)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "start"}]},
+                {"type": "configuration_update", "reasoning": {"effort": "max"}},
+            ],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_rejects_configuration_update_conflicting_with_enforced_effort(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "enforced-conflict-update-effort", "enforcedReasoningEffort": "low"},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    await _import_account(async_client, "acc_enforced_conflict", "enforced-conflict@example.com")
+
+    upstream_calls: list[object] = []
+
+    async def fake_stream(*args, **kwargs):
+        upstream_calls.append(args)
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "start"}]},
+                {"type": "configuration_update", "reasoning": {"effort": "high"}},
+            ],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert upstream_calls == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_allows_and_forwards_configuration_update_effort(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "allowlist-forward-update-effort", "allowedReasoningEfforts": ["low", "high"]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    await _import_account(async_client, "acc_allowlist_forward_update", "allowlist-forward-update@example.com")
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        seen["input"] = payload.input
+        yield 'data: {"type":"response.completed","response":{"id":"resp_forward_update"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "start"}]},
+        {"type": "configuration_update", "reasoning": {"effort": "high"}},
+    ]
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": request_input,
+            "reasoning": {"effort": "low"},
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    assert seen["input"] == request_input
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+    assert latest_log is not None
+    assert latest_log.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enforced_service_tier", "expected_service_tier"),
     [("fast", "priority"), ("ULTRAFAST", "ultrafast")],

@@ -86,6 +86,21 @@ describe("DonutChart", () => {
     expect(screen.getByText("A")).toBeInTheDocument();
   });
 
+  it("hatches the legend swatch of a hatched item", () => {
+    const { container } = render(
+      <DonutChart
+        items={[{ label: "Reserved", value: 20, color: "#888888", hatched: true }, ...BASE_ITEMS]}
+        total={300}
+        title="Usage"
+      />,
+    );
+
+    const pattern = container.querySelector("pattern")!;
+    const legend = (label: string) => screen.getByText(label).closest("[data-testid^='donut-legend-']")!;
+    expect(legend("Reserved").querySelector("circle")).toHaveAttribute("fill", `url(#${pattern.id})`);
+    expect(legend("Account A").querySelector("circle")).toBeNull();
+  });
+
   it("does not render a consumed segment when total equals sum of items", () => {
     const items = [
       { label: "Account A", value: 120, color: "#7bb661" },

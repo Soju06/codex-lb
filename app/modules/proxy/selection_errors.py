@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.resilience.overload import is_local_overload_error_code
 
@@ -36,6 +37,6 @@ def selection_failure_response(selection: SelectionFailure) -> tuple[int, OpenAI
                 resets_at=selection.resets_at,
             ),
         )
-    if is_local_overload_error_code(code):
+    if code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE or is_local_overload_error_code(code):
         return 429, openai_error(code, message, error_type="rate_limit_error")
     return 503, openai_error(code, message)

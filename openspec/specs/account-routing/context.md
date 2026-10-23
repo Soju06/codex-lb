@@ -6,6 +6,36 @@ The normative routing contract is in [spec.md](spec.md). This context explains
 why transient health is replica-local and how drained accounts return to normal
 routing without becoming permanently invisible behind healthier accounts.
 
+## Account usage limits
+
+Account usage limits reserve part of an account's standard quota for direct use. They are optional hard policies, separate from advisory routing preferences and from upstream rate-limit status. One evaluator in `app/core/usage/account_limits.py` serves routing, account summaries, and warmups, so they agree on window shapes, freshness, and thresholds. See the usage-limit requirements in [spec.md](spec.md) for the contract and the [change record](../../changes/archive/2026-10-02-add-account-usage-limits/context.md) for the editor mapping and migration history.
+
+The stored policy is a default maximum-used percentage with optional 5-hour and weekly overrides. For example, a 10% default leaves roughly 90% reserved: once a current observation reaches 10% used, new work is not dispatched to the account. With 54% used and an 80% cap, the provider reports 46% remaining, of which 20% is reserved and 26% is usable. The editor asks for reserves and stores maximum-used percentages.
+
+Decisions and constraints:
+
+- The limit is observation-bound. Delayed observations and work already sent upstream can overshoot it; nothing predicts a request's cost.
+- Missing or stale data blocks an enabled policy, because a reset deadline alone does not prove the window is empty. Unavailable placeholders are current-state evidence but never numeric history. They are written only while a policy is enabled (re-read when a poll returns, so an enable during the fetch still fails closed); a disabled account keeps its last measurements, as before this feature.
+- Toggles send only the enabled flag, so a stale tab cannot restore an older percentage. Enabling a policy that another client removed fails instead of restoring cached values.
+- Selection caches stay fast: capped observations invalidate selection immediately, and uncapped ones keep the throttled refresh. Final owner authorization reads committed policy, status, and telemetry in one database snapshot and never trusts the cache. Peer replicas rely on the existing invalidation and TTL fallback.
+- Shared transports authorize each new turn after their last wait, outside the bridge pending-response lock, with a bounded read. A denial affects only the unsent turn; dispatched work keeps its owner and settlement. A failed read returns HTTP 503 and keeps the transport.
+- Warmup authorization works on transient copies of the account, so its settlement commits cannot write an older policy over a newer operator edit.
+- Selection checks the invalidation generation after every await that precedes returning an account (affinity persistence, recovery-probe commitment, process-seed persistence). After affinity persistence or probe commitment it releases provisional admission and retries against fresh inputs on a bounded budget, so ambient cache invalidation does not fail requests; after process-seed persistence it fails closed with `selection_state_changed`. Committed affinity and seeds are kept, because a sibling request may already rely on them.
+
+Rejected websocket requests retain one settlement-only retry in their registered
+finalization task. Provisional gate and admission ownership are released first;
+the scope keeps its bounded wait if settlement stalls, so other pending requests
+and the connection lease can still be cleaned up. Bridge rejection defers
+cancellation through request cleanup and required retirement. Repeated settlement
+failures retain the existing warning and stale-reservation recovery behavior.
+
+Reserve presentation follows the evaluator's weekly/monthly precedence. Fresh
+weekly usage can supersede an old monthly row in both the summary and editor.
+When a weekly reserve constrains the primary donut, its reduction remains reserved,
+not consumed: an unused Plus account with capacities 225/7560 and a 1% weekly
+maximum shows 75.6 usable, 149.4 reserved, and zero consumed primary credits.
+
+Failure example: a bridge turn passes queue admission while its account is at 5% against a 10% limit, then waits for serialized dispatch. A refresh records 10% during the wait. The final check rejects the unsent turn with `account_usage_limit_reached` and releases its queue and lease accounting, while earlier turns on the bridge finish normally.
 ## Reauthentication warning state
 
 `reauth_required` means refresh-token exchange needs operator repair; it does not

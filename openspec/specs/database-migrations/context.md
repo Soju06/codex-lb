@@ -72,3 +72,26 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Usage-limit history convergence
+
+The usage-limit revisions retain the maintainer-requested linear graph. Earlier
+PR snapshots reused scalar, override, and merge identifiers with different
+upstream ancestors, so the revision stamp alone does not establish the installed
+schema. Upgrade tooling recognizes the observed historical checkpoints from
+schema markers and credential-retirement evidence before applying missing DDL.
+For example, an old scalar database missing `dashboard_users` gains the upstream
+tables and override columns while keeping its saved policies and account tokens.
+
+A temporary `usage_limit_upstream_repair` row in the existing runtime sentinel
+table commits with the ledger move. Interrupted repair resumes through the
+ordinary Alembic cursor; unknown historical marker combinations stop before
+mutation. Credential retirement is preserved. Canonical installations retain
+ordinary index-drift handling. This is bounded compatibility for observed
+PR-branch histories, not a general damaged-schema repair facility. See the
+[repair context](../../changes/archive/2026-10-23-repair-usage-limit-review-gaps/context.md)
+for the supported checkpoints and limits.
+
+The topology guard accepts a parallel branch only when the checkout joins it
+with every upstream head and keeps one canonical head; joining an older
+upstream revision while omitting a later head still fails.

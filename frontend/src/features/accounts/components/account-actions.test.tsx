@@ -27,6 +27,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -52,6 +53,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -79,6 +81,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -112,6 +115,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -140,6 +144,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -172,6 +177,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -202,6 +208,7 @@ describe("AccountActions", () => {
           onSecurityWorkAuthorizedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
+          onUsageLimitChange={vi.fn()}
         />,
       );
 
@@ -234,6 +241,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -267,6 +275,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -299,6 +308,7 @@ describe("AccountActions", () => {
           onSecurityWorkAuthorizedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
+          onUsageLimitChange={vi.fn()}
         />,
       );
 
@@ -334,6 +344,7 @@ describe("AccountActions", () => {
           onSecurityWorkAuthorizedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
+          onUsageLimitChange={vi.fn()}
         />,
       );
 
@@ -364,6 +375,7 @@ describe("AccountActions", () => {
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 

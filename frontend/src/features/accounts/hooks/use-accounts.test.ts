@@ -1,13 +1,19 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   useAccounts,
+  useAccountMutations,
   useAccountUsageResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
+import type { AccountSummary } from "@/features/accounts/schemas";
+import {
+  createAccountSummary,
+  createDashboardOverview,
+} from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
@@ -28,6 +34,93 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useAccounts", () => {
+  it.each(["accounts", "dashboard"] as const)(
+    "does not let an older inactive %s read revert an acknowledged usage policy",
+    async (source) => {
+      const queryClient = createTestQueryClient();
+      queryClient.setDefaultOptions({ queries: { retry: false, gcTime: Infinity } });
+      const key = source === "accounts" ? ["accounts", "list"] : ["dashboard", "overview", "7d"];
+      const account = createAccountSummary({
+        accountId: "acc_primary", usageLimitEnabled: false, usageLimitPercent: null, usageLimitState: "disabled",
+      });
+      const oldData = source === "accounts" ? { accounts: [account] } : createDashboardOverview({ accounts: [account] });
+      queryClient.setQueryData(key, oldData);
+      let resolveOldRead!: (value: typeof oldData) => void;
+      const oldRead = new Promise<typeof oldData>((resolve) => { resolveOldRead = resolve; });
+      const read = vi.fn(() => oldRead);
+      const observer = renderHook(() => useQuery({ queryKey: key, queryFn: read }), {
+        wrapper: createWrapper(queryClient),
+      });
+      await waitFor(() => expect(read).toHaveBeenCalledOnce());
+      observer.unmount();
+      expect(queryClient.getQueryCache().find({ queryKey: key })?.isActive()).toBe(false);
+
+      const mutation = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
+      await act(async () => {
+        await mutation.result.current.usageLimitMutation.mutateAsync({
+          accountId: "acc_primary", update: { enabled: true, percent: 10 },
+        });
+      });
+      expect(queryClient.getQueryData<{ accounts: AccountSummary[] }>(key)?.accounts[0]).toMatchObject({
+        usageLimitEnabled: true, usageLimitPercent: 10,
+      });
+      await act(async () => {
+        resolveOldRead(oldData);
+        await oldRead;
+      });
+      expect(queryClient.getQueryData<{ accounts: AccountSummary[] }>(key)?.accounts[0]).toMatchObject({
+        usageLimitEnabled: true, usageLimitPercent: 10,
+      });
+      mutation.unmount();
+      queryClient.clear();
+    },
+  );
+
+  it("serializes overlapping policy edits across controls and retains the last saved percentage", async () => {
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryDefaults(["accounts"], { gcTime: Infinity });
+    queryClient.setQueryData(["accounts", "list"], { accounts: [createAccountSummary({ accountId: "acc_primary" })] });
+    let releaseFirst!: () => void;
+    const firstReply = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const requests: { enabled: boolean; percent?: number | null }[] = [];
+    let percent: number | null = null;
+    server.use(http.put("/api/accounts/:accountId/usage-limit", async ({ request, params }) => {
+      const update = await request.json() as { enabled: boolean; percent?: number | null };
+      requests.push(update);
+      if (update.percent === 10) await firstReply;
+      if (update.percent !== undefined) percent = update.percent;
+      return HttpResponse.json({
+        accountId: String(params.accountId), enabled: update.enabled, percent, percent5H: null, percentWeekly: null,
+      });
+    }));
+    const first = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
+    const second = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
+    const enable = first.result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary", update: { enabled: true, percent: 10 },
+    });
+    await waitFor(() => expect(requests).toHaveLength(1));
+    const change = second.result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary", update: { enabled: true, percent: 20 },
+    });
+    const disable = second.result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary", update: { enabled: false },
+    });
+    await waitFor(() => expect(queryClient.getMutationCache().getAll()).toHaveLength(3));
+    const paused = queryClient.getMutationCache().getAll().filter((mutation) => mutation.state.isPaused).length;
+    await act(async () => {
+      releaseFirst();
+      await Promise.all([enable, change, disable]);
+    });
+    expect(paused).toBe(2);
+    expect(requests).toEqual([{ enabled: true, percent: 10 }, { enabled: true, percent: 20 }, { enabled: false }]);
+    expect(queryClient.getQueryData<{ accounts: AccountSummary[] }>(["accounts", "list"])?.accounts[0]).toMatchObject({
+      usageLimitEnabled: false, usageLimitPercent: 20, usageLimitState: "disabled",
+    });
+    first.unmount();
+    second.unmount();
+    queryClient.clear();
+  });
+
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

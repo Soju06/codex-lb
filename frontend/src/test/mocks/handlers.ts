@@ -1,6 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import { AccountUsageLimitUpdateRequestSchema } from "@/features/accounts/schemas";
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
 import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
@@ -479,9 +480,9 @@ type MockState = {
   }>;
 };
 
-function createInitialState(): MockState {
+function createInitialState(accounts: AccountSummary[] = createDefaultAccounts()): MockState {
   return {
-    accounts: createDefaultAccounts(),
+    accounts,
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -526,8 +527,8 @@ function createInitialState(): MockState {
 
 let state: MockState = createInitialState();
 
-export function resetMockState(): void {
-  state = createInitialState();
+export function resetMockState(accounts?: AccountSummary[]): void {
+  state = createInitialState(accounts);
 }
 
 function parseDateValue(value: string | null): number | null {
@@ -696,6 +697,21 @@ function requestLogOptionsFromEntries(
 
 function findAccount(accountId: string): AccountSummary | undefined {
   return state.accounts.find((account) => account.accountId === accountId);
+}
+
+function effectiveMockUsageLimit(account: AccountSummary, windowMinutes: number | null | undefined): number | null {
+  if (!account.usageLimitEnabled) return null;
+  if (windowMinutes === 300) return account.usageLimit5HPercent ?? account.usageLimitPercent ?? null;
+  if (windowMinutes === 10_080) return account.usageLimitWeeklyPercent ?? account.usageLimitPercent ?? null;
+  return account.usageLimitPercent ?? null;
+}
+
+// The real evaluation lives in the backend; the mock only keeps reads consistent with the saved policy.
+function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
+  account.effectiveLimitPrimary = effectiveMockUsageLimit(account, account.windowMinutesPrimary);
+  account.effectiveLimitSecondary = effectiveMockUsageLimit(account, account.windowMinutesSecondary);
+  account.effectiveLimitMonthly = effectiveMockUsageLimit(account, account.windowMinutesMonthly);
+  account.usageLimitState = account.usageLimitEnabled ? "available" : "disabled";
 }
 
 function findApiKey(keyId: string): ApiKey | undefined {
@@ -1132,6 +1148,57 @@ export const handlers = [
       return HttpResponse.json({
         accountId,
         routingPolicy: account.routingPolicy,
+      });
+    },
+  ),
+
+  http.put(
+    "/api/accounts/:accountId/usage-limit",
+    async ({ params, request }) => {
+      const accountId = String(params.accountId);
+      const account = findAccount(accountId);
+      if (!account) {
+        return HttpResponse.json(
+          {
+            error: { code: "account_not_found", message: "Account not found" },
+          },
+          { status: 404 },
+        );
+      }
+      const payload = await parseJsonBody(request, AccountUsageLimitUpdateRequestSchema);
+      const percentages = payload && [
+        payload.percent === undefined ? account.usageLimitPercent : payload.percent,
+        payload.percent5H === undefined ? account.usageLimit5HPercent : payload.percent5H,
+        payload.percentWeekly === undefined ? account.usageLimitWeeklyPercent : payload.percentWeekly,
+      ];
+      if (!payload || (payload.enabled && !percentages?.some((value) => value != null))) {
+        return HttpResponse.json(
+          {
+            error: {
+              code: "validation_error",
+              message: "Invalid account usage limit payload",
+            },
+          },
+          { status: 422 },
+        );
+      }
+      account.usageLimitEnabled = payload.enabled;
+      if (payload.percent !== undefined) {
+        account.usageLimitPercent = payload.percent;
+      }
+      if (payload.percent5H !== undefined) {
+        account.usageLimit5HPercent = payload.percent5H;
+      }
+      if (payload.percentWeekly !== undefined) {
+        account.usageLimitWeeklyPercent = payload.percentWeekly;
+      }
+      refreshMockUsageLimitSnapshot(account);
+      return HttpResponse.json({
+        accountId,
+        enabled: account.usageLimitEnabled,
+        percent: account.usageLimitPercent ?? null,
+        percent5H: account.usageLimit5HPercent ?? null,
+        percentWeekly: account.usageLimitWeeklyPercent ?? null,
       });
     },
   ),

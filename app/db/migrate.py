@@ -133,6 +133,72 @@ _LEGACY_EXTRA_COLUMNS = frozenset(
 )
 
 
+_USAGE_LIMIT_SCALAR_REVISION = "20260728_010000_add_account_usage_limits"
+_USAGE_LIMIT_OVERRIDE_REVISION = "20260910_010000_add_usage_limit_overrides"
+_USAGE_LIMIT_UPSTREAM_REVISION = "20260918_000000_merge_scim_and_overflow_heads"
+_USAGE_LIMIT_REVIEW_REVISION = "20261002_010000_merge_usage_limit_review_heads"
+_USAGE_LIMIT_STAMPS = frozenset(
+    {
+        _USAGE_LIMIT_SCALAR_REVISION,
+        _USAGE_LIMIT_OVERRIDE_REVISION,
+        "20261002_000000_merge_usage_limits_and_main_heads",
+        _USAGE_LIMIT_REVIEW_REVISION,
+    }
+)
+_USAGE_LIMIT_REPAIR_SENTINEL = "usage_limit_upstream_repair"
+# Distinctive markers for the observed historical parents, in upstream order.
+# Dots identify columns and @ indexes; bare names identify whole tables. This
+# recognizes those snapshots, not arbitrary drift in unrelated schema objects.
+_USAGE_LIMIT_SCHEMA_CHECKPOINTS: tuple[tuple[str, str, str], ...] = (
+    ("20260816_000000_add_model_source_embeddings", "", ""),
+    (
+        "20260830_000000_add_quota_warmup_claim_expiry",
+        "http_bridge_retry_circuits.admission_generation http_bridge_operations.spool_format "
+        "http_bridge_operation_event_chunks quota_planner_decisions.lease_expires_at "
+        "accounts@idx_accounts_chatgpt_account_id",
+        "",
+    ),
+    (
+        "20260909_130000_add_request_logs_live_facet_indexes",
+        "model_source_pins dashboard_settings.subscription_overflow_source_id "
+        "dashboard_settings.subscription_overflow_drain_until "
+        "dashboard_settings.conversation_archive_enabled model_context_window_overrides "
+        "request_report_hourly_rollups automation_runs.claim_budget_seconds "
+        "request_logs@idx_logs_live_api_key request_logs@idx_logs_live_model_effort "
+        "request_logs@idx_logs_live_status_error",
+        "",
+    ),
+    (
+        "20260910_000000_request_logs_missing_cost_index",
+        "request_logs@idx_logs_missing_cost",
+        "",
+    ),
+    (
+        "20260912_000000_merge_thread_cache_and_bridge_retirement_heads",
+        "dashboard_roles dashboard_users dashboard_identities dashboard_user_invites "
+        "dashboard_auth_providers dashboard_role_mappings api_keys.owner_user_id "
+        "dashboard_settings.local_login_policy dashboard_settings.thread_cache_identity_mode "
+        "dashboard_settings.http_responses_session_bridge_operation_spool_retention_seconds "
+        "http_bridge_operations.terminal_append_phase http_bridge_sessions.continuity_abandoned_at "
+        "model_source_pins@ix_model_source_pins_kind_expires_at request_logs.sticky_kind",
+        "",
+    ),
+    (
+        "20260912_010000_drop_legacy_dashboard_credentials",
+        "legacy_credentials_retired",
+        "dashboard_settings.password_hash dashboard_settings.totp_secret_encrypted "
+        "dashboard_settings.totp_last_verified_step",
+    ),
+    (
+        _USAGE_LIMIT_UPSTREAM_REVISION,
+        "dashboard_oidc_login_flows dashboard_scim_tokens dashboard_identities.user_name "
+        "dashboard_auth_providers.test_login_verified_at",
+        "model_source_pins model_source_pins@ix_model_source_pins_kind_expires_at "
+        "dashboard_settings.subscription_overflow_source_id dashboard_settings.subscription_overflow_drain_until",
+    ),
+)
+
+
 @dataclass(frozen=True)
 class LegacyBootstrapResult:
     stamped_revision: str | None
@@ -854,6 +920,111 @@ def _ledger_has_applied(config: Config, current_revisions: Sequence[str], revisi
     )
 
 
+def _usage_limit_schema_checkpoint(connection: Connection) -> str:
+    inspector = inspect(connection)
+    tables = _read_table_names(connection)
+    retired = _read_runtime_sentinel(connection, LEGACY_CREDENTIALS_RETIRED_SENTINEL)
+    if retired not in {None, CREDENTIAL_DROP_REVISION}:
+        raise MigrationBootstrapError("Unrecognized historical usage-limit schema: credential retirement marker")
+    expected = {
+        "dashboard_settings.password_hash",
+        "dashboard_settings.totp_secret_encrypted",
+        "dashboard_settings.totp_last_verified_step",
+    }
+    tracked = expected | {
+        feature for _, added, removed in _USAGE_LIMIT_SCHEMA_CHECKPOINTS for feature in (added + " " + removed).split()
+    }
+    actual: set[str] = set()
+    for feature in tracked:
+        table, separator, name = feature.replace("@", ".").partition(".")
+        if feature == "legacy_credentials_retired":
+            if retired is not None:
+                actual.add(feature)
+        elif table in tables and (
+            not separator
+            or (
+                name in _read_index_names_for_drift(connection, table)
+                if "@" in feature
+                else name in {column["name"] for column in inspector.get_columns(table)}
+            )
+        ):
+            actual.add(feature)
+    for checkpoint, added, removed in _USAGE_LIMIT_SCHEMA_CHECKPOINTS:
+        expected.update(added.split())
+        expected.difference_update(removed.split())
+        if actual == expected:
+            return checkpoint
+    # Complete upstream tables, columns and credential retirement prove this
+    # checkpoint independently of performance indexes. Leave index drift to
+    # the existing schema check; it must not turn a canonical restart into a
+    # historical-schema repair or a startup failure.
+    if {feature for feature in actual if "@" not in feature} == {feature for feature in expected if "@" not in feature}:
+        return _USAGE_LIMIT_UPSTREAM_REVISION
+    raise MigrationBootstrapError(
+        f"Unrecognized historical usage-limit schema; manual intervention required markers={','.join(sorted(actual))}"
+    )
+
+
+def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
+    """Recover only the observed reused stamps, before ancestry can hide missing DDL.
+
+    Keep the policy columns in place and replay from the proven upstream parent.
+    The existing scalar/override migrations preserve those values. A durable
+    marker and the ledger move commit together, so an interrupted repair resumes
+    through Alembic's ordinary ledger instead of guessing another checkpoint.
+    """
+    with _sync_transaction(_required_sqlalchemy_url(config)) as connection:
+        tables = _read_table_names(connection)
+        current = _read_current_revisions_from_connection(connection) if _ALEMBIC_VERSION_TABLE in tables else ()
+        pending = _read_runtime_sentinel(connection, _USAGE_LIMIT_REPAIR_SENTINEL)
+        if pending is not None:
+            if pending not in {item[0] for item in _USAGE_LIMIT_SCHEMA_CHECKPOINTS} or not _ledger_has_applied(
+                config, current, pending
+            ):
+                raise MigrationBootstrapError("Unrecognized historical usage-limit repair ledger")
+            return revision
+        if not set(current) & _USAGE_LIMIT_STAMPS:
+            return None
+        if len(current) != 1:
+            raise MigrationBootstrapError("Unrecognized historical usage-limit stamp combination")
+        if not {"accounts", "dashboard_settings", _RUNTIME_SENTINELS_TABLE} <= tables:
+            raise MigrationBootstrapError("Unrecognized historical usage-limit schema: required tables missing")
+
+        columns = {column["name"] for column in inspect(connection).get_columns("accounts")}
+        scalar = {"usage_limit_enabled", "usage_limit_percent"}
+        overrides = {"usage_limit_5h_percent", "usage_limit_weekly_percent"}
+        has_overrides = overrides <= columns
+        if (
+            not scalar <= columns
+            or (bool(columns & overrides) and not has_overrides)
+            or (current[0] == _USAGE_LIMIT_SCALAR_REVISION and has_overrides)
+            or (current[0] in {_USAGE_LIMIT_OVERRIDE_REVISION, _USAGE_LIMIT_REVIEW_REVISION} and not has_overrides)
+        ):
+            raise MigrationBootstrapError("Unrecognized historical usage-limit policy columns")
+
+        checkpoint = _usage_limit_schema_checkpoint(connection)
+        if checkpoint == _USAGE_LIMIT_UPSTREAM_REVISION:
+            if has_overrides or current[0] == _USAGE_LIMIT_SCALAR_REVISION:
+                return None
+        elif current[0] not in {_USAGE_LIMIT_SCALAR_REVISION, _USAGE_LIMIT_OVERRIDE_REVISION}:
+            raise MigrationBootstrapError("Unrecognized historical usage-limit merge schema")
+
+        # Resolve relative targets against the original ledger before moving it.
+        steps = ScriptDirectory.from_config(config)._upgrade_revs(revision, cast("Any", current))
+        target = steps[-1].revision.revision if steps else current[0]
+        _ensure_alembic_version_table_capacity_for_connection(connection, required_length=len(checkpoint))
+        connection.execute(
+            text(f"INSERT INTO {_RUNTIME_SENTINELS_TABLE} (name, value) VALUES (:name, :value)"),
+            {"name": _USAGE_LIMIT_REPAIR_SENTINEL, "value": checkpoint},
+        )
+        connection.execute(
+            text(f"UPDATE {_ALEMBIC_VERSION_TABLE} SET {_ALEMBIC_VERSION_COLUMN} = :revision"),
+            {"revision": checkpoint},
+        )
+    logger.warning("Reconciled historical usage-limit ledger stamp=%s upstream=%s", current[0], checkpoint)
+    return target
+
+
 def _reconcile_retired_credential_ledger(config: Config) -> str | None:
     """Re-stamp a ledger that sits below a schema which already retired the credentials.
 
@@ -956,11 +1127,21 @@ def _run_upgrade_locked(
     if state_before.is_ahead:
         raise _schema_ahead_error(state_before)
 
+    reconciled_target = _reconcile_usage_limit_ledger(config, revision)
+    if reconciled_target is not None:
+        revision = reconciled_target
+        state_before = inspect_migration_state(database_url)
+
     # Post-acquire re-check: a peer holding the lock first may already have
     # migrated to head. When alembic_version exists the legacy bootstrap never
     # stamps, and current == head means no legacy remap is pending, so skipping
     # is safe and lets the losing replica complete startup successfully.
-    if revision == "head" and state_before.has_alembic_version_table and not state_before.needs_upgrade:
+    if (
+        reconciled_target is None
+        and revision == "head"
+        and state_before.has_alembic_version_table
+        and not state_before.needs_upgrade
+    ):
         logger.info(
             "Database schema already at Alembic head revision=%s; skipping upgrade "
             "(migrations were applied by this or another replica)",
@@ -1001,6 +1182,23 @@ def _run_upgrade_locked(
 
     sync_database_url = _required_sqlalchemy_url(config)
     current_revision = _read_current_revision(sync_database_url)
+    repair_complete = reconciled_target is not None and (
+        current_revision == _head_revision(config) or current_revision in _USAGE_LIMIT_STAMPS
+    )
+    if repair_complete and current_revision == _USAGE_LIMIT_SCALAR_REVISION:
+        with _sync_connection(sync_database_url) as connection:
+            # An override history can deliberately stop at the scalar target
+            # while retaining its saved overrides. Keep its provenance until
+            # the ordinary ledger reaches the override revision again.
+            repair_complete = "usage_limit_5h_percent" not in {
+                column["name"] for column in inspect(connection).get_columns("accounts")
+            }
+    if repair_complete:
+        with _sync_transaction(sync_database_url) as connection:
+            connection.execute(
+                text(f"DELETE FROM {_RUNTIME_SENTINELS_TABLE} WHERE name = :name"),
+                {"name": _USAGE_LIMIT_REPAIR_SENTINEL},
+            )
 
     if bootstrap_result.unknown_migrations:
         logger.warning(

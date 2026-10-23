@@ -66,6 +66,43 @@ Each signal needs at least eight samples on at least three accounts (per model, 
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+## Reserve quota on individual accounts
+
+On the **Accounts** page, **Keep quota for yourself** sets how much of each
+quota window to keep for direct use. There is one row per window the account
+reports (for example **5-hour** and **Weekly**). Each row shows the remaining
+quota and how much of it Codex LB could use with the value you are typing, so a
+reserve that would block the account right away shows as reached before you
+save. A reserve of `90%` stores a maximum-used limit of `10%`, and a blank row
+keeps nothing back. Monthly-only accounts get a single **Monthly** row, accounts
+whose windows are not known yet get a single **All windows** row, and monthly
+windows never use the weekly reserve. The switch turns a saved reserve off
+without forgetting it; clear every row and save to remove it.
+
+Quota bars keep provider remaining visible and hatch the reserved part. At 54%
+used with an 80% cap, the provider has 46% remaining: 20% is reserved and 26% is
+usable by Codex LB.
+
+An enabled reserve is a hard routing gate for every strategy, including sticky
+and single-account routing, new turns on existing HTTP and WebSocket
+connections, and public, limit-reset, and quota-planner warmups. Codex LB stops
+using the account once a current standard window reports usage at or above the
+limit, or when current usage data is missing or stale, until a fresh
+observation arrives. A continuation pinned to a blocked account is rejected
+rather than moved to another account. The account's upstream status does not
+change, and work already sent upstream is not cancelled. Because usage is
+reported after requests finish, in-flight work can move usage past the limit
+before the gate sees it.
+
+An enabled `100%` limit is **not** the same as turning the reserve off: it still
+requires current usage data.
+
+`account_usage_limit_reached` (HTTP 429, type `rate_limit_error`, no reset
+deadline) means the local policy blocks the account.
+`account_usage_limit_authorization_failed` (HTTP 503) means Codex LB could not
+read the policy; retry once the database recovers. Neither is an upstream
+response.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

@@ -554,6 +554,8 @@ def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Re
         for parent in revision.down_revisions:
             base_children[parent].append(revision.revision)
     base_heads = tuple(sorted(base_ids - set(base_children)))
+    parents = {revision.revision: revision.down_revisions for revision in revisions}
+    base_head_revisions = [revision for revision in base_revisions if revision.revision in base_heads]
     for revision in revisions:
         if revision.revision in base_ids:
             continue
@@ -563,6 +565,10 @@ def check_branch_fork(revisions: Sequence[Revision], base_revisions: Sequence[Re
             continue
         parent = revision.down_revisions[0]
         if parent not in base_ids or parent not in base_children:
+            continue
+        if _converged_by([revision, *base_head_revisions], revisions, parents) is not None:
+            # Published parallel history is repaired by joining both lineages,
+            # not by changing a revision already recorded in a database.
             continue
         report.error(
             f"alembic_branch_forks_base revision={revision.revision} parent={parent} base_ref={base_ref}: "

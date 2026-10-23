@@ -64,6 +64,18 @@ def _make_usage(
     )
 
 
+def _make_placeholder(account_id: str, *, window: str, recorded_at: datetime) -> UsageHistory:
+    return UsageHistory(
+        id=1,
+        account_id=account_id,
+        recorded_at=recorded_at,
+        window=window,
+        used_percent=0.0,
+        reset_at=None,
+        window_minutes=None,
+    )
+
+
 def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
@@ -1874,6 +1886,7 @@ async def test_reconcile_recovers_downgraded_free_despite_an_obsolete_paid_secon
     recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
         accounts_repo=StubAccountsRepository([account]),
         usage_repo=StubUsageRepository(
+            primary={account.id: _make_placeholder(account.id, window="primary", recorded_at=after.recorded_at)},
             monthly={account.id: after},
             secondary={account.id: obsolete_paid_secondary},
         ),
@@ -2013,6 +2026,92 @@ async def test_reconcile_keeps_account_blocked_when_its_short_window_is_exhauste
         long_reset_at,
         blocked_at,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("short_window_measured", [False, True])
+async def test_reconcile_requires_a_real_short_window_sample_after_long_window_reset(
+    monkeypatch: pytest.MonkeyPatch,
+    short_window_measured: bool,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_short_window_unknown",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=long_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    observed_at = _epoch_to_naive_utc(now - 60)
+    primary = (
+        _make_usage(
+            account.id,
+            window="primary",
+            used_percent=0.0,
+            reset_at=int(now + 300 * 60),
+            recorded_at=observed_at,
+            window_minutes=300,
+        )
+        if short_window_measured
+        else _make_placeholder(account.id, window="primary", recorded_at=observed_at)
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(primary={account.id: primary}, secondary={account.id: after}),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == int(short_window_measured)
+    assert account.status is (AccountStatus.ACTIVE if short_window_measured else AccountStatus.RATE_LIMITED)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_recover_from_a_superseded_long_window_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    long_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_long_window_unknown",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=long_reset_at,
+        blocked_at=blocked_at,
+    )
+    before, after = _long_window_block(account.id, now=now, long_reset_at=long_reset_at)
+    latest_placeholder = _make_placeholder(account.id, window="secondary", recorded_at=_epoch_to_naive_utc(now - 30))
+    primary = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=0.0,
+        reset_at=int(now + 300 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=300,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(primary={account.id: primary}, secondary={account.id: latest_placeholder}),
+        accounts=[account],
+        reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at) == (AccountStatus.RATE_LIMITED, long_reset_at)
 
 
 @pytest.mark.asyncio

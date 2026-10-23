@@ -40,27 +40,36 @@ The warmup target pool SHALL be derived from the authenticated API key. If `acco
 - **THEN** warmup evaluates and submits requests against all active accounts
 
 ### Requirement: Warmup mode semantics are deterministic
+
 The endpoint SHALL implement three warmup modes with deterministic behavior:
-- `normal`: submit warmup only for accounts that have a primary (5h) usage row and 100% remaining primary usage.
-- `strict`: if any target account fails the same eligibility check, reject the entire request and submit no warmups.
-- `force`: submit warmup for all target accounts regardless of usage.
+
+- `normal`: submit warmup only for accounts that have a primary (5h) usage row, 100% remaining primary usage, and no blocking account usage limit.
+- `strict`: if any target account fails the same eligibility checks, reject the entire request and submit no warmups.
+- `force`: bypass the primary-window usage check, but not an enabled account usage limit in `reached` or `data_unavailable` state.
 
 An account SHALL be considered eligible for `normal` and `strict` only when:
+
 - a primary usage row exists,
-- `window_minutes=300`, and
-- remaining usage is 100% (used percent is 0).
+- `window_minutes=300`,
+- remaining usage is 100% (used percent is 0), and
+- its account usage limit is disabled or `available`.
 
 #### Scenario: Normal mode skips ineligible accounts
+
 - **WHEN** a `normal` warmup request includes eligible and ineligible accounts
 - **THEN** only eligible accounts are submitted and ineligible accounts are returned as skipped
 
 #### Scenario: All-or-none rejects mixed eligibility pool
+
 - **WHEN** a `strict` warmup request includes any ineligible account
 - **THEN** the system rejects the request and submits zero warmup upstream requests
 
 #### Scenario: Force bypasses usage eligibility
-- **WHEN** a `force` request is submitted
-- **THEN** the system submits warmup requests for every target account regardless of usage state
+
+- **GIVEN** a `force` request includes an account that fails the primary-window usage check
+- **WHEN** warmup eligibility is evaluated
+- **THEN** the system submits a warmup for that account when its usage limit is disabled or `available`
+- **AND** it skips the account with reason `account_usage_limit_reached` when its enabled usage limit is `reached` or `data_unavailable`
 
 ### Requirement: Warmup sends minimal upstream responses request
 For each submitted account, the system SHALL send a minimal upstream Responses API request intended to warm transport/session/model path behavior. The model used SHALL be the configured warmup model unless the authenticated API key has `enforcedModel`, in which case that enforced model is used instead (consistent with normal request enforcement). `warmup_model` SHALL NOT be sent as an upstream field. The warmup request SHALL remain small and deterministic. Submissions SHALL run in parallel with a maximum concurrency of 5 accounts per warmup execution.
@@ -117,3 +126,13 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 - **WHEN** a warmup request omits the required-capability carrier
 - **THEN** the existing authentication, mode, account-scope, and fan-out behavior remains in effect
 
+### Requirement: Warmup submissions reauthorize account usage limits before dispatch
+
+After credential refresh and before each compact request is sent, the endpoint MUST reload the target account's policy, status, and standard observations in one read and MUST evaluate the usage limit again. A missing account MUST fail the target with `account_not_found`, a non-active account with `account_not_active`, a `reached` or `data_unavailable` policy with `account_usage_limit_reached`, and a failed read with `account_usage_limit_authorization_failed`. None of these outcomes MAY send the compact request.
+
+#### Scenario: Account reaches the limit after warmup planning
+
+- **GIVEN** `/v1/warmup` selected an account while its enabled policy was available
+- **AND** a newer observation reaches the maximum before the account's submission
+- **WHEN** final warmup authorization runs
+- **THEN** that target fails with `account_usage_limit_reached` and no compact request is sent

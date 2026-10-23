@@ -20,11 +20,46 @@ import {
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
+  updateAccountUsageLimit,
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountSummary,
+  AccountUsageLimitUpdateRequest,
+  AccountUsageLimitUpdateResponse,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
+import type { DashboardOverview } from "@/features/dashboard/schemas";
+
+// Patch the acknowledged policy into every cached account list so an older read cannot show the
+// previous policy. Until a refetch returns the server's evaluation, an enabled policy reads as
+// unavailable rather than keeping a stale "available" state.
+function reconcileUsageLimitCaches(
+  queryClient: ReturnType<typeof useQueryClient>,
+  policy: AccountUsageLimitUpdateResponse,
+) {
+  const patch = <T extends { accounts: AccountSummary[] }>(current: T | undefined) =>
+    current && {
+      ...current,
+      accounts: current.accounts.map((account) =>
+        account.accountId === policy.accountId
+          ? {
+              ...account,
+              usageLimitEnabled: policy.enabled,
+              usageLimitPercent: policy.percent,
+              usageLimit5HPercent: policy.percent5H,
+              usageLimitWeeklyPercent: policy.percentWeekly,
+              effectiveLimitPrimary: undefined,
+              effectiveLimitSecondary: undefined,
+              effectiveLimitMonthly: undefined,
+              usageLimitState: policy.enabled ? "data_unavailable" : "disabled",
+            }
+          : account,
+      ),
+    };
+  queryClient.setQueryData<{ accounts: AccountSummary[] }>(["accounts", "list"], patch);
+  queryClient.setQueriesData<DashboardOverview>({ queryKey: ["dashboard", "overview"] }, patch);
+}
 
 async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   const invalidations = [
@@ -201,6 +236,32 @@ export function useAccountMutations() {
     },
   });
 
+  const usageLimitMutation = useMutation({
+    // Every control shares these caches, so policy writes run one at a time.
+    scope: { id: "account-usage-limit" },
+    mutationFn: ({ accountId, update }: { accountId: string; update: AccountUsageLimitUpdateRequest }) =>
+      updateAccountUsageLimit(accountId, update),
+    onSuccess: async (data) => {
+      // Cancel in-flight reads, including inactive ones that invalidation leaves running, so an
+      // older response cannot overwrite the acknowledged policy.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ["accounts", "list"] }),
+        queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
+      ]);
+      reconcileUsageLimitCaches(queryClient, data);
+      const removed = data.percent === null && data.percent5H === null && data.percentWeekly === null;
+      toast.success(t(
+        removed
+          ? "accounts.toasts.usageLimitRemoved"
+          : data.enabled ? "accounts.toasts.usageLimitEnabled" : "accounts.toasts.usageLimitDisabled",
+      ));
+      void invalidateAccountRelatedQueries(queryClient, data.accountId);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.usageLimitUpdateFailed"));
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -253,6 +314,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    usageLimitMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };

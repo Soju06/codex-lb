@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from fastapi import WebSocket
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
@@ -17,23 +18,28 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.downstream_delivery as downstream_delivery_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
+from app.core.balancer import HEALTH_TIER_PROBING
 from app.core.config.settings import Settings
 from app.core.http_protocol import HTTP_DISCONNECTED_STATE
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.time import utcnow
-from app.db.models import Account, DashboardSettings, RequestLog, StickySessionKind
+from app.db.models import Account, ApiKeyLimit, ApiKeyUsageReservation, DashboardSettings, RequestLog, StickySessionKind
 from app.db.session import SessionLocal
-from app.modules.api_keys.service import ApiKeyUsageReservationData
+from app.dependencies import get_proxy_service_for_app
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, ApiKeyUsageReservationData, LimitRuleInput
+from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy.downstream_delivery import (
     OUTCOME_TERMINAL_AFTER_DISCONNECT,
     OUTCOME_TERMINAL_WRITTEN,
     DeliveryTracedStreamingResponse,
 )
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1055,6 +1061,365 @@ async def test_proxy_responses_routes_spark_when_fresh_quota_overrides_account_c
     assert event["type"] == "response.completed"
     assert seen_payload["model"] == "gpt-5.3-codex-spark"
     assert seen_payload["selected_account_id"] == raw_account_id
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_spark_additional_quota_does_not_bypass_account_usage_limit(
+    async_client,
+    monkeypatch,
+) -> None:
+    email = "spark-account-usage-limited@example.com"
+    raw_account_id = "acc_spark_account_usage_limited"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email, plan_type="pro")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        usage = UsageRepository(session)
+        await usage.add_entry(
+            account_id=account_id,
+            window="primary",
+            used_percent=10.0,
+            reset_at=None,
+            window_minutes=300,
+            recorded_at=utcnow(),
+        )
+        additional_usage = AdditionalUsageRepository(session)
+        await additional_usage.add_entry(
+            account_id=account_id,
+            limit_name="GPT-5.3-Codex-Spark",
+            metered_feature="codex_bengalfox",
+            window="primary",
+            used_percent=1.0,
+            reset_at=None,
+            window_minutes=300,
+            recorded_at=utcnow(),
+        )
+
+    changed = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert changed.status_code == 200
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(
+            get_snapshot=lambda: SimpleNamespace(account_plans={account_id: "pro"}),
+            account_ids_for_model=lambda _model: frozenset(),
+            plan_types_for_model=lambda _model: frozenset({"pro"}),
+        ),
+    )
+
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("account usage limit must reject before upstream dispatch")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+
+    payload = {"model": "gpt-5.3-codex-spark", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    assert event["response"]["error"] == {
+        "message": "All otherwise available accounts have reached their usage limit or lack current usage data",
+        "type": "rate_limit_error",
+        "code": "account_usage_limit_reached",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["probe", "seed"])
+async def test_proxy_policy_change_at_final_selection_wait_prevents_dispatch(
+    async_client,
+    app_instance,
+    monkeypatch,
+    boundary,
+) -> None:
+    account_ids = []
+    for suffix in ("owner", "healthy"):
+        email, raw_id = f"final-{boundary}-{suffix}@example.com", f"final-{boundary}-{suffix}"
+        imported = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_id, email)), "application/json")},
+        )
+        assert imported.status_code == 200
+        account_ids.append(generate_unique_account_id(raw_id, email))
+    owner_id, healthy_id = account_ids
+    async with SessionLocal() as session:
+        for account_id in account_ids:
+            await UsageRepository(session).add_entry(account_id, 10.0, window="primary", window_minutes=300)
+        if boundary == "seed":
+            await RequestLogsRepository(session).add_log(
+                account_id=owner_id,
+                request_id="resp_seed_owner",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=1,
+                latency_ms=1,
+                status="success",
+                error_code=None,
+                session_id="final-seed-process",
+            )
+    changed = await async_client.put(
+        f"/api/accounts/{owner_id}/usage-limit",
+        json={"enabled": True, "percent": 20.0},
+    )
+    assert changed.status_code == 200
+    service = get_proxy_service_for_app(app_instance)
+    balancer = service._load_balancer
+    waiting, release = asyncio.Event(), asyncio.Event()
+    base_lock = balancer._runtime_lock
+    lock_held = False
+    seed_key = None
+    if boundary == "probe":
+        balancer._runtime[owner_id] = RuntimeState(health_tier=HEALTH_TIER_PROBING, last_selected_at=0.0, version=17)
+        original_persist = balancer._persist_selection_state
+
+        class ObservedLock:
+            async def __aenter__(self):
+                if base_lock.locked():
+                    waiting.set()
+                await base_lock.acquire()
+
+            async def __aexit__(self, *_args):
+                base_lock.release()
+
+        async def persist_then_hold_commit(*args, **kwargs):
+            nonlocal lock_held
+            result = await original_persist(*args, **kwargs)
+            if not lock_held and balancer._runtime[owner_id].inflight_streams:
+                await base_lock.acquire()
+                lock_held = True
+            return result
+
+        monkeypatch.setattr(balancer, "_runtime_lock", ObservedLock())
+        monkeypatch.setattr(balancer, "_persist_selection_state", persist_then_hold_commit)
+    else:
+        original_insert = StickySessionsRepository.insert_if_absent
+
+        async def persist_seed_then_wait(self, key, account_id, kind):
+            nonlocal seed_key
+            result = await original_insert(self, key, account_id, kind)
+            seed_key = key
+            waiting.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(StickySessionsRepository, "insert_if_absent", persist_seed_then_wait)
+
+    sends = []
+
+    async def upstream(payload, headers, access_token, account_id, **kwargs):
+        sends.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_final_wait","status":"completed"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    payload = {"model": "gpt-5.1", "input": "hello", "stream": True}
+    headers = {}
+    if boundary == "seed":
+        payload["previous_response_id"] = "resp_seed_owner"
+        headers = {"session_id": "final-seed-process", "thread-id": "final-seed-thread"}
+    task = asyncio.create_task(async_client.post("/backend-api/codex/responses", json=payload, headers=headers))
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+        changed = await async_client.put(
+            f"/api/accounts/{owner_id}/usage-limit",
+            json={"enabled": True, "percent": 10.0},
+        )
+        assert changed.status_code == 200
+        if lock_held:
+            base_lock.release()
+            lock_held = False
+        release.set()
+        response = await asyncio.wait_for(task, timeout=5)
+        assert response.status_code == 200
+        if boundary == "probe":
+            assert sends == ["final-probe-healthy"]
+            assert balancer._runtime[owner_id].last_selected_at == 0.0
+        else:
+            assert sends == []
+            event = _extract_first_event(response.text.splitlines())
+            assert event["response"]["error"]["code"] == "previous_response_owner_unavailable"
+            assert seed_key is not None
+            async with SessionLocal() as session:
+                assert (
+                    await StickySessionsRepository(session).get_account_id(
+                        seed_key,
+                        kind=StickySessionKind.CODEX_SESSION,
+                    )
+                    == owner_id
+                )
+        assert await balancer.account_pressure_snapshot(owner_id) == (0, 0, 0.0)
+        assert await balancer.account_pressure_snapshot(healthy_id) == (0, 0, 0.0)
+    finally:
+        if lock_held:
+            base_lock.release()
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_websocket_policy_rejection_settles_real_reservation(
+    async_client,
+    app_instance,
+    monkeypatch,
+) -> None:
+    raw_id, email = "cancelled-policy-owner", "cancelled-policy-owner@example.com"
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_id, email)), "application/json")},
+    )
+    assert imported.status_code == 200
+    owner_id = generate_unique_account_id(raw_id, email)
+    async with SessionLocal() as session:
+        account = await session.get(Account, owner_id)
+        assert account is not None
+        await UsageRepository(session).add_entry(owner_id, 10.0, window="primary", window_minutes=300)
+        keys = ApiKeysService(ApiKeysRepository(session))
+        key = await keys.create_key(
+            ApiKeyCreateData(
+                name="cancelled policy rejection",
+                allowed_models=None,
+                limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000)],
+            )
+        )
+    changed = await async_client.put(
+        f"/api/accounts/{owner_id}/usage-limit",
+        json={"enabled": True, "percent": 20.0},
+    )
+    assert changed.status_code == 200
+    service = get_proxy_service_for_app(app_instance)
+    balancer = service._load_balancer
+    cleanup_started, upstream_closed = asyncio.Event(), asyncio.Event()
+    states = []
+    sent_upstream, sent_downstream = [], []
+    lock_held = False
+    checks = 0
+    original_prepare = service._prepare_websocket_response_create_request
+    original_authorize = balancer.authorize_account_fresh
+    original_release = balancer.release_account_lease
+    request_text = json.dumps({"type": "response.create", "model": "gpt-5.1", "instructions": "hi", "input": "hello"})
+
+    class Downstream:
+        received = False
+
+        async def receive(self):
+            if not self.received:
+                self.received = True
+                return {"type": "websocket.receive", "text": request_text}
+            await asyncio.Event().wait()
+
+        async def send_text(self, text):
+            sent_downstream.append(json.loads(text))
+
+        async def close(self, **kwargs):
+            pass
+
+    class Upstream:
+        async def send_text(self, text):
+            sent_upstream.append(text)
+
+        async def receive(self):
+            await upstream_closed.wait()
+            return SimpleNamespace(kind="close", text=None, data=None, close_code=1000, error=None)
+
+        async def close(self):
+            upstream_closed.set()
+
+    upstream = Upstream()
+
+    async def connect(*args, **kwargs):
+        return account, upstream
+
+    async def prepare(*args, **kwargs):
+        prepared = await original_prepare(*args, **kwargs)
+        assert prepared.request_state is not None
+        states.append(prepared.request_state)
+        return prepared
+
+    async def authorize(account_id):
+        nonlocal checks, lock_held
+        checks += 1
+        if checks == 2:
+            await balancer._runtime_lock.acquire()
+            lock_held = True
+            changed = await async_client.put(
+                f"/api/accounts/{owner_id}/usage-limit",
+                json={"enabled": True, "percent": 10.0},
+            )
+            assert changed.status_code == 200
+        return await original_authorize(account_id)
+
+    async def release_lease(lease):
+        if checks == 2 and lease is not None:
+            cleanup_started.set()
+        await original_release(lease)
+
+    monkeypatch.setattr(service, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", prepare)
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(balancer, "authorize_account_fresh", authorize)
+    monkeypatch.setattr(balancer, "release_account_lease", release_lease)
+    task = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, Downstream()),
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=key,
+        )
+    )
+    try:
+        try:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+        except TimeoutError:
+            if task.done():
+                task.result()
+            pytest.fail(f"rejection cleanup not reached: checks={checks}, events={sent_downstream}")
+        state = states[0]
+        reservation = state.api_key_reservation
+        assert reservation is not None
+        async with SessionLocal() as session:
+            row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+            assert row is not None and row.status == "reserved"
+            reserved = await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key.id))
+            assert reserved is not None and reserved > 0
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        balancer._runtime_lock.release()
+        lock_held = False
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert await service.drain_persistence_tasks(timeout_seconds=5)
+        assert sent_upstream == []
+        assert state.api_key_reservation is None
+        assert not state.response_create_gate_acquired
+        assert await balancer.account_pressure_snapshot(owner_id) == (0, 0, 0.0)
+        async with SessionLocal() as session:
+            row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+            assert row is not None and row.status == "released"
+            assert await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key.id)) == 0
+        terminals = [event for event in sent_downstream if event.get("type") == "response.failed"]
+        assert len(terminals) == 1
+        assert terminals[0]["response"]["error"]["code"] == "account_usage_limit_reached"
+        assert terminals[0]["response"]["error"]["type"] == "rate_limit_error"
+    finally:
+        if lock_held:
+            balancer._runtime_lock.release()
+        upstream_closed.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await service.drain_persistence_tasks(timeout_seconds=5)
 
 
 @pytest.mark.asyncio

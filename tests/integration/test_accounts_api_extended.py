@@ -5,19 +5,21 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.usage.models import RateLimitPayload, UsagePayload
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.deletion import run_account_deletion_pass
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -93,6 +95,81 @@ async def test_import_invalid_json_returns_400(async_client):
     assert response.status_code == 400
     payload = response.json()
     assert payload["error"]["code"] == "invalid_auth_json"
+
+
+@pytest.mark.asyncio
+async def test_account_summary_reports_reached_and_available_usage_limit_states(async_client, db_setup):
+    account = _make_account("acc_usage_limit_reached", "usage-limit-reached@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        session.add(
+            UsageHistory(
+                account_id=account.id,
+                window="primary",
+                window_minutes=300,
+                used_percent=10.0,
+                reset_at=int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp()),
+                recorded_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        )
+        await session.commit()
+
+    enabled = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True, "percent": 10},
+    )
+    assert enabled.status_code == 200
+
+    listed = await async_client.get("/api/accounts")
+    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["status"] == "active"
+    assert summary["usageLimitEnabled"] is True
+    assert summary["usageLimitState"] == "reached"
+
+    async with SessionLocal() as session:
+        stored = await session.get(Account, account.id)
+        assert stored is not None
+        assert stored.status is AccountStatus.ACTIVE
+
+    async with SessionLocal() as session:
+        row = await session.scalar(select(UsageHistory).where(UsageHistory.account_id == account.id))
+        assert row is not None
+        row.used_percent = 5.0
+        await session.commit()
+
+    listed = await async_client.get("/api/accounts")
+    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["usageLimitState"] == "available"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"enabled": True},
+        {"enabled": True, "percent": 0},
+        {"enabled": True, "percent": 100.01},
+    ],
+)
+async def test_account_usage_limit_rejects_invalid_configuration(async_client, db_setup, payload):
+    account = _make_account("acc_usage_limit_invalid", "usage-limit-invalid@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    response = await async_client.put(f"/api/accounts/{account.id}/usage-limit", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_account_usage_limit_missing_account_returns_404(async_client):
+    response = await async_client.put(
+        "/api/accounts/missing/usage-limit",
+        json={"enabled": True, "percent": 10},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "account_not_found"
 
 
 @pytest.mark.asyncio
@@ -1282,11 +1359,11 @@ async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_cl
 
 @pytest.mark.asyncio
 async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(hours=2)).timestamp())
+    future_reset = int((utcnow() + timedelta(hours=2)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_credit_rate_limited", "credit-rate-limited@example.com")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = future_reset
-    account.blocked_at = int((utcnow() - timedelta(minutes=10)).timestamp())
+    account.blocked_at = int((utcnow() - timedelta(minutes=10)).replace(tzinfo=timezone.utc).timestamp())
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -1314,7 +1391,7 @@ async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(as
 
 @pytest.mark.asyncio
 async def test_accounts_list_ignores_zero_capacity_monthly_primary_status(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    future_reset = int((utcnow() + timedelta(days=14)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_monthly_primary", "free-monthly@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = future_reset
@@ -1353,8 +1430,69 @@ async def test_accounts_list_ignores_zero_capacity_monthly_primary_status(async_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("weekly_slot", ["primary", "secondary"])
+@pytest.mark.parametrize("monthly_newer,monthly_elapsed", [(False, True), (False, False), (True, False)])
+async def test_accounts_reserve_window_matches_policy(
+    async_client, db_setup, weekly_slot, monthly_newer, monthly_elapsed
+):
+    now = utcnow()
+    account = _make_account("window-change", "window-change@example.com", plan_type="free")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50
+    account.usage_limit_weekly_percent = 80
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account.id,
+                    window=weekly_slot,
+                    window_minutes=10080,
+                    used_percent=85,
+                    recorded_at=now - timedelta(seconds=30 if monthly_newer else 0),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
+                ),
+                UsageHistory(
+                    account_id=account.id,
+                    window="monthly",
+                    window_minutes=43200,
+                    used_percent=10,
+                    recorded_at=now - timedelta(seconds=0 if monthly_newer else 60),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=-1 if monthly_elapsed else 20)),
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    summary = next(item for item in response.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["windowMinutesPrimary"] is None
+    if monthly_newer:
+        assert summary["usageLimitState"] == "available"
+        assert summary["windowMinutesMonthly"] == 43200
+        assert summary["effectiveLimitMonthly"] == 50
+        assert summary["windowMinutesSecondary"] is None
+    else:
+        assert summary["usageLimitState"] == "reached"
+        assert summary["windowMinutesMonthly"] is None
+        assert summary["usage"]["monthlyRemainingPercent"] is None
+        assert summary["windowMinutesSecondary"] == 10080
+        assert summary["effectiveLimitSecondary"] == 80
+        assert summary["usage"]["secondaryRemainingPercent"] == 15
+        updated = await async_client.put(
+            f"/api/accounts/{account.id}/usage-limit", json={"enabled": True, "percentWeekly": 90}
+        )
+        assert updated.status_code == 200
+        refreshed = await async_client.get("/api/accounts")
+        summary = next(item for item in refreshed.json()["accounts"] if item["accountId"] == account.id)
+        assert summary["effectiveLimitSecondary"] == 90
+        assert summary["usageLimitState"] == "available"
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_recovers_weekly_only_primary_rate_limited_status(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(days=7)).timestamp())
+    future_reset = int((utcnow() + timedelta(days=7)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_weekly_primary_only", "free-weekly-primary@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = future_reset
@@ -1387,7 +1525,7 @@ async def test_accounts_list_recovers_weekly_only_primary_rate_limited_status(as
 
 @pytest.mark.asyncio
 async def test_accounts_list_keeps_legacy_unknown_primary_rate_limited_until_known_window(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    future_reset = int((utcnow() + timedelta(days=14)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_legacy_unknown_primary", "free-legacy@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = future_reset
@@ -1427,7 +1565,7 @@ async def test_accounts_list_keeps_legacy_unknown_primary_rate_limited_until_kno
 
 @pytest.mark.asyncio
 async def test_accounts_list_keeps_free_rate_limited_until_weekly_quota_available(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    future_reset = int((utcnow() + timedelta(days=14)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_monthly_without_weekly", "free-monthly-no-weekly@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = future_reset
@@ -1463,7 +1601,7 @@ async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_clien
     account = _make_account("acc_free_rate_limited_no_reset", "free-no-reset@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = None
-    account.blocked_at = int(utcnow().timestamp())
+    account.blocked_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -1498,7 +1636,7 @@ async def test_accounts_list_keeps_rate_limited_without_reset_signal(async_clien
 
 @pytest.mark.asyncio
 async def test_accounts_list_keeps_quota_exceeded_reset_when_ignoring_monthly_primary(async_client, db_setup):
-    future_reset = int((utcnow() + timedelta(days=14)).timestamp())
+    future_reset = int((utcnow() + timedelta(days=14)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_quota_exceeded_monthly", "free-quota-monthly@example.com", plan_type="free")
     account.status = AccountStatus.QUOTA_EXCEEDED
     account.reset_at = future_reset
@@ -1686,3 +1824,179 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     # The recovered account's only sample still has an elapsed reset; the
     # display stays absent until a fresh sample arrives.
     assert reconciled_account["usage"]["primaryRemainingPercent"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("restricted_window", "override_field"), [("primary", "percent5H"), ("secondary", "percentWeekly")]
+)
+async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
+    async_client, db_setup, restricted_window, override_field
+):
+    from app.modules.usage.authorization import load_owner_authorization
+
+    account = _make_account("combined-policy", "combined@example.test")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account.id,
+                    window=window,
+                    window_minutes=minutes,
+                    used_percent=used,
+                    recorded_at=utcnow(),
+                    reset_at=int(naive_utc_to_epoch(utcnow() + timedelta(hours=1))),
+                )
+                for window, minutes, used in [("primary", 300, 65), ("secondary", 10080, 75)]
+            ]
+        )
+        await session.commit()
+    path = f"/api/accounts/{account.id}/usage-limit"
+    policy = {"enabled": True, "percent": 80, "percent5H": 70, "percentWeekly": 90}
+    response = await async_client.put(path, json=policy)
+    assert response.status_code == 200
+    assert response.json() == {"accountId": account.id, **policy}
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["effectiveLimitPrimary"] == 70
+    assert summary["effectiveLimitSecondary"] == 90
+    assert summary["usageLimitState"] == "available"
+    async with SessionLocal() as session:
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    response = await async_client.put(path, json={**policy, "percentWeekly": 70})
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        assert not (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    # Omitting thresholds (e.g. a stale dashboard toggling only the flag) retains the newer stored values.
+    disabled = await async_client.put(path, json={"enabled": False})
+    assert disabled.json() == {"accountId": account.id, **policy, "enabled": False, "percentWeekly": 70}
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "disabled"
+    removed = await async_client.put(
+        path,
+        json={
+            "enabled": False,
+            "percent": None,
+            "percent5H": None,
+            "percentWeekly": None,
+        },
+    )
+    assert removed.status_code == 200
+    assert removed.json()["percent5H"] is None
+    standalone = await async_client.put(path, json={"enabled": True, override_field: 90})
+    assert standalone.status_code == 200
+    assert standalone.json()["percent"] is None
+    assert (await async_client.put(path, json={"enabled": False})).status_code == 200
+    reenabled = await async_client.put(path, json={"enabled": True})
+    assert reenabled.status_code == 200
+    assert reenabled.json()["percent"] is None
+    assert reenabled.json()[override_field] == 90
+    rejected = await async_client.put(path, json={"enabled": True, override_field: None})
+    assert rejected.status_code == 422
+    async with SessionLocal() as session:
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(UsageHistory)
+            .where(UsageHistory.account_id == account.id, UsageHistory.window != restricted_window)
+            .values(used_percent=0, window_minutes=None, reset_at=None)
+        )
+        await session.commit()
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "available"
+
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(UsageHistory).where(UsageHistory.account_id == account.id, UsageHistory.window == restricted_window)
+        )
+        await session.commit()
+        assert not (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "data_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disable_during_poll", [False, True])
+@pytest.mark.parametrize(
+    ("plan_type", "policy", "empty_rate_limit"),
+    [
+        ("plus", "scalar", None),
+        ("free", "scalar", RateLimitPayload()),
+        ("plus", "5h", RateLimitPayload()),
+        ("plus", "weekly", None),
+    ],
+    ids=["plus-scalar-omitted", "free-scalar-empty", "plus-5h-empty", "plus-weekly-omitted"],
+)
+async def test_empty_poll_supersedes_usage_limit_telemetry(
+    async_client,
+    db_setup,
+    monkeypatch,
+    plan_type,
+    policy,
+    empty_rate_limit,
+    disable_during_poll,
+) -> None:
+    account = _make_account("acc_empty_policy_poll", "empty-policy-poll@example.com", plan_type=plan_type)
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0 if policy == "scalar" else None
+    account.usage_limit_5h_percent = 50.0 if policy == "5h" else None
+    account.usage_limit_weekly_percent = 50.0 if policy == "weekly" else None
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        usage = UsageRepository(session)
+        for window, minutes in (("primary", 300), ("secondary", 10080), ("monthly", 43200)):
+            await usage.add_entry(
+                account.id,
+                5.0,
+                window=window,
+                window_minutes=minutes,
+                reset_at=naive_utc_to_epoch(utcnow()) + minutes * 60,
+            )
+    before = await async_client.get("/api/accounts")
+    assert before.json()["accounts"][0]["usageLimitState"] == "available"
+
+    async def empty_poll(**_kwargs):
+        if disable_during_poll:
+            disabled = await async_client.put(f"/api/accounts/{account.id}/usage-limit", json={"enabled": False})
+            assert disabled.status_code == 200
+        return UsagePayload(plan_type=plan_type, rate_limit=empty_rate_limit)
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", empty_poll)
+    async with SessionLocal() as session:
+        updater = UsageUpdater(UsageRepository(session), accounts_repo=AccountsRepository(session))
+        result = await updater._refresh_account(account, usage_account_id=None)
+    assert result.usage_written is (not disable_during_poll)
+    after = await async_client.get("/api/accounts")
+    assert after.status_code == 200
+    if disable_during_poll:
+        assert after.json()["accounts"][0]["usageLimitState"] == "disabled"
+        assert after.json()["accounts"][0]["usage"] == before.json()["accounts"][0]["usage"]
+        return
+    assert after.json()["accounts"][0]["usageLimitState"] == "data_unavailable"
+    for stream in (False, True):
+        denied = await async_client.post(
+            "/v1/responses", json={"model": "gpt-5.1", "input": "blocked", "stream": stream}
+        )
+        assert denied.status_code == 429
+        assert denied.json()["error"]["code"] == "account_usage_limit_reached"
+        assert denied.json()["error"]["type"] == "rate_limit_error"

@@ -86,6 +86,17 @@ class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def has_repeatable_history_view(self) -> bool:
+        # The lower bound comes from another statement. Only use it where the
+        # server actually keeps both reads in the same repeatable transaction.
+        # SQLite's legacy driver can leave SELECT outside a DB transaction even
+        # when SQLAlchemy has an active logical transaction, so do not assume it.
+        dialect = self._session.get_bind().dialect.name
+        if dialect != "postgresql":
+            return False
+        connection = await self._session.connection()
+        return await connection.get_isolation_level() in ("REPEATABLE READ", "SERIALIZABLE")
+
     async def aggregate_daily_rows(
         self,
         start_date: date,
@@ -95,10 +106,19 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        *,
+        earliest_activity_at: datetime | None = None,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
             raise DailyReportRangeTooLargeError(f"report date range must be {MAX_DAILY_REPORT_DAYS} days or less")
+        if earliest_activity_at is not None:
+            observed = earliest_activity_at
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            start_date = max(start_date, observed.astimezone(timezone_info).date())
+            if start_date > end_date:
+                return []
         rows: list[DailyReportAggregateRow] = []
         for batch in batched(_daily_bucket_ranges(start_date, end_date, timezone_info), _SQLITE_COMPOUND_SELECT_LIMIT):
             windows = list(batch)

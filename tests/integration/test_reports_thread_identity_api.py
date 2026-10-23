@@ -8,6 +8,7 @@ from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.reports.thread_identity import MAX_THREAD_IDENTITY_DAYS
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -86,6 +87,9 @@ async def test_thread_identity_api_splits_keyed_and_unkeyed(async_client, db_set
         )
         await session.commit()
 
+    await prepare_read_snapshot(
+        "/api/reports/thread-identity", params={"start_date": DAY, "end_date": DAY, "timezone": "UTC"}
+    )
     response = await async_client.get(
         "/api/reports/thread-identity",
         params={"start_date": DAY, "end_date": DAY, "timezone": "UTC"},
@@ -118,6 +122,9 @@ async def test_thread_identity_api_splits_keyed_and_unkeyed(async_client, db_set
 async def test_thread_identity_api_reports_unavailable_for_wide_ranges(async_client, db_setup):
     end = (BASE.date() + timedelta(days=MAX_THREAD_IDENTITY_DAYS)).isoformat()
 
+    await prepare_read_snapshot(
+        "/api/reports/thread-identity", params={"start_date": DAY, "end_date": end, "timezone": "UTC"}
+    )
     response = await async_client.get(
         "/api/reports/thread-identity",
         params={"start_date": DAY, "end_date": end, "timezone": "UTC"},
@@ -131,6 +138,7 @@ async def test_thread_identity_api_reports_unavailable_for_wide_ranges(async_cli
 
 
 async def test_thread_identity_api_rejects_an_inverted_range(async_client, db_setup):
+    await prepare_read_snapshot("/api/reports/thread-identity", params={"start_date": DAY, "end_date": "2026-05-01"})
     response = await async_client.get(
         "/api/reports/thread-identity",
         params={"start_date": DAY, "end_date": "2026-05-01"},

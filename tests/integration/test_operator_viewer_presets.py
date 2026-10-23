@@ -35,6 +35,7 @@ from app.db.models import (
     DashboardSettings,
 )
 from app.db.session import SessionLocal
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -225,6 +226,8 @@ async def test_viewer_reads_the_guest_surface_and_mutates_nothing(async_client: 
         session = (await viewer.get("/api/dashboard-auth/session")).json()
         assert session["user"]["role"]["slug"] == "viewer"
         assert "write" not in session["permissions"]
+
+        await prepare_read_snapshot("/api/dashboard/overview")
 
         # The guest read surface, with the same identity masking guests get (no accounts:write).
         listing = await viewer.get("/api/accounts")

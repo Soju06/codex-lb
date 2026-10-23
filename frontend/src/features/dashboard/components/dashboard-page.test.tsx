@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
+import { ApiError } from "@/lib/api-client";
 import { renderWithProviders } from "@/test/utils";
 import {
   ADMIN_PERMISSIONS,
@@ -306,6 +307,36 @@ describe("DashboardPage", () => {
     expect(screen.getByTestId("dashboard-skeleton")).toBeInTheDocument();
     expect(screen.queryByTestId("stats-grid")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Accounts" })).not.toBeInTheDocument();
+  });
+
+  it("keeps cold warming responses in loading state between polls", () => {
+    mockReadyDashboard();
+    useDashboardMock.mockReturnValue({
+      data: undefined, isFetching: false, isPending: false,
+      error: new ApiError({ status: 503, code: "read_snapshot_warming", message: "Preparing" }),
+    } as unknown as ReturnType<typeof useDashboard>);
+    renderWithProviders(<DashboardPage />);
+    expect(screen.getByTestId("dashboard-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("Request failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])("shows exactly one freshness notice with weekly pace=%s", (pace) => {
+    const overview = mockReadyDashboard();
+    overview.snapshot = {
+      generatedAt: "2026-10-23T00:00:00Z", stale: false, refreshing: true,
+      lastError: null, generation: 1, refreshIntervalSeconds: 300,
+    };
+    if (pace) {
+      // The card is mocked; only the presence/absence of the layout branch matters.
+      buildDashboardViewMock.mockReturnValue({
+        stats: [], weeklyCreditPace: {}, primaryUsageItems: [], secondaryUsageItems: [],
+        primaryTotal: 0, secondaryTotal: 0, safeLinePrimary: null, safeLineSecondary: null, requestLogs: [],
+      } as unknown as ReturnType<typeof buildDashboardView>);
+    }
+    renderWithProviders(<DashboardPage />);
+    expect(screen.getAllByTestId("read-snapshot-status")).toHaveLength(1);
+    expect(screen.queryByTestId("weekly-credits-pace-card") !== null).toBe(pace);
   });
 
   it("renders request-log loading inside its section without hiding overview content", () => {

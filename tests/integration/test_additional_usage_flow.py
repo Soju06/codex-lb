@@ -18,6 +18,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -185,6 +186,7 @@ async def test_dashboard_overview_omits_additional_quotas(async_client, db_setup
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
 
@@ -224,6 +226,7 @@ async def test_dashboard_overview_omits_aggregated_additional_quotas_even_when_p
             recorded_at=now,
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
 

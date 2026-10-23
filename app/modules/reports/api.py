@@ -4,14 +4,16 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
 from app.core.exceptions import DashboardBadRequestError
-from app.dependencies import ReportsContext, get_reports_caches, get_reports_context
-from app.modules.reports.cache import ReportCacheKey, ReportsCaches
+from app.db.session import get_session
+from app.modules.read_snapshots.service import SnapshotReader
+from app.modules.reports.cache import ReportCacheKey
 from app.modules.reports.repository import DailyReportRangeTooLargeError
 from app.modules.reports.schemas import ReportsOptionsResponse, ReportsResponse, ThreadIdentityResponse
 from app.modules.reports.service import InvalidReportDateRangeError, resolve_report_range
@@ -25,8 +27,7 @@ router = APIRouter(
 
 @router.get("", response_model=ReportsResponse)
 async def get_reports(
-    context: ReportsContext = Depends(get_reports_context),
-    caches: ReportsCaches = Depends(get_reports_caches),
+    session: AsyncSession = Depends(get_session),
     start_date: Annotated[date | None, Query()] = None,
     end_date: Annotated[date | None, Query()] = None,
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
@@ -36,19 +37,17 @@ async def get_reports(
     useragent_group: Annotated[str | None, Query()] = None,
 ) -> ReportsResponse:
     try:
-        key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group)
-        return await caches.reports.get(
-            key,
-            lambda: context.service.get_reports(
-                start_date=key.start,
-                end_date=key.end,
-                report_timezone=key.timezone,
-                account_ids=list(key.accounts) or None,
-                api_key_ids=list(key.api_keys) or None,
-                model=key.model or None,
-                useragent_group=key.useragent or None,
-            ),
+        value = await SnapshotReader(session).report(
+            "report",
+            start=start_date,
+            end=end_date,
+            timezone=report_timezone,
+            accounts=account_id,
+            api_keys=api_key_id,
+            model=model,
+            useragent=useragent_group,
         )
+        return ReportsResponse.model_validate(value)
     except InvalidReportDateRangeError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:
@@ -57,8 +56,7 @@ async def get_reports(
 
 @router.get("/thread-identity", response_model=ThreadIdentityResponse)
 async def get_thread_identity(
-    context: ReportsContext = Depends(get_reports_context),
-    caches: ReportsCaches = Depends(get_reports_caches),
+    session: AsyncSession = Depends(get_session),
     start_date: Annotated[date | None, Query()] = None,
     end_date: Annotated[date | None, Query()] = None,
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
@@ -70,15 +68,13 @@ async def get_thread_identity(
     accounts-per-conversation factor meaningless.
     """
     try:
-        key = _cache_key(start_date, end_date, report_timezone, None, None)
-        return await caches.thread_identity.get(
-            key,
-            lambda: context.service.get_thread_identity(
-                start_date=key.start,
-                end_date=key.end,
-                report_timezone=key.timezone,
-            ),
+        value = await SnapshotReader(session).report(
+            "threadIdentity",
+            start=start_date,
+            end=end_date,
+            timezone=report_timezone,
         )
+        return ThreadIdentityResponse.model_validate(value)
     except InvalidReportDateRangeError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:
@@ -87,8 +83,7 @@ async def get_thread_identity(
 
 @router.get("/options", response_model=ReportsOptionsResponse)
 async def get_report_options(
-    context: ReportsContext = Depends(get_reports_context),
-    caches: ReportsCaches = Depends(get_reports_caches),
+    session: AsyncSession = Depends(get_session),
     start_date: Annotated[date | None, Query()] = None,
     end_date: Annotated[date | None, Query()] = None,
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
@@ -96,17 +91,15 @@ async def get_report_options(
     api_key_id: Annotated[list[str] | None, Query()] = None,
 ) -> ReportsOptionsResponse:
     try:
-        key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id)
-        return await caches.options.get(
-            key,
-            lambda: context.service.get_options(
-                start_date=key.start,
-                end_date=key.end,
-                report_timezone=key.timezone,
-                account_ids=list(key.accounts) or None,
-                api_key_ids=list(key.api_keys) or None,
-            ),
+        value = await SnapshotReader(session).report(
+            "options",
+            start=start_date,
+            end=end_date,
+            timezone=report_timezone,
+            accounts=account_id,
+            api_keys=api_key_id,
         )
+        return ReportsOptionsResponse.model_validate(value)
     except InvalidReportDateRangeError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:

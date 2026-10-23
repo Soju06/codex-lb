@@ -56,6 +56,7 @@ def _lifespan_scheduler_builders() -> set[str]:
 
 def test_background_loop_seam_is_explicit_and_complete() -> None:
     assert BACKGROUND_LOOP_BUILDERS == (
+        "build_read_snapshot_scheduler",
         "build_metadata_refresh_scheduler",
         "build_usage_refresh_scheduler",
         "build_model_refresh_scheduler",
@@ -83,7 +84,7 @@ async def test_ambient_account_deletion_scheduler_is_noop() -> None:
     scheduler = main_module.build_account_deletion_scheduler()
     assert isinstance(scheduler, _NoopScheduler)
     assert await scheduler.start() is None
-    assert await scheduler.stop() is None
+    assert await scheduler.stop() is True
 
 
 def test_every_patched_builder_is_started_by_the_lifespan() -> None:
@@ -101,7 +102,7 @@ async def test_autouse_fixture_replaces_every_background_loop_builder(
         scheduler = getattr(main_module, builder_name)()
         assert isinstance(scheduler, _NoopScheduler), builder_name
         assert await scheduler.start() is None
-        assert await scheduler.stop() is None
+        assert await scheduler.stop() is True
 
 
 def test_harness_does_not_export_background_loop_env_kill_switches() -> None:

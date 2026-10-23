@@ -206,6 +206,19 @@ describe("ReportsPage", () => {
     );
   });
 
+  it("keeps the published as-of time and status while a fresh snapshot refreshes", () => {
+    useReportsMock.mockReturnValue(asUseReportsResult({
+      data: { ...EMPTY_REPORT, generatedAt: "2026-10-23T00:00:00Z", snapshot: {
+        generatedAt: "2026-10-23T00:00:00Z", stale: false, refreshing: true,
+        lastError: null, generation: 1, refreshIntervalSeconds: 300,
+      } },
+      isLoading: false, isError: false, refetch: vi.fn(),
+    }));
+    renderWithProviders(<ReportsPage />);
+    expect(screen.getByText(/As of/)).toBeInTheDocument();
+    expect(screen.getByTestId("read-snapshot-status")).toBeInTheDocument();
+  });
+
   it("shows the loading label without duplicating ellipsis punctuation", () => {
     useReportsMock.mockReturnValue(
       asUseReportsResult({

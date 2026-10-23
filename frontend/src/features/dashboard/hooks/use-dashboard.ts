@@ -1,3 +1,4 @@
+import { isSnapshotWarming } from "@/schemas/read-snapshot";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardOverview, getDashboardProjections } from "@/features/dashboard/api";
@@ -12,9 +13,10 @@ export function useDashboard(timeframe: OverviewTimeframe = DEFAULT_OVERVIEW_TIM
   return useQuery({
     queryKey: ["dashboard", "overview", timeframe],
     queryFn: () => getDashboardOverview({ timeframe }),
-    refetchInterval: refreshSeconds * 1_000,
+    refetchInterval: (query) => isSnapshotWarming(query.state.error) ? 2_000 : refreshSeconds * 1_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
+    retry: (count, error) => !isSnapshotWarming(error) && count < 3,
   });
 }
 
@@ -24,8 +26,9 @@ export function useDashboardProjections(enabled = true) {
     queryKey: ["dashboard", "projections"],
     queryFn: getDashboardProjections,
     enabled,
-    refetchInterval: refreshSeconds * 1_000,
+    refetchInterval: (query) => isSnapshotWarming(query.state.error) ? 2_000 : refreshSeconds * 1_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
+    retry: (count, error) => !isSnapshotWarming(error) && count < 3,
   });
 }

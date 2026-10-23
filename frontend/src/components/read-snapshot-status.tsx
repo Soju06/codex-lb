@@ -12,10 +12,10 @@ export function ReadSnapshotStatus({
   if (warming && !snapshot) {
     return <p role="status" className="text-xs text-muted-foreground">{t("common.loading")}</p>;
   }
-  if (!snapshot?.generatedAt || (!snapshot.stale && !snapshot.lastError)) return null;
+  if (!snapshot?.generatedAt || (!snapshot.stale && !snapshot.lastError && !snapshot.refreshing)) return null;
   return (
     <p role="status" className="text-xs text-muted-foreground" data-testid="read-snapshot-status">
-      {t("readSnapshot.delayed")}
+      {t(snapshot.stale || snapshot.lastError ? "readSnapshot.delayed" : "common.loading")}
     </p>
   );
 }

@@ -30,14 +30,12 @@ Completed snapshots SHALL survive browser refresh and application replica restar
 
 
 ### Requirement: Analytical traffic readiness is independent of inference readiness
-The application SHALL expose a cheap, read-only analytical readiness check that
-requires a published dashboard and all 7/30/90-day presets for UTC and admitted
-timezones, at the current snapshot schema version and within one refresh interval.
-Report generations SHALL belong to the current local calendar day. The check
-SHALL NOT register interest, start collectors, or transfer stored JSON payloads.
-Deployment traffic qualification SHALL require this check in addition to ordinary
-inference readiness. Analytical warming or failure SHALL NOT make the existing
-inference readiness endpoint fail.
+A read-only analytical traffic-readiness check SHALL require current-schema
+Dashboard and 7/30/90-day presets for UTC and admitted timezones. Values SHALL be
+younger than their refresh interval plus 100 seconds and match the current local
+report day. This check SHALL neither compute/register views nor transfer JSON
+payloads. Deployment qualification SHALL require this check as well as ordinary
+inference readiness, which snapshot failures SHALL NOT affect.
 
 #### Scenario: A newly started replica has not prepared its reports
 - **WHEN** inference infrastructure is ready but required snapshots are absent
@@ -75,3 +73,15 @@ modify existing accounting, quota, request-history, scheduler or bridge rows.
 #### Scenario: A generated payload column imitates the expected storage type
 - **WHEN** upgrade or downgrade encounters a computed payload column instead of writable snapshot storage
 - **THEN** it SHALL refuse without stamping the revision or removing the unexpected table
+
+#### Scenario: A scheduled refresh is still within its completion budget
+- **GIVEN** a published snapshot reaches its scheduled refresh interval
+- **WHEN** its age remains below the refresh interval plus 100 seconds
+- **THEN** its freshness and traffic-readiness age checks SHALL remain successful
+- **AND** exceeding that bound SHALL mark it stale and fail analytical readiness
+
+#### Scenario: One producer lane encounters a transient database error
+- **WHEN** a dashboard or report scheduling pass fails without cancellation
+- **THEN** that lane SHALL log the failure and retry on a later tick
+- **AND** the other lane SHALL remain running with its own session
+- **AND** lease loss or shutdown SHALL still cancel and join both lanes

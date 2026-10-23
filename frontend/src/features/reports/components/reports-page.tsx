@@ -317,7 +317,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       ) : null}
 
       <div className="flex items-center justify-end gap-3">
-        {reportsQuery.data?.generatedAt && !reportsQuery.data.snapshot ? (
+        {reportsQuery.data?.generatedAt ? (
           <span className="text-xs text-muted-foreground">{t("reports.asOf", { time: new Date(reportsQuery.data.generatedAt).toLocaleString() })}</span>
         ) : null}
         <Button variant="outline" size="sm"

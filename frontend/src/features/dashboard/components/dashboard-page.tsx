@@ -437,7 +437,7 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
+      {(dashboardQuery.isPending || dashboardQuery.isFetching || isSnapshotWarming(dashboardQuery.error)) &&
       !view &&
       displayedDashboardLoadError === null ? (
         <DashboardSkeleton />
@@ -486,7 +486,6 @@ export function DashboardPage() {
                 safeLineSecondary={view.safeLineSecondary}
               />
               <WeeklyCreditsPaceCard pace={view.weeklyCreditPace} />
-              <ReadSnapshotStatus snapshot={overview?.snapshot} warming={isSnapshotWarming(dashboardQuery.error)} />
             </div>
           ) : (
             <UsageDonuts
@@ -500,6 +499,7 @@ export function DashboardPage() {
               safeLineSecondary={view.safeLineSecondary}
             />
           )}
+          <ReadSnapshotStatus snapshot={overview?.snapshot} warming={isSnapshotWarming(dashboardQuery.error)} />
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">

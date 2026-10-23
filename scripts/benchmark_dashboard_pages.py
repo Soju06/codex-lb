@@ -238,7 +238,7 @@ if __name__ == "__main__":
             clock = datetime.fromisoformat(os.environ["BENCHMARK_NOW"])
             for name, module in tuple(sys.modules.items()):
                 if name.startswith("app.") and module is not None and hasattr(module, "utcnow"):
-                    module.utcnow = lambda: clock
+                    module.__dict__["utcnow"] = lambda: clock
 
         smoke["_run_backend"].__globals__["_disable_background_loops"] = disable_and_pin_evaluation_clock
         smoke["_run_backend"](int(sys.argv[2]))

@@ -72,7 +72,12 @@ class ReadSnapshotScheduler:
 
     async def _lane(self, kinds: tuple[str, ...]) -> None:
         while not self._stop.is_set():
-            await self.refresh_due(kinds)
+            try:
+                await self.refresh_due(kinds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Analytical snapshot lane failed kinds=%s; last-good data retained", kinds)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.tick_seconds)
             except asyncio.TimeoutError:

@@ -33,6 +33,8 @@ SCHEMA_VERSION = 2
 DASHBOARD_INTERVAL_SECONDS = 300
 REPORT_INTERVAL_SECONDS = 300
 REFRESH_TIMEOUT_SECONDS = 90
+# Collector timeout plus two scheduler ticks; failure must not stay fresh forever.
+FRESHNESS_GRACE_SECONDS = REFRESH_TIMEOUT_SECONDS + 10
 
 
 class SnapshotCapacityError(ValueError):
@@ -221,7 +223,7 @@ class SnapshotRepository:
         return SnapshotValue(
             payload=payload,
             generated_at=generated,
-            stale=generated is None or now - generated >= timedelta(seconds=interval_seconds),
+            stale=generated is None or now - generated >= timedelta(seconds=interval_seconds + FRESHNESS_GRACE_SECONDS),
             refreshing=row.refresh_started_at is not None
             and now - row.refresh_started_at < timedelta(seconds=REFRESH_TIMEOUT_SECONDS),
             last_error=row.last_error,
@@ -290,7 +292,7 @@ class SnapshotRepository:
         for key, generated, end_date in rows:
             zone = required[key]
             interval = DASHBOARD_INTERVAL_SECONDS if zone is None else REPORT_INTERVAL_SECONDS
-            if generated is None or now - generated >= timedelta(seconds=interval):
+            if generated is None or now - generated >= timedelta(seconds=interval + FRESHNESS_GRACE_SECONDS):
                 return False
             if zone is not None and end_date != local_today(zone, now).isoformat():
                 return False

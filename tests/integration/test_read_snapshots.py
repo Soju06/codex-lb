@@ -117,7 +117,7 @@ async def test_last_good_is_shared_across_replicas_and_failure_does_not_erase_it
         await session.execute(
             update(ReadSnapshot)
             .where(ReadSnapshot.snapshot_key == key)
-            .values(generated_at=utcnow() - timedelta(minutes=6))
+            .values(generated_at=utcnow() - timedelta(minutes=7))
         )
         await session.commit()
 
@@ -619,3 +619,48 @@ async def test_oversized_filters_are_client_errors_without_report_registration(
             )
         ).all()
         assert keys == []
+
+
+@pytest.mark.asyncio
+async def test_transient_report_lane_error_does_not_cancel_dashboard(db_setup, monkeypatch):
+    worker = ReadSnapshotScheduler(tick_seconds=0.001)
+    dashboard_started = asyncio.Event()
+    dashboard_survived = asyncio.Event()
+    report_retried = asyncio.Event()
+    report_passes = 0
+
+    async def refresh(kinds):
+        nonlocal report_passes
+        if kinds == ("dashboard",):
+            dashboard_started.set()
+            await report_retried.wait()
+            dashboard_survived.set()
+            worker._stop.set()
+        else:
+            await dashboard_started.wait()
+            report_passes += 1
+            if report_passes == 1:
+                raise RuntimeError("transient registry failure")
+            report_retried.set()
+
+    monkeypatch.setattr(worker, "refresh_due", refresh)
+    async with asyncio.timeout(2):
+        await worker._serve()
+    assert dashboard_survived.is_set()
+    assert report_passes >= 2
+
+
+@pytest.mark.asyncio
+async def test_lane_cancellation_propagates_instead_of_being_retried(monkeypatch):
+    worker = ReadSnapshotScheduler(tick_seconds=0.001)
+    calls = 0
+
+    async def refresh(kinds):
+        nonlocal calls
+        calls += 1
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(worker, "refresh_due", refresh)
+    with pytest.raises(asyncio.CancelledError):
+        await worker._lane(("dashboard",))
+    assert calls == 1

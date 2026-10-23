@@ -10,8 +10,8 @@ const SNAPSHOT: ReadSnapshotMetadata = {
 };
 
 describe("ReadSnapshotStatus", () => {
-  it.each([false, true])("renders no helper copy for fresh data while refreshing=%s", (refreshing) => {
-    const { container } = render(<ReadSnapshotStatus snapshot={{ ...SNAPSHOT, refreshing }} />);
+  it("renders no helper copy for idle fresh data", () => {
+    const { container } = render(<ReadSnapshotStatus snapshot={SNAPSHOT} />);
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByText(/Prepared|background refresh|Refreshing in the background/)).not.toBeInTheDocument();
   });
@@ -19,6 +19,11 @@ describe("ReadSnapshotStatus", () => {
     render(<ReadSnapshotStatus snapshot={{ ...SNAPSHOT, ...state }} />);
     expect(screen.getByRole("status")).toHaveTextContent(/Updates are delayed/);
     expect(screen.queryByText(/Prepared|last completed snapshot|collector failed/)).not.toBeInTheDocument();
+  });
+  it("shows a normal refresh without claiming that fresh data is delayed", () => {
+    render(<ReadSnapshotStatus snapshot={{ ...SNAPSHOT, refreshing: true }} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/Loading/);
+    expect(screen.queryByText(/Updates are delayed/)).not.toBeInTheDocument();
   });
   it("does not show preparation commentary before a first snapshot", () => {
     render(<ReadSnapshotStatus warming />);

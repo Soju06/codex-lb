@@ -91,7 +91,7 @@ async def test_analytics_readiness_refuses_incomplete_or_expired_generations(asy
         row = await session.get(ReadSnapshot, key)
         assert row is not None
         if failure == "stale":
-            row.generated_at = utcnow() - timedelta(seconds=301)
+            row.generated_at = utcnow() - timedelta(seconds=401)
         elif failure == "wrong-schema":
             row.schema_version = SCHEMA_VERSION + 1
         elif failure == "unpublished":
@@ -119,3 +119,25 @@ async def test_local_midnight_requires_new_preset_even_with_recent_publication(a
     assert (await async_client.get("/health/read-snapshots")).status_code == 503
     await _publish_metadata(("UTC", "America/New_York"))
     assert (await async_client.get("/health/read-snapshots")).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age,ready", [(299, True), (301, True), (399, True), (400, False), (401, False)])
+async def test_refresh_grace_has_consistent_bounded_readiness_and_staleness(db_setup, monkeypatch, age, ready):
+    clock = datetime(2026, 10, 23, 12, 0, 0)
+    monkeypatch.setattr(__name__ + ".utcnow", lambda: clock)
+    monkeypatch.setattr("app.modules.read_snapshots.repository.utcnow", lambda: clock)
+    monkeypatch.setattr("app.modules.read_snapshots.keys.utcnow", lambda: clock)
+    await _publish_metadata()
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(ReadSnapshot))).scalars().all()
+        for row in rows:
+            if row.published_generation:
+                row.generated_at = clock - timedelta(seconds=age)
+                row.refresh_started_at = clock - timedelta(seconds=1)
+        await session.commit()
+        repository = SnapshotRepository(session)
+        assert await repository.ready_for_traffic() is ready
+        value = await repository.read(encode_parameters("dashboard", {})[0], interval_seconds=300)
+        assert value is not None and value.stale is not ready
+        assert value.refreshing

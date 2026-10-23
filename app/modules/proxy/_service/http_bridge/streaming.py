@@ -126,6 +126,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
+from app.modules.proxy._service.http_bridge.owner_replay import retains_owner_bound_tool_context
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_clear_fence,
     _http_bridge_session_key_poison_quarantined,
@@ -477,7 +478,9 @@ class _VerifiedDurableFullResend:
                 canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
             )
         )
-        if not safe_fresh_context:
+        if not safe_fresh_context and not retains_owner_bound_tool_context(
+            input_items, stored_count=stored_count, pending_tool_calls=pending_tool_calls
+        ):
             return None
         return cls(
             _token=cls.__construction_token,
@@ -1811,7 +1814,7 @@ class _HTTPBridgeStreamingMixin:
             if (
                 fresh_reattach_can_use_durable_anchor
                 and payload_looks_like_full_resend
-                and durable_full_resend_has_safe_fresh_context
+                and durable_full_resend_proof is not None
             ):
                 if durable_full_resend_proof is not None and durable_full_resend_proof.matches(payload, durable_lookup):
                     durable_full_resend_fresh_bridge_proof = durable_full_resend_proof
@@ -2273,6 +2276,9 @@ class _HTTPBridgeStreamingMixin:
                 return False
             if payload.previous_response_id is not None or rewritten_file_account_id is not None:
                 return False
+            if durable_full_resend_proof is not None:
+                # A context-only proof does not authorize account relocation.
+                return False
             retiring_account_id = request_state.preferred_account_id
             if durable_lookup is None or retiring_account_id is None:
                 # Nothing durable to retire: the owner came from the
@@ -2521,7 +2527,9 @@ class _HTTPBridgeStreamingMixin:
                     request_stage=request_state.request_stage,
                     preferred_account_id=request_state.preferred_account_id,
                     preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
-                    fallback_on_preferred_account_unavailable=not file_required_preferred_account,
+                    fallback_on_preferred_account_unavailable=not (
+                        file_required_preferred_account or durable_full_resend_proof is not None
+                    ),
                     request_usage_budget=request_state.request_usage_budget,
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
@@ -2898,6 +2906,12 @@ class _HTTPBridgeStreamingMixin:
                     # would rebuild the same wedged reattach.
                     and not fresh_reattach_anchor_suppressed_quarantined
                     and not durable_full_resend_has_safe_fresh_context
+                    and not (
+                        durable_full_resend_proof is not None
+                        and durable_full_resend_proof.matches(payload, durable_lookup)
+                        and durable_lookup is not None
+                        and durable_lookup.account_id == session.account.id
+                    )
                     and recovery_payload.previous_response_id is None
                     and durable_lookup is not None
                     and durable_lookup.latest_response_id is not None
@@ -3067,6 +3081,12 @@ class _HTTPBridgeStreamingMixin:
             # and trim the prefix, rebuilding the wedged reattach.
             not fresh_reattach_anchor_suppressed_quarantined
             and not durable_full_resend_has_safe_fresh_context
+            and not (
+                durable_full_resend_proof is not None
+                and durable_full_resend_proof.matches(payload, durable_lookup)
+                and durable_lookup is not None
+                and durable_lookup.account_id == session.account.id
+            )
             and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
@@ -3785,7 +3805,15 @@ class _HTTPBridgeStreamingMixin:
                 and verified_stale_anchor_operation_fenced
                 and request_state.response_event_count == 0
                 and request_state.replay_count == 0
-                and durable_full_resend_retains_required_context()
+                and (
+                    durable_full_resend_retains_required_context()
+                    or (
+                        durable_full_resend_proof is not None
+                        and durable_full_resend_proof.matches(payload, durable_lookup)
+                        and durable_lookup is not None
+                        and durable_lookup.account_id == session.account.id
+                    )
+                )
             )
             previous_response_rejected_full_resend = (
                 explicit_previous_response_rejection
@@ -3799,7 +3827,15 @@ class _HTTPBridgeStreamingMixin:
                 and not verified_stale_anchor_operation_fenced
                 and request_state.response_event_count == 0
                 and request_state.replay_count == 0
-                and durable_full_resend_retains_required_context()
+                and (
+                    durable_full_resend_retains_required_context()
+                    or (
+                        durable_full_resend_proof is not None
+                        and durable_full_resend_proof.matches(payload, durable_lookup)
+                        and durable_lookup is not None
+                        and durable_lookup.account_id == session.account.id
+                    )
+                )
             )
             should_attempt_context_overflow_fresh_turn_recovery = (
                 is_context_overflow

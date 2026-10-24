@@ -85,9 +85,12 @@ rolls. A normal rolling `helm upgrade` therefore does not provide the required
 quiescence. Use this sequence (substitute the release and namespace):
 
 ```bash
-kubectl -n <namespace> scale statefulset/<release>-codex-lb-workload --replicas=0
+WORKLOAD_STATEFULSET="$(kubectl -n <namespace> get pod \
+  -l app.kubernetes.io/instance=<release>,codex-lb.soju.dev/traffic=workload \
+  -o jsonpath='{.items[0].metadata.ownerReferences[?(@.kind=="StatefulSet")].name}')"
+kubectl -n <namespace> scale "statefulset/${WORKLOAD_STATEFULSET}" --replicas=0
 kubectl -n <namespace> wait --for=delete pod \
-  -l app.kubernetes.io/instance=<release> --timeout=5m
+  -l app.kubernetes.io/instance=<release>,codex-lb.soju.dev/traffic=workload --timeout=5m
 helm upgrade <release> oci://ghcr.io/soju06/charts/codex-lb \
   --namespace <namespace> --wait
 ```

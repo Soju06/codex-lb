@@ -1562,6 +1562,17 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "StefanSa",
+      "name": "StefanSa",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6105075?v=4",
+      "profile": "https://github.com/StefanSa",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

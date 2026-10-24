@@ -2625,6 +2625,9 @@ class HttpBridgeOperationRecord(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'submitted'"))
     response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # NULL is legacy, zero is registered but unclaimed. No server default:
+    # additive migration must never authorize an old in-flight dispatch.
+    dispatch_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     terminal_append_phase: Mapped[str] = mapped_column(

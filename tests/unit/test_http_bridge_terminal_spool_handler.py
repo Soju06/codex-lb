@@ -113,6 +113,14 @@ async def _arrange_operation(
         parent_response_id=None,
     )
     assert operation is not None
+    dispatch = await coordinator.claim_operation_dispatch(
+        operation_id=operation_id,
+        session_id=lookup.session_id,
+        instance_id=instance_id,
+        owner_epoch=lookup.owner_epoch,
+        expected_dispatch_generation=0,
+    )
+    assert dispatch is not None
 
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     service._durable_bridge = coordinator  # noqa: SLF001
@@ -137,6 +145,7 @@ async def _arrange_operation(
         skip_request_log=True,
     )
     request_state.operation_id = operation_id
+    request_state.operation_dispatch_generation = dispatch.dispatch_generation
     session = _make_bridge_session(
         key_value=key_value,
         pending_requests=deque([request_state]),
@@ -319,6 +328,16 @@ async def test_late_clear_does_not_strand_a_newer_terminal_attempt(
     )
 
     release_first_append = asyncio.Event()
+    assert (
+        await coordinator.claim_operation_dispatch(
+            operation_id=operation_id,
+            session_id=lookup.session_id,
+            instance_id=instance_id,
+            owner_epoch=lookup.owner_epoch,
+            expected_dispatch_generation=0,
+        )
+        is not None
+    )
     first_append_started = asyncio.Event()
     real_append = coordinator.append_terminal_operation_event
     attempts = 0
@@ -354,6 +373,7 @@ async def test_late_clear_does_not_strand_a_newer_terminal_attempt(
         "session_id": lookup.session_id,
         "instance_id": instance_id,
         "owner_epoch": lookup.owner_epoch,
+        "expected_dispatch_generation": 1,
         "max_bytes": 64 * 1024,
         "state": "completed",
         "response_id": "resp-late-clear",
@@ -372,6 +392,7 @@ async def test_late_clear_does_not_strand_a_newer_terminal_attempt(
         instance_id=instance_id,
         owner_epoch=lookup.owner_epoch,
         event_text="retry body\n\n",
+        expected_dispatch_generation=1,
     )
 
     # The abandoned attempt's cleanup runs only now, after attempt 2 took over.

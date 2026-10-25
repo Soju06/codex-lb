@@ -328,7 +328,7 @@ it("uses a lightweight catalog key that does not change with model or useragent 
   client.clear();
 });
 
-it("caches reports without periodic polling or automatic retries", async () => {
+it("polls prepared reports cheaply without automatic request retries", async () => {
   getMock.mockClear();
   const client = createTestQueryClient();
   const filters = { startDate: "2026-06-01", endDate: "2026-06-07", accountId: [], model: "" };
@@ -336,7 +336,8 @@ it("caches reports without periodic polling or automatic retries", async () => {
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   const options = client.getQueryCache().getAll()[0]?.options as { staleTime: number; refetchInterval: unknown; retry: unknown };
   expect(options.staleTime).toBe(300_000);
-  expect(options.refetchInterval).toBe(false);
+  expect(typeof options.refetchInterval).toBe("function");
+  expect((options.refetchInterval as (q: unknown) => number)(client.getQueryCache().getAll()[0])).toBe(60_000);
   expect(options.retry).toBe(false);
   unmount();
   client.clear();

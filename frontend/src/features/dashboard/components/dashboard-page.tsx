@@ -1,3 +1,5 @@
+import { ReadSnapshotStatus } from "@/components/read-snapshot-status";
+import { isSnapshotWarming } from "@/schemas/read-snapshot";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -119,7 +121,7 @@ export function DashboardPage() {
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
     useState<OverviewTimeframe | null>(null);
-  const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
+  const projectionsQuery = useDashboardProjections();
   const conversationsState = useConversations({
     enabled: canReadConversations && dashboardView === "conversations",
   });
@@ -368,7 +370,7 @@ export function DashboardPage() {
     [optionsQuery.data?.statuses, t],
   );
 
-  const dashboardLoadError = getErrorMessageOrNull(dashboardQuery.error);
+  const dashboardLoadError = isSnapshotWarming(dashboardQuery.error) ? null : getErrorMessageOrNull(dashboardQuery.error);
   if (
     retainedDashboardLoadError !== null &&
     (overview || retainedDashboardLoadError.timeframe !== dashboardTimeframe)
@@ -435,7 +437,7 @@ export function DashboardPage() {
 
       {errorMessage ? <AlertMessage variant="error">{errorMessage}</AlertMessage> : null}
 
-      {(dashboardQuery.isPending || dashboardQuery.isFetching) &&
+      {(dashboardQuery.isPending || dashboardQuery.isFetching || isSnapshotWarming(dashboardQuery.error)) &&
       !view &&
       displayedDashboardLoadError === null ? (
         <DashboardSkeleton />
@@ -497,6 +499,7 @@ export function DashboardPage() {
               safeLineSecondary={view.safeLineSecondary}
             />
           )}
+          <ReadSnapshotStatus snapshot={overview?.snapshot} warming={isSnapshotWarming(dashboardQuery.error)} />
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">

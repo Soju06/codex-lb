@@ -1,3 +1,4 @@
+import { ReadSnapshotSchema } from "@/schemas/read-snapshot";
 import { z } from "zod";
 
 const DailyReportRowSchema = z.object({
@@ -66,11 +67,14 @@ const ReportComparisonSchema = z.object({
 });
 
 export const ReportsOptionsResponseSchema = z.object({
+  snapshot: ReadSnapshotSchema.nullable().optional(),
   models: z.array(z.string()),
   useragents: z.array(z.string()),
 });
 
 export const ReportsResponseSchema = z.object({
+  observedHistoryStart: z.string().nullable().optional(),
+  snapshot: ReadSnapshotSchema.nullable().optional(),
   generatedAt: z.string().optional(),
   speedMetricsAvailable: z.boolean().optional(),
   speedMetricsMaxDays: z.number().optional(),
@@ -97,6 +101,7 @@ const ThreadIdentityFacetSchema = z.object({
 });
 
 export const ThreadIdentityResponseSchema = z.object({
+  snapshot: ReadSnapshotSchema.nullable().optional(),
   generatedAt: z.string().optional(),
   available: z.boolean(),
   maxDays: z.number(),

@@ -17,6 +17,7 @@ from app.db.models import Account, AccountStatus, ApiKey, RequestKind, RequestLo
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -1476,6 +1477,7 @@ async def test_conversation_timeframe_matches_dashboard_activity_under_fixed_clo
         await session.commit()
 
     conversations_response = await async_client.get("/api/conversations", params={"timeframe": "7d"})
+    await prepare_read_snapshot("/api/dashboard/overview", params={"timeframe": "7d"})
     dashboard_response = await async_client.get("/api/dashboard/overview", params={"timeframe": "7d"})
 
     assert conversations_response.status_code == 200

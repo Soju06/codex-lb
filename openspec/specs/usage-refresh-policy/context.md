@@ -134,3 +134,7 @@ does not count as evidence that the account is healthy.
 
 - [#676 - initial bug report on `/wham/usage` vs. Settings UI divergence](https://github.com/Soju06/codex-lb/issues/676)
 - [#677 - dashboard per-account force-probe action](https://github.com/Soju06/codex-lb/issues/677)
+
+## Refresh completion task ownership
+
+The singleflight owns its asynchronous completion work as well as the refresh operation itself. Completion can wait for the singleflight lock before removing its inflight entry or recording a failure cooldown. Retaining that task avoids depending on incidental awaitable references; it does not alter the successor guard, refresh policy or cancellation independence of callers. For example, a failed old refresh whose successor is already installed still cannot overwrite the successor's cache state. No production task-loss incident is asserted by this preventive change.

@@ -143,12 +143,23 @@ class OAuthStateStore:
         self._state_token_index: dict[str, str] = {}
         self._callback_server: OAuthCallbackServer | None = None
         self._callback_server_stop_task: asyncio.Task[None] | None = None
+        self._idle_stop_tasks: set[asyncio.Task[None]] = set()
         self._browser_flow_expiry_task: asyncio.Task[None] | None = None
         self._browser_flow_expiry_changed = asyncio.Event()
 
     @property
     def lock(self) -> asyncio.Lock:
         return self._lock
+
+    def retain_idle_stop_task(self, task: asyncio.Task[None]) -> None:
+        """Own callback cleanup until its result has been observed."""
+        self._idle_stop_tasks.add(task)
+        task.add_done_callback(self._idle_stop_done)
+
+    def _idle_stop_done(self, task: asyncio.Task[None]) -> None:
+        self._idle_stop_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("OAuth callback idle cleanup failed")
 
     @property
     def state(self) -> OAuthState:
@@ -713,7 +724,7 @@ class OauthService:
             )
             await self._persist_tokens(tokens, intended_account_id=flow.intended_account_id)
             await self._set_success(flow.flow_id)
-            asyncio.create_task(self._stop_callback_server_if_idle())
+            self._spawn_callback_server_idle_stop()
             return ManualCallbackResponse(status="success")
         except OAuthError as exc:
             # Loser race: a concurrent callback may have committed success for the
@@ -878,7 +889,7 @@ class OauthService:
                 else _error_html(_ACCOUNT_IDENTITY_CONFLICT_MESSAGE)
             )
 
-        asyncio.create_task(self._stop_callback_server_if_idle())
+        self._spawn_callback_server_idle_stop()
         return self._html_response(html)
 
     async def _poll_device_tokens(self, flow_id: str | None, context: "DevicePollContext") -> None:
@@ -1157,6 +1168,10 @@ class OauthService:
             if stop_task is None:
                 return
             await asyncio.shield(stop_task)
+
+    def _spawn_callback_server_idle_stop(self) -> None:
+        task = asyncio.create_task(self._stop_callback_server_if_idle(), name="oauth-callback-idle-stop")
+        self._store.retain_idle_stop_task(task)
 
     async def _stop_callback_server_if_idle(self) -> None:
         server: OAuthCallbackServer | None = None

@@ -123,3 +123,7 @@ programmatic shutdown, instead of returning an unbounded task to asyncio runner 
   invalidation bus. If a bump or poll fails, the mutation still succeeds and each affected cache
   follows its documented fallback behavior. See `query-caching` for namespaces, timing, failure
   metrics, and cache-specific backstops.
+
+## Callback cleanup task ownership
+
+Successful browser and manual callbacks schedule listener-idle cleanup asynchronously so their responses do not wait for it. The process-local OAuth store retains those cleanup tasks until completion and observes failures with a content-free message. This makes the lifetime explicit without changing flow expiry, response shape, listener stop serialization or credential handling. For example, an idle stop waiting behind an in-progress listener close stays owned until that wait ends; success, failure and cancellation all drop the completed task reference.

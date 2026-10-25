@@ -13,6 +13,7 @@ from app.core.utils.time import utcnow
 from app.db.models import ReadSnapshot, SchedulerLeader
 from app.db.session import SessionLocal
 from app.modules.dashboard.service import DashboardService
+from app.modules.read_snapshots import repository as repository_module
 from app.modules.read_snapshots import scheduler as scheduler_module
 from app.modules.read_snapshots.keys import report_parameters, resolve_parameters
 from app.modules.read_snapshots.repository import (
@@ -664,3 +665,137 @@ async def test_lane_cancellation_propagates_instead_of_being_retried(monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await worker._lane(("dashboard",))
     assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("interval", "expected_delay"), [(1, 1), (30, 1), (100, 1), (300, 200)])
+async def test_successful_publication_reserves_bounded_refresh_headroom(db_setup, interval, expected_delay):
+    worker = ReadSnapshotScheduler()
+    assert await worker.leader.try_acquire()
+    try:
+        key = await _register()
+        async with SessionLocal() as session:
+            repository = SnapshotRepository(session)
+            generation = await repository.claim(key, worker.leader)
+            assert generation is not None
+            assert await repository.publish(
+                key, generation, worker.leader, {"complete": True}, interval_seconds=interval, duration_ms=24_000
+            )
+            row = await session.get(ReadSnapshot, key, populate_existing=True)
+            assert row is not None and row.generated_at is not None
+            assert (row.refresh_at - row.generated_at).total_seconds() == expected_delay
+    finally:
+        assert await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_replacement_is_due_while_the_prior_generation_remains_fresh(db_setup, monkeypatch):
+    worker = ReadSnapshotScheduler()
+    assert await worker.leader.try_acquire()
+    try:
+        key = await _register()
+        async with SessionLocal() as session:
+            repository = SnapshotRepository(session)
+            generation = await repository.claim(key, worker.leader)
+            assert generation is not None
+            assert await repository.publish(
+                key, generation, worker.leader, {"complete": 1}, interval_seconds=300, duration_ms=24_000
+            )
+            row = await session.get(ReadSnapshot, key, populate_existing=True)
+            assert row is not None and row.generated_at is not None
+            published_at = row.generated_at
+        monkeypatch.setattr(repository_module, "utcnow", lambda: published_at + timedelta(seconds=201))
+        async with SessionLocal() as session:
+            repository = SnapshotRepository(session)
+            assert key in [job[0] for job in await repository.due(("dashboard",))]
+            prior = await repository.read(key, interval_seconds=300)
+            assert prior is not None and prior.payload == {"complete": 1} and not prior.stale
+            replacement = await repository.claim(key, worker.leader)
+            assert replacement is not None and replacement > generation
+            during = await repository.read(key, interval_seconds=300)
+            assert during is not None and during.payload == prior.payload and not during.stale and during.refreshing
+            await repository.failed(key, replacement, worker.leader, "controlled_failure")
+            row = await session.get(ReadSnapshot, key, populate_existing=True)
+            assert row is not None
+            assert row.refresh_at == published_at + timedelta(seconds=231)
+            assert row.published_generation == generation and row.last_error == "controlled_failure"
+        monkeypatch.setattr(repository_module, "utcnow", lambda: published_at + timedelta(days=1))
+        async with SessionLocal() as session:
+            expired = await SnapshotRepository(session).read(key, interval_seconds=300)
+            assert expired is not None and expired.stale and expired.payload == prior.payload
+    finally:
+        assert await worker.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headroom,expected_status", [(100, 200), (0, 503)])
+async def test_successful_early_refresh_preserves_analytical_readiness(
+    async_client, db_setup, monkeypatch, headroom, expected_status
+):
+    from app.modules.read_snapshots import keys as keys_module
+
+    clock = utcnow().replace(hour=12, minute=0, second=0, microsecond=0)
+    initial = clock
+    collecting_replacements = False
+    collected = 0
+    boundary = initial + timedelta(seconds=301 + repository_module.FRESHNESS_GRACE_SECONDS)
+    boundary_status = None
+    monkeypatch.setattr(repository_module, "utcnow", lambda: clock)
+    monkeypatch.setattr(keys_module, "utcnow", lambda: clock)
+    # Zero is the previous schedule: begin collection only at the interval.
+    monkeypatch.setattr(repository_module, "REFRESH_HEADROOM_SECONDS", headroom)
+
+    async def collection_elapsed():
+        nonlocal clock, collected, boundary_status
+        if collecting_replacements:
+            completed_at = clock + timedelta(seconds=40)
+            if clock < boundary <= completed_at:
+                clock = boundary
+                boundary_status = (await async_client.get("/health/read-snapshots")).status_code
+            clock = completed_at
+            collected += 1
+
+    async def dashboard(session):
+        await collection_elapsed()
+        return {"complete": True}
+
+    async def report(session, parameters):
+        await collection_elapsed()
+        resolved = resolve_parameters(parameters)
+        return {"range": {name: resolved[name] for name in ("start", "end", "timezone")}}
+
+    monkeypatch.setattr(scheduler_module, "dashboard_snapshot", dashboard)
+    monkeypatch.setattr(scheduler_module, "report_snapshot", report)
+    worker = ReadSnapshotScheduler()
+    assert await worker.leader.try_acquire()
+    try:
+        await worker.refresh_due()
+        assert (await async_client.get("/health/read-snapshots")).status_code == 200
+        collecting_replacements = True
+        clock = initial + timedelta(seconds=201)
+        await worker.refresh_due()
+        assert collected == (4 if headroom else 0)
+        if not headroom:
+            # Keep the old producer active at its actual deadline. Four healthy
+            # 40-second collectors cross the prior value's freshness boundary.
+            clock = initial + timedelta(seconds=301)
+            await worker.refresh_due()
+        assert collected == 4
+        if clock < boundary:
+            # Early collection finished by t=361, before the t=401 boundary.
+            clock = boundary
+            boundary_status = (await async_client.get("/health/read-snapshots")).status_code
+        assert boundary_status == expected_status
+        # Both producers finish successfully; only the old schedule has a gap.
+        assert (await async_client.get("/health/read-snapshots")).status_code == 200
+        assert (await async_client.get("/health/ready")).status_code == 200
+        async with SessionLocal() as session:
+            rows = (
+                (await session.execute(select(ReadSnapshot).where(ReadSnapshot.published_generation > 0)))
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 4
+            assert all(row.published_generation == 2 for row in rows)
+    finally:
+        assert await worker.stop()

@@ -1336,7 +1336,10 @@ async def test_device_oauth_flow_reports_proxy_route_errors(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_manual_callback_returns_success_and_creates_account(async_client, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["manual", "browser"])
+async def test_callback_success_owns_cleanup_and_creates_account(async_client, monkeypatch, entrypoint):
+    from aiohttp.test_utils import make_mocked_request
+
     async def fake_callback_server_start(self) -> None:
         return None
 
@@ -1358,6 +1361,16 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
     monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
     monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
 
+    store = oauth_module._OAUTH_STORE
+    retained: list[asyncio.Task[None]] = []
+    retain = store.retain_idle_stop_task
+
+    def track_cleanup(task: asyncio.Task[None]) -> None:
+        retained.append(task)
+        retain(task)
+
+    monkeypatch.setattr(store, "retain_idle_stop_task", track_cleanup)
+
     start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser"})
     assert start.status_code == 200
     payload = start.json()
@@ -1366,14 +1379,28 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
     async with oauth_module._OAUTH_STORE.lock:
         state_token = oauth_module._OAUTH_STORE.state.state_token
 
-    response = await async_client.post(
-        "/api/oauth/manual-callback",
-        json={
-            "callbackUrl": f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}",
-        },
-    )
-    assert response.status_code == 200
-    assert response.json() == {"status": "success", "errorMessage": None}
+    if entrypoint == "manual":
+        response = await async_client.post(
+            "/api/oauth/manual-callback",
+            json={
+                "callbackUrl": f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "success", "errorMessage": None}
+    else:
+        async with SessionLocal() as session:
+            service = oauth_module.OauthService(AccountsRepository(session))
+            browser_response = await service._handle_callback(
+                make_mocked_request("GET", f"/auth/callback?code=browser-code&state={state_token}")
+            )
+        assert browser_response.status == 200
+        assert browser_response.text is not None and "Login failed" not in browser_response.text
+
+    assert len(retained) == 1
+    assert retained[0].get_name() == "oauth-callback-idle-stop"
+    await asyncio.wait_for(retained[0], timeout=1)
+    assert not store._idle_stop_tasks
 
     status = await async_client.get("/api/oauth/status")
     assert status.status_code == 200

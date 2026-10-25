@@ -22,12 +22,11 @@ STARTUP_TIMEOUT_SECONDS = 90.0
 SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
 # Background loops the app lifespan builds through ``app.main`` seams. The smoke
-# backend replaces every builder with a no-op in-process (mirroring the autouse
-# ``_disable_background_loop_schedulers`` fixture in tests/conftest.py, which
-# pins this tuple) instead of exporting ``CODEX_LB_*_ENABLED=false``: the
-# dashboard under test never needs them, several would leave the process
-# (public GitHub/npm catalog lookups, upstream usage polls), and an env override
-# silently stops working the day the toggle behind it is constantized.
+# backend disables outbound/background maintenance loops in-process instead of
+# exporting ``CODEX_LB_*_ENABLED=false``. Unlike the general test fixture, keep
+# the local read-snapshot producer: the real dashboard consumes its values.
+# The disabled loops include public catalog lookups and upstream usage polls;
+# an env override could silently stop working if its toggle is constantized.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
     "build_metadata_refresh_scheduler",
     "build_usage_refresh_scheduler",
@@ -57,7 +56,7 @@ def _disable_background_loops(
     *,
     setter: Callable[[ModuleType, str, Any], None] = setattr,
 ) -> None:
-    """Make the app lifespan skip every background loop and the live-usage ingestor.
+    """Disable outbound/maintenance loops and ingestion, not local snapshot production.
 
     The lifespan resolves these names from ``app.main`` globals at startup, so
     rebinding them here is sufficient. The live-usage ingestor is a queue
@@ -132,7 +131,7 @@ def _wait_until_ready(server: subprocess.Popen[bytes], base_url: str) -> None:
         if return_code is not None:
             raise RuntimeError(f"dashboard smoke backend exited during startup with code {return_code}")
         try:
-            with opener.open(f"{base_url}/health", timeout=1.0) as response:
+            with opener.open(f"{base_url}/health/read-snapshots", timeout=1.0) as response:
                 if response.status == 200:
                     return
         except (TimeoutError, urllib.error.URLError):

@@ -21,3 +21,15 @@ existing freshness/grace policy, or generation and lease fencing.
 - **WHEN** a replacement fails or its producer stops
 - **THEN** the prior generation remains readable with truthful freshness metadata
 - **AND** the existing failure backoff and publication ownership fences remain in force
+
+
+### Requirement: Smoke verification waits for prepared dashboard values
+The isolated browser smoke backend SHALL retain local snapshot production while
+disabling outbound background loops. It SHALL wait for analytical readiness before
+launching the browser rather than treating infrastructure liveness as proof that
+prepared dashboard values exist.
+
+#### Scenario: A fresh isolated backend is still warming
+- **WHEN** the backend serves liveness but has not published its initial snapshots
+- **THEN** browser launch waits for analytical readiness
+- **AND** the local producer remains able to publish those snapshots

@@ -25,3 +25,11 @@ Verify the actual repository's publication, due/readiness and stale/failure path
 against a real isolated database. Compare the unmodified deployed source as a causal
 control. Production adoption requires a separately qualified immutable candidate;
 never edit the selected process's source or force its clients to disconnect.
+
+
+The standalone browser smoke backend keeps the local snapshot producer enabled
+while suppressing outbound catalog, usage and maintenance loops. It waits for
+analytical readiness before launching the browser; infrastructure liveness alone
+does not imply that prepared dashboard values exist. Integration tests that
+disable all schedulers explicitly publish a replacement after changing source
+state before asserting the prepared overview.

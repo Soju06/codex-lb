@@ -18,11 +18,21 @@ pytestmark = pytest.mark.unit
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
-async def test_refresh_completion_is_owned_while_waiting_for_lock(outcome: str) -> None:
+async def test_refresh_completion_is_owned_while_waiting_for_lock(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A completion retains its task and preserves the existing cache policy."""
     owner = auth_manager._RefreshSingleflight()
     key = ("account-test", "token-fingerprint")
     account = Account(id=key[0])
+    started = asyncio.Event()
+    complete = owner._complete
+
+    async def observed_complete(key: tuple[str, str], task: asyncio.Task[Account]) -> None:
+        started.set()
+        await complete(key, task)
+
+    monkeypatch.setattr(owner, "_complete", observed_complete)
 
     async def refresh() -> Account:
         if outcome == "failure":
@@ -39,6 +49,7 @@ async def test_refresh_completion_is_owned_while_waiting_for_lock(outcome: str) 
         owner._schedule_complete(key, refresh_task)
         assert len(owner._completions) == 1
         completion = next(iter(owner._completions))
+        await asyncio.wait_for(started.wait(), timeout=1)
         assert not completion.done()
     finally:
         owner._lock.release()

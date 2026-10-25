@@ -1,5 +1,7 @@
 import importlib.util
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -109,17 +111,39 @@ def test_smoke_main_rejects_invalid_backend_fd(
     assert capsys.readouterr().err == "Invalid --backend-fd value.\n"
 
 
-def test_smoke_backend_disables_the_same_background_loops_as_the_test_harness(
+def test_smoke_backend_keeps_snapshot_production_but_disables_other_background_loops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     smoke_harness = _load_smoke_harness()
-    assert smoke_harness.BACKGROUND_LOOP_BUILDERS == BACKGROUND_LOOP_BUILDERS
+    snapshot_builder = main_module.build_read_snapshot_scheduler
+    disabled_builders = tuple(name for name in BACKGROUND_LOOP_BUILDERS if name != "build_read_snapshot_scheduler")
+    assert smoke_harness.BACKGROUND_LOOP_BUILDERS == disabled_builders
 
     smoke_harness._disable_background_loops(main_module, setter=monkeypatch.setattr)
 
-    for builder_name in BACKGROUND_LOOP_BUILDERS:
+    assert main_module.build_read_snapshot_scheduler is snapshot_builder
+    for builder_name in disabled_builders:
         assert isinstance(getattr(main_module, builder_name)(), smoke_harness._NoopScheduler), builder_name
     assert main_module.start_live_usage_ingestor() is None
+
+
+def test_smoke_waits_for_prepared_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    smoke_harness = _load_smoke_harness()
+    statuses = iter((503, 200))
+    requested: list[str] = []
+
+    @contextmanager
+    def open_health(url: str, *, timeout: float):
+        requested.append(url)
+        assert timeout == 1.0
+        status = next(statuses)
+        if status != 200:
+            raise smoke_harness.urllib.error.HTTPError(url, status, "warming", None, None)
+        yield SimpleNamespace(status=status)
+
+    monkeypatch.setattr(smoke_harness.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_health))
+    smoke_harness._wait_until_ready(SimpleNamespace(poll=lambda: None), "http://127.0.0.1:1234")
+    assert requested == ["http://127.0.0.1:1234/health/read-snapshots"] * 2
 
 
 def test_smoke_environment_does_not_export_background_loop_env_kill_switches(tmp_path: Path) -> None:

@@ -1392,6 +1392,15 @@ async def test_proxy_compact_token_invalidated_marks_reauth_and_fails_over(async
     accounts = {account["accountId"]: account for account in accounts_response.json()["accounts"]}
     assert accounts[invalidated_account_id]["status"] == "reauth_required"
 
+    from app.modules.read_snapshots.scheduler import ReadSnapshotScheduler
+
+    worker = ReadSnapshotScheduler()
+    assert await worker.leader.try_acquire()
+    try:
+        await worker.refresh_due()
+    finally:
+        assert await worker.stop()
+
     overview_response = await async_client.get("/api/dashboard/overview")
     assert overview_response.status_code == 200
     overview_accounts = {account["accountId"]: account for account in overview_response.json()["accounts"]}

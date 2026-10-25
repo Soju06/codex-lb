@@ -33,6 +33,9 @@ SCHEMA_VERSION = 2
 DASHBOARD_INTERVAL_SECONDS = 300
 REPORT_INTERVAL_SECONDS = 300
 REFRESH_TIMEOUT_SECONDS = 90
+# Start replacements while the previous generation is still fresh, allowing
+# the collector deadline and two scheduler ticks without request-time work.
+REFRESH_HEADROOM_SECONDS = REFRESH_TIMEOUT_SECONDS + 10
 # Collector timeout plus two scheduler ticks; failure must not stay fresh forever.
 FRESHNESS_GRACE_SECONDS = REFRESH_TIMEOUT_SECONDS + 10
 
@@ -359,7 +362,7 @@ class SnapshotRepository:
         row.payload_json = encoded
         row.published_generation = generation
         row.generated_at = now
-        row.refresh_at = now + timedelta(seconds=interval_seconds)
+        row.refresh_at = now + timedelta(seconds=max(1, interval_seconds - REFRESH_HEADROOM_SECONDS))
         row.refresh_started_at = None
         row.last_error = None
         row.duration_ms = duration_ms

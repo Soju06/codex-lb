@@ -191,6 +191,7 @@ class _RefreshSingleflight:
     def __init__(self) -> None:
         self._inflight: dict[_RefreshSingleflightKey, asyncio.Task[Account]] = {}
         self._recent_failures: dict[_RefreshSingleflightKey, tuple[float, tuple[str, str, bool]]] = {}
+        self._completions: set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
     async def run(
@@ -224,7 +225,9 @@ class _RefreshSingleflight:
         return await wait_on_shared_future(task)
 
     def _schedule_complete(self, key: _RefreshSingleflightKey, task: asyncio.Task[Account]) -> None:
-        asyncio.create_task(self._complete(key, task))
+        completion = asyncio.create_task(self._complete(key, task), name="refresh-singleflight-complete")
+        self._completions.add(completion)
+        completion.add_done_callback(self._completions.discard)
 
     async def _complete(self, key: _RefreshSingleflightKey, task: asyncio.Task[Account]) -> None:
         try:

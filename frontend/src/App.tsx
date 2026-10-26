@@ -33,6 +33,9 @@ const ReportsPage = lazy(() =>
 const AccountsPage = lazy(() =>
   import("@/features/accounts/components/accounts-page").then((m) => ({ default: m.AccountsPage })),
 );
+const DashboardOverviewPage = lazy(() =>
+  import("@/features/dashboard/components/dashboard-overview-page").then((m) => ({ default: m.DashboardOverviewPage })),
+);
 const AutomationsPage = lazy(() =>
   import("@/features/automations/components/automations-page").then((m) => ({ default: m.AutomationsPage })),
 );
@@ -115,8 +118,11 @@ export default function App() {
                 and, when a same-tab sign-in flow it started failed here, back on
                 the card that started it rather than on the dashboard. */}
             <Route path="/login" element={<Navigate to={signedInLoginDestination()} replace />} />
+            {/* Outside the guard: `/accounts/` would otherwise demand `accounts:read` for a dashboard link. */}
+            <Route path="/accounts/overview" element={<Navigate to="/dashboard/overview" replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/dashboard/overview" element={<DashboardOverviewPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/automations" element={<AutomationsPage />} />

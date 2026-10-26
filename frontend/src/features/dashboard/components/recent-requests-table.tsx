@@ -44,6 +44,7 @@ import {
 } from "@/features/dashboard/request-log-columns";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { usePermission } from "@/features/auth/hooks/use-auth";
+import { formatCompactElapsed, formatGenerationSpeed } from "@/features/dashboard/utils";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
@@ -277,30 +278,6 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
   }
 
   return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
-}
-
-function formatGenerationSpeed(request: RequestLog): string | null {
-  if (request.outputTokensRaw == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
-    return null;
-  }
-
-  const outputCount = request.outputTokensRaw - (request.reasoningTokens ?? 0);
-  const generationMs = request.latencyMs - request.latencyFirstTokenMs;
-  if (outputCount <= 0 || generationMs <= 0) {
-    return null;
-  }
-
-  return (outputCount / (generationMs / 1000)).toFixed(1);
-}
-
-function formatCompactElapsed(ms: number | null | undefined): string | null {
-  if (ms == null) {
-    return null;
-  }
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 export function RecentRequestsTable({

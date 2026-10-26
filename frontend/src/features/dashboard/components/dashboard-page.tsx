@@ -26,6 +26,7 @@ import { DashboardSkeleton } from "@/features/dashboard/components/dashboard-ske
 import { ConversationsView } from "@/features/dashboard/components/conversations-view";
 import { ConversationTimeframeSelect } from "@/features/dashboard/components/filters/conversation-timeframe-select";
 import { DashboardViewSelector } from "@/features/dashboard/components/filters/dashboard-view-selector";
+import { DashboardViewTabs } from "@/features/dashboard/components/dashboard-view-tabs";
 import { OverviewTimeframeSelect } from "@/features/dashboard/components/filters/overview-timeframe-select";
 import { RequestFilters } from "@/features/dashboard/components/filters/request-filters";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
@@ -407,7 +408,8 @@ export function DashboardPage() {
             {t("dashboard.page.subtitle")}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <DashboardViewTabs />
           {dashboardView === "request-logs" ? (
             <OverviewTimeframeSelect
               value={overviewTimeframe}

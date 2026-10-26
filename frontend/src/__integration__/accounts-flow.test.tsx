@@ -62,4 +62,19 @@ describe("accounts flow integration", () => {
       expect(screen.getByRole("heading", { name: "primary@example.com" })).toBeInTheDocument();
     });
   });
+
+  it("shows no view tabs and sends the old overview link to the dashboard overview", async () => {
+    window.history.pushState({}, "", "/accounts");
+    const { unmount } = renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accounts" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Dashboard views" })).not.toBeInTheDocument();
+    unmount();
+
+    window.history.pushState({}, "", "/accounts/overview");
+    renderWithProviders(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/dashboard/overview");
+  });
 });

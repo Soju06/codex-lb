@@ -874,3 +874,27 @@ export function buildDashboardView(
       overview.weeklyCreditPace ?? projections?.weeklyCreditPace ?? buildWeeklyCreditPace(overview.accounts),
   };
 }
+
+export function formatGenerationSpeed(request: RequestLog): string | null {
+  if (request.outputTokensRaw == null || request.latencyMs == null || request.latencyFirstTokenMs == null) {
+    return null;
+  }
+
+  const outputCount = request.outputTokensRaw - (request.reasoningTokens ?? 0);
+  const generationMs = request.latencyMs - request.latencyFirstTokenMs;
+  if (outputCount <= 0 || generationMs <= 0) {
+    return null;
+  }
+
+  return (outputCount / (generationMs / 1000)).toFixed(1);
+}
+
+export function formatCompactElapsed(ms: number | null | undefined): string | null {
+  if (ms == null) {
+    return null;
+  }
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  return `${(ms / 1000).toFixed(1)}s`;
+}

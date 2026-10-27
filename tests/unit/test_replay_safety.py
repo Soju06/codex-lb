@@ -2596,10 +2596,22 @@ def test_account_neutral_fresh_replay_rejects_nested_extras_preserved_by_request
     assert responses_payload_is_account_neutral_fresh_replay(request.to_payload()) is False
 
 
-@pytest.mark.parametrize("item_index", [0, 1, 2])
-def test_encrypted_output_remains_account_scoped_after_item_id_projection(item_index: int) -> None:
+@pytest.mark.parametrize(
+    "item_index, encrypted_field",
+    [
+        (0, "encrypted_content"),
+        (1, "encrypted_content"),
+        (2, "encrypted_content"),
+        (1, "encrypted_function_args"),
+    ],
+)
+def test_encrypted_output_remains_account_scoped_after_item_id_projection(
+    item_index: int, encrypted_field: str
+) -> None:
     item = encrypted_output_items()[item_index]
-    item.pop("encrypted_function_args", None)
+    for field in ("encrypted_content", "encrypted_function_args"):
+        if field != encrypted_field:
+            item.pop(field, None)
     inputs: list[JsonValue] = [item]
     if item["type"] in {"function_call", "custom_tool_call"}:
         inputs.append({"type": f"{item['type']}_output", "call_id": item["call_id"], "output": "OK"})
@@ -2611,9 +2623,9 @@ def test_encrypted_output_remains_account_scoped_after_item_id_projection(item_i
     projected_item = projection.input_items[0]
     assert isinstance(projected_item, dict)
     assert "id" not in projected_item
-    assert projected_item["encrypted_content"] == item["encrypted_content"]
+    assert projected_item[encrypted_field] == item[encrypted_field]
     assert not responses_payload_is_account_neutral_fresh_replay(payload)
-    projected_item.pop("encrypted_content")
+    projected_item.pop(encrypted_field)
     assert responses_payload_is_account_neutral_fresh_replay(payload)
 
 

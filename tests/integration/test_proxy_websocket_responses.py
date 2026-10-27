@@ -50,6 +50,11 @@ from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
     _capability_lineage_unavailable_error,
 )
+from tests.fixtures.encrypted_output import (
+    encrypted_output_events,
+    encrypted_output_items,
+    encrypted_output_replay_input,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -2677,6 +2682,85 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     assert isinstance(latency_response_created_ms, int)
     assert isinstance(latency_first_token_ms, int)
     assert latency_first_upstream_event_ms <= latency_response_created_ms <= latency_first_token_ms
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+def test_responses_websocket_preserves_encrypted_output_and_replay(app_instance, monkeypatch, path):
+    upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [_FakeUpstreamMessage("text", text=json.dumps(event)) for event in encrypted_output_events(response_id)]
+            for response_id in ("resp_encrypted_first", "resp_encrypted_second")
+        ],
+    )
+
+    async def seed_account():
+        async with SessionLocal() as session:
+            session.add(
+                Account(
+                    id="acct_encrypted_output",
+                    chatgpt_account_id="acct_encrypted_output",
+                    email="encrypted@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"access",
+                    refresh_token_encrypted=b"refresh",
+                    id_token_encrypted=b"id",
+                    last_refresh=proxy_module.utcnow(),
+                    status=AccountStatus.ACTIVE,
+                )
+            )
+            await session.commit()
+
+    async def connect(self, *args, **kwargs):
+        return SimpleNamespace(id="acct_encrypted_output", codex_installation_id="synthetic-installation"), upstream
+
+    async def allow(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow)
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        client.portal.call(seed_account)
+        with client.websocket_connect(path) as websocket:
+            for input_value in ("hello", encrypted_output_replay_input()):
+                websocket.send_json(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.4",
+                        "instructions": "",
+                        "input": input_value,
+                        "include": include,
+                        "stream": True,
+                    }
+                )
+                events = []
+                for _ in range(2 + len(encrypted_output_items()) * 2):
+                    event = websocket.receive_json()
+                    assert event.get("type") not in {"error", "response.failed"}, event
+                    events.append(event)
+                    if event.get("type") == "response.completed":
+                        break
+                assert events[-1]["type"] == "response.completed"
+                assert events[-1]["response"]["output"] == encrypted_output_items()
+                for event_type in ("response.output_item.added", "response.output_item.done"):
+                    assert [
+                        event["item"] for event in events if event.get("type") == event_type
+                    ] == encrypted_output_items()
+    sent = [json.loads(text) for text in upstream.sent_text]
+    assert len(sent) == 2
+    assert all(payload["include"] == include for payload in sent)
+    assert sent[-1]["input"] == encrypted_output_replay_input()
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses/", "/v1/responses/"])
+def test_responses_websocket_trailing_slash_remains_unsupported(app_instance, path):
+    with TestClient(app_instance) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(path):
+                pytest.fail("unsupported WebSocket route was accepted")
 
 
 def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch):

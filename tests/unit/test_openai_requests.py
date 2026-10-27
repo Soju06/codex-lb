@@ -28,6 +28,7 @@ from app.core.openai.requests import (
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
+from tests.fixtures.encrypted_output import encrypted_output_replay_input
 from tests.unit.hypothesis_strategies import json_arrays, json_directive_types, json_objects, json_values
 
 
@@ -750,26 +751,78 @@ def test_responses_normalizes_tool_choice_web_search_preview(tool_choice):
     assert request.tool_choice == {"type": "web_search"}
 
 
-def test_responses_rejects_invalid_include_value():
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+@pytest.mark.parametrize(
+    "include, message",
+    [
+        (["message.output_text.logprobs", "bad.include.value"], "Unsupported include value"),
+        (None, "valid list"),
+        ([42], "valid string"),
+    ],
+)
+def test_responses_rejects_invalid_include_value(request_class, include, message):
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
         "input": [],
-        "include": ["message.output_text.logprobs", "bad.include.value"],
+        "include": include,
     }
-    with pytest.raises(ValueError, match="Unsupported include value"):
-        ResponsesRequest.model_validate(payload)
+    with pytest.raises(ValidationError, match=message):
+        request = request_class.model_validate(payload)
+        if isinstance(request, V1ResponsesRequest):
+            request.to_responses_request()
 
 
-def test_responses_accepts_known_include_values():
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+@pytest.mark.parametrize(
+    "include",
+    [
+        [
+            "code_interpreter_call.outputs",
+            "computer_call_output.output.image_url",
+            "file_search_call.results",
+            "message.input_image.image_url",
+            "message.output_text.logprobs",
+            "reasoning.encrypted_content",
+            "web_search_call.action.sources",
+        ],
+        ["output.encrypted_content"],
+        ["reasoning.encrypted_content", "output.encrypted_content"],
+    ],
+)
+def test_responses_accepts_known_include_values(request_class, include):
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
         "input": [],
-        "include": ["reasoning.encrypted_content", "web_search_call.action.sources"],
+        "include": include,
     }
-    request = ResponsesRequest.model_validate(payload)
-    assert request.include == ["reasoning.encrypted_content", "web_search_call.action.sources"]
+    request = request_class.model_validate(payload)
+    if isinstance(request, V1ResponsesRequest):
+        request = request.to_responses_request()
+    assert request.to_payload()["include"] == include
+
+
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+@pytest.mark.parametrize("fields", [{}, {"include": []}])
+def test_responses_preserves_empty_or_omitted_include(request_class, fields):
+    request = request_class.model_validate({"model": "gpt-5.4", "instructions": "", "input": [], **fields})
+    if isinstance(request, V1ResponsesRequest):
+        request = request.to_responses_request()
+    assert request.to_payload()["include"] == []
+
+
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+def test_responses_preserves_encrypted_output_replay(request_class):
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
+    request = request_class.model_validate(
+        {"model": "gpt-5.4", "instructions": "", "input": encrypted_output_replay_input(), "include": include}
+    )
+    if isinstance(request, V1ResponsesRequest):
+        request = request.to_responses_request()
+    wire = request.to_payload()
+    assert wire["include"] == include
+    assert wire["input"] == encrypted_output_replay_input()
 
 
 def test_responses_accepts_previous_response_id_without_conversation():

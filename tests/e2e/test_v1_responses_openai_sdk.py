@@ -32,6 +32,11 @@ from httpx import AsyncClient
 
 import app.modules.proxy.service as proxy_module
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
+from tests.fixtures.encrypted_output import (
+    encrypted_output_events,
+    encrypted_output_items,
+    encrypted_output_replay_input,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -355,6 +360,47 @@ def _patch_upstream_stream(monkeypatch, blocks: list[str]) -> None:
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_sdk_responses_preserves_encrypted_output_replay(sdk_client, monkeypatch, streaming: bool) -> None:
+    seen = []
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
+
+    async def fake_stream(payload, *args, **kwargs):
+        seen.append(payload.to_payload())
+        for event in encrypted_output_events(terminal_output=False):
+            yield _sse(event)
+
+    async def invoke(input_value):
+        if streaming:
+            async with sdk_client.responses.stream(
+                model=DEFAULT_MODEL, input=input_value, extra_body={"include": include}
+            ) as stream:
+                async for _ in stream:
+                    pass
+                return await stream.get_final_response()
+        return await sdk_client.responses.create(
+            model=DEFAULT_MODEL, input=input_value, extra_body={"include": include}
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    first = await invoke("hello")
+    returned = [item.model_dump(exclude_none=True) for item in first.output]
+    expected = encrypted_output_items()
+    opaque_fields = ("id", "encrypted_content", "phase", "call_id", "encrypted_function_args")
+    for actual, original in zip(returned, expected, strict=True):
+        for field in opaque_fields:
+            if field in original:
+                assert actual[field] == original[field]
+    followup = await invoke([*returned, *encrypted_output_replay_input()[len(expected) :]])
+    assert len(followup.output) == len(expected)
+    assert all(payload["include"] == include for payload in seen)
+    for actual, original in zip(seen[-1]["input"][: len(expected)], expected, strict=True):
+        for field in opaque_fields:
+            if field in original:
+                assert actual[field] == original[field]
 
 
 @pytest.mark.asyncio

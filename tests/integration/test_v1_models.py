@@ -294,7 +294,7 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert set(entries) == set(EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS)
     for slug, expected_version in EXPECTED_BOOTSTRAP_MINIMAL_CLIENT_VERSIONS.items():
         assert entries[slug]["minimal_client_version"] == expected_version
-        assert entries[slug]["shell_type"] == ("unified_exec" if slug == "gpt-6-astra" else "shell_command")
+        assert entries[slug]["shell_type"] == "shell_command"
         assert isinstance(entries[slug]["experimental_supported_tools"], list)
         assert entries[slug]["truncation_policy"]["mode"] in {"bytes", "tokens"}
         assert isinstance(entries[slug]["truncation_policy"]["limit"], int)
@@ -316,6 +316,9 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     assert astra["tool_mode"] == "code_mode_only"
     assert astra["multi_agent_version"] == "v2"
     assert astra["use_responses_lite"] is True
+    assert astra["supports_reasoning_effort_updates"] is True
+    assert astra["supports_experimental_context"] is False
+    assert {"promax", "ent26"} <= set(astra["available_in_plans"])
     assert astra["default_service_tier"] is None
     assert astra["service_tiers"] == [{"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}]
     assert astra["additional_speed_tiers"] == ["fast"]

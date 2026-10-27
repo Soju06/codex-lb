@@ -1,6 +1,6 @@
 ## 1. Implementation
 
-- [x] 1.1 Add Astra bootstrap fields verified against OpenAI Codex `rust-v0.153.4`.
+- [x] 1.1 Add Astra bootstrap fields verified against OpenAI Codex `rust-v0.158.0`.
 - [x] 1.2 Preserve current main pricing and client-version owners.
 - [x] 1.3 Add Astra request-policy suffix normalization.
 

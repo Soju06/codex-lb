@@ -4,7 +4,7 @@ The bundled model registry lacks GPT-6 Astra during startup or offline operation
 
 ## What Changes
 
-- Add Astra bootstrap metadata from OpenAI Codex `rust-v0.153.4`.
+- Add Astra bootstrap metadata from OpenAI Codex `rust-v0.158.0`.
 - Normalize supported Cursor-style Astra reasoning and fast suffixes through the existing request-policy path.
 - Keep pricing and fallback client-version ownership in the current upstream-metadata implementation.
 

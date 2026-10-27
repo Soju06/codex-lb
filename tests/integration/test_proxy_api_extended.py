@@ -988,28 +988,15 @@ async def test_native_history_notes_seed_from_process_session_owner_and_fail_clo
     assert '"type":"response.completed"' in rotated_response.text, rotated_response.text
     assert response_calls[-1] == (other_upstream_id, "history-rotated-thread")
 
-    # Native notes are account-local: with their owner unavailable they fail
-    # without selecting the other account or replacing the stored owner. The
-    # budget is shrunk only here, so the refusal is bounded without putting the
-    # rotation above under a wall-clock limit that a loaded machine can miss.
-    from app.core.config.settings import get_settings
-
-    monkeypatch.setattr(get_settings(), "http_responses_stream_request_budget_seconds", 0.1)
-    monkeypatch.setattr(get_settings(), "proxy_request_budget_seconds", 0.1)
+    # Native notes are account-local: a paused hard owner is refused without
+    # changing the owner or selecting another account. Keep the normal request
+    # budget so an artificial deadline cannot mask the selector's refusal.
     paused_notes = await bounded_post(
         "/backend-api/codex/alpha/notes/v2/write_file",
         json={"context": {"session_id": session_id, "current_agent_name": "/root"}, "path": "memory.md"},
     )
-    # A hard owner that stays unavailable is refused, never served by another
-    # account. Which refusal wins depends on whether selection reports the hard
-    # owner as unavailable (503) or the shrunken request budget runs out first
-    # (502); both are fail-closed, so pin exactly that pair rather than any
-    # non-200 status.
-    refusal = (paused_notes.status_code, paused_notes.json()["error"]["code"])
-    assert refusal in {
-        (503, "hard_affinity_saturated"),
-        (502, "upstream_request_timeout"),
-    }, paused_notes.text
+    assert paused_notes.status_code == 503, paused_notes.text
+    assert paused_notes.json()["error"]["code"] == "hard_affinity_saturated"
     assert notes_accounts == [owner_upstream_id]
     assert await history_owner() == owner_id
 

@@ -34,6 +34,11 @@ from app.modules.proxy.downstream_delivery import (
 )
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
+from tests.fixtures.encrypted_output import (
+    encrypted_output_events,
+    encrypted_output_items,
+    encrypted_output_replay_input,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -4072,6 +4077,78 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
         {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("trailing_slash", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("terminal_output", [False, True])
+async def test_responses_preserves_encrypted_output_and_replay(
+    async_client, monkeypatch, path: str, trailing_slash: bool, stream: bool, terminal_output: bool
+):
+    account = _make_auth_json("acc_encrypted_output", "encrypted@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(account), "application/json")}
+    )
+    assert imported.status_code == 200
+    seen = []
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
+
+    async def fake_stream(payload, *args, **kwargs):
+        seen.append(payload.to_payload())
+        for event in encrypted_output_events(terminal_output=terminal_output):
+            yield "data: " + json.dumps(event) + "\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    for input_value in ("hello", encrypted_output_replay_input()):
+        response = await async_client.post(
+            path + ("/" if trailing_slash else ""),
+            json={"model": "gpt-5.4", "instructions": "", "input": input_value, "include": include, "stream": stream},
+            follow_redirects=False,
+        )
+        assert response.status_code == 200, response.text
+        if response.headers["content-type"].startswith("application/json"):
+            completed = response.json()
+        else:
+            events = list(_iter_sse_events(response.text.splitlines()))
+            for event_type in ("response.output_item.added", "response.output_item.done"):
+                assert [
+                    event["item"] for event in events if event.get("type") == event_type
+                ] == encrypted_output_items()
+            completed = next(event["response"] for event in events if event.get("type") == "response.completed")
+        # Native SSE retains upstream's empty terminal; item events carry output.
+        expected = (
+            [] if path.startswith("/backend-api/") and stream and not terminal_output else encrypted_output_items()
+        )
+        assert completed["output"] == expected
+        assert seen[-1]["include"] == include
+    assert seen[-1]["input"] == encrypted_output_replay_input()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("trailing_slash", [False, True])
+@pytest.mark.parametrize(
+    "include, param", [(["output.unsupported"], "include"), (None, "include"), ([42], "include.0")]
+)
+async def test_responses_rejects_invalid_include_before_dispatch(
+    async_client, monkeypatch, path, trailing_slash, include, param
+):
+    async def unexpected_upstream(*args, **kwargs):
+        pytest.fail("invalid include reached upstream")
+        yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", unexpected_upstream)
+    response = await async_client.post(
+        path + ("/" if trailing_slash else ""),
+        json={"model": "gpt-5.4", "instructions": "", "input": "hello", "include": include},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["param"] == param
+    assert error["type"] == "invalid_request_error"
 
 
 @pytest.mark.asyncio

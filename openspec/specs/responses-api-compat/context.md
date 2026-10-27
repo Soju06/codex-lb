@@ -143,7 +143,23 @@ when upstream reports a different actual tier.
 - `message.input_image.image_url`
 - `message.output_text.logprobs`
 - `reasoning.encrypted_content`
+- `output.encrypted_content`
 - `web_search_call.action.sources`
+
+The output selector is additive: Codex can request it alongside reasoning
+encryption. Its [client request construction](https://github.com/openai/codex/blob/33d306d457a4632b22bebf214e0c25d91f90f6e8/codex-rs/core/src/client.rs#L1130)
+adds `output.encrypted_content` when output token replay is enabled for the
+OpenAI provider. The [ResponseItem model](https://github.com/openai/codex/blob/33d306d457a4632b22bebf214e0c25d91f90f6e8/codex-rs/protocol/src/models.rs#L1052)
+also carries ciphertext on messages and tool calls.
+
+The proxy forwards these fields as opaque values. For example, a returned
+message with `id: "msg_1"`, `phase: "final_answer"` and
+`encrypted_content: "opaque+/="` retains those fields when sent back in the
+next turn. Item IDs and encrypted function arguments travel with the content;
+the proxy does not decrypt it or treat it as account-neutral replay state.
+Synthetic transport tests verify field preservation, not provider-side
+cryptographic validity. Unknown selectors and malformed include arrays still
+fail validation before dispatch.
 
 ## Failure Modes
 

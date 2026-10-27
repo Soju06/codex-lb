@@ -30,3 +30,5 @@
 - [x] 4.1 Confirm the route regressions fail on the baseline and pass with the
       change; run the focused compact/responses/source-routing suites, Ruff,
       ty, the proxy architecture check, and strict OpenSpec validation.
+
+- [x] Preserve recorded subscription ownership for terminal-trigger compaction; cover anchored and unanchored source routing.

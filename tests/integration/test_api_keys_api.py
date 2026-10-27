@@ -2013,7 +2013,10 @@ async def test_backend_codex_responses_file_pinned_payload_skips_model_source(as
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_recorded_previous_response_owner_skips_model_source(async_client, monkeypatch):
+@pytest.mark.parametrize("compact", [False, True])
+async def test_backend_codex_responses_recorded_previous_response_owner_skips_model_source(
+    async_client, monkeypatch, compact
+):
     model = "external-codex-responses-prev-id"
     previous_response_id = "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e"
     await _create_model_source(
@@ -2055,7 +2058,10 @@ async def test_backend_codex_responses_recorded_previous_response_owner_skips_mo
         json={
             "model": model,
             "instructions": "continue",
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "next"}]},
+                *([{"type": "compaction_trigger"}] if compact else []),
+            ],
             "previous_response_id": previous_response_id,
             "stream": True,
         },

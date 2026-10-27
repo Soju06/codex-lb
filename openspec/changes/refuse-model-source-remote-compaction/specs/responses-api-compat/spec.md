@@ -106,7 +106,9 @@ rules: the raw client alias then the normalized model, the API key model
 allowlist, the source assignment scope, and subscription-registry precedence.
 A subscription-registry model that an unscoped API key never source-routes
 MUST keep reaching the subscription compact flow even when a source lists the
-same slug. A model served only by a disabled source or a disabled source model
+same slug. A terminal-trigger request whose `previous_response_id` has a
+recorded subscription owner MUST also keep the subscription compact flow,
+even when the API key's source scope lists the same model. A model served only by a disabled source or a disabled source model
 MUST be refused at the same boundary with the existing HTTP 503
 `model_source_disabled` response, so a compaction request never hands a
 source-owned slug to a subscription account.
@@ -152,3 +154,12 @@ https://github.com/openai/codex/blob/440312f11396a58b312dd31798ec3393810d8ff8/co
   model with a terminal `compaction_trigger` item
 - **THEN** the request reaches subscription account selection for the compact flow
 - **AND** it is not refused with `compaction_unsupported`
+
+#### Scenario: Subscription continuity takes precedence over compaction refusal
+
+- **GIVEN** a Responses-compatible source exposes the requested model
+- **AND** `previous_response_id` has a recorded subscription account owner
+- **WHEN** a client calls `POST /backend-api/codex/responses` with that anchor
+  and a terminal `compaction_trigger`
+- **THEN** the request keeps the subscription compact flow
+- **AND** it is not refused with `compaction_unsupported` or dispatched to the source

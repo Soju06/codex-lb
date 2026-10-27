@@ -1189,7 +1189,19 @@ async def responses(
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
-    if compaction_requested:
+    compaction_continuity_suppressed = False
+    if compaction_requested and responses_payload.previous_response_id is not None:
+        try:
+            _, compaction_continuity_suppressed = await _select_responses_model_source_with_continuity(
+                request,
+                responses_payload,
+                context,
+                api_key,
+                raw_model=raw_source_model,
+            )
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload)
+    if compaction_requested and not compaction_continuity_suppressed:
         # A source-owned model has no remote compaction path at all, so refuse
         # here, before the subscription compact flow below spends account
         # selection, admission, and a reservation on it.
@@ -4816,7 +4828,7 @@ async def _model_source_compaction_denial(
     answers with whatever the account pool says (``usage_limit_reached`` when
     every account is saturated) -- a retryable verdict for a request that has
     no path to success. The 400 ``invalid_request_error`` is deliberate: the
-    Codex CLI treats it as non-retryable and compacts locally.
+    refusal stops this unsupported dispatch without promising client fallback.
 
     Ownership is decided by the ordinary enabled-source lookup, so the same
     candidate order, API key model allowlist, source assignment scope, and

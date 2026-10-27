@@ -26,14 +26,15 @@ model that never touches a ChatGPT account, and kept retrying.
   alias then normalized model, API key model allowlist, source assignment
   scope, subscription-registry precedence), so subscription models are never
   affected and disabled sources keep the existing `model_source_disabled`
-  behaviour.
+  behaviour. Recorded subscription continuity also takes precedence for
+  terminal-trigger requests with `previous_response_id`.
 - Log the refusal through the existing proxy error-response path; no new
   logging path and no request log row for a dispatch that never happened.
 
 ## Non Goals
 
 - Serving compaction through a model source, or synthesizing a local
-  compaction summary in the proxy. The client compacts locally.
+  compaction summary in the proxy. Client fallback behavior is outside this change.
 - Changing `/v1/responses`, where a terminal `compaction_trigger` remains
   eligible for source routing as an ordinary Responses input item.
 - Changing the WebSocket transport's source-ownership guards.

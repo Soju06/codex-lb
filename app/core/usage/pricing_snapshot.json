@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-27T06:51:06.536650+00:00",
+  "updated_at": "2026-10-29T06:38:02.580674+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -318,6 +318,14 @@
       "cached_input_per_1m": 0.005,
       "flex_input_per_1m": 0.025,
       "flex_output_per_1m": 0.2,
+      "flex_cached_input_per_1m": 0.0025
+    },
+    "gpt-5-nano-2025-08-07": {
+      "input_per_1m": 0.049999999999999996,
+      "output_per_1m": 0.39999999999999997,
+      "cached_input_per_1m": 0.005,
+      "flex_input_per_1m": 0.024999999999999998,
+      "flex_output_per_1m": 0.19999999999999998,
       "flex_cached_input_per_1m": 0.0025
     },
     "gpt-5-pro": {

@@ -6,11 +6,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, text, true, update
+from sqlalchemy import BigInteger, Integer, case, cast, delete, func, insert, literal, or_, select, text, true, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.usage.credit_pricing import MAX_CREDIT_UNITS, credit_units_for_usage
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -67,6 +69,7 @@ class UsageReservationData:
     model: str
     status: str
     items: list[UsageReservationItemData]
+    credit_service_tier: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +323,44 @@ class ApiKeysRepository:
         model_filter: str | None,
     ) -> int:
         if limit_type == LimitType.CREDITS:
-            return 0
+            raw_input = func.coalesce(RequestLog.input_tokens, 0)
+            raw_output = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+            raw_cached = func.coalesce(RequestLog.cached_input_tokens, 0)
+            input_value = case((raw_input < 0, 0), else_=raw_input)
+            output_value = case((raw_output < 0, 0), else_=raw_output)
+            cached_value = case((raw_cached < 0, 0), (raw_cached > input_value, input_value), else_=raw_cached)
+            credit_tier = RequestLog.requested_service_tier
+            stmt = (
+                select(
+                    RequestLog.model,
+                    credit_tier.label("service_tier"),
+                    func.sum(input_value).label("input_total"),
+                    func.sum(output_value).label("output_total"),
+                    func.sum(cached_value).label("cached_total"),
+                )
+                .where(
+                    RequestLog.api_key_id == key_id,
+                    self._exclude_warmup_clause(),
+                    RequestLog.requested_at >= since,
+                    RequestLog.requested_at < until,
+                )
+                .group_by(RequestLog.model, credit_tier)
+            )
+            result = await self._session.execute(stmt)
+            # Failed requests with reported usage are charged at settlement too.
+            # Never turn an unpriced, token-bearing historical request into free usage.
+            total = sum(
+                credit_units_for_usage(
+                    row.model,
+                    input_tokens=int(row.input_total),
+                    output_tokens=int(row.output_total),
+                    cached_input_tokens=int(row.cached_total),
+                    service_tier=row.service_tier,
+                )
+                for row in result.all()
+                if row.input_total or row.output_total
+            )
+            return min(total, MAX_CREDIT_UNITS)
 
         if limit_type == LimitType.TOTAL_TOKENS:
             value_expr = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
@@ -591,17 +631,18 @@ class ApiKeysRepository:
         input_tokens: int,
         output_tokens: int,
         cost_microdollars: int,
+        credit_units: int = 0,
     ) -> None:
         limits = await self.get_limits_by_key(key_id)
         for limit in limits:
             if limit.model_filter is not None and limit.model_filter != model:
                 continue
-            increment = _compute_increment(limit, input_tokens, output_tokens, cost_microdollars)
+            increment = _compute_increment(limit, input_tokens, output_tokens, cost_microdollars, credit_units)
             if increment > 0:
                 await self._session.execute(
                     update(ApiKeyLimit)
                     .where(ApiKeyLimit.id == limit.id)
-                    .values(current_value=ApiKeyLimit.current_value + increment)
+                    .values(current_value=_counter_after_delta(increment))
                 )
         await self._session.commit()
 
@@ -669,7 +710,7 @@ class ApiKeysRepository:
             update(ApiKeyLimit)
             .where(ApiKeyLimit.id == limit_id)
             .where(ApiKeyLimit.reset_at == expected_reset_at)
-            .where(ApiKeyLimit.current_value + delta <= ApiKeyLimit.max_value)
+            .where(ApiKeyLimit.current_value <= ApiKeyLimit.max_value - delta)
             .values(current_value=ApiKeyLimit.current_value + delta)
             .returning(
                 ApiKeyLimit.id,
@@ -715,7 +756,7 @@ class ApiKeysRepository:
         if delta < 0:
             stmt = stmt.where(ApiKeyLimit.current_value >= -delta)
         result = await self._session.execute(
-            stmt.values(current_value=ApiKeyLimit.current_value + delta).returning(ApiKeyLimit.id)
+            stmt.values(current_value=_counter_after_delta(delta)).returning(ApiKeyLimit.id)
         )
         return result.scalar_one_or_none() is not None
 
@@ -726,6 +767,7 @@ class ApiKeysRepository:
         key_id: str,
         model: str,
         items: list[UsageReservationItemData],
+        credit_service_tier: str | None = None,
     ) -> None:
         # Reservation accounting keeps full commit durability. On external/HA
         # PostgreSQL a server failover does not kill in-flight application
@@ -736,6 +778,7 @@ class ApiKeysRepository:
             id=reservation_id,
             api_key_id=key_id,
             model=model,
+            credit_service_tier=credit_service_tier,
             status="reserved",
         )
         self._session.add(reservation)
@@ -764,6 +807,7 @@ class ApiKeysRepository:
             api_key_id=row.api_key_id,
             model=row.model,
             status=row.status,
+            credit_service_tier=row.credit_service_tier,
             items=[
                 UsageReservationItemData(
                     limit_id=item.limit_id,
@@ -1179,7 +1223,22 @@ class ApiKeysRepository:
         )
 
 
-def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
+def _counter_after_delta(delta: int) -> ColumnElement[int]:
+    # At the physical ceiling every legal credit budget is exhausted. Latch it
+    # until reset so later releases cannot reopen quota after lost overflow.
+    threshold = MAX_CREDIT_UNITS - max(delta, 0)
+    return case(
+        (
+            (ApiKeyLimit.limit_type == LimitType.CREDITS) & (ApiKeyLimit.current_value >= threshold),
+            MAX_CREDIT_UNITS,
+        ),
+        else_=ApiKeyLimit.current_value + delta,
+    )
+
+
+def _compute_increment(
+    limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int, credit_units: int = 0
+) -> int:
     if limit.limit_type == LimitType.TOTAL_TOKENS:
         return input_tokens + output_tokens
     if limit.limit_type == LimitType.INPUT_TOKENS:
@@ -1188,6 +1247,8 @@ def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int
         return output_tokens
     if limit.limit_type == LimitType.COST_USD:
         return cost_microdollars
+    if limit.limit_type == LimitType.CREDITS:
+        return credit_units
     return 0
 
 

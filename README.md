@@ -22,7 +22,7 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 <tr>
 <td><b>Account Pooling</b><br>Load balance across multiple ChatGPT accounts</td>
 <td><b>Usage Tracking</b><br>Per-account tokens, cost, 28-day trends</td>
-<td><b>API Keys</b><br>Per-key rate limits by token, cost, window, model</td>
+<td><b>API Keys</b><br>Per-key rate limits by token, cost, credits, window, model</td>
 </tr>
 <tr>
 <td><b>Dashboard Auth</b><br>Password + optional TOTP</td>

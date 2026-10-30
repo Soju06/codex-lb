@@ -5,6 +5,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Collection
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
@@ -292,12 +293,17 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         input_tokens: int,
         output_tokens: int,
         cost_microdollars: int,
+        credit_units: int = 0,
     ) -> None:
         limits = self._limits.get(key_id, [])
         for limit in limits:
             if limit.model_filter is not None and limit.model_filter != model:
                 continue
-            increment = _compute_increment(limit, input_tokens, output_tokens, cost_microdollars)
+            increment = (
+                credit_units
+                if limit.limit_type == LimitType.CREDITS
+                else _compute_increment(limit, input_tokens, output_tokens, cost_microdollars)
+            )
             if increment > 0:
                 limit.current_value += increment
 
@@ -350,11 +356,13 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         key_id: str,
         model: str,
         items: list[UsageReservationItemData],
+        credit_service_tier: str | None = None,
     ) -> None:
         self._reservations[reservation_id] = UsageReservationData(
             reservation_id=reservation_id,
             api_key_id=key_id,
             model=model,
+            credit_service_tier=credit_service_tier,
             status="reserved",
             items=[
                 UsageReservationItemData(
@@ -372,11 +380,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         reservation = self._reservations.get(reservation_id)
         if reservation is None:
             return None
-        return UsageReservationData(
-            reservation_id=reservation.reservation_id,
-            api_key_id=reservation.api_key_id,
-            model=reservation.model,
-            status=reservation.status,
+        return replace(
+            reservation,
             items=[
                 UsageReservationItemData(
                     limit_id=item.limit_id,
@@ -399,13 +404,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         reservation = self._reservations.get(reservation_id)
         if reservation is None or reservation.status != expected_status:
             return False
-        self._reservations[reservation_id] = UsageReservationData(
-            reservation_id=reservation.reservation_id,
-            api_key_id=reservation.api_key_id,
-            model=reservation.model,
-            status=new_status,
-            items=reservation.items,
-        )
+        self._reservations[reservation_id] = replace(reservation, status=new_status)
         return True
 
     async def upsert_reservation_item_actual(
@@ -444,13 +443,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
                     actual_delta=actual_delta,
                 )
             )
-        self._reservations[reservation_id] = UsageReservationData(
-            reservation_id=reservation.reservation_id,
-            api_key_id=reservation.api_key_id,
-            model=reservation.model,
-            status=reservation.status,
-            items=updated_items,
-        )
+        self._reservations[reservation_id] = replace(reservation, items=updated_items)
 
     async def settle_usage_reservation(
         self,
@@ -465,13 +458,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         reservation = self._reservations.get(reservation_id)
         if reservation is None:
             return
-        self._reservations[reservation_id] = UsageReservationData(
-            reservation_id=reservation.reservation_id,
-            api_key_id=reservation.api_key_id,
-            model=reservation.model,
-            status=status,
-            items=reservation.items,
-        )
+        self._reservations[reservation_id] = replace(reservation, status=status)
 
     async def touch_usage_reservation(self, reservation_id: str) -> bool:
         reservation = self._reservations.get(reservation_id)
@@ -1538,6 +1525,132 @@ async def test_validate_key_multi_limit_all_must_pass() -> None:
 
 
 @pytest.mark.asyncio
+async def test_credits_accrue_fractional_usage_and_enforce_the_limit() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="credits-accrual",
+            allowed_models=None,
+            limits=[LimitRuleInput(limit_type="credits", limit_window="5h", max_value=1)],
+        )
+    )
+    assert created.limits[0].max_value == 1
+
+    for _ in range(2):
+        reservation = await service.enforce_limits_for_request(
+            created.id,
+            request_model="gpt-5.6-sol",
+            request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=1, output_tokens=0),
+        )
+        assert reservation is not None
+        limits = await repo.get_limits_by_key(created.id)
+        assert limits[0].current_value > 0
+        # The published Standard rate is 100 credits per million input tokens:
+        # each settlement consumes 0.6 credits, not zero rounded whole credits.
+        await service.finalize_usage_reservation(
+            reservation.reservation_id,
+            model="gpt-5.6-sol",
+            input_tokens=6_000,
+            output_tokens=0,
+        )
+
+    assert limits[0].current_value == 120_000_000
+    usage = await service.get_key_by_id(created.id)
+    assert usage.limits[0].max_value == 1
+    assert usage.limits[0].current_value == 1
+    with pytest.raises(ApiKeyRateLimitExceededError, match="credits"):
+        await service.enforce_limits_for_request(created.id, request_model="gpt-5.6-sol")
+
+
+@pytest.mark.asyncio
+async def test_credit_reservation_releases_and_settles_cached_usage_once() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="credits-cached",
+            allowed_models=None,
+            limits=[LimitRuleInput(limit_type="credits", limit_window="5h", max_value=2)],
+        )
+    )
+    first = await service.enforce_limits_for_request(created.id, request_model="gpt-6.1-sol")
+    assert first is not None
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value > 0
+    await service.release_usage_reservation(first.reservation_id)
+    assert limits[0].current_value == 0
+    second = await service.enforce_limits_for_request(created.id, request_model="gpt-6.1-sol")
+    assert second is not None
+    for _ in range(2):
+        await service.finalize_usage_reservation(
+            second.reservation_id,
+            model="response-model-snapshot",
+            input_tokens=100_000,
+            output_tokens=0,
+            cached_input_tokens=100_000,
+            service_tier="response-tier-snapshot",
+        )
+    # The admitted model's cached rate is 2.5 credits per million tokens.
+    assert limits[0].current_value == 25_000_000
+
+
+@pytest.mark.parametrize("model,tier", [("unpriced-model", None), ("gpt-6.1-sol", "unpriced-tier")])
+@pytest.mark.asyncio
+async def test_credit_reservation_refuses_unpriced_requests(model: str, tier: str | None) -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="credits-unpriced",
+            allowed_models=None,
+            limits=[LimitRuleInput(limit_type="credits", limit_window="5h", max_value=1)],
+        )
+    )
+    with pytest.raises(ApiKeyRateLimitExceededError, match="No published Codex credit rate"):
+        await service.enforce_limits_for_request(
+            created.id,
+            request_model=model,
+            request_service_tier=tier,
+            request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=0, output_tokens=0),
+        )
+    assert not repo._reservations
+    assert (await repo.get_limits_by_key(created.id))[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_model_less_credit_admission_and_failure_without_usage_do_not_charge() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="credits-metadata",
+            allowed_models=None,
+            limits=[LimitRuleInput(limit_type="credits", limit_window="5h", max_value=1)],
+        )
+    )
+    reservation = await service.enforce_limits_for_request(created.id, request_model=None)
+    assert reservation is not None
+    await service.fail_usage_reservation(reservation.reservation_id, model="unpriced-model")
+    assert (await repo.get_limits_by_key(created.id))[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_credit_record_usage_keeps_fractional_units() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="credits-record",
+            allowed_models=None,
+            limits=[LimitRuleInput(limit_type="credits", limit_window="5h", max_value=1)],
+        )
+    )
+    await service.record_usage(created.id, model="gpt-6-luna", input_tokens=1, output_tokens=0, cached_input_tokens=1)
+    assert (await repo.get_limits_by_key(created.id))[0].current_value == 25
+
+
+@pytest.mark.asyncio
 async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
@@ -1710,6 +1823,7 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
             key_id: str,
             model: str,
             items: list[UsageReservationItemData],
+            credit_service_tier: str | None = None,
         ) -> None:
             self.create_usage_reservation_calls += 1
             if self.create_usage_reservation_calls < 3:
@@ -1719,6 +1833,7 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
                 key_id=key_id,
                 model=model,
                 items=items,
+                credit_service_tier=credit_service_tier,
             )
 
     repo = _BusyRepo()

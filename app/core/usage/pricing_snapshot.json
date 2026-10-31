@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-29T06:38:02.580674+00:00",
+  "updated_at": "2026-10-31T06:30:29.877348+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -674,6 +674,15 @@
       "flex_long_context_input_per_1m": 0.09999999999999999,
       "flex_long_context_output_per_1m": 0.375,
       "flex_long_context_cached_input_per_1m": 0.01
+    },
+    "gpt-6-rosalind": {
+      "input_per_1m": 15.0,
+      "output_per_1m": 75.0,
+      "cached_input_per_1m": 1.5,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 30.0,
+      "long_context_output_per_1m": 112.5,
+      "long_context_cached_input_per_1m": 3.0
     },
     "gpt-6-sol": {
       "input_per_1m": 2.0,

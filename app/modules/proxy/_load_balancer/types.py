@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 AccountLeaseKind = Literal["response_create", "stream"]
 
 MAX_SELECTION_ATTEMPTS = 4
+
+
+@dataclass(frozen=True, slots=True)
+class AccountRoutingObservation:
+    account_id: str
+    health_tier: int
+    inflight_streams: int
+    inflight_response_creates: int
+    recent_errors: int
+    last_selected_at: datetime | None
+    cooldown_until: datetime | None
+    overload_backoff_until: datetime | None
+    burst_backoff_until: datetime | None
+    scope: Literal["replica_local"] = "replica_local"
 
 
 @dataclass

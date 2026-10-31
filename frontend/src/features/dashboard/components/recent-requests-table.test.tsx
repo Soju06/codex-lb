@@ -132,6 +132,18 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
   });
 
+  it("shows historical account and affinity in request details", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST, stickyKeySource: "thread_header", stickyKind: "prompt_cache", stickyKeyHash: "routing-hash",
+    }]} />);
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Historical routing")).toBeInTheDocument();
+    expect(within(dialog).getByText("thread_header")).toBeInTheDocument();
+    expect(within(dialog).getByText("prompt_cache")).toBeInTheDocument();
+    expect(within(dialog).getByText("routing-hash")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Copy account ID" })).toBeInTheDocument();
+  });
+
   it("renders only selected headers and matching row cells", () => {
     render(
       <RecentRequestsTable

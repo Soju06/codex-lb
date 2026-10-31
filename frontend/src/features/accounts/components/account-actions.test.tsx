@@ -175,7 +175,7 @@ describe("AccountActions", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Force probe" }));
+    await user.click(screen.getByRole("button", { name: "Test account" }));
 
     expect(onProbe).toHaveBeenCalledWith(account.accountId);
     expect(onProbe).toHaveBeenCalledTimes(1);
@@ -205,7 +205,7 @@ describe("AccountActions", () => {
         />,
       );
 
-      const button = screen.getByRole("button", { name: "Force probe" });
+      const button = screen.getByRole("button", { name: "Test account" });
       expect(button).toBeDisabled();
 
       await user.click(button);
@@ -237,7 +237,7 @@ describe("AccountActions", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Force probe" });
+    const button = screen.getByRole("button", { name: "Test account" });
     expect(button).toBeDisabled();
 
     await user.click(button);

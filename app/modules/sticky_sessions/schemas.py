@@ -14,6 +14,7 @@ StickySessionSortDir = Literal["asc", "desc"]
 
 class StickySessionEntryResponse(DashboardModel):
     key: str
+    account_id: str
     display_name: str
     kind: StickySessionKind
     created_at: datetime
@@ -32,6 +33,16 @@ class StickySessionsListResponse(DashboardModel):
 class StickySessionIdentifier(DashboardModel):
     key: str = Field(min_length=1)
     kind: StickySessionKind
+
+
+class StickySessionReassignRequest(StickySessionIdentifier):
+    expected_account_id: str = Field(min_length=1)
+    account_id: str = Field(min_length=1)
+
+
+class StickySessionReassignResponse(DashboardModel):
+    status: Literal["reassigned"] = "reassigned"
+    account_id: str
 
 
 class StickySessionsDeleteRequest(DashboardModel):

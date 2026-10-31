@@ -10,6 +10,7 @@ const StickySessionSortDirSchema = z.enum(STICKY_SESSION_SORT_DIRECTIONS);
 
 export const StickySessionEntrySchema = z.object({
   key: z.string().min(1),
+  accountId: z.string().optional(),
   displayName: z.string().min(1),
   kind: StickySessionKindSchema,
   createdAt: z.iso.datetime({ offset: true }),
@@ -21,6 +22,11 @@ export const StickySessionEntrySchema = z.object({
 export const StickySessionIdentifierSchema = z.object({
   key: z.string().min(1),
   kind: StickySessionKindSchema,
+});
+
+export const StickySessionReassignResponseSchema = z.object({
+  status: z.literal("reassigned"),
+  accountId: z.string(),
 });
 
 export const StickySessionsDeleteRequestSchema = z.object({

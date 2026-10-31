@@ -9,6 +9,10 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { ADMIN_PERMISSIONS, createUpstreamProxyAdmin } from "@/test/mocks/factories";
 import type { AccountSummary } from "@/features/accounts/schemas";
 
+vi.mock("@/features/accounts/components/account-routing-observation", () => ({
+  AccountRoutingObservation: () => <div>Local routing observation</div>,
+}));
+
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
   useAccounts: vi.fn(),
   useAccountTrends: vi.fn(() => ({ data: null })),
@@ -406,7 +410,7 @@ describe("AccountsPage", () => {
     });
   });
 
-  it("keeps force probe as an immediate action", async () => {
+  it("opens an account test and sends the selected model in completion mode", async () => {
     const user = userEvent.setup();
     const probe = vi.fn().mockResolvedValue({
       status: "probed",
@@ -418,6 +422,9 @@ describe("AccountsPage", () => {
       secondaryUsedPercentAfter: 19,
       accountStatusBefore: "active",
       accountStatusAfter: "active",
+      model: "gpt-6-astra",
+      outcome: "completed",
+      latencyMs: 123,
     });
 
     mockedUseAccounts.mockReturnValue({
@@ -457,9 +464,13 @@ describe("AccountsPage", () => {
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole("button", { name: "Force probe" }));
+    await user.click(screen.getByRole("button", { name: "Test account" }));
+    expect(probe).not.toHaveBeenCalled();
+    await user.type(screen.getByRole("textbox", { name: "Model (optional)" }), "gpt-6-astra");
+    await user.click(screen.getByRole("button", { name: "Run test" }));
 
-    expect(probe).toHaveBeenCalledWith({ accountId: "acc-probe" });
+    expect(probe).toHaveBeenCalledWith({ accountId: "acc-probe", model: "gpt-6-astra", mode: "completion" });
+    expect(await screen.findByText("Response completed")).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog", { name: "Reset usage" })).not.toBeInTheDocument();
   });
 });

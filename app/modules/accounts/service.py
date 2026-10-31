@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import aiohttp
@@ -43,6 +43,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
+from app.modules.accounts.probe_sender import send_completion_probe
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
@@ -686,8 +687,9 @@ class AccountsService:
         self,
         account_id: str,
         model: str | None = None,
+        mode: Literal["wakeup", "completion"] = "wakeup",
     ) -> AccountProbeResponse | None:
-        """Send a minimal upstream ``responses.create`` pinned to one account.
+        """Wake the limiter or verify a minimal completion on one named account.
 
         Bypasses load-balancer scoring so an operator can wake the upstream
         rate-limiter for a stuck account (see upstream issues #676 / #677).
@@ -710,11 +712,18 @@ class AccountsService:
 
         access_token = self._encryptor.decrypt(probe_account.access_token_encrypted)
         probe_model = model or resolve_default_host_model()
-        probe_status = await self._send_probe_request(
-            access_token=access_token,
-            chatgpt_account_id=probe_account.chatgpt_account_id,
-            model=probe_model,
-        )
+        completion = None
+        if mode == "completion":
+            completion = await send_completion_probe(
+                probe_account, access_token=access_token, model=probe_model, encryptor=self._encryptor
+            )
+            probe_status = completion.http_status
+        else:
+            probe_status = await self._send_probe_request(
+                access_token=access_token,
+                chatgpt_account_id=probe_account.chatgpt_account_id,
+                model=probe_model,
+            )
 
         usage_refresh_fetch_succeeded: bool | None = None
         if self._usage_repo and self._usage_updater:
@@ -739,6 +748,11 @@ class AccountsService:
             secondary_used_percent_after=secondary_after,
             account_status_before=status_before,
             account_status_after=refreshed.status.value,
+            model=probe_model if completion is not None else None,
+            outcome=completion.outcome if completion is not None else None,
+            latency_ms=completion.latency_ms if completion is not None else None,
+            error_code=completion.error_code if completion is not None else None,
+            error_message=completion.error_message if completion is not None else None,
         )
         response._usage_refresh_fetch_succeeded = usage_refresh_fetch_succeeded
         return response

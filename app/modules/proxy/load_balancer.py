@@ -151,10 +151,7 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
 )
-from app.modules.proxy.account_cache import (
-    get_account_selection_cache,
-    mark_account_routing_unavailable,
-)
+from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
     account_access_token_expires_at,
     all_accounts_require_reauthentication,

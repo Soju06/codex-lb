@@ -143,6 +143,53 @@ async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+@pytest.mark.parametrize("stream", [True, False], ids=["streaming", "non-streaming"])
+@pytest.mark.parametrize(
+    ("strict_fields", "expected"),
+    [({}, False), ({"strict": None}, False), ({"strict": False}, False), ({"strict": True}, True)],
+    ids=["omitted", "null", "false", "true"],
+)
+async def test_v1_chat_completions_forwards_function_strictness(
+    async_client, monkeypatch, nested: bool, stream: bool, strict_fields: dict, expected: bool
+) -> None:
+    auth_json = _make_auth_json("acc_chat_strict_default", "chat-strict-default@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+    seen_tools = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        seen_tools.extend(payload.to_payload()["tools"])
+        yield 'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_strict_default"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    parameters = {
+        "type": "object",
+        "properties": {"record_id": {"type": "string"}, "context": {"type": ["integer", "null"]}},
+        "required": ["record_id", "context"] if expected else ["record_id"],
+        "additionalProperties": False,
+    }
+    definition = {"name": "lookup_record", "parameters": parameters, **strict_fields}
+    tool = {"type": "function", "function": definition} if nested else {"type": "function", **definition}
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "Read a record"}],
+        "stream": stream,
+        "tools": [tool],
+    }
+
+    response = await async_client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert len(seen_tools) == 1
+    assert seen_tools[0]["strict"] is expected
+    assert seen_tools[0]["parameters"] == parameters
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_opportunistic_denial_runs_before_api_key_reservation(async_client, monkeypatch):
     settings = await async_client.put(
         "/api/settings",

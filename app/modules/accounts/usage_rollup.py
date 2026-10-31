@@ -68,7 +68,7 @@ def deduped_usage_aggregate_stmt(
     account_ids: list[str] | None = None,
     after_exclusive: datetime | None = None,
     until_inclusive: datetime | None = None,
-) -> Select[tuple[str | None, int, int | None, int, int | None, float | None]]:
+) -> Select[str | None, int, int | None, int, int | None, float | None]:
     """Per-account usage aggregate collapsing duplicate rows to the latest id.
 
     Duplicate request-log rows share the exact `(account_id, request_id,
@@ -118,7 +118,7 @@ def api_key_usage_aggregate_stmt(
     api_key_ids: list[str] | None = None,
     after_exclusive: datetime | None = None,
     until_inclusive: datetime | None = None,
-) -> Select[tuple[str | None, int, int | None, int, int | None, float | None]]:
+) -> Select[str | None, int, int | None, int, int | None, float | None]:
     """Per-API-key usage aggregate matching the API-key summary semantics:
     no duplicate collapsing, soft-deleted rows included, warmup kinds
     excluded. Bounds are `requested_at`-based, governed by the same fold

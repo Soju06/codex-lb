@@ -18,6 +18,12 @@ from app.core.clients.thread_cache_identity import (
     THREAD_CACHE_IDENTITY_MODES,
     normalize_thread_cache_identity_mode,
 )
+from app.core.usage.credit_pricing import (
+    CREDIT_SCALE,
+    MAX_CREDIT_LIMIT,
+    CreditPricingUnavailable,
+    credit_units_for_usage,
+)
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -138,6 +144,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         input_tokens: int,
         output_tokens: int,
         cost_microdollars: int,
+        credit_units: int = 0,
     ) -> None: ...
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
@@ -165,6 +172,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         key_id: str,
         model: str,
         items: list[UsageReservationItemData],
+        credit_service_tier: str | None = None,
     ) -> None: ...
 
     async def get_usage_reservation(self, reservation_id: str) -> UsageReservationData | None: ...
@@ -1002,6 +1010,7 @@ class ApiKeysService:
                         key_id=key_id,
                         model=request_model or "",
                         items=reservation_items,
+                        credit_service_tier=request_service_tier,
                     )
                     await self._repository.commit()
             except Exception:
@@ -1144,6 +1153,9 @@ class ApiKeysService:
                         input_tokens=effective_input_tokens,
                         output_tokens=effective_output_tokens,
                         cost_microdollars=cost_microdollars,
+                        model=reservation.model,
+                        cached_input_tokens=effective_cached_input_tokens,
+                        service_tier=reservation.credit_service_tier,
                     )
                     delta = actual_delta - item.reserved_delta
                     if delta != 0:
@@ -1272,12 +1284,23 @@ class ApiKeysService:
             cached_input_tokens,
             service_tier,
         )
+        limits = await self._repository.get_limits_by_key(key_id)
+        credit_units = 0
+        if any(limit.limit_type == LimitType.CREDITS for limit in limits) and (input_tokens or output_tokens):
+            credit_units = credit_units_for_usage(
+                model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
+                service_tier=service_tier,
+            )
         await self._repository.increment_limit_usage(
             key_id,
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_microdollars=cost_microdollars,
+            credit_units=credit_units,
         )
         await self._last_used_coalescer.record(key_id, utcnow())
 
@@ -1313,9 +1336,10 @@ class ApiKeysService:
             ApiKeySelfLimitData(
                 limit_type=limit.limit_type.value,
                 limit_window=limit.limit_window.value,
-                max_value=limit.max_value,
-                current_value=max(0, min(limit.current_value, limit.max_value)),
-                remaining_value=max(0, limit.max_value - max(0, min(limit.current_value, limit.max_value))),
+                max_value=_public_limit_value(limit, limit.max_value),
+                current_value=_public_limit_value(limit, max(0, min(limit.current_value, limit.max_value))),
+                remaining_value=_public_limit_value(limit, limit.max_value)
+                - _public_limit_value(limit, max(0, min(limit.current_value, limit.max_value))),
                 model_filter=limit.model_filter,
                 reset_at=limit.reset_at,
                 source="api_key_limit",
@@ -1679,13 +1703,17 @@ def _validate_reasoning_effort_policy(
         )
 
 
+def _public_limit_value(limit: ApiKeyLimit, value: int) -> int:
+    return value // CREDIT_SCALE if limit.limit_type == LimitType.CREDITS else value
+
+
 def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
     return LimitRuleData(
         id=limit.id,
         limit_type=limit.limit_type.value,
         limit_window=limit.limit_window.value,
-        max_value=limit.max_value,
-        current_value=limit.current_value,
+        max_value=_public_limit_value(limit, limit.max_value),
+        current_value=_public_limit_value(limit, limit.current_value),
         model_filter=limit.model_filter,
         reset_at=limit.reset_at,
     )
@@ -1743,12 +1771,15 @@ def _reserve_delta_for_limit(
     remaining = limit.max_value - limit.current_value
     if remaining <= 0:
         return 0
-    budget = _reserve_budget_for_limit_type(
-        limit.limit_type,
-        request_model=request_model,
-        request_service_tier=request_service_tier,
-        request_usage_budget=request_usage_budget,
-    )
+    try:
+        budget = _reserve_budget_for_limit_type(
+            limit.limit_type,
+            request_model=request_model,
+            request_service_tier=request_service_tier,
+            request_usage_budget=request_usage_budget,
+        )
+    except CreditPricingUnavailable as exc:
+        raise ApiKeyRateLimitExceededError(message=str(exc), reset_at=limit.reset_at) from exc
     return min(remaining, budget)
 
 
@@ -1799,7 +1830,15 @@ def _reserve_budget_for_limit_type(
             output_tokens=output_tokens,
         )
     if limit_type == LimitType.CREDITS:
-        return 0
+        if request_model is None:
+            # Model-less metadata requests do not consume a credit budget.
+            return 0
+        return credit_units_for_usage(
+            request_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            service_tier=request_service_tier,
+        )
     return 1
 
 
@@ -1843,6 +1882,9 @@ def _compute_increment_for_limit_type(
     input_tokens: int,
     output_tokens: int,
     cost_microdollars: int,
+    model: str,
+    cached_input_tokens: int,
+    service_tier: str | None,
 ) -> int:
     if limit_type == LimitType.TOTAL_TOKENS:
         return input_tokens + output_tokens
@@ -1852,8 +1894,14 @@ def _compute_increment_for_limit_type(
         return output_tokens
     if limit_type == LimitType.COST_USD:
         return cost_microdollars
-    if limit_type == LimitType.CREDITS:
-        return 0
+    if limit_type == LimitType.CREDITS and (input_tokens or output_tokens):
+        return credit_units_for_usage(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            service_tier=service_tier,
+        )
     return 0
 
 
@@ -1953,13 +2001,16 @@ def _limit_input_to_row(
     reset_at: datetime | None = None,
 ) -> ApiKeyLimit:
     window = LimitWindow(li.limit_window)
-    if li.limit_type == LimitType.CREDITS.value and li.model_filter is not None:
-        raise ApiKeyValidationError("credits limits do not support model_filter")
+    if li.limit_type == LimitType.CREDITS.value:
+        if li.model_filter is not None:
+            raise ApiKeyValidationError("credits limits do not support model_filter")
+        if not 1 <= li.max_value <= MAX_CREDIT_LIMIT:
+            raise ApiKeyValidationError(f"credits max_value must be between 1 and {MAX_CREDIT_LIMIT}")
     return ApiKeyLimit(
         api_key_id=key_id,
         limit_type=LimitType(li.limit_type),
         limit_window=window,
-        max_value=li.max_value,
+        max_value=li.max_value * CREDIT_SCALE if li.limit_type == LimitType.CREDITS.value else li.max_value,
         current_value=current_value,
         model_filter=li.model_filter,
         reset_at=reset_at if reset_at is not None else next_limit_reset(now, window),
@@ -2012,13 +2063,16 @@ async def _new_limit_input_to_backfilled_row(
     window = LimitWindow(submitted.limit_window)
     reset_at = next_limit_reset(now, window)
     since = now - limit_window_delta(window)
-    current_value = await repository.get_limit_usage_value(
-        key_id,
-        limit_type=limit_type,
-        since=since,
-        until=now,
-        model_filter=submitted.model_filter,
-    )
+    try:
+        current_value = await repository.get_limit_usage_value(
+            key_id,
+            limit_type=limit_type,
+            since=since,
+            until=now,
+            model_filter=submitted.model_filter,
+        )
+    except CreditPricingUnavailable as exc:
+        raise ApiKeyValidationError(str(exc)) from exc
     return _limit_input_to_row(
         submitted,
         key_id,

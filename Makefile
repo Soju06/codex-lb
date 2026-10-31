@@ -5,6 +5,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_affinity_invite_migration.py \
 	tests/integration/test_affinity_identity_migration.py \
 	tests/integration/test_cost_backfill.py \
+	tests/integration/test_api_key_credits.py \
 	tests/integration/test_atomic_quota_warmup_claims.py \
 	tests/integration/test_report_rollup.py \
 	tests/integration/test_reports_performance_api.py \

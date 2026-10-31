@@ -16,19 +16,19 @@ repository = "https://github.com/Soju06/codex-lb"
 publish = false
 
 [workspace.dependencies]
-aws-lc-rs = "=1.18.1"
+aws-lc-rs = "=1.19.0"
 base64 = "0.22.1"
 futures-util = { version = "0.3.31", features = ["sink"] }
-hyper = "=1.8.1"
-hyper-rustls = { version = "=0.27.7", default-features = false, features = ["http2", "native-tokio", "aws-lc-rs"] }
-hyper-util = "=0.1.20"
+hyper = "=1.12.0"
+hyper-rustls = { version = "=0.27.10", default-features = false, features = ["http2", "native-tokio", "aws-lc-rs"] }
+hyper-util = "=0.1.21"
 reqwest = { version = "=0.12.28", default-features = false, features = ["http2", "rustls-tls-native-roots-no-provider", "socks"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12"] }
 rustls-native-certs = "0.8.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value", "preserve_order"] }
-tokio = { version = "=1.49.0", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
+tokio = { version = "=1.54.1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 tokio-tungstenite = { version = "0.28.0", features = ["proxy", "rustls-tls-native-roots"] }
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 url = "2.5.7"

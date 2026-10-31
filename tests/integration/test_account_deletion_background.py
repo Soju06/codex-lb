@@ -911,7 +911,7 @@ async def test_supersede_between_drain_and_finalize_is_abandoned(db_setup):
     assert await _account_row("acc_bg_race") is not None
 
 
-def _batch_pinning_cases() -> tuple[tuple[Callable[[str, int], Select[tuple[int]]], Table, str], ...]:
+def _batch_pinning_cases() -> tuple[tuple[Callable[[str, int], Select[int]], Table, str], ...]:
     from app.db.models import AdditionalUsageHistory
     from app.modules.accounts import deletion
 

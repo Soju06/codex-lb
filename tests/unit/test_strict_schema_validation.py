@@ -677,7 +677,7 @@ def test_chat_function_tool_strict_false_is_preserved_as_false():
     assert tool.get("strict") is False
 
 
-def test_chat_function_tool_without_strict_has_no_strict_key():
+def test_chat_function_tool_without_strict_preserves_non_strict_default():
     payload = {
         "model": "gpt-5.5",
         "messages": [{"role": "user", "content": "hi"}],
@@ -700,7 +700,7 @@ def test_chat_function_tool_without_strict_has_no_strict_key():
     responses_request = request.to_responses_request()
     tool = responses_request.tools[0]
     assert isinstance(tool, dict)
-    assert "strict" not in tool
+    assert tool["strict"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -200,8 +200,22 @@ export const AccountActionResponseSchema = z.object({
   status: z.string(),
 });
 
+export const AccountRoutingObservationSchema = z.object({
+  accountId: z.string(),
+  scope: z.literal("replica_local"),
+  healthTier: z.number().int(),
+  inflightStreams: z.number().int().nonnegative(),
+  inflightResponseCreates: z.number().int().nonnegative(),
+  recentErrors: z.number().int().nonnegative(),
+  lastSelectedAt: z.iso.datetime({ offset: true }).nullable(),
+  cooldownUntil: z.iso.datetime({ offset: true }).nullable(),
+  overloadBackoffUntil: z.iso.datetime({ offset: true }).nullable(),
+  burstBackoffUntil: z.iso.datetime({ offset: true }).nullable(),
+});
+
 export const AccountProbeRequestSchema = z.object({
   model: z.string().min(1).optional(),
+  mode: z.enum(["wakeup", "completion"]).optional(),
 });
 
 export const AccountProbeResponseSchema = z.object({
@@ -214,6 +228,11 @@ export const AccountProbeResponseSchema = z.object({
   secondaryUsedPercentAfter: z.number().nullable(),
   accountStatusBefore: z.string(),
   accountStatusAfter: z.string(),
+  model: z.string().nullable().optional(),
+  outcome: z.enum(["completed", "failed", "incomplete"]).nullable().optional(),
+  latencyMs: z.number().int().nonnegative().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
 });
 
 export const AccountUsageResetConsumeRequestSchema = z.object({

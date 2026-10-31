@@ -37,6 +37,7 @@ from app.modules.accounts.schemas import (
     AccountProbeRequest,
     AccountProbeResponse,
     AccountReactivateResponse,
+    AccountRoutingObservationResponse,
     AccountRoutingPolicyUpdateRequest,
     AccountRoutingPolicyUpdateResponse,
     AccountsResponse,
@@ -105,6 +106,34 @@ async def list_accounts(
         redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
     )
     return AccountsResponse(accounts=accounts)
+
+
+@router.get(
+    "/{account_id}/routing-observation",
+    response_model=AccountRoutingObservationResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE))],
+)
+async def get_account_routing_observation(
+    account_id: str,
+    request: Request,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountRoutingObservationResponse:
+    account = await context.repository.get_by_id(account_id)
+    if account is None or account.delete_requested_at is not None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    observation = await get_proxy_service_for_app(request.app).account_routing_observation(account_id)
+    return AccountRoutingObservationResponse(
+        account_id=observation.account_id,
+        scope=observation.scope,
+        health_tier=observation.health_tier,
+        inflight_streams=observation.inflight_streams,
+        inflight_response_creates=observation.inflight_response_creates,
+        recent_errors=observation.recent_errors,
+        last_selected_at=observation.last_selected_at,
+        cooldown_until=observation.cooldown_until,
+        overload_backoff_until=observation.overload_backoff_until,
+        burst_backoff_until=observation.burst_backoff_until,
+    )
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)
@@ -300,8 +329,12 @@ async def probe_account(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountProbeResponse:
     requested_model = body.model if body is not None else None
+    completion_requested = body is not None and body.mode == "completion"
     try:
-        result = await context.service.probe_account(account_id, model=requested_model)
+        if completion_requested:
+            result = await context.service.probe_account(account_id, model=requested_model, mode="completion")
+        else:
+            result = await context.service.probe_account(account_id, model=requested_model)
     except AccountNotProbableError as exc:
         raise DashboardConflictError(str(exc), code="account_not_probable") from exc
     except RefreshError as exc:
@@ -311,8 +344,9 @@ async def probe_account(
         ) from exc
     if result is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
-    probe_succeeded = 200 <= result.probe_status_code < 300
-    if not probe_succeeded or result.usage_refresh_ready_for_probe_settlement():
+    http_succeeded = 200 <= result.probe_status_code < 300
+    probe_succeeded = http_succeeded and (not completion_requested or result.outcome == "completed")
+    if not http_succeeded or (probe_succeeded and result.usage_refresh_ready_for_probe_settlement()):
         try:
             await get_proxy_service_for_app(request.app).record_account_probe_result(
                 account_id=result.account_id,
@@ -324,7 +358,7 @@ async def probe_account(
                 result.account_id,
                 result.probe_status_code,
             )
-    else:
+    elif probe_succeeded:
         logger.warning(
             "Force Probe success skipped advisory settlement before successful usage refresh fetch "
             "account_id=%s probe_status_code=%s",
@@ -340,6 +374,8 @@ async def probe_account(
             "account_id": result.account_id,
             "probe_status_code": result.probe_status_code,
             "model": requested_model,
+            "mode": body.mode if body is not None else "wakeup",
+            "outcome": result.outcome,
         },
     )
     return result

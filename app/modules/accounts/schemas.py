@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field, PrivateAttr, field_validator
 
@@ -201,9 +201,24 @@ class AccountDeleteResponse(DashboardModel):
     status: str
 
 
+class AccountRoutingObservationResponse(DashboardModel):
+    account_id: str
+    scope: Literal["replica_local"]
+    health_tier: int
+    inflight_streams: int
+    inflight_response_creates: int
+    recent_errors: int
+    last_selected_at: datetime | None
+    cooldown_until: datetime | None
+    overload_backoff_until: datetime | None
+    burst_backoff_until: datetime | None
+
+
 class AccountProbeRequest(DashboardModel):
+    mode: Literal["wakeup", "completion"] = "wakeup"
     model: str | None = Field(
         default=None,
+        max_length=128,
         description=(
             "Optional model slug for the probe request. Defaults to the service's configured fallback when omitted."
         ),
@@ -222,6 +237,11 @@ class AccountProbeResponse(DashboardModel):
     secondary_used_percent_after: float | None = None
     account_status_before: str
     account_status_after: str
+    model: str | None = None
+    outcome: Literal["completed", "failed", "incomplete"] | None = None
+    latency_ms: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
 
     def usage_refresh_ready_for_probe_settlement(self) -> bool:
         return self._usage_refresh_fetch_succeeded is True

@@ -15,6 +15,8 @@ from app.modules.sticky_sessions.schemas import (
     StickySessionDeleteFailure,
     StickySessionEntryResponse,
     StickySessionIdentifier,
+    StickySessionReassignRequest,
+    StickySessionReassignResponse,
     StickySessionsDeleteFilteredRequest,
     StickySessionsDeleteFilteredResponse,
     StickySessionsDeleteRequest,
@@ -63,6 +65,7 @@ async def list_sticky_sessions(
         entries=[
             StickySessionEntryResponse(
                 key=entry.key,
+                account_id=entry.account_id,
                 display_name=entry.display_name,
                 kind=entry.kind,
                 created_at=entry.created_at,
@@ -76,6 +79,21 @@ async def list_sticky_sessions(
         total=result.total,
         has_more=result.has_more,
     )
+
+
+@router.post("/reassign", response_model=StickySessionReassignResponse)
+async def reassign_sticky_session(
+    payload: StickySessionReassignRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: StickySessionsContext = Depends(get_sticky_sessions_context),
+) -> StickySessionReassignResponse:
+    await context.service.reassign(
+        key=payload.key,
+        kind=payload.kind,
+        expected_account_id=payload.expected_account_id,
+        account_id=payload.account_id,
+    )
+    return StickySessionReassignResponse(account_id=payload.account_id)
 
 
 @router.post("/purge", response_model=StickySessionsPurgeResponse)

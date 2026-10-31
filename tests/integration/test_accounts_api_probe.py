@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -14,19 +15,192 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.balancer import HEALTH_TIER_HEALTHY, HEALTH_TIER_PROBING
 from app.core.balancer.logic import PROBE_SUCCESS_STREAK_REQUIRED
+from app.core.clients import proxy as proxy_client
 from app.core.openai.model_registry import get_model_registry
+from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
 from app.db.models import UsageHistory
 from app.db.session import SessionLocal
 from app.db.snapshot import clone_row
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts import probe_sender
 from app.modules.accounts.schemas import AccountProbeResponse
 from app.modules.accounts.service import AccountsService
 from app.modules.proxy.load_balancer import RuntimeState
 from app.modules.usage.updater import AccountRefreshResult, UsageUpdater
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize(
+    "terminal,outcome,error_code",
+    [
+        ("response.completed", "completed", None),
+        ("response.failed", "failed", None),
+        ("error", "failed", None),
+        ("response.incomplete", "incomplete", None),
+        (None, "incomplete", None),
+        ("timeout", "incomplete", None),
+        ("response.failed", "failed", "token_expired"),
+        ("response.failed", "failed", "usage_limit_reached"),
+        ("error", "failed", "token_expired"),
+        ("error", "failed", "usage_limit_reached"),
+    ],
+)
+async def test_completion_probe_endpoint_checks_terminal_and_preserves_snapshots(
+    async_client, monkeypatch, terminal, outcome, error_code
+):
+    account_id = await _import_test_account(async_client, email="completion@example.invalid", account_id="completion")
+    sent = []
+    closed = []
+
+    class _Content:
+        async def iter_chunked(self, size):
+            del size
+            payload = {
+                "type": terminal if terminal not in (None, "timeout") else "response.created",
+                "response": {
+                    "id": "resp_probe",
+                    "status": "completed" if terminal == "response.completed" else "failed",
+                    "output": [],
+                    "error": {
+                        "code": error_code or "private-value",
+                        "message": "Account rejected. Bearer private-upstream-data token=private-keyed-value",
+                    },
+                },
+            }
+            if terminal == "error":
+                payload["error"] = payload.pop("response")["error"]
+            data = ("data: " + json.dumps(payload) + "\n\n").encode()
+            for index in range(0, len(data), 7):
+                yield data[index : index + 7]
+            if terminal == "timeout":
+                await asyncio.Event().wait()
+
+    class _Response:
+        status = 200
+        headers = {"Content-Type": "text/event-stream"}
+        content = _Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            closed.append(True)
+
+    def _post(url, **kwargs):
+        wire = kwargs["json"]
+        headers = {key.lower(): value for key, value in kwargs["headers"].items()}
+        sent.append((account_id, headers["chatgpt-account-id"], wire["model"], None))
+        return _Response()
+
+    @asynccontextmanager
+    async def _lease(*args):
+        yield SimpleNamespace(post=_post)
+
+    async def _refresh(self, account, *, ignore_refresh_disabled=False):
+        return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
+
+    recorder = AsyncMock()
+    monkeypatch.setattr(proxy_client, "lease_http_session", _lease)
+    monkeypatch.setattr(proxy_client, "discover_native_egress_client", lambda: None)
+    if terminal == "timeout":
+        monkeypatch.setattr(probe_sender, "COMPLETION_IDLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(UsageUpdater, "force_refresh_result", _refresh)
+    monkeypatch.setattr(
+        accounts_api, "get_proxy_service_for_app", lambda app: SimpleNamespace(record_account_probe_result=recorder)
+    )
+    response = await async_client.post(
+        f"/api/accounts/{account_id}/probe", json={"mode": "completion", "model": "gpt-test"}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["outcome"] == outcome
+    assert body["probeStatusCode"] == 200
+    assert body["model"] == "gpt-test"
+    assert body["latencyMs"] >= 0
+    assert body["accountStatusBefore"] == "active"
+    assert body["accountStatusAfter"] == "active"
+    assert "primaryUsedPercentBefore" in body
+    assert "secondaryUsedPercentAfter" in body
+    assert "private-upstream-data" not in response.text
+    assert "private-keyed-value" not in response.text
+    assert "private-value" not in response.text
+    assert sent == [(account_id, "completion", "gpt-test", None)]
+    assert closed == [True]
+    if outcome == "completed":
+        assert body["errorCode"] is None
+        assert body["errorMessage"] is None
+        recorder.assert_awaited_once_with(account_id=account_id, http_status=200)
+    else:
+        assert body["errorCode"]
+        assert body["errorMessage"]
+        if error_code:
+            assert body["errorCode"] == error_code
+            assert body["errorMessage"].startswith("Account rejected.")
+        recorder.assert_not_awaited()
+
+
+async def test_completion_probe_route_refusal_has_no_dispatch_and_records_no_success(async_client, monkeypatch):
+    account_id = await _import_test_account(async_client, email="route@example.invalid", account_id="route")
+    resolver = AsyncMock(side_effect=UpstreamProxyRouteError("private route data"))
+    dispatch = AsyncMock(side_effect=AssertionError("No dispatch on route refusal"))
+    recorder = AsyncMock()
+    monkeypatch.setattr(probe_sender, "resolve_upstream_route", resolver)
+    monkeypatch.setattr(probe_sender, "stream_responses", dispatch)
+    monkeypatch.setattr(
+        accounts_api, "get_proxy_service_for_app", lambda app: SimpleNamespace(record_account_probe_result=recorder)
+    )
+
+    response = await async_client.post(f"/api/accounts/{account_id}/probe", json={"mode": "completion"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["outcome"] == "failed"
+    assert body["probeStatusCode"] == 0
+    assert body["errorCode"] == "upstream_proxy_unavailable"
+    assert body["model"]
+    assert body["accountStatusBefore"] == "active"
+    assert body["accountStatusAfter"] == "active"
+    assert "private route data" not in response.text
+    assert resolver.call_args.kwargs["account_id"] == account_id
+    dispatch.assert_not_called()
+    recorder.assert_awaited_once_with(account_id=account_id, http_status=0)
+
+
+async def test_probe_rejects_unknown_mode_before_dispatch(async_client):
+    response = await async_client.post("/api/accounts/missing/probe", json={"mode": "arbitrary"})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("mode", ["wakeup", "completion"])
+async def test_probe_bounds_model_length_before_dispatch(async_client, monkeypatch, mode):
+    probe = AsyncMock()
+    monkeypatch.setattr(AccountsService, "probe_account", probe)
+    response = await async_client.post("/api/accounts/missing/probe", json={"mode": mode, "model": "x" * 129})
+    assert response.status_code == 422
+    probe.assert_not_awaited()
+
+
+async def test_explicit_wakeup_keeps_legacy_service_signature(async_client, monkeypatch):
+    async def _legacy_probe(self, account_id, model=None):
+        return AccountProbeResponse(
+            status="probed",
+            account_id=account_id,
+            probe_status_code=200,
+            account_status_before="active",
+            account_status_after="active",
+        )
+
+    monkeypatch.setattr(AccountsService, "probe_account", _legacy_probe)
+    response = await async_client.post("/api/accounts/legacy/probe", json={"mode": "wakeup"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] is None
+    assert body["model"] is None
+    assert body["latencyMs"] is None
 
 
 def _encode_jwt(payload: dict) -> str:

@@ -18,6 +18,7 @@ import {
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
+  AccountRoutingObservationSchema,
   ConsumeRateLimitResetCreditResponseSchema,
   ManualOauthCallbackRequestSchema,
   ManualOauthCallbackResponseSchema,
@@ -39,6 +40,10 @@ const OAUTH_BASE_PATH = "/api/oauth";
 
 export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);
+}
+
+export function getAccountRoutingObservation(accountId: string) {
+  return get(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/routing-observation`, AccountRoutingObservationSchema);
 }
 
 export function importAccount(file: File) {

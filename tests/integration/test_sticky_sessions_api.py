@@ -63,6 +63,68 @@ async def _set_affinity_ttl(seconds: int) -> None:
         await session.commit()
 
 
+@pytest.mark.asyncio
+async def test_reassign_soft_affinity_preserves_hard_owner_and_rejects_stale_writer(async_client):
+    accounts = await _create_accounts()
+    for kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION):
+        await _insert_sticky_session(
+            key="operator-switch", account_id=accounts[0].id, kind=kind, updated_at_offset_seconds=10
+        )
+    payload = {
+        "key": "operator-switch",
+        "kind": "prompt_cache",
+        "expectedAccountId": accounts[0].id,
+        "accountId": accounts[1].id,
+    }
+    response = await async_client.post("/api/sticky-sessions/reassign", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "reassigned", "accountId": accounts[1].id}
+    stale = await async_client.post("/api/sticky-sessions/reassign", json=payload)
+    assert stale.status_code == 409
+    entries = (await async_client.get("/api/sticky-sessions")).json()["entries"]
+    assert {entry["kind"]: entry["accountId"] for entry in entries} == {
+        "prompt_cache": accounts[1].id,
+        "codex_session": accounts[0].id,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "key", "status", "policy", "expected_status"),
+    [
+        ("codex_session", "hard", "active", "normal", 400),
+        ("sticky_thread", "thread", "active", "normal", 400),
+        ("prompt_cache", "\ncodex_live_call:reserved", "active", "normal", 400),
+        ("prompt_cache", "soft", "paused", "normal", 409),
+        ("prompt_cache", "soft", "rate_limited", "normal", 409),
+        ("prompt_cache", "soft", "quota_exceeded", "normal", 409),
+        ("prompt_cache", "soft", "deactivated", "normal", 409),
+        ("prompt_cache", "soft", "active", "preserve", 409),
+    ],
+)
+async def test_reassign_rejects_hard_keys_and_unavailable_target(
+    async_client, kind: str, key: str, status: str, policy: str, expected_status: int
+):
+    accounts = await _create_accounts()
+    await _insert_sticky_session(
+        key=key, account_id=accounts[0].id, kind=StickySessionKind(kind), updated_at_offset_seconds=10
+    )
+    async with SessionLocal() as session:
+        target = await AccountsRepository(session).get_by_id(accounts[1].id)
+        assert target is not None
+        target.status = AccountStatus(status)
+        target.routing_policy = policy
+        await session.commit()
+    response = await async_client.post(
+        "/api/sticky-sessions/reassign",
+        json={"key": key, "kind": kind, "expectedAccountId": accounts[0].id, "accountId": accounts[1].id},
+    )
+    assert response.status_code == expected_status, response.text
+    async with SessionLocal() as session:
+        owner = await session.scalar(text("SELECT account_id FROM sticky_sessions WHERE key=:key"), {"key": key})
+        assert owner == accounts[0].id
+
+
 async def _insert_sticky_session(
     *,
     key: str,

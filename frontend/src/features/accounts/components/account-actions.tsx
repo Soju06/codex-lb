@@ -188,7 +188,7 @@ export function AccountActions({
           disabled={probeDisabled}
         >
           <Activity className="h-3.5 w-3.5" />
-          {t("accounts.actions.forceProbe")}
+          {t("accounts.test.title", { defaultValue: "Test account" })}
         </Button>
 
         <Button

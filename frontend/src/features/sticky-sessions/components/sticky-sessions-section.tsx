@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
+import { StickyReassignDialog } from "@/features/sticky-sessions/components/sticky-reassign-dialog";
 import type {
   StickySessionEntry,
   StickySessionIdentifier,
@@ -86,6 +87,7 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
   const deleteSelectedDialog = useDialogState<StickySessionIdentifier[]>();
   const deleteFilteredDialog = useDialogState<number>();
   const purgeDialog = useDialogState();
+  const reassignDialog = useDialogState<StickySessionEntry>();
   const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
 
   const mutationError = useMemo(
@@ -331,6 +333,12 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                           )}
                         </TableCell>
                         <TableCell className="pr-4 text-right">
+                          {entry.kind === "prompt_cache" && entry.accountId && !entry.key.startsWith("\ncodex_live_call:") ? (
+                            <Button type="button" size="sm" variant="outline" disabled={busy}
+                              onClick={() => reassignDialog.show(entry)}>
+                              {t("stickySessions.switch.title", { defaultValue: "Switch account" })}
+                            </Button>
+                          ) : null}
                           <Button
                             type="button"
                             size="sm"
@@ -367,6 +375,10 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
           </div>
         </>
       )}
+
+      {reassignDialog.open && reassignDialog.data ? (
+        <StickyReassignDialog entry={reassignDialog.data} onClose={reassignDialog.hide} />
+      ) : null}
 
       <ConfirmDialog
         open={deleteDialog.open}

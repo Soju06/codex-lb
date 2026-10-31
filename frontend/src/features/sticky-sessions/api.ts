@@ -9,9 +9,19 @@ import {
   StickySessionsListResponseSchema,
   StickySessionsPurgeRequestSchema,
   StickySessionsPurgeResponseSchema,
+  StickySessionReassignResponseSchema,
 } from "@/features/sticky-sessions/schemas";
 
 const STICKY_SESSIONS_PATH = "/api/sticky-sessions";
+
+export function reassignStickySession(payload: {
+  key: string;
+  kind: "prompt_cache";
+  expectedAccountId: string;
+  accountId: string;
+}) {
+  return post(`${STICKY_SESSIONS_PATH}/reassign`, StickySessionReassignResponseSchema, { body: payload });
+}
 
 export function listStickySessions(params: unknown) {
   const validated = StickySessionsListParamsSchema.parse(params);

@@ -505,6 +505,40 @@ class StickySessionsRepository:
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def get_reassignment_target(self, account_id: str) -> Account | None:
+        return await self._session.scalar(
+            select(Account).where(Account.id == account_id, Account.delete_requested_at.is_(None))
+        )
+
+    async def reassign_prompt_cache(self, key: str, *, expected_account_id: str, target: Account) -> bool:
+        """CAS only soft preference; never rewrite hard ownership or live bridges."""
+        eligible_target = select(Account.id).where(
+            Account.id == target.id,
+            Account.status == target.status,
+            Account.deactivation_reason == target.deactivation_reason,
+            Account.access_token_encrypted == target.access_token_encrypted,
+            Account.routing_policy != "preserve",
+            Account.delete_requested_at.is_(None),
+        )
+        statement = (
+            update(StickySession)
+            .where(
+                StickySession.key == key,
+                StickySession.kind == StickySessionKind.PROMPT_CACHE,
+                StickySession.account_id == expected_account_id,
+                StickySession.continuity_abandoned_at.is_(None),
+                StickySession.continuity_abandonment_scope.is_(None),
+                StickySession.account_id != target.id,
+                eligible_target.exists(),
+            )
+            .values(account_id=target.id, updated_at=func.now())
+            .returning(StickySession.key)
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement)
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def delete_entries(
         self,
         entries: Sequence[tuple[str, StickySessionKind]],

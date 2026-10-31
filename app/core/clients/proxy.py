@@ -363,6 +363,7 @@ class UpstreamProxyRouteTrace:
     pool_id: str | None = None
     endpoint_id: str | None = None
     fallback_used: bool | None = None
+    http_status: int | None = None
 
     def record(self, *, route: ResolvedUpstreamRoute, fallback_used: bool) -> None:
         self.mode = route.mode
@@ -1978,7 +1979,24 @@ def _error_payload_from_response_body(
     return openai_error("upstream_error", fallback_message)
 
 
-async def _error_payload_from_response(resp: ErrorResponse) -> OpenAIErrorEnvelope:
+async def _error_payload_from_response(
+    resp: ErrorResponse, *, max_body_bytes: int | None = None
+) -> OpenAIErrorEnvelope:
+    if max_body_bytes is not None:
+        body = bytearray()
+        try:
+            async with asyncio.timeout(_effective_stream_timeout(get_settings().stream_idle_timeout_seconds, "idle")):
+                async for chunk in _CodexSSEContent(resp).iter_chunked(4096):
+                    if len(body) + len(chunk) > max_body_bytes:
+                        return openai_error("upstream_http_error", "Upstream rejected the request.")
+                    body.extend(chunk)
+        except TimeoutError:
+            return openai_error("upstream_http_error", "Upstream rejected the request.")
+        try:
+            data = json.loads(body)
+        except ValueError:
+            return openai_error("upstream_http_error", "Upstream rejected the request.")
+        return _error_payload_from_response_body(resp, data=data, text=None)
     data, text = await _error_response_body(resp)
     return _error_payload_from_response_body(resp, data=data, text=text)
 
@@ -3646,6 +3664,8 @@ async def stream_responses(
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
     thread_cache_identity: ThreadCacheIdentity | None = None,
+    max_sse_event_bytes: int = MAX_SSE_EVENT_BYTES,
+    error_body_max_bytes: int | None = None,
 ) -> AsyncIterator[str]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     # aclosing() at every hop lets a consumer's aclose() reach the upstream
@@ -3673,6 +3693,8 @@ async def stream_responses(
                 native_egress_client=native_egress_client,
                 synthesize_routing_hint=synthesize_routing_hint,
                 thread_cache_identity=thread_cache_identity,
+                max_sse_event_bytes=max_sse_event_bytes,
+                error_body_max_bytes=error_body_max_bytes,
             )
         ) as upstream_events,
     ):
@@ -3706,6 +3728,8 @@ async def _stream_responses_with_session(
     native_egress_client: NativeEgressClient | None = None,
     synthesize_routing_hint: bool = False,
     thread_cache_identity: ThreadCacheIdentity | None = None,
+    max_sse_event_bytes: int = MAX_SSE_EVENT_BYTES,
+    error_body_max_bytes: int | None = None,
 ) -> AsyncGenerator[str, None]:
     settings = with_dashboard_overrides(get_settings())
     headers = apply_codex_installation_headers(
@@ -3904,7 +3928,7 @@ async def _stream_responses_with_session(
                 }
                 if not non_streaming_http:
                     request_kwargs["native_sse"] = NativeSseOptions(
-                        effective_idle_timeout, MAX_SSE_EVENT_BYTES, interpret_responses=True
+                        effective_idle_timeout, max_sse_event_bytes, interpret_responses=True
                     )
                 request_with_metadata = getattr(active_codex_client, "request_with_route_metadata", None)
                 if callable(request_with_metadata):
@@ -3920,6 +3944,8 @@ async def _stream_responses_with_session(
                 # raw-content adapter is only needed for Python transports.
                 resp = raw_resp if isinstance(raw_resp, NativeEgressResponse) else _CodexSSEResponse(raw_resp)
                 status_code = resp.status
+                if route_trace is not None:
+                    route_trace.http_status = resp.status
                 last_stream_activity_at = time.monotonic()
                 # Error responses (429/403) carry the saturated-window
                 # snapshot — exactly when freshness matters most — so headers
@@ -3932,7 +3958,11 @@ async def _stream_responses_with_session(
                     )
                 if resp.status >= 400:
                     if raise_for_status:
-                        error_payload = await _error_payload_from_response(resp)
+                        error_payload = (
+                            await _error_payload_from_response(resp, max_body_bytes=error_body_max_bytes)
+                            if error_body_max_bytes is not None
+                            else await _error_payload_from_response(resp)
+                        )
                         error_code, error_message = _error_details_from_envelope(error_payload)
                         retry_after_header = _safe_retry_after_header(getattr(raw_resp, "headers", None))
                         archive_json(
@@ -3993,7 +4023,7 @@ async def _stream_responses_with_session(
                     _iter_sse_events(
                         cast(SSEResponse, resp),
                         effective_idle_timeout,
-                        MAX_SSE_EVENT_BYTES,
+                        max_sse_event_bytes,
                     )
                 ) as routed_events:
                     async for event_block in routed_events:
@@ -4054,7 +4084,7 @@ async def _stream_responses_with_session(
                             response_head_timeout_seconds=current_timeout.sock_read,
                             proxy_url=resolve_http_proxy_from_env(url),
                             sse=(
-                                NativeSseOptions(effective_idle_timeout, MAX_SSE_EVENT_BYTES, interpret_responses=True)
+                                NativeSseOptions(effective_idle_timeout, max_sse_event_bytes, interpret_responses=True)
                                 if not non_streaming_http
                                 else None
                             ),
@@ -4081,6 +4111,8 @@ async def _stream_responses_with_session(
             account_id=account_id,
         ) as resp:
             status_code = resp.status
+            if route_trace is not None:
+                route_trace.http_status = resp.status
             last_stream_activity_at = time.monotonic()
             if not suppress_live_usage:
                 publish_live_usage(
@@ -4090,7 +4122,11 @@ async def _stream_responses_with_session(
                 )
             if resp.status >= 400:
                 if raise_for_status:
-                    error_payload = await _error_payload_from_response(resp)
+                    error_payload = (
+                        await _error_payload_from_response(resp, max_body_bytes=error_body_max_bytes)
+                        if error_body_max_bytes is not None
+                        else await _error_payload_from_response(resp)
+                    )
                     error_code, error_message = _error_details_from_envelope(error_payload)
                     retry_after_header = _safe_retry_after_header(getattr(resp, "headers", None))
                     archive_json(
@@ -4151,7 +4187,7 @@ async def _stream_responses_with_session(
                 _iter_sse_events(
                     resp,
                     effective_idle_timeout,
-                    MAX_SSE_EVENT_BYTES,
+                    max_sse_event_bytes,
                 )
             ) as direct_events:
                 async for event_block in direct_events:
@@ -4306,7 +4342,7 @@ async def _stream_responses_with_session(
                     effective_total_timeout=(remaining_request_timeout or settings.proxy_request_budget_seconds),
                     effective_connect_timeout=effective_connect_timeout,
                     effective_idle_timeout=effective_idle_timeout,
-                    max_event_bytes=MAX_SSE_EVENT_BYTES,
+                    max_event_bytes=max_sse_event_bytes,
                     raise_for_status=raise_for_status,
                     account_id=account_id,
                     route=route,

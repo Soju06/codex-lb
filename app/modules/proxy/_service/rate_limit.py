@@ -9,6 +9,7 @@ from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, UsageHistory
 from app.db.session import detach_session_objects
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.proxy._load_balancer.types import AccountRoutingObservation
 from app.modules.proxy.helpers import (
     _credits_headers,
     _credits_snapshot,
@@ -77,6 +78,10 @@ def _has_available_usage_account(
 
 
 class _RateLimitMixin:
+    async def account_routing_observation(self, account_id: str) -> AccountRoutingObservation:
+        proxy = cast(_RateLimitServiceProtocol, self)
+        return await proxy._load_balancer.account_routing_observation(account_id)
+
     async def record_account_probe_result(
         self,
         *,

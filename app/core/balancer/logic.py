@@ -20,6 +20,7 @@ PERMANENT_FAILURE_CODES = {
     "refresh_token_invalidated": "Refresh token was revoked - re-login required",
     "invalid_grant": "Refresh token grant invalid - re-login required",
     "token_invalidated": "Authentication token invalidated - re-login required",
+    "token_revoked": "Authentication token revoked - re-login required",
     # ``token_expired`` from the OAuth refresh endpoint means the refresh
     # request itself failed because the refresh token (or the session it
     # belonged to) is no longer usable -- access-token-only expiry would have
@@ -53,6 +54,21 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "invalid_refresh_token",
     }
 )
+
+ROUTING_BLOCKED_REAUTH_REASONS = frozenset(
+    PERMANENT_FAILURE_CODES[code]
+    for code in (
+        "token_invalidated",
+        "token_revoked",
+        "account_auth_invalidated",
+    )
+)
+
+
+def reauth_reason_blocks_routing(deactivation_reason: str | None) -> bool:
+    """Return whether a re-auth reason proves the stored access token is unusable."""
+    return deactivation_reason in ROUTING_BLOCKED_REAUTH_REASONS
+
 
 SECONDS_PER_DAY = 60 * 60 * 24
 SECONDS_PER_HOUR = 60 * 60

@@ -5,12 +5,39 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import BigInteger
+from sqlalchemy.dialects.postgresql import asyncpg, psycopg
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.engine import Dialect
 
 from app.db.models import ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import ApiKeyAccountCost, ApiKeysRepository
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect", [asyncpg.dialect(), psycopg.dialect()], ids=["asyncpg", "psycopg"])
+@pytest.mark.parametrize("delta", [-5_000_000_000, -5, 5, 5_000_000_000])
+async def test_counter_adjustment_binds_large_values_as_bigint_on_postgresql(dialect: Dialect, delta: int) -> None:
+    session = AsyncMock()
+    repo = ApiKeysRepository(session)
+    compiled_statements = []
+
+    async def _execute(statement):
+        compiled_statements.append(statement.compile(dialect=dialect))
+        return SimpleNamespace(scalar_one_or_none=lambda: 101)
+
+    session.execute.side_effect = _execute
+    assert await repo.adjust_reserved_usage(101, delta=delta, expected_reset_at=datetime(2026, 5, 8))
+    assert len(compiled_statements) == 1
+    compiled = compiled_statements[0]
+    large_binds = [
+        bind for bind in compiled.binds.values() if isinstance(bind.value, int) and abs(bind.value) > 2**31 - 1
+    ]
+    assert any(bind.value == 2**63 - 1 for bind in large_binds)
+    assert all(isinstance(bind.type, BigInteger) for bind in large_binds)
+    assert "::BIGINT" in str(compiled)
 
 
 @pytest.mark.asyncio

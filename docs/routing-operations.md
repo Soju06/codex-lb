@@ -1,8 +1,8 @@
 # Inspect and operate account routing
 
-Contracts: [sticky-session operations](../openspec/specs/sticky-session-operations/spec.md),
-[dashboard](../openspec/specs/frontend-architecture/spec.md),
-[Responses compatibility](../openspec/specs/responses-api-compat/spec.md).
+Contracts: [sticky-session operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/sticky-session-operations),
+[dashboard](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture),
+[Responses compatibility](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat).
 
 ## Find the account behind a request
 

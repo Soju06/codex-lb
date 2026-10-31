@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -172,11 +173,16 @@ async def test_terminal_preserves_actionable_error_code(completion_probe, kind, 
 
 async def test_terminal_message_redacts_credentials_before_truncation(completion_probe):
     _, _, configure, send = completion_probe
+    # Unsigned, synthetic claims test JWT redaction without storing a credential-shaped literal.
+    test_jwt = ".".join(
+        base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        for claims in ({"alg": "none"}, {"sub": "synthetic-test"})
+    ) + ".synthetic-signature"
     secrets = [
         "synthetic-test-token",
         "synthetic-bearer",
         "synthetic-keyed",
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.synthetic-signature",
+        test_jwt,
         "sk-test-synthetic-secret",
         "proxy.invalid",
     ]

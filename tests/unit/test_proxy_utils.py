@@ -17438,7 +17438,8 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
 
 
 @pytest.mark.asyncio
-async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_settlement(monkeypatch):
+@pytest.mark.parametrize("http_rejection", [False, True])
+async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_settlement(monkeypatch, http_rejection):
     """A keyed token revocation leaves routing immediately but defers health.
 
     The request can move only after the encrypted reasoning bookkeeping is
@@ -17495,6 +17496,8 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
     async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
         stream_account_ids.append(account.id)
         if account is account_a:
+            if http_rejection:
+                raise proxy_module.ProxyResponseError(401, openai_error("token_expired", "expired access token"))
             raise proxy_service._RetryableStreamError(
                 "token_revoked",
                 cast(UpstreamError, {"message": "access token revoked"}),
@@ -17511,7 +17514,13 @@ async def test_stream_with_retry_keyed_token_revoked_quarantines_routing_before_
     )
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
-    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+
+    async def ensure_fresh(account: Account, *, force: bool = False, **_kwargs: object) -> Account:
+        if force and http_rejection:
+            raise proxy_service.RefreshError("token_revoked", "access token revoked", True)
+        return account
+
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
     monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
     monkeypatch.setattr(service, "_stream_once", fake_stream_once)
 
@@ -40827,7 +40836,11 @@ async def test_stream_forced_refresh_timeout_before_visible_output_fails_over(mo
 
 
 @pytest.mark.asyncio
-async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_account(monkeypatch):
+@pytest.mark.parametrize("full_history", [False, True])
+@pytest.mark.parametrize("refresh_failure", [False, True])
+async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_account(
+    monkeypatch, full_history: bool, refresh_failure: bool
+):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -40835,6 +40848,7 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
     account_b = _make_account("acc_stream_post_refresh_401_b")
     seen_excluded_account_ids: list[set[str]] = []
     stream_account_ids: list[str | None] = []
+    streamed_inputs: list[object] = []
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -40847,22 +40861,47 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
         return AccountSelection(account=account_b, error_message=None)
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
-        del payload, headers, access_token, base_url, raise_for_status
+        del headers, access_token, base_url, raise_for_status
         stream_account_ids.append(account_id)
+        streamed_inputs.append(payload.input)
         if account_id == account_a.chatgpt_account_id:
             raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token invalidated"))
         yield 'data: {"type":"response.completed","response":{"id":"resp_post_refresh_failover"}}\n\n'
 
     monkeypatch.setattr(service._load_balancer, "select_account", select_account)
-    monkeypatch.setattr(
-        service,
-        "_ensure_fresh",
-        AsyncMock(side_effect=[account_a, account_a, account_b]),
+    refresh = AsyncMock(
+        side_effect=[
+            account_a,
+            proxy_service.RefreshError("token_revoked", "Refresh token was revoked", True)
+            if refresh_failure
+            else account_a,
+            account_b,
+        ]
     )
+    monkeypatch.setattr(service, "_ensure_fresh", refresh)
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", AsyncMock())
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    input_items = (
+        [
+            {"type": "message", "role": "user", "content": "first question"},
+            {"type": "reasoning", "id": "rs_auth", "encrypted_content": "opaque-state", "summary": []},
+            {
+                "type": "message",
+                "id": "msg_auth",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "prior answer"}],
+            },
+            {"type": "message", "role": "user", "content": "continue"},
+        ]
+        if full_history
+        else []
+    )
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": input_items, "stream": True}
+    )
 
     chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-stream"})]
 
@@ -40870,11 +40909,76 @@ async def test_stream_post_refresh_401_fails_over_instead_of_retrying_same_accou
     assert event["type"] == "response.completed"
     assert event["response"]["id"] == "resp_post_refresh_failover"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
-    assert stream_account_ids == [
-        account_a.chatgpt_account_id,
-        account_a.chatgpt_account_id,
-        account_b.chatgpt_account_id,
+    assert stream_account_ids == [account_a.chatgpt_account_id] * (1 if refresh_failure else 2) + [
+        account_b.chatgpt_account_id
     ]
+    if full_history:
+        assert "opaque-state" not in json.dumps(streamed_inputs[-1])
+        assert "prior answer" in json.dumps(streamed_inputs[-1])
+        assert "opaque-state" in json.dumps(payload.input)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ownership", ["previous_response", "turn_state", "file", "single_account", "unresolved_tool"])
+async def test_stream_post_refresh_401_preserves_hard_or_unprojectable_owner(monkeypatch, ownership: str):
+    settings = _make_proxy_settings()
+    if ownership == "single_account":
+        settings.routing_strategy = "single_account"
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc_auth_hard_owner")
+    select = AsyncMock(return_value=AccountSelection(account=owner, error_message=None))
+    stream = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=owner))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=owner.id))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=owner.id))
+
+    async def reject(account: Account, *_args: object, **_kwargs: object):
+        await stream(account.id)
+        raise proxy_module.ProxyResponseError(401, openai_error("token_expired", "Expired credential"))
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_once", reject)
+    data: dict[str, object] = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "stream": True,
+        "input": [
+            {"role": "user", "content": "continue"},
+            {"type": "reasoning", "id": "rs_auth_hard", "encrypted_content": "opaque", "summary": []},
+        ],
+    }
+    if ownership == "previous_response":
+        data["previous_response_id"] = "resp_auth_hard"
+    elif ownership == "unresolved_tool":
+        data["input"] = [{"type": "function_call_output", "call_id": "unresolved", "output": "result"}]
+    headers = {"session_id": "auth-hard"}
+    if ownership == "turn_state":
+        headers["x-codex-turn-state"] = "auth-hard-state"
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            ResponsesRequest.model_validate(data),
+            headers,
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+            rewritten_file_account_id=owner.id if ownership == "file" else None,
+        )
+    ]
+    error = json.loads(chunks[-1].split("data: ", 1)[1])["response"]["error"]
+    assert error["code"] == "token_expired"
+    assert error["message"] == "Expired credential"
+    assert stream.await_count == 2
+    assert select.await_count == 1
 
 
 @pytest.mark.asyncio

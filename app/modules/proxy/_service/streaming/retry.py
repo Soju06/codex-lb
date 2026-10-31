@@ -3121,15 +3121,28 @@ class _StreamingRetryMixin:
                         except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
-                                    if refresh_exc.code == "token_revoked":
-                                        last_permanent_refresh_error = refresh_exc
-                                        last_permanent_refresh_error_account_id = account.id
-                                    await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                    last_permanent_refresh_error = refresh_exc
+                                    last_permanent_refresh_error_account_id = account.id
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        {"message": refresh_exc.message},
+                                        refresh_exc.code,
+                                    )
                                     # Keep the warning account routable for later
                                     # requests, but exclude it from this request's
                                     # retry pool after upstream rejected its token.
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
+                                    if not settlement.downstream_visible:
+                                        replay_moved = _move_verified_fresh_replay_from_owner(
+                                            account_id=account.id,
+                                            outcome="owner_forced_refresh_permanent_failure",
+                                        )
+                                        if not replay_moved:
+                                            _move_previsible_account_rejection_from_dispatch_owner(
+                                                account_id=account.id,
+                                                outcome="owner_forced_refresh_permanent_failure",
+                                            )
                                     excluded_account_ids.add(account.id)
                                     continue
                                 if is_transient_refresh_contention(refresh_exc):
@@ -3508,8 +3521,21 @@ class _StreamingRetryMixin:
                                 failure_class=classified["failure_class"],
                                 http_status=retry_exc.status_code,
                             )
-                            if retry_exc.status_code == 401 and candidates_remaining > 0:
-                                action = "failover_next"
+                            if retry_exc.status_code == 401:
+                                replay_moved = _move_verified_fresh_replay_from_owner(
+                                    account_id=account.id,
+                                    outcome="owner_post_refresh_auth_rejection",
+                                )
+                                if not replay_moved:
+                                    _move_previsible_account_rejection_from_dispatch_owner(
+                                        account_id=account.id,
+                                        outcome="owner_post_refresh_auth_rejection",
+                                    )
+                                action = (
+                                    "failover_next"
+                                    if candidates_remaining > 0 and not _stream_owner_bound_to(account)
+                                    else "surface"
+                                )
                             elif resilience.deterministic_failover_enabled:
                                 action = failover_decision(
                                     failure_class=classified["failure_class"],

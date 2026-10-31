@@ -21,6 +21,8 @@
   (8 passed, 58 failed), primarily requirement-length warnings. Main specs were
   not edited by this change.
 
-All network responses in verification were local test doubles. No live account
-requests, secrets, commits or deployment were needed. The active OpenSpec change
-is retained for integration with the parent's frontend work.
+The automated suites use local transport doubles. After integration and local
+deployment, both currently active accounts completed a real account-pinned
+`gpt-6.1-sol` probe with HTTP 200 and `response.completed` (7855 ms and 4716 ms).
+The standalone smoke test first warmed the Codex-version and persisted-model
+caches, as normal server startup does. It emitted only sanitized result fields.

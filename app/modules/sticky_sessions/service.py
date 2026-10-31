@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from app.core.auth import token_expiry_epoch_ms
-from app.core.balancer.logic import reauth_reason_blocks_routing
+from app.core.balancer.logic import PERMANENT_FAILURE_CODES
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
@@ -77,7 +77,12 @@ class StickySessionsService:
             or target.status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
             or target.routing_policy == "preserve"
             or is_account_locally_routing_unavailable(account_id)
-            or reauth_reason_blocks_routing(target.deactivation_reason)
+            or target.deactivation_reason
+            in {
+                PERMANENT_FAILURE_CODES["token_invalidated"],
+                PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                "Authentication token revoked - re-login required",
+            }
         ):
             raise DashboardConflictError("Target account is unavailable for routing")
         if target.status == AccountStatus.REAUTH_REQUIRED:

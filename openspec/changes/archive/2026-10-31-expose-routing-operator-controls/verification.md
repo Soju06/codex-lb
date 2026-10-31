@@ -17,4 +17,8 @@ Live deployment to the local Docker service completed using an independent
 backup/readiness/rollback script. All four account IDs, the API-key ID, 19 hard
 continuation mappings, settings and encryption-key fingerprints were preserved.
 Readiness returned HTTP 200. The existing effective HTTP and WebSocket ingress
-budgets were retained. Per-account completion results are recorded separately.
+budgets were retained. Both accounts active at verification completed a tiny
+real `gpt-6.1-sol` request (HTTP 200 plus `response.completed`, 7855 ms and
+4716 ms). Two other accounts were rate-limited and were not completion-tested.
+The service recorded 38 successful routed requests after deployment before
+the follow-up log inspection.

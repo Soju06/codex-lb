@@ -163,6 +163,7 @@ async function capture(
     theme: Theme;
     route: string;
     fullPage?: boolean;
+    dialogName?: string;
     session?: SessionOverride;
     waitFor?: string;
     beforeScreenshot?: (page: Page) => Promise<void>;
@@ -206,6 +207,12 @@ async function capture(
     });
   }
 
+  if (opts.dialogName) {
+    await page.getByRole("dialog", { name: opts.dialogName }).screenshot({
+      path: path.join(SCREENSHOT_DIR, opts.file), type: "jpeg", quality: 90,
+    });
+    return;
+  }
   await page.screenshot({
     path: path.join(SCREENSHOT_DIR, opts.file),
     type: "jpeg",
@@ -267,7 +274,7 @@ test("accounts — dark", async ({ page }) => {
 
 test("routing account completion test", async ({ page }) => {
   await capture(page, {
-    file: "routing-account-test.jpg", theme: "light", route: "/accounts",
+    file: "routing-account-test.jpg", theme: "light", route: "/accounts", dialogName: "Test account",
     beforeScreenshot: async (current) => {
       await current.getByRole("button", { name: "Test account" }).click();
       await current.getByRole("textbox", { name: "Model (optional)" }).fill("gpt-6-astra");
@@ -279,7 +286,7 @@ test("routing account completion test", async ({ page }) => {
 
 test("routing soft account switch", async ({ page }) => {
   await capture(page, {
-    file: "routing-account-switch.jpg", theme: "light", route: "/settings",
+    file: "routing-account-switch.jpg", theme: "light", route: "/settings", dialogName: "Switch account",
     beforeScreenshot: async (current) => {
       await current.getByRole("button", { name: "Show advanced settings" }).click();
       await current.getByRole("button", { name: "Switch account", exact: true }).click();

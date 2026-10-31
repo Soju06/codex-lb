@@ -125,6 +125,41 @@ async def test_reassign_rejects_hard_keys_and_unavailable_target(
         assert owner == accounts[0].id
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Authentication token invalidated - re-login required",
+        "Authentication token revoked - re-login required",
+        "Authentication failed after token refresh - re-login required",
+    ],
+)
+async def test_reassign_rejects_invalidated_reauth_target(async_client, reason: str):
+    accounts = await _create_accounts()
+    await _insert_sticky_session(
+        key="soft-reauth",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=10,
+    )
+    async with SessionLocal() as session:
+        target = await AccountsRepository(session).get_by_id(accounts[1].id)
+        assert target is not None
+        target.status = AccountStatus.REAUTH_REQUIRED
+        target.deactivation_reason = reason
+        await session.commit()
+    response = await async_client.post(
+        "/api/sticky-sessions/reassign",
+        json={
+            "key": "soft-reauth",
+            "kind": "prompt_cache",
+            "expectedAccountId": accounts[0].id,
+            "accountId": accounts[1].id,
+        },
+    )
+    assert response.status_code == 409, response.text
+
+
 async def _insert_sticky_session(
     *,
     key: str,

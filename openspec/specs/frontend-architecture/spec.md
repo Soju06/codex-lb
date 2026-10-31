@@ -4280,4 +4280,3 @@ Missing or deleting accounts MUST return not found.
 - **WHEN** an operator opens the account's routing observation
 - **THEN** the current replica's deadline and recent error count are visible
 - **AND** the read does not change that account's next selection or health
-

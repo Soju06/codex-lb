@@ -17,6 +17,7 @@ from app.core.auth.refresh import (
     is_transient_refresh_contention,
     refresh_contention_kind,
 )
+from app.core.balancer import reauth_reason_blocks_routing
 from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
@@ -296,7 +297,10 @@ class _WarmupMixin:
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
         active_accounts = [
-            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            account
+            for account in accounts
+            if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            and not reauth_reason_blocks_routing(account.deactivation_reason)
         ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts

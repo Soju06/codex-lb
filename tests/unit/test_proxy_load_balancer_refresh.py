@@ -34,7 +34,11 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier
-from app.modules.proxy.account_cache import is_account_routing_unavailable
+from app.modules.proxy.account_cache import (
+    clear_account_routing_unavailable,
+    is_account_routing_unavailable,
+    mark_account_routing_unavailable,
+)
 from app.modules.proxy.load_balancer import (
     ADDITIONAL_QUOTA_DATA_UNAVAILABLE,
     ADDITIONAL_QUOTA_EXHAUSTED,
@@ -634,6 +638,27 @@ async def test_budget_safe_fallback_still_skips_unavailable_accounts() -> None:
 
     assert selection.account is not None
     assert selection.account.id == available_account.id
+
+
+@pytest.mark.asyncio
+async def test_select_account_skips_process_local_routing_mark() -> None:
+    revoked = _make_account("acc-locally-revoked", "revoked@example.com")
+    healthy = _make_account("acc-healthy", "healthy@example.com")
+    accounts_repo = StubAccountsRepository([revoked, healthy])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    mark_account_routing_unavailable(revoked.id)
+    try:
+        selection = await balancer.select_account(
+            routing_strategy="single_account",
+        )
+    finally:
+        clear_account_routing_unavailable(revoked.id)
+
+    assert selection.account is not None
+    assert selection.account.id == healthy.id
 
 
 @pytest.mark.asyncio

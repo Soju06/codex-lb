@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -69,7 +69,7 @@ class _Harness:
         capability_lineage.is_required.return_value = False
 
         @asynccontextmanager
-        async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        async def repo_factory() -> AsyncGenerator[ProxyRepositories]:
             yield ProxyRepositories(
                 accounts=cast(Any, accounts_repo),
                 usage=cast(Any, usage_repo),

@@ -5,11 +5,11 @@ import logging
 import re
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -191,7 +191,7 @@ def _required_sqlalchemy_url(config: Config) -> str:
 
 
 @contextmanager
-def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
+def _sync_connection(sync_database_url: str) -> Generator[Connection]:
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.connect() as connection:
@@ -201,7 +201,7 @@ def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
 
 
 @contextmanager
-def _sync_transaction(sync_database_url: str) -> Iterator[Connection]:
+def _sync_transaction(sync_database_url: str) -> Generator[Connection]:
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.begin() as connection:

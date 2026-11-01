@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncGenerator, AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -204,7 +204,7 @@ async def test_background_snapshot_uses_one_owned_session_until_rows_are_detache
     ]
 
     @asynccontextmanager
-    async def recording_background_session() -> AsyncIterator[object]:
+    async def recording_background_session() -> AsyncGenerator[object]:
         events.append("session_open")
         try:
             yield session

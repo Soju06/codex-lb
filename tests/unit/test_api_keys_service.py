@@ -31,6 +31,7 @@ from app.modules.api_keys.repository import (
     _UNSET,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
+    ApiKeyUsageTotals,
     ReservationResult,
     UsageReservationData,
     UsageReservationItemData,
@@ -87,6 +88,21 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         self.rollback_calls = 0
         self.commit_count = 0
         self.touched_reservations: list[str] = []
+
+    async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary:
+        raise NotImplementedError
+
+    async def trends_by_key(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 3600,
+    ) -> list[ApiKeyTrendBucket]:
+        raise NotImplementedError
+
+    async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
+        raise NotImplementedError
 
     async def create(self, row: ApiKey, *, commit: bool = True) -> ApiKey:
         del commit

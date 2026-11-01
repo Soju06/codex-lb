@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -53,7 +53,7 @@ def _error_code(error: ProxyResponseError) -> str | None:
 
 def _repo_factory(repository: object) -> ProxyRepoFactory:
     @asynccontextmanager
-    async def factory() -> AsyncIterator[ProxyRepositories]:
+    async def factory() -> AsyncGenerator[ProxyRepositories]:
         yield cast(ProxyRepositories, SimpleNamespace(capability_lineage=repository))
 
     return factory

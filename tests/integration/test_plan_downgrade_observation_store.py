@@ -12,7 +12,7 @@ the raw SQL and its binds must be proven per driver, not only on SQLite.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 import pytest
@@ -57,7 +57,7 @@ async def _seed_account(account_id: str, email: str) -> None:
 
 
 @contextmanager
-def _capture_observation_statements() -> Iterator[list[str]]:
+def _capture_observation_statements() -> Generator[list[str]]:
     """Record every statement touching the observations table.
 
     Listens at the ``Engine`` class level rather than on one engine instance:

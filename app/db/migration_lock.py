@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -62,7 +63,7 @@ def _acquire_with_timeout(
 
 
 @contextmanager
-def _postgresql_migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterator[None]:
+def _postgresql_migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Generator[None]:
     # A dedicated session-level advisory lock connection: run_upgrade spans many
     # transactions across several short-lived engines, so the lock must outlive
     # any single transaction and is held on this connection for the whole
@@ -98,7 +99,7 @@ def _postgresql_migration_lock(sync_database_url: str, *, timeout_seconds: float
 
 
 @contextmanager
-def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Iterator[None]:
+def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Generator[None]:
     # Holding a BEGIN IMMEDIATE write transaction on a sentinel SQLite file is
     # the mutex: SQLite's RESERVED lock is exclusive across processes sharing
     # the volume and vanishes on process death. The sentinel must be a separate
@@ -135,7 +136,7 @@ def _sqlite_migration_lock(db_path: Path, *, timeout_seconds: float) -> Iterator
 
 
 @contextmanager
-def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterator[None]:
+def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Generator[None]:
     """Cross-process mutex serializing schema upgrades/stamps for one database.
 
     PostgreSQL: session-level advisory lock held on a dedicated connection.

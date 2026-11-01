@@ -5,11 +5,11 @@ import logging
 import os
 import random
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha1
-from typing import AsyncIterator
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def _automation_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
+async def _automation_accounts_refresh_scope() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
 
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 
 
 @asynccontextmanager
-async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
+async def _repo_factory() -> AsyncGenerator[ProxyRepositories]:
     async with SessionLocal() as session:
         yield ProxyRepositories(
             accounts=AccountsRepository(session),

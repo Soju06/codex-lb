@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -1001,7 +1002,7 @@ def init_background_db(url: str | None = None) -> None:
 
 
 @asynccontextmanager
-async def get_background_session() -> AsyncIterator[AsyncSession]:
+async def get_background_session() -> AsyncGenerator[AsyncSession]:
     """Session provider for background tasks, schedulers, and auth dependencies.
 
     Uses the separate background pool if initialized, otherwise falls back to main pool.
@@ -1051,7 +1052,7 @@ async def relax_commit_durability(session: AsyncSession) -> None:
 
 
 @asynccontextmanager
-async def sqlite_writer_section() -> AsyncIterator[None]:
+async def sqlite_writer_section() -> AsyncGenerator[None]:
     """Serialize local SQLite write transactions without throttling upstream work."""
     global _sqlite_writer_lock
     database_url = normalize_sqlite_url(_settings.database_url)

@@ -17,7 +17,7 @@ import base64
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -274,7 +274,7 @@ class FakeIdp:
         import app.core.auth.providers.oidc as oidc_module
 
         @contextlib.asynccontextmanager
-        async def _lease(session: Any = None) -> AsyncIterator[_FakeSession]:
+        async def _lease(session: Any = None) -> AsyncGenerator[_FakeSession]:
             del session
             yield self.session()
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import cast
@@ -256,13 +256,13 @@ def get_usage_context(
 
 
 @asynccontextmanager
-async def _accounts_repo_context() -> AsyncIterator[AccountsRepository]:
+async def _accounts_repo_context() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
 
 
 @asynccontextmanager
-async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
+async def _proxy_repo_context() -> AsyncGenerator[ProxyRepositories]:
     async with get_background_session() as session:
         yield ProxyRepositories(
             accounts=AccountsRepository(session),

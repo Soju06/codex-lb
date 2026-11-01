@@ -4,10 +4,10 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Collection
+from collections.abc import AsyncGenerator, Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Protocol, cast
+from typing import Any, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.plan_types import normalize_account_plan_type
@@ -360,7 +360,7 @@ async def _invalidate_usage_refresh_caches() -> None:
 
 
 @contextlib.asynccontextmanager
-async def _background_accounts_repo() -> AsyncIterator[AccountsRepository]:
+async def _background_accounts_repo() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         try:
             yield AccountsRepository(session)

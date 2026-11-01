@@ -5,7 +5,7 @@ import os
 import sqlite3
 import tempfile
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -93,7 +93,7 @@ class SqliteRunStateRecord:
 
 
 @contextmanager
-def sqlite_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
+def sqlite_connection(path: str | Path) -> Generator[sqlite3.Connection]:
     connection = sqlite3.connect(str(path))
     try:
         with connection:

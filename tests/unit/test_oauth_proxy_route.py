@@ -14,7 +14,7 @@ API calls. OpenAI detects the IP change and invalidates the session, causing
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import cast
@@ -109,7 +109,7 @@ async def test_oauth_route_fails_closed_when_bindings_exist_but_no_default_pool(
     """
 
     @asynccontextmanager
-    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+    async def fake_background_session() -> AsyncGenerator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
@@ -146,7 +146,7 @@ async def test_oauth_route_uses_default_pool_when_bindings_exist(
     _oauth_route() MUST return a resolved route from that pool."""
 
     @asynccontextmanager
-    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+    async def fake_background_session() -> AsyncGenerator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
@@ -185,7 +185,7 @@ async def test_oauth_route_preserves_direct_egress_when_no_bindings_exist(
     (direct egress) instead of failing closed."""
 
     @asynccontextmanager
-    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+    async def fake_background_session() -> AsyncGenerator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
@@ -299,7 +299,7 @@ async def test_refresh_fails_closed_when_binding_exists_but_route_returns_none(
     """
 
     @asynccontextmanager
-    async def fake_background_session() -> AsyncIterator[AsyncSession]:
+    async def fake_background_session() -> AsyncGenerator[AsyncSession]:
         async with session_factory() as session:
             yield session
 

@@ -693,7 +693,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 status = "error"
                 if not (preserve_raw_sse_line and error is None):
                     settlement.error = _upstream_error_from_openai(error)
-                upstream_error: UpstreamError = settlement.error or cast(UpstreamError, {"message": "Upstream error"})
+                upstream_error: UpstreamError = settlement.error or {"message": "Upstream error"}
                 settlement.record_success = False
                 if rewritten_error is not None:
                     rewritten_code, rewritten_message, upstream_error_code = rewritten_error
@@ -836,7 +836,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 event_type,
                                 event_payload,
                             )
-                            upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
+                            upstream_error = {"message": raw_error_message or "Upstream error"}
                         else:
                             raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)

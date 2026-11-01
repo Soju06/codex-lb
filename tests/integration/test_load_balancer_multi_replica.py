@@ -10,7 +10,7 @@ CAS-wrote the flip back, erasing the marking replica's rate-limit state.
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.integration
 
 
 @asynccontextmanager
-async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
+async def _repo_factory() -> AsyncGenerator[ProxyRepositories]:
     async with SessionLocal() as session:
         yield ProxyRepositories(
             accounts=AccountsRepository(session),

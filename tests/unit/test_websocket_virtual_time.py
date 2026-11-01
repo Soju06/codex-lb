@@ -13,9 +13,10 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, cast
 
 import anyio
 import pytest
@@ -41,7 +42,7 @@ class _RequestLogsRecorder:
 
 
 @asynccontextmanager
-async def _repo_factory() -> AsyncIterator[SimpleNamespace]:
+async def _repo_factory() -> AsyncGenerator[SimpleNamespace]:
     yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
 

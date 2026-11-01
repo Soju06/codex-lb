@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
@@ -326,7 +326,7 @@ class _LockingSession:
 
 def _install_session(monkeypatch: pytest.MonkeyPatch, session: _LockingSession) -> None:
     @contextlib.asynccontextmanager
-    async def _fake_background_session() -> AsyncIterator[_LockingSession]:
+    async def _fake_background_session() -> AsyncGenerator[_LockingSession]:
         yield session
 
     monkeypatch.setattr(refresh_claims_module, "get_background_session", _fake_background_session)

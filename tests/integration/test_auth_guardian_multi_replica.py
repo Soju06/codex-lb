@@ -9,7 +9,7 @@ concurrent force-refreshes. The per-tick dynamic check counts live
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -44,7 +44,7 @@ class _AlwaysLeader:
 
 def _scheduler(repo: _RecordingRepo, *, leader_election_enabled: bool) -> AuthGuardianScheduler:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_RecordingRepo]:
+    async def repo_factory() -> AsyncGenerator[_RecordingRepo]:
         yield repo
 
     return AuthGuardianScheduler(

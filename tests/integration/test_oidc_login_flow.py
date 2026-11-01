@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -88,7 +88,7 @@ def idp(monkeypatch: pytest.MonkeyPatch) -> FakeIdp:
 
 
 @asynccontextmanager
-async def _client(app) -> AsyncIterator[AsyncClient]:
+async def _client(app) -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
         yield client
 

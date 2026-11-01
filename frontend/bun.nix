@@ -261,9 +261,9 @@
     url = "https://registry.npmjs.org/@floating-ui/utils/-/utils-0.2.12.tgz";
     hash = "sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==";
   };
-  "@hookform/resolvers@5.9.2" = fetchurl {
-    url = "https://registry.npmjs.org/@hookform/resolvers/-/resolvers-5.9.2.tgz";
-    hash = "sha512-RtjTnZqsC38s4NKp2XO3fD8IA5uyN4tB7McQ5C6uiMPcV+WWO8F+wVa3e+BXUpH2ScgxghAlwFRMVqjT9WChAQ==";
+  "@hookform/resolvers@7.0.1" = fetchurl {
+    url = "https://registry.npmjs.org/@hookform/resolvers/-/resolvers-7.0.1.tgz";
+    hash = "sha512-F3aM0dDWsRGmFjnnXjogaGLwP7gY2HA6/c5qp4v4Im/UV7pTNkX+WAjcOlM1V0PE0zoMzuPqCyaYtMzUhoFToA==";
   };
   "@humanfs/core@0.19.2" = fetchurl {
     url = "https://registry.npmjs.org/@humanfs/core/-/core-0.19.2.tgz";

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-31T06:30:29.877348+00:00",
+  "updated_at": "2026-11-01T06:31:27.216716+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -653,6 +653,11 @@
       "flex_long_context_input_per_1m": 10.0,
       "flex_long_context_output_per_1m": 37.5,
       "flex_long_context_cached_input_per_1m": 1.0
+    },
+    "gpt-6-astra-law": {
+      "input_per_1m": 10.0,
+      "output_per_1m": 50.0,
+      "cached_input_per_1m": 1.0
     },
     "gpt-6-luna": {
       "input_per_1m": 0.1,

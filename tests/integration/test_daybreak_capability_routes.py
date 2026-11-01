@@ -18,6 +18,7 @@ from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.service import ProxyService
+from tests.integration.route_inventory import iter_routes, route_path
 
 pytestmark = pytest.mark.integration
 
@@ -104,14 +105,14 @@ _SEPARATE_NAMESPACE_ROUTES: frozenset[_RouteKey] = frozenset(
 
 def test_registered_proxy_route_inventory_has_one_explicit_capability_policy(app_instance) -> None:
     registered: set[_RouteKey] = set()
-    for route in app_instance.routes:
-        endpoint = getattr(route, "endpoint", None)
+    for route in iter_routes(app_instance):
+        endpoint = route.endpoint
         if getattr(endpoint, "__module__", None) != proxy_api_module.__name__:
             continue
-        if isinstance(route, APIRoute):
-            registered.update(("HTTP", method, route.path) for method in route.methods or ())
-        elif isinstance(route, WebSocketRoute):
-            registered.add(("WS", "WEBSOCKET", route.path))
+        if isinstance(route.original_route, APIRoute):
+            registered.update(("HTTP", method, route_path(route)) for method in route.methods or ())
+        elif isinstance(route.original_route, WebSocketRoute):
+            registered.add(("WS", "WEBSOCKET", route_path(route)))
 
     policy_groups = (
         _FAIL_CLOSED_HTTP_ROUTES,

@@ -59,6 +59,7 @@ from tests.fixtures.fake_idp import (
     json_response,
     provider_config_document,
 )
+from tests.integration.route_inventory import iter_routes
 
 pytestmark = pytest.mark.integration
 
@@ -713,8 +714,8 @@ def test_both_public_routes_are_safe_methods(app_instance) -> None:
 
     methods = {
         route.path: route.methods
-        for route in app_instance.routes
-        if getattr(route, "path", "").startswith("/api/dashboard-auth/oidc")
+        for route in iter_routes(app_instance)
+        if (route.path or "").startswith("/api/dashboard-auth/oidc")
     }
 
     assert methods[START] == {"GET"}

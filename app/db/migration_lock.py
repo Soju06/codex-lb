@@ -10,7 +10,7 @@ from typing import Callable, Iterator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from app.db.sqlite_utils import sqlite_db_path_from_url
+from app.db.sqlite_utils import sqlite_db_path_from_sqlalchemy_url
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def migration_lock(sync_database_url: str, *, timeout_seconds: float) -> Iterato
             yield
         return
     if backend == "sqlite":
-        db_path = sqlite_db_path_from_url(sync_database_url)
+        db_path = sqlite_db_path_from_sqlalchemy_url(sync_database_url)
         if db_path is None:
             yield
             return

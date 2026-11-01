@@ -10,11 +10,17 @@ from typing import cast
 
 import pytest
 from alembic.config import Config
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.migrate import _build_alembic_config
 from app.db.migration_url import to_sync_database_url
-from app.db.sqlite_utils import normalize_sqlite_url, sqlite_db_path_from_url
+from app.db.sqlite_utils import (
+    normalize_sqlite_url,
+    sqlalchemy_sqlite_url,
+    sqlite_db_path_from_sqlalchemy_url,
+    sqlite_db_path_from_url,
+)
 from app.modules.usage.repository import UsageRepository
 
 # The shape SQLAlchemy's `URL.render_as_string()` produces for the Windows
@@ -240,17 +246,44 @@ class TestBuildAlembicConfigWindowsUrl:
         sqlalchemy_url = config.get_main_option("sqlalchemy.url")
         assert sqlalchemy_url is not None
         assert sqlalchemy_url == to_sync_database_url(ENCODED_WINDOWS_URL)
-        assert r"C:\Users\me\.codex-lb\store.db" in sqlalchemy_url
+        # SQLAlchemy 2.1 renders the database portion percent-encoded; what
+        # matters is the path it parses back out of that string.
+        assert make_url(sqlalchemy_url).database == DECODED_WINDOWS_PATH
 
 
 def test_to_sync_database_url_decodes_percent_encoded_sqlite_path() -> None:
-    assert to_sync_database_url(ENCODED_WINDOWS_URL) == f"sqlite:///{DECODED_WINDOWS_PATH}"
+    # SQLAlchemy 2.1 keeps the database portion percent-encoded when it renders
+    # a URL (and decodes it when it parses one), so the string form is the
+    # encoded one; the equivalence that matters is the path the engine opens.
+    sync_url = to_sync_database_url(ENCODED_WINDOWS_URL)
+    assert make_url(sync_url).database == DECODED_WINDOWS_PATH
+    assert sqlite_db_path_from_sqlalchemy_url(sync_url) == Path(DECODED_WINDOWS_PATH)
 
 
 def test_to_sync_database_url_preserves_literal_percent_path() -> None:
     literal_percent_url = "sqlite+aiosqlite:////var/lib/codex%20lb/store.db"
 
-    assert to_sync_database_url(literal_percent_url) == "sqlite:////var/lib/codex%20lb/store.db"
+    sync_url = to_sync_database_url(literal_percent_url)
+
+    # SQLAlchemy 2.1 percent-decodes URLs it parses, so the literal ``%`` of the
+    # raw path must be escaped (``%2520``) for the engine to open
+    # ``/var/lib/codex%20lb/store.db`` and not ``/var/lib/codex lb/store.db``.
+    assert sync_url == "sqlite:////var/lib/codex%2520lb/store.db"
+    assert make_url(sync_url).database == "/var/lib/codex%20lb/store.db"
+    assert sqlite_db_path_from_sqlalchemy_url(sync_url) == Path("/var/lib/codex%20lb/store.db")
+
+
+def test_sqlalchemy_sqlite_url_opens_the_file_the_path_helpers_name(tmp_path: Path) -> None:
+    """The engine, the migration lock and the runstate code must agree on one file."""
+
+    literal_dir = tmp_path / "codex%20lb"
+    literal_dir.mkdir()
+    raw_url = f"sqlite+aiosqlite:///{literal_dir / 'store.db'}"
+
+    assert make_url(sqlalchemy_sqlite_url(raw_url)).database == str(literal_dir / "store.db")
+    assert sqlite_db_path_from_url(raw_url) == literal_dir / "store.db"
+    assert sqlalchemy_sqlite_url("sqlite+aiosqlite:///:memory:") == "sqlite+aiosqlite:///:memory:"
+    assert sqlalchemy_sqlite_url("sqlite+aiosqlite:///x.db?uri=true&a=%41") == "sqlite+aiosqlite:///x.db?uri=true&a=%41"
 
 
 def test_background_engine_creation_decodes_percent_encoded_sqlite_url(tmp_path, monkeypatch) -> None:
@@ -481,3 +514,21 @@ async def test_dashboard_usage_sqlite_fast_path_decodes_percent_encoded_bind_url
 
     assert latest["acc_dash"].used_percent == pytest.approx(42.0)
     assert not Path("C%3A%5CUsers%5Cme%5C.codex-lb%5Cstore.db").exists()
+
+
+def test_sync_engine_from_raw_literal_percent_url_creates_the_literal_path(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine, text
+
+    literal_dir = tmp_path / "codex%20lb"
+    literal_dir.mkdir()
+    db_file = literal_dir / "store.db"
+
+    engine = create_engine(to_sync_database_url(f"sqlite+aiosqlite:///{db_file}"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE t (id INTEGER)"))
+    finally:
+        engine.dispose()
+
+    assert db_file.exists()
+    assert not (tmp_path / "codex lb").exists()

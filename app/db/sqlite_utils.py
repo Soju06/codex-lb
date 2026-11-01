@@ -271,6 +271,53 @@ def normalize_sqlite_url(url: str) -> str:
     return f"{url[:path_start]}{decoded_path}{url[suffix_index:]}"
 
 
+def sqlalchemy_sqlite_url(url: str) -> str:
+    """Return ``url`` in the form SQLAlchemy 2.1 parses back to the same file.
+
+    Throughout the app a SQLite URL string carries a *raw* filesystem path
+    (``settings`` builds it from ``data_dir``, and ``sqlite_db_path_from_url``
+    only decodes the Windows forms SQLAlchemy renders). SQLAlchemy 2.1
+    percent-decodes the database portion of every URL it parses
+    (https://docs.sqlalchemy.org/en/21/changelog/migration_21.html#url-stringify-and-parse-now-supports-url-escaping-for-the-database-portion),
+    so a path with a literal ``%`` (``/var/lib/codex%20lb``) would silently open
+    a different file. Escape the ``%`` of the path so SQLAlchemy decodes it back
+    to the raw path we mean. In-memory URLs, URL queries and non-SQLite URLs are
+    returned unchanged.
+    """
+    url = normalize_sqlite_url(url)
+    if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
+        return url
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0:
+        return url
+    path_start = marker_index + len(marker)
+    query_index = url.find("?", path_start)
+    path_end = len(url) if query_index < 0 else query_index
+    path = url[path_start:path_end]
+    if "%" not in path:
+        return url
+    return f"{url[:path_start]}{path.replace('%', '%25')}{url[path_end:]}"
+
+
+def sqlite_db_path_from_sqlalchemy_url(url: str) -> Path | None:
+    """``sqlite_db_path_from_url`` for a URL already in SQLAlchemy 2.1 form.
+
+    Inverse of :func:`sqlalchemy_sqlite_url`: percent-decode the database
+    portion (as SQLAlchemy does) to recover the raw path the rest of the app
+    reasons about.
+    """
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0 or not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
+        return sqlite_db_path_from_url(url)
+    path_start = marker_index + len(marker)
+    query_index = url.find("?", path_start)
+    path_end = len(url) if query_index < 0 else query_index
+    raw_path = urllib.parse.unquote(url[path_start:path_end])
+    return sqlite_db_path_from_url(f"{url[:path_start]}{raw_path}{url[path_end:]}")
+
+
 def _integrity_check_pragma(mode: SqliteIntegrityCheckMode) -> str:
     if mode == SqliteIntegrityCheckMode.QUICK:
         return "PRAGMA quick_check;"

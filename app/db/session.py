@@ -34,6 +34,7 @@ from app.db.sqlite_utils import (
     normalize_sqlite_url,
     read_sqlite_runstate_record,
     release_sqlite_runstate_lock,
+    sqlalchemy_sqlite_url,
     sqlite_db_path_from_url,
     sqlite_url_is_memory,
     write_sqlite_runstate,
@@ -354,13 +355,13 @@ def _create_main_engine(url: str) -> AsyncEngine:
     is_sqlite_memory = _is_sqlite_memory_url(url)
     if is_sqlite_memory:
         main_engine = create_async_engine(
-            url,
+            sqlalchemy_sqlite_url(url),
             echo=False,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     else:
         main_engine = create_async_engine(
-            url,
+            sqlalchemy_sqlite_url(url),
             echo=False,
             **_sqlite_file_async_engine_kwargs(),
         )
@@ -985,7 +986,7 @@ def init_background_db(url: str | None = None) -> None:
             _background_session_factory = SessionLocal
             return
         _background_engine = create_async_engine(
-            db_url,
+            sqlalchemy_sqlite_url(db_url),
             echo=False,
             **_sqlite_file_async_engine_kwargs(),
         )

@@ -1139,6 +1139,7 @@ async def test_v1_chat_completions_normalizes_tools_and_tool_choice(async_client
             "name": "get_weather",
             "description": "Get weather",
             "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            "strict": False,
         }
     ]
     assert seen["payload"].tool_choice == {"type": "function", "name": "get_weather"}

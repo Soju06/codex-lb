@@ -3,7 +3,9 @@
 ## Purpose
 
 Ensure `/v1/chat/completions` behavior matches OpenAI Chat Completions expectations by mapping to Responses semantics and preserving streaming and error envelopes.
+
 ## Requirements
+
 ### Requirement: Validate Chat Completions requests
 
 The service MUST accept POST requests to `/v1/chat/completions` with a JSON body and MUST validate required fields according to OpenAI
@@ -220,7 +222,7 @@ The Requirement applies only to message-item shapes. The existing tool-call deco
 
 The chat → responses coercion pipeline MUST preserve the `strict` field on `function` tools when normalizing the chat-completions `tools[]` array into the Responses-API tool item shape. Specifically, when a chat tool of shape `{ "type": "function", "function": { "name": "...", "parameters": {...}, "strict": <bool> } }` is normalized, the emitted Responses tool item MUST set `"strict": <bool>` (mirroring the inbound value) and not silently drop it.
 
-This is required because the chat-completions endpoint enters `enforce_strict_function_tools_format` via `to_responses_request()` after coercion. Dropping the strict flag during normalization would (a) mask spec-violating tool schemas, contradicting the strict-mode pre-validation requirement on the responses-api-compat capability, and (b) leave `/v1/chat/completions` and `/v1/responses` with divergent behavior for the same logical payload.
+Function tools with explicit `strict: true` MUST retain strict-mode schema validation. Validation errors MUST identify the tool index in the original client payload.
 
 For non-function tool types (`web_search`, etc.), the strict flag is not applicable and behavior is unchanged.
 
@@ -239,10 +241,11 @@ For non-function tool types (`web_search`, etc.), the strict flag is not applica
 - **WHEN** a client sends a Responses-shaped payload through `/v1/chat/completions` using `input` and a flat Responses function tool with `strict: true` but a violating `parameters` schema
 - **THEN** the proxy returns `HTTP 400` with `error.code = "invalid_function_parameters"` and `error.param = "tools[<index>].parameters"`, without any upstream connection being opened
 
-#### Scenario: Chat tool with strict=false or omitted is forwarded with strict preserved (or absent)
+#### Scenario: Chat tool with strict=false, null, or omitted is forwarded as non-strict
 
-- **WHEN** a client sends a chat tool without a `strict` key (or with `strict: false`)
-- **THEN** the coerced Responses tool item has no `strict` key (or `strict: false`) accordingly, and no strict-mode pre-validation is run for that tool
+- **WHEN** a request with non-empty chat `messages` contains a function tool whose `strict` flag is false, null, or omitted
+- **THEN** the coerced Responses tool item contains `strict: false`
+- **AND** no strict-mode pre-validation is run for that tool
 
 #### Scenario: Built-in tool types are unaffected
 
@@ -474,3 +477,31 @@ model.
 - **THEN** the source receives model `gpt-5.6-sol`
 - **AND** it receives `reasoning_effort: "xhigh"`
 
+### Requirement: Preserve Chat Completions function strictness defaults
+
+When converting a request with non-empty chat `messages` to Responses, the service
+MUST emit `strict: false` for function tools whose strictness is omitted or null.
+It MUST preserve explicit boolean strictness and MUST NOT change the tool's
+parameter schema or mutate the client's tool definition. This applies to nested
+Chat Completions function definitions and accepted flat function definitions.
+The rule MUST apply to streaming and non-streaming Chat Completions requests.
+Native Responses requests and Responses-shaped chat requests with absent or empty
+`messages` MUST retain their original strictness and omission semantics.
+
+#### Scenario: Omitted chat strictness stays non-strict upstream
+
+- **GIVEN** a chat function tool with required `record_id` and optional `grep` and `context`
+- **WHEN** the client omits `strict` or sets it to null
+- **THEN** the forwarded Responses function tool contains `strict: false`
+- **AND** only `record_id` remains required in the unchanged parameter schema
+
+#### Scenario: Explicit chat strictness is preserved
+
+- **WHEN** a chat function tool explicitly sets `strict` to true or false
+- **THEN** the forwarded Responses function tool retains that boolean value
+
+#### Scenario: Responses omission is preserved
+
+- **GIVEN** a native Responses request or a Responses-shaped chat passthrough request
+- **WHEN** the function tool omits `strict`
+- **THEN** the forwarded tool continues to omit `strict`

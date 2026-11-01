@@ -175,7 +175,7 @@ async def test_v1_chat_completions_forwards_function_strictness(
     definition = {"name": "lookup_record", "parameters": parameters, **strict_fields}
     tool = {"type": "function", "function": definition} if nested else {"type": "function", **definition}
     payload = {
-        "model": "gpt-5.2",
+        "model": "gpt-6.1-sol",
         "messages": [{"role": "user", "content": "Read a record"}],
         "stream": stream,
         "tools": [tool],

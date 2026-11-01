@@ -473,7 +473,7 @@ def test_chat_function_tools_preserve_non_strict_default(
         {"type": "function", "function": definition} if nested else {"type": "function", **definition}
     )
     request = ChatCompletionsRequest.model_validate(
-        {"model": "gpt-5.2", "messages": [{"role": "user", "content": "Read a record"}], "tools": [tool]}
+        {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "Read a record"}], "tools": [tool]}
     )
 
     forwarded_tools = request.to_responses_request().to_payload()["tools"]
@@ -496,7 +496,7 @@ def test_chat_function_tools_preserve_non_strict_default(
 @pytest.mark.parametrize("messages", [None, []], ids=["absent-messages", "empty-messages"])
 def test_responses_shaped_chat_tools_keep_omitted_strict(messages: list[JsonValue] | None) -> None:
     tool = {"type": "function", "name": "lookup_record", "parameters": {"type": "object", "properties": {}}}
-    payload = {"model": "gpt-5.2", "input": "Read a record", "tools": [tool]}
+    payload = {"model": "gpt-6.1-sol", "input": "Read a record", "tools": [tool]}
     if messages is not None:
         payload["messages"] = messages
 
@@ -510,7 +510,7 @@ def test_native_responses_tools_keep_omitted_strict() -> None:
     tool = {"type": "function", "name": "lookup_record", "parameters": {"type": "object", "properties": {}}}
 
     forwarded = ResponsesRequest.model_validate(
-        {"model": "gpt-5.2", "instructions": "Read a record", "input": "Read a record", "tools": [tool]}
+        {"model": "gpt-6.1-sol", "instructions": "Read a record", "input": "Read a record", "tools": [tool]}
     ).to_payload()
 
     assert forwarded["tools"] == [tool]

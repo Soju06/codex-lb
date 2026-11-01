@@ -21,9 +21,9 @@
     url = "https://registry.npmjs.org/@asamuzakjp/css-color/-/css-color-7.1.9.tgz";
     hash = "sha512-vZ6JQVq8Ivgz6b/IBlAf90wZviXdluY13cQOPO+nJHbmXwGrPl2GcpqUY7a55/8ZVdfONXpCFMpRijOBCHNlcQ==";
   };
-  "@asamuzakjp/dom-selector@9.2.4" = fetchurl {
-    url = "https://registry.npmjs.org/@asamuzakjp/dom-selector/-/dom-selector-9.2.4.tgz";
-    hash = "sha512-YnVzxDxLaqL0t7Q4wfcgHZjg55Wm6y5EaO7Bhu3q9J7wq/8iw3PhsnWiOQhYekx4VexnbkgWpTT6n+QIV7kczw==";
+  "@asamuzakjp/dom-selector@10.0.5" = fetchurl {
+    url = "https://registry.npmjs.org/@asamuzakjp/dom-selector/-/dom-selector-10.0.5.tgz";
+    hash = "sha512-EgmJ7oEaGQECTn3H3wmnQpEy4hKY66VvM7VQndwPIQob3p877BgbyOUE3EX0LgXQCciF2H8KMdR+RznqjMNOLw==";
   };
   "@astrojs/compiler@4.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@astrojs/compiler/-/compiler-4.0.0.tgz";
@@ -2193,9 +2193,9 @@
     url = "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz";
     hash = "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==";
   };
-  "jsdom@30.1.2" = fetchurl {
-    url = "https://registry.npmjs.org/jsdom/-/jsdom-30.1.2.tgz";
-    hash = "sha512-0FFE/jE1rppmVfUrJUgxqXjcwolZYIGtAgj1pTussMhNZxIxi7W/PvfWaMNroGi2B36X1IKHbexpZ9DhkoOPiQ==";
+  "jsdom@30.1.3" = fetchurl {
+    url = "https://registry.npmjs.org/jsdom/-/jsdom-30.1.3.tgz";
+    hash = "sha512-hQMUPvRgN7KxsfIytDQji7bimuJeRQa6Qo5+iuiZQk5CafeRxLIA10/cG5YCBFNpD9RO3oqIiN4CO1Y44kxqXg==";
   };
   "jsesc@3.1.0" = fetchurl {
     url = "https://registry.npmjs.org/jsesc/-/jsesc-3.1.0.tgz";

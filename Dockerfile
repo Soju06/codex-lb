@@ -59,7 +59,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip uninstall -y pip setuptools wheel || true \
-    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
     && rm -rf /usr/local/lib/python*/site-packages/pip* \
         /usr/local/lib/python*/site-packages/setuptools* \
         /usr/local/lib/python*/site-packages/wheel*

@@ -55,7 +55,7 @@ RUN ARCH="$(uname -m)" && \
     cp -a "/usr/lib/${ARCH}-linux-gnu" "/staged-libs/usr/lib/${ARCH}-linux-gnu"
 
 RUN /usr/local/bin/python -m pip uninstall -y pip setuptools wheel || true \
-    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 /usr/local/bin/uv /usr/local/bin/uvx \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* /usr/local/bin/uv /usr/local/bin/uvx \
     && rm -rf /usr/local/lib/python*/site-packages/pip* \
         /usr/local/lib/python*/site-packages/setuptools* \
         /usr/local/lib/python*/site-packages/wheel*

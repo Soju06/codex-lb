@@ -209,3 +209,17 @@ async def test_fetch_image_data_url_uses_fallback_ip_when_first_fails(monkeypatc
     assert len(session.calls) == 2
     assert session.calls[0]["url"] == "https://[2001:db8::1]/a.png"
     assert session.calls[1]["url"] == "https://93.184.216.34/a.png"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sockaddr", [(), None])
+async def test_resolve_global_ips_rejects_empty_sockaddr(monkeypatch, sockaddr):
+    import socket
+
+    async def getaddrinfo(*args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+    loop = proxy_module.asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
+
+    assert await proxy_module._resolve_global_ips("example.com", timeout_seconds=1.0) is None

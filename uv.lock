@@ -739,7 +739,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "bcrypt", specifier = ">=4.3.0" },
     { name = "brotli", specifier = ">=1.2.0" },
-    { name = "certifi", specifier = ">=2026.4.22" },
+    { name = "certifi", specifier = ">=2026.10.19" },
     { name = "cryptography", specifier = ">=46.0.6" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.162.0" },
     { name = "greenlet", specifier = ">=3.3.0" },

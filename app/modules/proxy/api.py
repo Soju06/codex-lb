@@ -2237,7 +2237,11 @@ async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLim
             raise ProxyAuthError("Invalid API key")
 
         limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
-        if not limits and expose_pool_windows:
+        # The Codex shape can only show unfiltered credit windows, so a key limited by
+        # tokens or cost alone still has nothing to display: judge the fallback by what
+        # `_select_codex_usage_limit` could pick, not by the presence of any limit.
+        displayable = any(limit.limit_type == "credits" and limit.model_filter is None for limit in limits)
+        if not displayable and expose_pool_windows:
             # /v1/usage mirrors aggregate windows for limit-free keys; the
             # Codex-shaped route needs the same fallback or the client reads
             # `rate_limit: null` and paints its synthetic exhausted snapshot.
@@ -7407,9 +7411,14 @@ async def wham_usage(
     return RateLimitStatusPayload.from_data(payload)
 
 
-_PASSTHROUGH_HOP_BY_HOP_HEADERS = frozenset(
-    {"host", "connection", "keep-alive", "transfer-encoding", "upgrade", "content-length", "content-type"}
-)
+# A caller's own credential and the metadata the Codex CLI's discovery reads. Everything
+# else the CLI sends (cookies, a dashboard session, an alternate auth header) belongs to a
+# different audience and must not leave for the upstream backend.
+_RELAY_HEADER_NAMES = frozenset({"authorization", "chatgpt-account-id", "accept", "accept-language", "user-agent"})
+_RELAY_HEADER_PREFIXES = ("x-codex-", "openai-")
+# The pool-owned namespace keeps its own handlers; a GET that only the relay could answer
+# here must behave as if no such route existed rather than borrow the relay.
+_RELAY_RESERVED_PREFIXES = ("codex", "wham/usage")
 
 
 @backend_passthrough_router.get("/{path:path}", include_in_schema=False)
@@ -7423,14 +7432,20 @@ async def backend_api_passthrough(path: str, request: Request) -> Response:
     credential. Pool credentials are never attached.
     """
 
-    authorization = request.headers.get("authorization")
-    if not authorization:
+    if any(path == reserved or path.startswith(f"{reserved}/") for reserved in _RELAY_RESERVED_PREFIXES):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    authorization = request.headers.get("authorization") or ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
         raise ProxyAuthError("Missing ChatGPT token in Authorization header")
 
     settings = get_settings()
     url = f"{settings.upstream_base_url.rstrip('/')}/{path}"
     headers = {
-        name: value for name, value in request.headers.items() if name.lower() not in _PASSTHROUGH_HOP_BY_HOP_HEADERS
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() in _RELAY_HEADER_NAMES or name.lower().startswith(_RELAY_HEADER_PREFIXES)
     }
     timeout = aiohttp.ClientTimeout(total=30)
     try:
@@ -7440,7 +7455,11 @@ async def backend_api_passthrough(path: str, request: Request) -> Response:
                 headers=headers,
                 params=list(request.query_params.multi_items()),
                 timeout=timeout,
+                # A redirect would hand these headers to another host and change the answer.
+                allow_redirects=False,
             ) as upstream:
+                if 300 <= upstream.status < 400:
+                    raise ProxyUpstreamError("The upstream backend redirected this read")
                 body = await upstream.read()
                 media_type = upstream.headers.get("content-type")
                 return Response(

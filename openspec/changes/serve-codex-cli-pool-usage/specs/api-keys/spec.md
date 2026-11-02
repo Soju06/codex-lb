@@ -112,30 +112,6 @@ converted from the aggregate row's ISO timestamp to epoch seconds.
   `GET /api/codex/usage`
 - **THEN** the response does not expose the pool's aggregate windows
 
-## MODIFIED Requirements
-
-### Requirement: API Key Bearer authentication guard
-The system SHALL validate API keys on protected proxy routes (`/v1/*`, `/backend-api/codex/*`, `/backend-api/transcribe`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
-
-The dependency SHALL return a typed `ApiKeyData` value directly to the route handler. Route handlers MUST NOT access API key data via `request.state`.
-
-`/api/codex/usage` SHALL NOT be covered by the API key auth guard scope.
-
-`/backend-api/wham/usage` SHALL NOT be covered by the router-level API key auth guard scope either; it SHALL authenticate through its dedicated usage-identity dependency (balancer API key or validated ChatGPT bearer).
-
-The dependency SHALL raise a domain exception on validation failure. The exception handler SHALL format the response using the OpenAI error envelope.
-
-#### Scenario: Codex usage excluded from API key guard scope
-
-- **WHEN** `api_key_auth_enabled` is true and a request is made to `/api/codex/usage`
-- **THEN** API key guard validation is not applied
-
-#### Scenario: Wham usage excluded from API key guard scope
-
-- **WHEN** `api_key_auth_enabled` is true and a request is made to `/backend-api/wham/usage`
-- **THEN** the router-level API key guard is not applied
-- **AND** the dedicated usage-identity dependency authenticates the request
-
 ### Requirement: Unrecognised `/backend-api/*` reads are relayed upstream
 
 Pointing `chatgpt_base_url` at the balancer moves every account read the Codex
@@ -144,11 +120,18 @@ CLI performs, not just the usage one. The system SHALL relay a `GET` for any
 preserving the caller's query string and credential, and SHALL return the
 upstream status, body and content type unchanged.
 
-The relay SHALL NOT attach pool credentials, SHALL require an `Authorization`
-bearer, and SHALL be registered after every specific router so
-`/backend-api/codex/*` and `/backend-api/wham/usage` keep their own handlers.
-Without it, `account/read` fails with "workspace routing discovery failed",
-which fails the whole provider probe in clients such as T3 Code.
+The relay SHALL NOT attach pool credentials and SHALL require a non-empty
+`Bearer` credential. It SHALL forward only that credential, `chatgpt-account-id`,
+`Accept`/`Accept-Language`/`User-Agent` and `x-codex-*`/`openai-*` metadata:
+cookies, alternative authentication headers and internal proxy headers MUST NOT
+leave for the upstream backend. It SHALL NOT follow upstream redirects.
+
+The relay SHALL be registered after every specific router, and SHALL NOT answer
+for the `/backend-api/codex/*` or `/backend-api/wham/usage` namespaces even where
+only a different method has a handler, so those keep their own method and auth
+semantics. Without the relay, `account/read` fails with "workspace routing
+discovery failed", which fails the whole provider probe in clients such as
+T3 Code.
 
 #### Scenario: Workspace routing discovery stays available
 
@@ -163,3 +146,57 @@ which fails the whole provider probe in clients such as T3 Code.
 - **WHEN** a request targets `/backend-api/wham/usage` or any
   `/backend-api/codex/*` path
 - **THEN** the dedicated route handles it and the relay is not reached
+
+## MODIFIED Requirements
+
+### Requirement: API Key Bearer authentication guard
+The system SHALL validate API keys on protected proxy routes (`/v1/*`, `/backend-api/codex/*`, `/backend-api/transcribe`) when `api_key_auth_enabled` is true. Validation MUST be implemented as a router-level `Security` dependency, not ASGI middleware. The dependency MUST compute `sha256` of the Bearer token and look up the hash in the `api_keys` table.
+
+The dependency SHALL return a typed `ApiKeyData` value directly to the route handler. Route handlers MUST NOT access API key data via `request.state`.
+
+`/api/codex/usage` SHALL NOT be covered by the API key auth guard scope.
+
+`/backend-api/wham/usage` SHALL NOT be covered by the router-level API key auth guard scope either; it SHALL authenticate through its dedicated usage-identity dependency (balancer API key or validated ChatGPT bearer).
+
+The dependency SHALL raise a domain exception on validation failure. The exception handler SHALL format the response using the OpenAI error envelope.
+
+#### Scenario: Disabled auth allowlist uses raw socket peer only
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** forwarded headers claim a different client IP
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the dependency rejects the request with 401
+- **AND** forwarded headers do not satisfy the explicit allowlist
+
+#### Scenario: API key guard route scope
+
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/v1/responses`, `/backend-api/codex/responses`, `/v1/audio/transcriptions`, or `/backend-api/transcribe`
+- **THEN** the API key guard validation is applied
+
+#### Scenario: Codex usage excluded from API key guard scope
+
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/api/codex/usage`
+- **THEN** API key guard validation is not applied
+
+#### Scenario: Valid API key injected into handler
+
+- **WHEN** `api_key_auth_enabled` is true and a valid Bearer token is provided
+- **THEN** the route handler receives a typed `ApiKeyData` parameter (not `request.state`)
+
+#### Scenario: API key auth disabled returns None for local requests
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** the request is classified as local
+- **THEN** the dependency returns `None` and the request proceeds without authentication
+
+#### Scenario: API key auth disabled rejects non-local requests
+
+- **WHEN** `api_key_auth_enabled` is false
+- **AND** the request is classified as non-local
+- **AND** the request socket peer IP is outside configured `proxy_unauthenticated_client_cidrs`
+- **THEN** the dependency rejects the request with 401
+
+#### Scenario: Wham usage excluded from API key guard scope
+
+- **WHEN** `api_key_auth_enabled` is true and a request is made to `/backend-api/wham/usage`
+- **THEN** the router-level API key guard is not applied
+- **AND** the dedicated usage-identity dependency authenticates the request

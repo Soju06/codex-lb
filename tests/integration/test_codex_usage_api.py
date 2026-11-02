@@ -618,6 +618,27 @@ async def test_codex_usage_api_key_without_limits_uses_pool_windows(async_client
 
 
 @pytest.mark.asyncio
+async def test_codex_usage_api_key_with_only_token_limits_uses_pool_windows(async_client, db_setup):
+    now = utcnow()
+    await _seed_pool_usage(now=now)
+    # A token limit is real but not displayable in the Codex shape, which shows credits only.
+    _, key = await _create_api_key(
+        name="codex-usage-token-limits",
+        limits=[LimitRuleInput(limit_type="total_tokens", limit_window="5h", max_value=100000)],
+    )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["primary_window"]["used_percent"] == 15
+    assert payload["rate_limit"]["secondary_window"]["used_percent"] == 30
+
+
+@pytest.mark.asyncio
 async def test_codex_usage_api_key_without_limits_respects_hide_upstream_quota(async_client, db_setup):
     now = utcnow()
     await _seed_pool_usage(now=now)

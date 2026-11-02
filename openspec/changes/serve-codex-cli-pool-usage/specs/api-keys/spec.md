@@ -135,3 +135,31 @@ The dependency SHALL raise a domain exception on validation failure. The excepti
 - **WHEN** `api_key_auth_enabled` is true and a request is made to `/backend-api/wham/usage`
 - **THEN** the router-level API key guard is not applied
 - **AND** the dedicated usage-identity dependency authenticates the request
+
+### Requirement: Unrecognised `/backend-api/*` reads are relayed upstream
+
+Pointing `chatgpt_base_url` at the balancer moves every account read the Codex
+CLI performs, not just the usage one. The system SHALL relay a `GET` for any
+`/backend-api/*` path that has no route of its own to `upstream_base_url`,
+preserving the caller's query string and credential, and SHALL return the
+upstream status, body and content type unchanged.
+
+The relay SHALL NOT attach pool credentials, SHALL require an `Authorization`
+bearer, and SHALL be registered after every specific router so
+`/backend-api/codex/*` and `/backend-api/wham/usage` keep their own handlers.
+Without it, `account/read` fails with "workspace routing discovery failed",
+which fails the whole provider probe in clients such as T3 Code.
+
+#### Scenario: Workspace routing discovery stays available
+
+- **WHEN** the CLI requests `GET /backend-api/wham/accounts/check` while
+  `chatgpt_base_url` names this balancer
+- **THEN** the request is relayed upstream with the caller's bearer and
+  `chatgpt-account-id`
+- **AND** the caller receives the upstream payload, not a 404
+
+#### Scenario: Pool-owned paths are not relayed
+
+- **WHEN** a request targets `/backend-api/wham/usage` or any
+  `/backend-api/codex/*` path
+- **THEN** the dedicated route handles it and the relay is not reached

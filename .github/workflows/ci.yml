@@ -751,12 +751,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .cache/ci-tools/kubeconform
-          key: kubeconform-0.7.0-${{ runner.os }}-${{ runner.arch }}
+          key: kubeconform-0.8.0-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install kubeconform
         run: |
           set -euo pipefail
-          KUBECONFORM_VERSION="0.7.0"
+          KUBECONFORM_VERSION="0.8.0"
           TOOL_DIR=".cache/ci-tools/kubeconform"
           TOOL_PATH="${TOOL_DIR}/kubeconform"
           if [[ ! -x "${TOOL_PATH}" ]]; then
@@ -799,12 +799,12 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: .cache/ci-tools/kind
-          key: kind-0.30.0-${{ runner.os }}-${{ runner.arch }}
+          key: kind-0.33.0-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install kind
         run: |
           set -euo pipefail
-          KIND_VERSION="0.30.0"
+          KIND_VERSION="0.33.0"
           TOOL_DIR=".cache/ci-tools/kind"
           TOOL_PATH="${TOOL_DIR}/kind"
           if [[ ! -x "${TOOL_PATH}" ]]; then

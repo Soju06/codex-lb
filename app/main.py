@@ -1034,6 +1034,7 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.internal_router)
     app.include_router(proxy_api.ws_router)
     app.include_router(proxy_api.wham_router)
+    app.include_router(proxy_api.wham_usage_router)
     app.include_router(proxy_api.v1_router)
     app.include_router(proxy_api.v1_ws_router)
     app.include_router(proxy_api.transcribe_router)
@@ -1068,6 +1069,8 @@ def create_app() -> FastAPI:
     app.include_router(api_keys_api.router)
     app.include_router(model_sources_api.router)
     app.include_router(health_api.router)
+    # Last, so every specific `/backend-api/*` route wins over the relay.
+    app.include_router(proxy_api.backend_passthrough_router)
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"

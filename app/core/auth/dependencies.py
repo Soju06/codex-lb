@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from ipaddress import ip_address, ip_network
 from typing import cast
 
@@ -34,6 +34,7 @@ from app.core.auth.step_up import (
     account_step_up_methods,
     is_step_up_fresh,
 )
+from app.core.auth.wham_usage_proof import get_wham_usage_proof_cache, wham_usage_proof_key
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -695,6 +696,66 @@ async def validate_codex_provider_usage_identity(request: Request) -> ApiKeyData
     if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
         return await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
     return await validate_codex_usage_identity(request)
+
+
+async def validate_wham_usage_identity(request: Request) -> ApiKeyData | None:
+    """Authenticate the pool-usage read the Codex CLI performs.
+
+    ``codex app-server`` asks ``{chatgpt_base_url}/wham/usage`` with the ChatGPT
+    bearer from its own ``auth.json``, which is usually a personal account that
+    is not in the pool -- requiring pool membership would answer 401 and keep
+    the client on its personal numbers. A pooled ``chatgpt-account-id`` keeps
+    the existing account-scoped route; anything else is proved by one cached
+    upstream usage call and answered from the pool.
+    """
+
+    token = _extract_bearer_token(request.headers.get("Authorization"))
+    if not token:
+        raise ProxyAuthError("Missing ChatGPT token in Authorization header")
+
+    if token.startswith("sk-clb-"):
+        return await _validate_api_key_token(token)
+
+    raw_account_id = request.headers.get("chatgpt-account-id")
+    account_id = raw_account_id.strip() if raw_account_id else ""
+    if account_id and await _pool_account_id_for_chatgpt_account(account_id) is not None:
+        return await validate_codex_usage_identity(request)
+
+    try:
+        await get_wham_usage_proof_cache().prove(
+            wham_usage_proof_key(token, account_id),
+            partial(_prove_wham_usage_bearer, token=token, account_id=account_id),
+        )
+    except UsageFetchError as exc:
+        if exc.status_code == 429:
+            from app.core.exceptions import ProxyRateLimitError
+
+            raise ProxyRateLimitError(exc.message) from exc
+        if exc.status_code in (401, 403):
+            raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
+        raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
+    return None
+
+
+async def _prove_wham_usage_bearer(*, token: str, account_id: str) -> None:
+    """One upstream identity check, deliberately without retries.
+
+    The proof only needs to learn whether the bearer is real, so a retryable
+    failure or a 429 must not multiply into three upstream requests per poll.
+    """
+    await fetch_usage(
+        access_token=token,
+        account_id=account_id or None,
+        route=None,
+        allow_direct_egress=True,
+        max_retries=0,
+    )
+
+
+async def _pool_account_id_for_chatgpt_account(account_id: str) -> str | None:
+    async with get_background_session() as session:
+        account = await AccountsRepository(session).get_active_by_chatgpt_account_id(account_id)
+        return None if account is None else account.id
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

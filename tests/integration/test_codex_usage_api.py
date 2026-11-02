@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -74,6 +74,28 @@ async def _create_api_key(*, name: str, limits: list[LimitRuleInput] | None = No
             )
         )
     return created.id, created.key
+
+
+async def _seed_pool_usage(*, now: datetime) -> None:
+    suffix = str(int(now.replace(tzinfo=timezone.utc).timestamp() * 1_000_000))
+    primary_reset = int((now + timedelta(hours=4)).replace(tzinfo=timezone.utc).timestamp())
+    secondary_reset = int((now + timedelta(days=6)).replace(tzinfo=timezone.utc).timestamp())
+    account_a_id = f"acc-pool-a-{suffix}"
+    account_b_id = f"acc-pool-b-{suffix}"
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account(account_a_id, f"pool-a-{suffix}@example.com", plan_type="plus"))
+        await accounts_repo.upsert(_make_account(account_b_id, f"pool-b-{suffix}@example.com", plan_type="plus"))
+        await usage_repo.add_entry(account_a_id, 10.0, window="primary", reset_at=primary_reset, window_minutes=300)
+        await usage_repo.add_entry(account_b_id, 20.0, window="primary", reset_at=primary_reset, window_minutes=300)
+        await usage_repo.add_entry(
+            account_a_id, 20.0, window="secondary", reset_at=secondary_reset, window_minutes=10080
+        )
+        await usage_repo.add_entry(
+            account_b_id, 40.0, window="secondary", reset_at=secondary_reset, window_minutes=10080
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -520,6 +542,10 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
         ],
     )
     now = utcnow()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account("acc-codex-usage-plan", "codex-usage-plan@example.com", plan_type="plus")
+        )
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
@@ -555,7 +581,7 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["plan_type"] == "api_key"
+    assert payload["plan_type"] == "plus"
     assert payload["rate_limit"]["allowed"] is True
     assert payload["rate_limit"]["limit_reached"] is False
     assert payload["rate_limit"]["primary_window"]["used_percent"] == 20
@@ -567,6 +593,134 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
         "approx_local_messages": None,
         "approx_cloud_messages": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_api_key_without_limits_uses_pool_windows(async_client, db_setup):
+    now = utcnow()
+    await _seed_pool_usage(now=now)
+    _, plain_key = await _create_api_key(name="codex-usage-no-limits")
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plan_type"] == "plus"
+    primary = payload["rate_limit"]["primary_window"]
+    secondary = payload["rate_limit"]["secondary_window"]
+    assert primary["used_percent"] == 15
+    assert primary["limit_window_seconds"] == 18000
+    assert secondary["used_percent"] == 30
+    assert secondary["limit_window_seconds"] == 604800
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_api_key_with_only_token_limits_uses_pool_windows(async_client, db_setup):
+    now = utcnow()
+    await _seed_pool_usage(now=now)
+    # A token limit is real but not displayable in the Codex shape, which shows credits only.
+    _, key = await _create_api_key(
+        name="codex-usage-token-limits",
+        limits=[LimitRuleInput(limit_type="total_tokens", limit_window="5h", max_value=100000)],
+    )
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["primary_window"]["used_percent"] == 15
+    assert payload["rate_limit"]["secondary_window"]["used_percent"] == 30
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_api_key_without_limits_respects_hide_upstream_quota(async_client, db_setup):
+    now = utcnow()
+    await _seed_pool_usage(now=now)
+    _, plain_key = await _create_api_key(name="codex-usage-no-limits-hidden")
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={"hideUpstreamQuotaFromApiKeys": True},
+    )
+    assert settings.status_code == 200
+
+    response = await async_client.get(
+        "/api/codex/usage",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plan_type"] == "plus"
+    assert payload["rate_limit"] is None
+
+
+@pytest.mark.asyncio
+async def test_wham_usage_serves_pool_windows_for_non_pool_chatgpt_login(async_client, db_setup, monkeypatch):
+    now = utcnow()
+    await _seed_pool_usage(now=now)
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+        assert access_token == "personal-chatgpt-token"
+        assert account_id == "personal-free-account"
+        return UsagePayload.model_validate({"plan_type": "free"})
+
+    monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)
+
+    response = await async_client.get(
+        "/backend-api/wham/usage",
+        headers={
+            "Authorization": "Bearer personal-chatgpt-token",
+            "chatgpt-account-id": "personal-free-account",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["plan_type"] == "plus"
+    assert payload["rate_limit"]["primary_window"]["used_percent"] == 15
+    assert payload["rate_limit"]["primary_window"]["limit_window_seconds"] == 18000
+    assert payload["rate_limit"]["secondary_window"]["used_percent"] == 30
+    assert payload["rate_limit"]["secondary_window"]["limit_window_seconds"] == 604800
+    assert payload["rate_limit"]["monthly_window"] is None
+
+
+@pytest.mark.asyncio
+async def test_wham_usage_accepts_pooled_chatgpt_account(async_client, db_setup):
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            _make_account(
+                "acc_wham_pooled",
+                "wham-pooled@example.com",
+                chatgpt_account_id="chatgpt_wham_pooled",
+                plan_type="pro",
+            )
+        )
+
+    response = await async_client.get(
+        "/backend-api/wham/usage",
+        headers={
+            "Authorization": "Bearer chatgpt-token",
+            "chatgpt-account-id": "chatgpt_wham_pooled",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plan_type"] == "pro"
+
+
+@pytest.mark.asyncio
+async def test_wham_usage_requires_bearer(async_client, db_setup):
+    response = await async_client.get("/backend-api/wham/usage")
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
 
 
 @pytest.mark.asyncio

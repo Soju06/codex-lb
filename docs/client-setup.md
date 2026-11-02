@@ -196,6 +196,28 @@ export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 codex
 ```
 
+### Usage limits from the pool
+
+`codex app-server` reads account limits with its own ChatGPT login, not with
+the provider `base_url`, so a client that shows quota (Codex CLI `/status`, T3
+Code, CodexBar) can keep reporting your personal account while requests run
+through codex-lb. Point that read at the balancer (top level, before any
+`[section]` header):
+
+```toml
+chatgpt_base_url = "https://<balancer>/backend-api"
+```
+
+The CLI then calls `GET /backend-api/wham/usage` and receives the pool's
+aggregate 5h/7d windows and plan type. The `/backend-api` segment selects that
+path; without it the client calls `/api/codex/usage`, which expects a pooled
+`chatgpt-account-id`. `chatgpt_base_url` also overrides the ChatGPT login flow,
+so run `codex login` before setting it, and remove the key to roll back. The
+endpoint accepts any valid ChatGPT login — that login only proves the caller is
+a real Codex client; the numbers are always the pool's.
+
+*Spec: [api-keys](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/api-keys/spec.md)*
+
 ### Verify WebSocket transport
 
 Use a one-off debug run:

@@ -43,9 +43,11 @@ from app.core.auth.dependencies import (
     validate_required_proxy_api_key,
     validate_required_proxy_api_key_authorization,
     validate_usage_api_key,
+    validate_wham_usage_identity,
 )
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
+from app.core.clients.backend_relay import BackendRelayReservedPath, relay_backend_get
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
@@ -192,6 +194,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
@@ -277,7 +280,12 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
-from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
+from app.modules.proxy.helpers import (
+    _openai_error_param,
+    _parse_openai_error,
+    _plan_type_for_accounts,
+    _rate_limit_details,
+)
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
     parse_forwarded_request,
@@ -447,6 +455,24 @@ wham_router = APIRouter(
     prefix="/backend-api/wham",
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+# The Codex CLI reads its limits from `{chatgpt_base_url}/wham/usage` with the
+# ChatGPT bearer in its own auth.json, not with a balancer key, so this router
+# cannot carry `wham_router`'s router-level API-key guard.
+wham_usage_router = APIRouter(
+    prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
+)
+# Everything else the Codex CLI reads from `chatgpt_base_url` has no pool analogue:
+# workspace routing (`/wham/accounts/check`), plugin listings. Pointing the CLI at
+# this balancer must not take those away, so unknown `/backend-api/*` reads are
+# relayed to the upstream backend with the caller's own credential. Registered
+# after every specific router, so `/codex/*` and `/wham/usage` keep their handlers.
+backend_passthrough_router = APIRouter(
+    prefix="/backend-api",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
 )
 v1_router = APIRouter(
     prefix="/v1",
@@ -2202,22 +2228,34 @@ def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitRespo
 
 
 async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLimitStatusPayloadData:
+    hide_upstream_quota = await _hide_upstream_quota_for_api_key_clients(api_key)
+    expose_pool_windows = not hide_upstream_quota and "upstream_limits" in _parse_usage_sections(api_key.usage_sections)
+
     async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        keys_repo = ApiKeysRepository(session)
+        usage = await ApiKeysService(keys_repo).get_key_usage_summary_for_self(api_key.id)
 
-    if usage is None:
-        raise ProxyAuthError("Invalid API key")
+        if usage is None:
+            raise ProxyAuthError("Invalid API key")
 
-    key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
-    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
-    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
-        key_limits, "weekly"
-    )
-    monthly_credit_limit = _select_codex_usage_limit(key_limits, "monthly")
+        limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+        # The Codex shape can only show unfiltered credit windows, so a key limited by
+        # tokens or cost alone still has nothing to display: judge the fallback by what
+        # `_select_codex_usage_limit` could pick, not by the presence of any limit.
+        displayable = any(limit.limit_type == "credits" and limit.model_filter is None for limit in limits)
+        if not displayable and expose_pool_windows:
+            # /v1/usage mirrors aggregate windows for limit-free keys; the
+            # Codex-shaped route needs the same fallback or the client reads
+            # `rate_limit: null` and paints its synthetic exhausted snapshot.
+            limits = _ordered_aggregate_limits(await _build_aggregate_credit_limits(session))
+        plan_type = _plan_type_for_accounts(await keys_repo.list_all_accounts())
+
+    primary_credit_limit = _select_codex_usage_limit(limits, "5h") or _select_codex_usage_limit(limits, "daily")
+    secondary_credit_limit = _select_codex_usage_limit(limits, "7d") or _select_codex_usage_limit(limits, "weekly")
+    monthly_credit_limit = _select_codex_usage_limit(limits, "monthly")
 
     return RateLimitStatusPayloadData(
-        plan_type="api_key",
+        plan_type=plan_type,
         rate_limit=_rate_limit_details(
             _codex_usage_window_snapshot(primary_credit_limit),
             _codex_usage_window_snapshot(secondary_credit_limit),
@@ -2482,6 +2520,12 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     secondary_rows = [usage_history_to_window_row(entry) for entry in secondary_latest.values()]
     monthly_rows = [usage_history_to_window_row(entry) for entry in monthly_latest.values()]
     primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
+    # An account that stopped reporting a window keeps its last sample forever;
+    # its elapsed reset_at would win the min() below and freeze the pool's reset.
+    now_epoch = naive_utc_to_epoch(utcnow())
+    primary_rows = usage_core.expire_elapsed_window_rows(primary_rows, now_epoch=now_epoch)
+    secondary_rows = usage_core.expire_elapsed_window_rows(secondary_rows, now_epoch=now_epoch)
+    monthly_rows = usage_core.expire_elapsed_window_rows(monthly_rows, now_epoch=now_epoch)
 
     account_ids = (
         {row.account_id for row in primary_rows}
@@ -7346,6 +7390,53 @@ async def codex_usage(
         else _attach_codex_usage_reset_credits(await context.service.get_rate_limit_payload(), request)
     )
     return RateLimitStatusPayload.from_data(payload)
+
+
+@wham_usage_router.get("/usage", response_model=RateLimitStatusPayload)
+@wham_usage_router.get("/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
+async def wham_usage(
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_wham_usage_identity),
+) -> RateLimitStatusPayload:
+    """Serve the pool's windows where the Codex CLI reads account limits.
+
+    ``codex app-server`` asks ``{chatgpt_base_url}/wham/usage``; pointing
+    ``chatgpt_base_url`` at this balancer keeps the client on the pool's real
+    quota instead of whatever personal account its auth.json holds.
+    """
+
+    payload = (
+        await _build_codex_usage_payload_for_api_key(api_key)
+        if api_key is not None
+        else await context.service.get_rate_limit_payload()
+    )
+    return RateLimitStatusPayload.from_data(payload)
+
+
+@backend_passthrough_router.get("/{path:path}", include_in_schema=False)
+async def backend_api_passthrough(path: str, request: Request) -> Response:
+    """Relay a `/backend-api/*` read the Codex CLI makes against its backend base.
+
+    ``chatgpt_base_url`` points the CLI here so ``/wham/usage`` can answer from the
+    pool. Workspace routing (``/wham/accounts/check``) and plugin listings have no
+    pool analogue, and without them the CLI's provider probe fails with "workspace
+    routing discovery failed", so those are relayed upstream with the caller's own
+    credential. Pool credentials are never attached.
+    """
+
+    try:
+        relayed = await relay_backend_get(
+            path,
+            headers=request.headers.items(),
+            query=request.query_params.multi_items(),
+        )
+    except BackendRelayReservedPath:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return Response(
+        content=relayed.body,
+        status_code=relayed.status_code,
+        media_type=relayed.content_type,
+    )
 
 
 @usage_router.post(

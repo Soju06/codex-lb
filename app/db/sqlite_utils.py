@@ -181,7 +181,12 @@ def _sqlite_uri_file_path(path: str) -> str | None:
     return resolved
 
 
-def sqlite_db_path_from_url(url: str) -> Path | None:
+def sqlite_db_path_from_url(url: str, *, decoded_path: str | None = None) -> Path | None:
+    """Resolve the filesystem path of a SQLite URL.
+
+    ``decoded_path`` is an already-decoded database portion (no query/fragment
+    splitting is applied to it), so ``#``, ``?`` and ``%`` stay literal.
+    """
     if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return None
 
@@ -191,8 +196,10 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
         return None
 
     path_start = marker_index + len(marker)
-    path = url[path_start:]
-    if _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
+    path = url[path_start:] if decoded_path is None else decoded_path
+    if decoded_path is not None:
+        pass
+    elif _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
         # Raw Windows drive and UNC paths are filesystem paths, not URL-encoded
         # forms: a `#` is a legal path character there (e.g. the decoded output
         # of `normalize_sqlite_url()`), so it must not be stripped as a URL
@@ -208,7 +215,8 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     # path. Do not unquote arbitrary `%xx` sequences here: settings builds the
     # default SQLite URL directly from `data_dir`, so a valid literal path such
     # as `/var/lib/codex%20lb/store.db` must remain literal.
-    path = _decode_sqlalchemy_windows_sqlite_path(path)
+    if decoded_path is None:
+        path = _decode_sqlalchemy_windows_sqlite_path(path)
 
     if not path or path == ":memory:" or _sqlite_uri_is_memory(url, path_start, path):
         return None
@@ -315,7 +323,7 @@ def sqlite_db_path_from_sqlalchemy_url(url: str) -> Path | None:
     query_index = url.find("?", path_start)
     path_end = len(url) if query_index < 0 else query_index
     raw_path = urllib.parse.unquote(url[path_start:path_end])
-    return sqlite_db_path_from_url(f"{url[:path_start]}{raw_path}{url[path_end:]}")
+    return sqlite_db_path_from_url(url, decoded_path=raw_path)
 
 
 def _integrity_check_pragma(mode: SqliteIntegrityCheckMode) -> str:

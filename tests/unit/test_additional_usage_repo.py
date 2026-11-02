@@ -1097,3 +1097,41 @@ async def test_delete_for_account_limit_window_canonicalizes_legacy_alias(async_
     assert [(entry.account_id, entry.limit_name, entry.window) for entry in entries] == [
         ("acc_delete", "codex_other", "primary"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dirname", ["a b%20@#", "p:;=&()[]!%", "données-ü"])
+async def test_latest_by_account_sqlite_fast_path_resolves_special_character_paths(
+    tmp_path: Path,
+    dirname: str,
+) -> None:
+    from sqlalchemy.engine import URL
+
+    from app.modules.usage.repository import _sqlite_path_from_bind
+
+    db_dir = tmp_path / dirname
+    db_dir.mkdir()
+    db_path = db_dir / "usage.db"
+    engine = create_async_engine(URL.create("sqlite+aiosqlite", database=str(db_path)))
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session_factory() as session:
+        assert str(_sqlite_path_from_bind(session.get_bind())) == str(db_path)
+        session.add(
+            AdditionalUsageHistory(
+                account_id="acc_special_path",
+                quota_key="codex_spark",
+                limit_name="codex_other",
+                metered_feature="codex_bengalfox",
+                window="primary",
+                used_percent=10.0,
+                recorded_at=datetime.now(tz=timezone.utc),
+            )
+        )
+        await session.commit()
+        result = await AdditionalUsageRepository(session).latest_by_account(quota_key="codex_spark", window="primary")
+
+    await engine.dispose()
+    assert list(result) == ["acc_special_path"]

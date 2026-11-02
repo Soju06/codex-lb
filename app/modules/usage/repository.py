@@ -37,7 +37,7 @@ from app.core.utils.time import utcnow
 from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
-from app.db.sqlite_utils import sqlite_db_path_from_url
+from app.db.sqlite_utils import sqlite_db_path_from_sqlalchemy_url, sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
     canonicalize_additional_quota_key,
@@ -329,7 +329,9 @@ def _window_clause(window: str | None):
 def _sqlite_path_from_bind(bind) -> object | None:
     bind_url = getattr(bind, "url", None)
     if bind_url is not None:
-        return sqlite_db_path_from_url(str(bind_url))
+        # SQLAlchemy 2.1 percent-encodes the database portion when rendering the URL.
+        rendered = bind_url if isinstance(bind_url, str) else bind_url.render_as_string(hide_password=False)
+        return sqlite_db_path_from_sqlalchemy_url(rendered)
     return sqlite_db_path_from_url(get_settings().database_url)
 
 

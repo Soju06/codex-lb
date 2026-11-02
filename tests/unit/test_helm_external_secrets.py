@@ -666,7 +666,7 @@ def test_helm_test_pod_uses_configurable_default_image() -> None:
         "templates/tests/test-connection.yaml",
     )
 
-    assert "image: docker.io/library/busybox:1.37" in rendered
+    assert "image: docker.io/library/busybox:1.38" in rendered
     assert "imagePullPolicy: IfNotPresent" in rendered
 
 
@@ -686,7 +686,7 @@ def test_helm_test_pod_image_can_be_overridden() -> None:
 
     assert "image: ghcr.io/soju06/codex-lb:ci" in rendered
     assert "imagePullPolicy: Never" in rendered
-    assert "docker.io/library/busybox:1.37" not in rendered
+    assert "docker.io/library/busybox:1.38" not in rendered
 
     (test_pod,) = _helm_documents(rendered)
     (container,) = test_pod["spec"]["containers"]

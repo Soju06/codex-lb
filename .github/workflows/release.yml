@@ -81,7 +81,7 @@ jobs:
         run: python -m scripts.verify_release_version --tag "${RELEASE_TAG}"
 
       - name: Build sdist + wheel
-        run: uvx --from build==1.3.0 python -m build
+        run: uvx --from build==1.6.1 python -m build
 
       - name: Verify wheel contains frontend assets
         shell: bash

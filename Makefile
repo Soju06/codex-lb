@@ -209,7 +209,7 @@ package: frontend-build
 	uv sync --frozen --no-dev
 	uv run python -c "import app; import app.main; print('import ok')"
 	rm -rf build dist *.egg-info
-	uvx --from build==1.3.0 python -m build
+	uvx --from build==1.6.1 python -m build
 	uv run python scripts/verify-wheel-assets.py
 
 .PHONY: docker

@@ -14,6 +14,7 @@ from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
+import aiohttp
 import anyio
 from fastapi import (
     APIRouter,
@@ -48,6 +49,7 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
+from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
     CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
@@ -460,6 +462,16 @@ wham_router = APIRouter(
 # cannot carry `wham_router`'s router-level API-key guard.
 wham_usage_router = APIRouter(
     prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
+)
+# Everything else the Codex CLI reads from `chatgpt_base_url` has no pool analogue:
+# workspace routing (`/wham/accounts/check`), plugin listings. Pointing the CLI at
+# this balancer must not take those away, so unknown `/backend-api/*` reads are
+# relayed to the upstream backend with the caller's own credential. Registered
+# after every specific router, so `/codex/*` and `/wham/usage` keep their handlers.
+backend_passthrough_router = APIRouter(
+    prefix="/backend-api",
     tags=["proxy"],
     dependencies=[Depends(set_openai_error_format)],
 )
@@ -7393,6 +7405,51 @@ async def wham_usage(
         else await context.service.get_rate_limit_payload()
     )
     return RateLimitStatusPayload.from_data(payload)
+
+
+_PASSTHROUGH_HOP_BY_HOP_HEADERS = frozenset(
+    {"host", "connection", "keep-alive", "transfer-encoding", "upgrade", "content-length", "content-type"}
+)
+
+
+@backend_passthrough_router.get("/{path:path}", include_in_schema=False)
+async def backend_api_passthrough(path: str, request: Request) -> Response:
+    """Relay a `/backend-api/*` read the Codex CLI makes against its backend base.
+
+    ``chatgpt_base_url`` points the CLI here so ``/wham/usage`` can answer from the
+    pool. Workspace routing (``/wham/accounts/check``) and plugin listings have no
+    pool analogue, and without them the CLI's provider probe fails with "workspace
+    routing discovery failed", so those are relayed upstream with the caller's own
+    credential. Pool credentials are never attached.
+    """
+
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        raise ProxyAuthError("Missing ChatGPT token in Authorization header")
+
+    settings = get_settings()
+    url = f"{settings.upstream_base_url.rstrip('/')}/{path}"
+    headers = {
+        name: value for name, value in request.headers.items() if name.lower() not in _PASSTHROUGH_HOP_BY_HOP_HEADERS
+    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    try:
+        async with lease_http_session() as client_session:
+            async with client_session.get(
+                url,
+                headers=headers,
+                params=list(request.query_params.multi_items()),
+                timeout=timeout,
+            ) as upstream:
+                body = await upstream.read()
+                media_type = upstream.headers.get("content-type")
+                return Response(
+                    content=body,
+                    status_code=upstream.status,
+                    media_type=media_type,
+                )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        raise ProxyUpstreamError("Unable to reach the upstream backend") from exc
 
 
 @usage_router.post(

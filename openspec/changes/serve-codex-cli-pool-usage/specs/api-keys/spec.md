@@ -27,10 +27,20 @@ SHALL accept:
 - a balancer API key (`sk-clb-...`), which keeps the API-key view used by
   `/api/codex/usage` (own limits, pool aggregate fallback, and
   `hide_upstream_quota_from_api_keys` honoured);
-- a ChatGPT OAuth bearer, after exactly one upstream usage validation,
-  whether or not its `chatgpt-account-id` belongs to an active pooled
-  account. A pooled `chatgpt-account-id` keeps the existing account-scoped
-  route resolution; an unknown or absent one uses direct egress.
+- a ChatGPT OAuth bearer, after one upstream usage validation, whether or not
+  its `chatgpt-account-id` belongs to an active pooled account. A pooled
+  `chatgpt-account-id` keeps the existing account-scoped route resolution; an
+  unknown or absent one uses direct egress.
+
+A successful validation for a foreign bearer SHALL be cached for 60 seconds so
+a polling client does not re-prove the same credential on every read. The cache
+key MUST be a hash of the bearer plus the presented `chatgpt-account-id`, never
+the raw token. Concurrent identical validations SHALL collapse into one
+upstream call, and a failed validation MUST NOT be cached. The validation call
+itself SHALL NOT retry: it MUST issue at most one upstream request per attempt,
+so a retryable failure or an upstream 429 cannot cost three. The cache is
+process-local and bounded (1024 entries); a revoked bearer therefore keeps
+answering from the pool for at most the remaining lifetime of its proof.
 
 A missing bearer MUST return 401. An upstream 401/403 MUST return 401, an
 upstream 429 MUST return 429, and any other validation failure MUST return
@@ -45,6 +55,26 @@ health.
 - **THEN** the response is 200 with the pool's windows and the pool's
   `plan_type`
 - **AND** the payload contains none of the caller's personal window values
+
+#### Scenario: A repeated poll reuses the proof
+
+- **WHEN** the same ChatGPT bearer and `chatgpt-account-id` call
+  `GET /backend-api/wham/usage` twice within 60 seconds
+- **AND** the first validation succeeds
+- **THEN** the second read is answered 200 without another upstream call
+
+#### Scenario: A refused bearer is revalidated on the next attempt
+
+- **WHEN** the upstream rejects a bearer with 401 or 403
+- **THEN** the system returns 401 and does not cache the failure
+- **AND** the next call with that bearer issues another upstream validation
+
+#### Scenario: Validation is not retried
+
+- **WHEN** the upstream answers a foreign-bearer validation with 429 or a
+  retryable failure status
+- **THEN** the system returns 429 (or 502 for a non-429 failure) after a
+  single upstream request
 
 #### Scenario: Missing or invalid bearer
 
@@ -133,6 +163,10 @@ semantics. Without the relay, `account/read` fails with "workspace routing
 discovery failed", which fails the whole provider probe in clients such as
 T3 Code.
 
+The relay's transport policy (header allowlist, reserved namespaces, Bearer
+check, upstream request and redirect refusal) SHALL live in one client module,
+so the route only decodes the request, calls it and maps its errors.
+
 #### Scenario: Workspace routing discovery stays available
 
 - **WHEN** the CLI requests `GET /backend-api/wham/accounts/check` while
@@ -146,6 +180,12 @@ T3 Code.
 - **WHEN** a request targets `/backend-api/wham/usage` or any
   `/backend-api/codex/*` path
 - **THEN** the dedicated route handles it and the relay is not reached
+
+#### Scenario: A method-mismatched pool path is not relayed
+
+- **WHEN** a `GET` targets `/backend-api/codex/responses` (a POST-only route)
+  or `/backend-api/codex/models/`
+- **THEN** the relay does not answer it and no upstream request is made
 
 ## MODIFIED Requirements
 

@@ -30,6 +30,22 @@
 - [x] 4.2 Report the client-side `chatgpt_base_url` line and rollback
 - [x] 4.3 Report header-path findings for `/backend-api/codex/responses`
 
+## 5. Review follow-ups
+
+- [x] 5.1 Bound the cost of proving a foreign bearer: 60 s / 1024-entry success
+      cache keyed by a digest of the bearer and `chatgpt-account-id`, per-key
+      singleflight, failures never cached, proof call with `max_retries=0`
+- [x] 5.2 Move the relay's transport policy into
+      `app/core/clients/backend_relay.py`; the route only decodes, calls and
+      maps errors
+- [x] 5.3 ASGI route-precedence tests: `wham/usage` and `wham/usage/` keep the
+      pool payload, `codex/models` keeps its handler, `codex/responses` (GET)
+      and `codex/models/` are not relayed
+- [x] 5.4 Relay test: cookies and `proxy-authorization` never leave; a non-Bearer
+      `Authorization` is refused
+- [x] 5.5 Proof-cache tests: a second identical proof does not call upstream; a
+      failed proof is retried on the next attempt
+
 ## Notes
 
 - `codex-rs/backend-client`'s `PathStyle::from_base_url` selects `{base}/wham/usage`

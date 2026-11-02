@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from ipaddress import ip_address, ip_network
 from typing import cast
 
@@ -34,6 +34,7 @@ from app.core.auth.step_up import (
     account_step_up_methods,
     is_step_up_fresh,
 )
+from app.core.auth.wham_usage_proof import get_wham_usage_proof_cache, wham_usage_proof_key
 from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
@@ -704,7 +705,7 @@ async def validate_wham_usage_identity(request: Request) -> ApiKeyData | None:
     bearer from its own ``auth.json``, which is usually a personal account that
     is not in the pool -- requiring pool membership would answer 401 and keep
     the client on its personal numbers. A pooled ``chatgpt-account-id`` keeps
-    the existing account-scoped route; anything else is proved with one
+    the existing account-scoped route; anything else is proved by one cached
     upstream usage call and answered from the pool.
     """
 
@@ -721,11 +722,9 @@ async def validate_wham_usage_identity(request: Request) -> ApiKeyData | None:
         return await validate_codex_usage_identity(request)
 
     try:
-        await fetch_usage(
-            access_token=token,
-            account_id=account_id or None,
-            route=None,
-            allow_direct_egress=True,
+        await get_wham_usage_proof_cache().prove(
+            wham_usage_proof_key(token, account_id),
+            partial(_prove_wham_usage_bearer, token=token, account_id=account_id),
         )
     except UsageFetchError as exc:
         if exc.status_code == 429:
@@ -736,6 +735,21 @@ async def validate_wham_usage_identity(request: Request) -> ApiKeyData | None:
             raise ProxyAuthError("Invalid ChatGPT token or chatgpt-account-id") from exc
         raise ProxyUpstreamError("Unable to validate ChatGPT credentials at this time") from exc
     return None
+
+
+async def _prove_wham_usage_bearer(*, token: str, account_id: str) -> None:
+    """One upstream identity check, deliberately without retries.
+
+    The proof only needs to learn whether the bearer is real, so a retryable
+    failure or a 429 must not multiply into three upstream requests per poll.
+    """
+    await fetch_usage(
+        access_token=token,
+        account_id=account_id or None,
+        route=None,
+        allow_direct_egress=True,
+        max_retries=0,
+    )
 
 
 async def _pool_account_id_for_chatgpt_account(account_id: str) -> str | None:

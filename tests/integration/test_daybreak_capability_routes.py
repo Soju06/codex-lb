@@ -98,6 +98,9 @@ _FAIL_CLOSED_WEBSOCKET_ROUTES: frozenset[_RouteKey] = frozenset(
 _SEPARATE_NAMESPACE_ROUTES: frozenset[_RouteKey] = frozenset(
     {
         ("HTTP", "GET", "/backend-api/wham/agent-identities/jwks"),
+        ("HTTP", "GET", "/backend-api/wham/usage"),
+        ("HTTP", "GET", "/backend-api/wham/usage/"),
+        ("HTTP", "GET", "/backend-api/{path:path}"),
     }
 )
 

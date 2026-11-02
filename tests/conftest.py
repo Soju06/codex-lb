@@ -466,6 +466,14 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        # A proved wham bearer survives one minute; without this reset a test
+        # that proves a token would hide the upstream call the next one stubs.
+        from app.core.auth.wham_usage_proof import get_wham_usage_proof_cache
+
+        get_wham_usage_proof_cache().clear()
+    except Exception:
+        pass
+    try:
         from app.core.middleware.firewall_cache import get_firewall_ip_cache as get_firewall_cache
 
         get_firewall_cache().invalidate_all()

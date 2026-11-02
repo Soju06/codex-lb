@@ -14,7 +14,6 @@ from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
-import aiohttp
 import anyio
 from fastapi import (
     APIRouter,
@@ -48,8 +47,8 @@ from app.core.auth.dependencies import (
 )
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
+from app.core.clients.backend_relay import BackendRelayReservedPath, relay_backend_get
 from app.core.clients.files import FileProxyError
-from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
     _SSE_SEPARATOR_OVERLAP,
     CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE,
@@ -7411,16 +7410,6 @@ async def wham_usage(
     return RateLimitStatusPayload.from_data(payload)
 
 
-# A caller's own credential and the metadata the Codex CLI's discovery reads. Everything
-# else the CLI sends (cookies, a dashboard session, an alternate auth header) belongs to a
-# different audience and must not leave for the upstream backend.
-_RELAY_HEADER_NAMES = frozenset({"authorization", "chatgpt-account-id", "accept", "accept-language", "user-agent"})
-_RELAY_HEADER_PREFIXES = ("x-codex-", "openai-")
-# The pool-owned namespace keeps its own handlers; a GET that only the relay could answer
-# here must behave as if no such route existed rather than borrow the relay.
-_RELAY_RESERVED_PREFIXES = ("codex", "wham/usage")
-
-
 @backend_passthrough_router.get("/{path:path}", include_in_schema=False)
 async def backend_api_passthrough(path: str, request: Request) -> Response:
     """Relay a `/backend-api/*` read the Codex CLI makes against its backend base.
@@ -7432,43 +7421,19 @@ async def backend_api_passthrough(path: str, request: Request) -> Response:
     credential. Pool credentials are never attached.
     """
 
-    if any(path == reserved or path.startswith(f"{reserved}/") for reserved in _RELAY_RESERVED_PREFIXES):
-        raise HTTPException(status_code=404, detail="Not Found")
-
-    authorization = request.headers.get("authorization") or ""
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise ProxyAuthError("Missing ChatGPT token in Authorization header")
-
-    settings = get_settings()
-    url = f"{settings.upstream_base_url.rstrip('/')}/{path}"
-    headers = {
-        name: value
-        for name, value in request.headers.items()
-        if name.lower() in _RELAY_HEADER_NAMES or name.lower().startswith(_RELAY_HEADER_PREFIXES)
-    }
-    timeout = aiohttp.ClientTimeout(total=30)
     try:
-        async with lease_http_session() as client_session:
-            async with client_session.get(
-                url,
-                headers=headers,
-                params=list(request.query_params.multi_items()),
-                timeout=timeout,
-                # A redirect would hand these headers to another host and change the answer.
-                allow_redirects=False,
-            ) as upstream:
-                if 300 <= upstream.status < 400:
-                    raise ProxyUpstreamError("The upstream backend redirected this read")
-                body = await upstream.read()
-                media_type = upstream.headers.get("content-type")
-                return Response(
-                    content=body,
-                    status_code=upstream.status,
-                    media_type=media_type,
-                )
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        raise ProxyUpstreamError("Unable to reach the upstream backend") from exc
+        relayed = await relay_backend_get(
+            path,
+            headers=request.headers.items(),
+            query=request.query_params.multi_items(),
+        )
+    except BackendRelayReservedPath:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return Response(
+        content=relayed.body,
+        status_code=relayed.status_code,
+        media_type=relayed.content_type,
+    )
 
 
 @usage_router.post(

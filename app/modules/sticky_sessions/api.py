@@ -80,7 +80,7 @@ async def list_sticky_sessions(
 
 @router.post("/purge", response_model=StickySessionsPurgeResponse)
 async def purge_sticky_sessions(
-    payload: StickySessionsPurgeRequest = Body(default=StickySessionsPurgeRequest()),
+    payload: StickySessionsPurgeRequest | None = Body(default=None),
     _write_access=Depends(require_dashboard_write_access),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsPurgeResponse:

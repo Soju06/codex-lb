@@ -1100,7 +1100,7 @@ async def test_delete_for_account_limit_window_canonicalizes_legacy_alias(async_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dirname", ["a b%20@#", "p:;=&()[]!%", "données-ü"])
+@pytest.mark.parametrize("dirname", ["a b%20@#", "p:;=&()[]!%", "données-ü", "кодекс@lb", "literal%20dir"])
 async def test_latest_by_account_sqlite_fast_path_resolves_special_character_paths(
     tmp_path: Path,
     dirname: str,

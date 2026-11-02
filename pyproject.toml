@@ -137,7 +137,7 @@ codex-lb = "app.cli:main"
 codex-lb-db = "app.db.migrate:main"
 
 [build-system]
-requires = ["hatchling==1.32.0"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]

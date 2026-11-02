@@ -43,6 +43,7 @@ from app.core.auth.dependencies import (
     validate_required_proxy_api_key,
     validate_required_proxy_api_key_authorization,
     validate_usage_api_key,
+    validate_wham_usage_identity,
 )
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
@@ -278,7 +279,12 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
-from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
+from app.modules.proxy.helpers import (
+    _openai_error_param,
+    _parse_openai_error,
+    _plan_type_for_accounts,
+    _rate_limit_details,
+)
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
     parse_forwarded_request,
@@ -448,6 +454,14 @@ wham_router = APIRouter(
     prefix="/backend-api/wham",
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+# The Codex CLI reads its limits from `{chatgpt_base_url}/wham/usage` with the
+# ChatGPT bearer in its own auth.json, not with a balancer key, so this router
+# cannot carry `wham_router`'s router-level API-key guard.
+wham_usage_router = APIRouter(
+    prefix="/backend-api/wham",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
 )
 v1_router = APIRouter(
     prefix="/v1",
@@ -2200,22 +2214,30 @@ def _to_v1_usage_limit_response(limit: ApiKeySelfLimitData) -> V1UsageLimitRespo
 
 
 async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLimitStatusPayloadData:
+    hide_upstream_quota = await _hide_upstream_quota_for_api_key_clients(api_key)
+    expose_pool_windows = not hide_upstream_quota and "upstream_limits" in _parse_usage_sections(api_key.usage_sections)
+
     async with get_background_session() as session:
-        service = ApiKeysService(ApiKeysRepository(session))
-        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        keys_repo = ApiKeysRepository(session)
+        usage = await ApiKeysService(keys_repo).get_key_usage_summary_for_self(api_key.id)
 
-    if usage is None:
-        raise ProxyAuthError("Invalid API key")
+        if usage is None:
+            raise ProxyAuthError("Invalid API key")
 
-    key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
-    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
-    secondary_credit_limit = _select_codex_usage_limit(key_limits, "7d") or _select_codex_usage_limit(
-        key_limits, "weekly"
-    )
-    monthly_credit_limit = _select_codex_usage_limit(key_limits, "monthly")
+        limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+        if not limits and expose_pool_windows:
+            # /v1/usage mirrors aggregate windows for limit-free keys; the
+            # Codex-shaped route needs the same fallback or the client reads
+            # `rate_limit: null` and paints its synthetic exhausted snapshot.
+            limits = _ordered_aggregate_limits(await _build_aggregate_credit_limits(session))
+        plan_type = _plan_type_for_accounts(await keys_repo.list_all_accounts())
+
+    primary_credit_limit = _select_codex_usage_limit(limits, "5h") or _select_codex_usage_limit(limits, "daily")
+    secondary_credit_limit = _select_codex_usage_limit(limits, "7d") or _select_codex_usage_limit(limits, "weekly")
+    monthly_credit_limit = _select_codex_usage_limit(limits, "monthly")
 
     return RateLimitStatusPayloadData(
-        plan_type="api_key",
+        plan_type=plan_type,
         rate_limit=_rate_limit_details(
             _codex_usage_window_snapshot(primary_credit_limit),
             _codex_usage_window_snapshot(secondary_credit_limit),
@@ -7348,6 +7370,27 @@ async def codex_usage(
         await _build_codex_usage_payload_for_api_key(api_key)
         if api_key is not None
         else _attach_codex_usage_reset_credits(await context.service.get_rate_limit_payload(), request)
+    )
+    return RateLimitStatusPayload.from_data(payload)
+
+
+@wham_usage_router.get("/usage", response_model=RateLimitStatusPayload)
+@wham_usage_router.get("/usage/", response_model=RateLimitStatusPayload, include_in_schema=False)
+async def wham_usage(
+    context: ProxyContext = Depends(get_proxy_context),
+    api_key: ApiKeyData | None = Depends(validate_wham_usage_identity),
+) -> RateLimitStatusPayload:
+    """Serve the pool's windows where the Codex CLI reads account limits.
+
+    ``codex app-server`` asks ``{chatgpt_base_url}/wham/usage``; pointing
+    ``chatgpt_base_url`` at this balancer keeps the client on the pool's real
+    quota instead of whatever personal account its auth.json holds.
+    """
+
+    payload = (
+        await _build_codex_usage_payload_for_api_key(api_key)
+        if api_key is not None
+        else await context.service.get_rate_limit_payload()
     )
     return RateLimitStatusPayload.from_data(payload)
 

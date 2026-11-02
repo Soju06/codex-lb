@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate canonical OpenSpec capabilities
-        run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+        run: npx --yes @fission-ai/openspec@1.16.0 validate --specs
 
       - name: Strictly validate changed OpenSpec folders
         run: python3 .github/scripts/validate_changed_openspec.py

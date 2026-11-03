@@ -380,7 +380,7 @@ async fn emit_error(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Once;
 
     use futures_util::SinkExt;
@@ -401,11 +401,9 @@ mod tests {
 
     static INSTALL_PROVIDER: Once = Once::new();
 
-    fn install_provider() {
+    pub(crate) fn install_provider() {
         INSTALL_PROVIDER.call_once(|| {
-            rustls::crypto::aws_lc_rs::default_provider()
-                .install_default()
-                .expect("install test crypto provider");
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         });
     }
 

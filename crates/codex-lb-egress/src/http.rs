@@ -15,6 +15,9 @@ pub(crate) const CODEX_H2_INITIAL_STREAM_WINDOW_SIZE: u32 = 2 * 1024 * 1024;
 pub(crate) const CODEX_H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 5 * 1024 * 1024;
 pub(crate) const CODEX_H2_MAX_FRAME_SIZE: u32 = 16 * 1024;
 pub(crate) const CODEX_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
+pub(crate) const CODEX_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
+pub(crate) const CODEX_H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
+pub(crate) const CODEX_H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 const SSE_READ_CHUNK_SIZE: usize = 16 * 1024;
 const SSE_IPC_TEXT_FRAGMENT_SIZE: usize = 16 * 1024;
 
@@ -53,7 +56,11 @@ impl ClientPool {
             .http2_max_frame_size(CODEX_H2_MAX_FRAME_SIZE)
             .http2_max_header_list_size(CODEX_H2_MAX_HEADER_LIST_SIZE)
             .pool_idle_timeout(Duration::from_secs(120))
-            .pool_max_idle_per_host(8);
+            .pool_max_idle_per_host(8)
+            .tcp_keepalive(CODEX_TCP_KEEPALIVE)
+            .http2_keep_alive_interval(CODEX_H2_KEEP_ALIVE_INTERVAL)
+            .http2_keep_alive_timeout(CODEX_H2_KEEP_ALIVE_TIMEOUT)
+            .http2_keep_alive_while_idle(false);
         if !key.decode_response {
             builder = builder.no_brotli().no_deflate().no_gzip().no_zstd();
         }
@@ -383,8 +390,35 @@ pub(crate) fn error_chain_has_invalid_certificate(
 mod tests {
     use reqwest::header::{ACCEPT, ACCEPT_ENCODING};
 
-    use super::forwarded_headers;
+    use super::{
+        CODEX_H2_KEEP_ALIVE_INTERVAL, CODEX_H2_KEEP_ALIVE_TIMEOUT, CODEX_TCP_KEEPALIVE, ClientKey,
+        ClientPool, forwarded_headers,
+    };
 
+    #[test]
+    fn keepalive_constants_match_spec_profile() {
+        assert_eq!(CODEX_TCP_KEEPALIVE, std::time::Duration::from_secs(15));
+        assert_eq!(
+            CODEX_H2_KEEP_ALIVE_INTERVAL,
+            std::time::Duration::from_secs(20)
+        );
+        assert_eq!(
+            CODEX_H2_KEEP_ALIVE_TIMEOUT,
+            std::time::Duration::from_secs(20)
+        );
+    }
+    #[test]
+    fn client_pool_builds_client_with_keepalive_settings() {
+        crate::runtime::tests::install_provider();
+        let mut pool = ClientPool::default();
+        let key = ClientKey {
+            proxy_url: None,
+            connect_timeout_ms: Some(5_000),
+            decode_response: true,
+        };
+        let client = pool.get(&key);
+        assert!(client.is_ok());
+    }
     #[test]
     fn forwarded_headers_preserve_inbound_accept_encoding() {
         let headers = forwarded_headers(vec![

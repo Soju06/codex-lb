@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,7 +21,7 @@ from app.modules.usage.updater import UsageUpdater
 pytestmark = pytest.mark.integration
 
 
-async def _seed_account(*, weekly_only=False):
+async def _seed_account(*, weekly_only=False, old_baseline=False):
     now = int(time.time())
     encryptor = TokenEncryptor()
     async with SessionLocal() as session:
@@ -41,15 +41,23 @@ async def _seed_account(*, weekly_only=False):
         session.add(account)
         await session.commit()
         repo = UsageRepository(session)
+        recorded_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60 if old_baseline else 0)
         if not weekly_only:
-            await repo.add_entry(account.id, 100, window="primary", reset_at=now + 3600, window_minutes=300)
-        await repo.add_entry(account.id, 100, window="secondary", reset_at=now + 3600, window_minutes=10080)
+            await repo.add_entry(
+                account.id, 100, window="primary", reset_at=now + 3600, window_minutes=300, recorded_at=recorded_at
+            )
+        await repo.add_entry(
+            account.id, 100, window="secondary", reset_at=now + 3600, window_minutes=10080, recorded_at=recorded_at
+        )
     return now
 
 
 @pytest.mark.parametrize("weekly_only", [False, True])
-async def test_dashboard_reset_clears_confirmed_reset_during_429_cooldown(async_client, monkeypatch, weekly_only):
-    now = await _seed_account(weekly_only=weekly_only)
+@pytest.mark.parametrize("old_baseline", [False, True])
+async def test_dashboard_reset_clears_confirmed_reset_during_429_cooldown(
+    async_client, monkeypatch, weekly_only, old_baseline
+):
+    now = await _seed_account(weekly_only=weekly_only, old_baseline=old_baseline)
 
     async def fresh(self, account, **kwargs):
         return account
@@ -97,7 +105,7 @@ async def test_dashboard_reset_clears_confirmed_reset_during_429_cooldown(async_
 
 @pytest.mark.parametrize("outcome", ["reset", "unchanged", "fetch_failure", "newer_block", "paused"])
 async def test_dashboard_reset_wakes_stale_usage_once(async_client, monkeypatch, outcome):
-    now = await _seed_account(weekly_only=True)
+    now = await _seed_account(weekly_only=True, old_baseline=True)
 
     async def fresh(self, account, **kwargs):
         return account
@@ -154,7 +162,8 @@ async def test_dashboard_reset_wakes_stale_usage_once(async_client, monkeypatch,
     assert response.json()["accountStatusAfter"] == expected
 
 
-async def test_natural_rollover_claim_survives_repeated_refreshes(async_client, monkeypatch):
+@pytest.mark.parametrize("reopens", [False, True])
+async def test_natural_rollover_claim_survives_repeated_refreshes(async_client, monkeypatch, reopens):
     now = await _seed_account(weekly_only=True)
     reset_at = now - 60
     async with SessionLocal() as session:
@@ -179,16 +188,22 @@ async def test_natural_rollover_claim_survives_repeated_refreshes(async_client, 
     monkeypatch.setattr(AuthManager, "ensure_fresh", fresh)
     wake = AsyncMock(return_value=429)
     monkeypatch.setattr("app.modules.usage.updater.send_usage_probe", wake)
-    fetch = AsyncMock(
-        return_value=UsagePayload.model_validate(
+
+    async def fetch_payload(**kwargs):
+        return UsagePayload.model_validate(
             {
                 "plan_type": "plus",
                 "rate_limit": {
-                    "secondary_window": {"used_percent": 100, "reset_at": reset_at, "limit_window_seconds": 604800},
+                    "secondary_window": {
+                        "used_percent": 0 if reopens and wake.await_count else 100,
+                        "reset_at": now + 604800 if reopens and wake.await_count else reset_at,
+                        "limit_window_seconds": 604800,
+                    },
                 },
             }
         )
-    )
+
+    fetch = AsyncMock(side_effect=fetch_payload)
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch)
     for _ in range(3):
         async with SessionLocal() as session:
@@ -201,6 +216,7 @@ async def test_natural_rollover_claim_survives_repeated_refreshes(async_client, 
             )
     wake.assert_awaited_once()
     assert fetch.await_count == 4
+    assert account.status == (AccountStatus.ACTIVE if reopens else AccountStatus.RATE_LIMITED)
 
 
 @pytest.mark.parametrize("surface", ["credit_picker", "codex", "v1"])

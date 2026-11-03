@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.13.6 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv-bin
 
 FROM rust:1.99.1-slim-trixie AS native-egress-build
 

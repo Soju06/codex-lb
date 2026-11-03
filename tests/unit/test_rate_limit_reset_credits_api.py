@@ -943,7 +943,7 @@ async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
         )
 
     class _UsageUpdater:
-        async def force_refresh(self, account: Account) -> bool:
+        async def wake_and_refresh(self, account: Account) -> bool:
             assert account.id == "acc_1"
             return False
 

@@ -99,9 +99,12 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
 
 @router.get("", response_model=AccountsResponse)
 async def list_accounts(
+    request: Request,
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountsResponse:
-    accounts = await context.service.list_accounts()
+    accounts = await context.service.list_accounts(
+        runtime_provider=get_proxy_service_for_app(request.app).account_runtime_snapshot,
+    )
     return AccountsResponse(accounts=accounts)
 
 

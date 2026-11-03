@@ -32,6 +32,7 @@ class LimitWarmupRepository:
                 .label("row_number"),
             )
             .where(AccountLimitWarmup.account_id.in_(account_ids))
+            .where(~AccountLimitWarmup.window.like("reset_recovery:%"))
             .subquery()
         )
         stmt = (
@@ -46,6 +47,7 @@ class LimitWarmupRepository:
         stmt = (
             select(AccountLimitWarmup)
             .where(AccountLimitWarmup.account_id == account_id)
+            .where(~AccountLimitWarmup.window.like("reset_recovery:%"))
             .order_by(AccountLimitWarmup.attempted_at.desc(), AccountLimitWarmup.id.desc())
             .limit(1)
         )

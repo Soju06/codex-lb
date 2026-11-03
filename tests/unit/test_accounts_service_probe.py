@@ -322,7 +322,7 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
             captured["released"] = True
             return False
 
-    monkeypatch.setattr("app.modules.accounts.service.lease_http_session", lambda: _Lease())
+    monkeypatch.setattr("app.core.clients.usage_probe.lease_http_session", lambda: _Lease())
 
     status = await service._send_probe_request(
         access_token=_PROBE_TOKEN_PLAINTEXT,

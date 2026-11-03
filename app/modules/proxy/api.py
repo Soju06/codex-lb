@@ -1888,7 +1888,7 @@ async def _refresh_usage_after_v1_reset_credit_redeem(account_id: str) -> None:
             AccountsRepository(session),
             AdditionalUsageRepository(session),
         )
-        refreshed = await usage_updater.force_refresh(account)
+        refreshed = await usage_updater.wake_and_refresh(account)
     if refreshed:
         get_account_selection_cache().invalidate()
         return
@@ -6619,9 +6619,8 @@ async def _force_refresh_codex_usage_identity_account(request: Request) -> None:
             accounts_repo,
             AdditionalUsageRepository(session),
         )
-        usage_written = await updater.force_refresh(
+        usage_written = await updater.wake_and_refresh(
             account,
-            ignore_refresh_disabled=True,
             access_token_override=access_token,
         )
         if usage_written:

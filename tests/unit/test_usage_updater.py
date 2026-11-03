@@ -951,7 +951,7 @@ async def test_force_refresh_usage_recovers_rate_limited_monthly_only_account() 
 
 
 @pytest.mark.asyncio
-async def test_force_refresh_usage_keeps_rate_limited_account_without_primary_or_monthly_quota() -> None:
+async def test_force_refresh_usage_recovers_rate_limited_account_with_secondary_only_quota() -> None:
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(StubUsageRepository(), accounts_repo)
     account = _make_account("acc_force_secondary_only", "workspace_force_secondary_only")
@@ -969,9 +969,9 @@ async def test_force_refresh_usage_keeps_rate_limited_account_without_primary_or
         monthly=None,
     )
 
-    assert accounts_repo.status_updates == []
-    assert account.status == AccountStatus.RATE_LIMITED
-    assert account.reset_at == 12345
+    assert len(accounts_repo.status_updates) == 1
+    assert account.status == AccountStatus.ACTIVE
+    assert account.reset_at is None
 
 
 @pytest.mark.asyncio

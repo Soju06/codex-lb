@@ -22,6 +22,8 @@ from app.modules.accounts.schemas import (
     AccountUsageTrend,
     UsageTrendPoint,
 )
+from app.modules.proxy._load_balancer.quota_recovery import standard_quota_status_from_account
+from app.modules.proxy._load_balancer.types import RuntimeState
 from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsSnapshot,
     RateLimitResetCreditsStore,
@@ -48,6 +50,7 @@ def build_account_summaries(
     encryptor: TokenEncryptor,
     include_auth: bool = True,
     reset_credits_store: RateLimitResetCreditsStore | None = None,
+    routing_runtime: dict[str, RuntimeState] | None = None,
 ) -> list[AccountSummary]:
     store = reset_credits_store or get_rate_limit_reset_credits_store()
     duplicate_keys = _duplicate_detection_keys_appearing_more_than_once(accounts)
@@ -64,6 +67,7 @@ def build_account_summaries(
             include_auth=include_auth,
             is_email_duplicate=_duplicate_detection_key(account) in duplicate_keys,
             reset_credits_snapshot=_reset_credits_snapshot_for_account(account, store),
+            routing_runtime=(routing_runtime or {}).get(account.id),
         )
         for account in accounts
     ]
@@ -111,6 +115,7 @@ def _account_to_summary(
     include_auth: bool = True,
     is_email_duplicate: bool = False,
     reset_credits_snapshot: RateLimitResetCreditsSnapshot | None = None,
+    routing_runtime: RuntimeState | None = None,
 ) -> AccountSummary:
     plan_type = coerce_account_plan_type(account.plan_type, DEFAULT_PLAN)
     auth_status = _build_auth_status(account, encryptor) if include_auth else None
@@ -238,6 +243,7 @@ def _account_to_summary(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
         allow_missing_runtime_reset_recovery=allow_missing_runtime_reset_recovery,
+        routing_runtime=routing_runtime,
     )
     # Display-only expiry for the SHORT window: a primary sample whose reset
     # elapsed is not an active window — show it as absent instead of
@@ -352,6 +358,7 @@ def _effective_status_from_usage(
     credits_unlimited: bool | None = None,
     credits_balance: float | None = None,
     allow_missing_runtime_reset_recovery: bool = False,
+    routing_runtime: RuntimeState | None = None,
 ) -> AccountStatus:
     long_window_usage = monthly_usage or secondary_usage
     long_window_used_percent = monthly_used_percent if monthly_usage is not None else secondary_used_percent
@@ -372,22 +379,14 @@ def _effective_status_from_usage(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
     )
-    if account.status == AccountStatus.RATE_LIMITED and status == AccountStatus.ACTIVE:
-        if runtime_reset is None and allow_missing_runtime_reset_recovery:
-            return status
-        if _has_credit_override(
-            credits_has=credits_has,
-            credits_unlimited=credits_unlimited,
-            credits_balance=credits_balance,
-        ):
-            return status
-        if (
-            account.blocked_at is None
-            and account.reset_at is not None
-            and account.reset_at <= datetime.now(timezone.utc).timestamp()
-        ):
-            return status
-        return account.status
+    if account.status == AccountStatus.RATE_LIMITED and status != AccountStatus.QUOTA_EXCEEDED:
+        return standard_quota_status_from_account(
+            account,
+            primary_entry=primary_usage,
+            secondary_entry=secondary_usage,
+            monthly_entry=monthly_usage,
+            runtime=routing_runtime,
+        )
     return status
 
 

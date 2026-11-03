@@ -781,7 +781,7 @@ async def test_v1_reset_credit_post_force_refreshes_usage_and_invalidates_select
         def __init__(self, *args, **kwargs) -> None:
             del args, kwargs
 
-        async def force_refresh(self, account) -> bool:
+        async def wake_and_refresh(self, account) -> bool:
             force_refresh_calls.append((account.id, account.status.value))
             return True
 

@@ -451,7 +451,7 @@ def _build_refresh_usage_callback(context: AccountsContext) -> RefreshUsageFn | 
         return None
 
     async def refresh_usage(account: Account) -> None:
-        refreshed = await usage_updater.force_refresh(account)
+        refreshed = await usage_updater.wake_and_refresh(account)
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()

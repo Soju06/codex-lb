@@ -20,6 +20,7 @@ from app.core.balancer import (
     plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
+from app.core.clients.usage_probe import send_usage_probe
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, normalize_account_plan_type
@@ -44,6 +45,12 @@ from app.modules.usage.plan_downgrade_observations import (
 )
 from app.modules.usage.repository import AdditionalUsageRepository, UsageWindowWrite
 from app.modules.usage.repository import UsageRepository as SessionUsageRepository
+from app.modules.usage.reset_recovery import (
+    HARD_BLOCKED_STATUSES,
+    claim_rollover_wake,
+    complete_rollover_wake,
+    reset_confirmed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +144,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
 class AccountRefreshResult:
     usage_written: bool
     fetch_succeeded: bool = True
+    reset_confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +396,83 @@ class UsageUpdater:
         )
         return result.usage_written
 
+    async def wake_and_refresh(
+        self,
+        account: Account,
+        *,
+        access_token_override: str | None = None,
+    ) -> bool:
+        """Reconcile an accepted redemption, waking a still-stale limiter once."""
+        if account.status in HARD_BLOCKED_STATUSES:
+            return False
+
+        async def recover() -> AccountRefreshResult:
+            # Integer persisted block markers must predate this operation's
+            # second, otherwise an identical newer 429 could pass tuple CAS.
+            if account.blocked_at is not None and account.blocked_at >= int(time.time()):
+                await asyncio.sleep(min(1.0, max(0.0, account.blocked_at + 1.0 - time.time())))
+            await self._sync_account_from_repo(account)
+            if account.status in HARD_BLOCKED_STATUSES:
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            before = await self._reset_baseline(account)
+            original_block = (account.status, account.deactivation_reason, account.reset_at, account.blocked_at)
+            result = await self._refresh_account(
+                account,
+                usage_account_id=account.chatgpt_account_id,
+                access_token_override=access_token_override,
+                reset_baseline=before,
+            )
+            if result.reset_confirmed or not result.fetch_succeeded or account.status in HARD_BLOCKED_STATUSES:
+                return result
+            latest = await self._reset_baseline(account)
+            if not any(row is not None and row.used_percent >= 100 for row in latest.values()):
+                return result
+            await self._wake_account(account, access_token_override=access_token_override)
+            if (account.status, account.deactivation_reason, account.reset_at, account.blocked_at) != original_block:
+                return result
+            after = await self._refresh_account(
+                account,
+                usage_account_id=account.chatgpt_account_id,
+                access_token_override=access_token_override,
+                reset_baseline=before,
+            )
+            return AccountRefreshResult(
+                usage_written=result.usage_written or after.usage_written,
+                fetch_succeeded=after.fetch_succeeded,
+                reset_confirmed=after.reset_confirmed,
+            )
+
+        try:
+            result = await _USAGE_REFRESH_SINGLEFLIGHT.run(account.id, recover, join_existing=False)
+            await self._sync_account_from_repo(account)
+            return result.usage_written
+        except Exception:
+            # Redemption has already committed upstream. Do not turn a failed
+            # recovery into an apparent consume failure or log credentials.
+            logger.warning("Post-reset usage recovery failed account_id=%s", account.id)
+            return False
+        finally:
+            get_account_selection_cache().invalidate()
+
+    async def _reset_baseline(self, account: Account) -> dict[str, UsageHistory | None]:
+        return {
+            window: await self._usage_repo.latest_entry_for_account(account.id, window=window)
+            for window in ("primary", "secondary", "monthly")
+        }
+
+    async def _wake_account(self, account: Account, *, access_token_override: str | None = None) -> int:
+        await self._sync_account_from_repo(account)
+        if account.status in HARD_BLOCKED_STATUSES:
+            return 0
+        if access_token_override is None and self._auth_manager is not None:
+            account = await self._auth_manager.ensure_fresh(account)
+        route = await _resolve_upstream_route_for_account(account, operation="usage_reset_probe")
+        return await send_usage_probe(
+            access_token=access_token_override or self._encryptor.decrypt(account.access_token_encrypted),
+            chatgpt_account_id=account.chatgpt_account_id,
+            route=route,
+        )
+
     async def force_refresh_result(
         self,
         account: Account,
@@ -446,6 +531,7 @@ class UsageUpdater:
         return await self._refresh_account(
             account,
             usage_account_id=usage_account_id,
+            allow_rollover_wake=True,
         )
 
     async def _additional_usage_is_stale(self, account_id: str, *, now: datetime, interval_seconds: int) -> bool:
@@ -548,7 +634,12 @@ class UsageUpdater:
         *,
         usage_account_id: str | None,
         access_token_override: str | None = None,
+        reset_baseline: Mapping[str, UsageHistory | None] | None = None,
+        allow_rollover_wake: bool = False,
     ) -> AccountRefreshResult:
+        refresh_started_at = utcnow()
+        original_block = (account.status, account.deactivation_reason, account.reset_at, account.blocked_at)
+        before = dict(reset_baseline) if reset_baseline is not None else await self._reset_baseline(account)
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
         try:
@@ -747,10 +838,49 @@ class UsageUpdater:
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
+            recorded_at=refresh_started_at,
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        return AccountRefreshResult(usage_written=usage_written)
+        confirmed = reset_confirmed(account, before, snapshot_windows, operator_reset=reset_baseline is not None)
+        if account.blocked_at is not None and account.blocked_at >= int(
+            refresh_started_at.replace(tzinfo=timezone.utc).timestamp()
+        ):
+            confirmed = False
+        recovered = await self._recover_quota_status_from_usage(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
+            confirmed_reset=confirmed,
+        )
+        confirmed = confirmed and recovered
+        if (
+            allow_rollover_wake
+            and not confirmed
+            and (account.status, account.deactivation_reason, account.reset_at, account.blocked_at) == original_block
+        ):
+            attempt_id = await claim_rollover_wake(account, snapshot_windows)
+            if attempt_id is not None:
+                succeeded = False
+                try:
+                    await self._wake_account(account, access_token_override=access_token_override)
+                    if (
+                        account.status,
+                        account.deactivation_reason,
+                        account.reset_at,
+                        account.blocked_at,
+                    ) != original_block:
+                        return AccountRefreshResult(usage_written=usage_written)
+                    result = await self._refresh_account(
+                        account,
+                        usage_account_id=usage_account_id,
+                        access_token_override=access_token_override,
+                    )
+                    succeeded = result.reset_confirmed
+                    return result
+                finally:
+                    await complete_rollover_wake(attempt_id, succeeded=succeeded)
+        return AccountRefreshResult(usage_written=usage_written, reset_confirmed=confirmed)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
@@ -835,11 +965,12 @@ class UsageUpdater:
         primary: UsageWindow | None,
         secondary: UsageWindow | None,
         monthly: UsageWindow | None = None,
-    ) -> None:
+        confirmed_reset: bool = False,
+    ) -> bool:
         if not self._auth_manager:
-            return
+            return False
         if account.status == AccountStatus.RATE_LIMITED:
-            if account.blocked_at is not None:
+            if account.blocked_at is not None and not confirmed_reset:
                 # An account marked RATE_LIMITED by an actual 429 always
                 # carries a blocked_at marker. Honor the persisted cooldown
                 # deadline (Retry-After hint, upstream reset metadata, or the
@@ -855,39 +986,43 @@ class UsageUpdater:
                     float(account.blocked_at) + RATE_LIMITED_MIN_COOLDOWN_SECONDS
                 )
                 if now < cooldown_deadline:
-                    return
+                    return False
             long_window = monthly or secondary
-            if primary is None and monthly is None:
-                return
+            if primary is None and long_window is None:
+                return False
             if primary is not None and not _window_has_available_quota(primary):
-                return
+                return False
             if primary is None and (long_window is None or not _window_has_available_quota(long_window)):
-                return
+                return False
             if long_window is not None and not _window_has_available_quota(long_window):
-                return
+                return False
             target_status = AccountStatus.ACTIVE
             target_reset_at = None
             expected_status = AccountStatus.RATE_LIMITED
         elif account.status == AccountStatus.QUOTA_EXCEEDED:
-            if account.blocked_at is not None and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS:
-                return
+            if (
+                not confirmed_reset
+                and account.blocked_at is not None
+                and time.time() < account.blocked_at + QUOTA_EXCEEDED_COOLDOWN_SECONDS
+            ):
+                return False
             long_window = monthly or secondary
             windows = [window for window in (primary, long_window) if window is not None]
             if long_window is None or not _window_has_available_quota(long_window):
-                return
+                return False
             if primary is not None and _window_is_exhausted(primary):
                 target_status = AccountStatus.RATE_LIMITED
                 target_reset_at = _reset_at(primary.reset_at, primary.reset_after_seconds, _now_epoch())
             else:
                 if any(_window_is_exhausted(window) for window in windows):
-                    return
+                    return False
                 target_status = AccountStatus.ACTIVE
                 target_reset_at = None
             if not any(_window_has_available_quota(window) for window in windows):
-                return
+                return False
             expected_status = AccountStatus.QUOTA_EXCEEDED
         else:
-            return
+            return False
 
         repo = cast(AccountsRepositoryWithStatusComparePort, self._auth_manager._repo)
         updated = await repo.update_status_if_current(
@@ -903,16 +1038,18 @@ class UsageUpdater:
         )
         if not updated:
             await self._sync_account_from_repo(account)
-            return
+            return False
         account.status = target_status
         account.deactivation_reason = None
         account.reset_at = target_reset_at
         account.blocked_at = None
+        get_account_selection_cache().invalidate()
+        return target_status == AccountStatus.ACTIVE
 
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:
             return
-        stored = await self._accounts_repo.get_by_id(account.id)
+        stored = await self._accounts_repo.get_by_id_fresh(account.id)
         if stored is None:
             return
         account.chatgpt_account_id = stored.chatgpt_account_id

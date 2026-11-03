@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import cast
 from uuid import uuid4
 
-import aiohttp
 from pydantic import ValidationError
 from sqlalchemy.exc import OperationalError
 
@@ -22,14 +21,13 @@ from app.core.auth import (
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
-from app.core.clients.http import lease_http_session
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse,
     UsageFetchError,
     consume_rate_limit_reset_credit,
     fetch_usage,
 )
-from app.core.config.settings import get_settings
+from app.core.clients.usage_probe import DEFAULT_PROBE_MODEL, send_usage_probe
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
@@ -71,6 +69,7 @@ from app.modules.proxy.account_cache import (
     mark_account_routing_unavailable,
     propagate_account_routing_change,
 )
+from app.modules.proxy.load_balancer import RuntimeState
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
@@ -84,7 +83,6 @@ logger = logging.getLogger(__name__)
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600  # 1h → 168 points
 
-DEFAULT_PROBE_MODEL = "gpt-5.5"
 PROBE_REQUEST_TIMEOUT_SECONDS = 30.0
 PROBE_CONNECT_TIMEOUT_SECONDS = 10.0
 # Network/upstream failure sentinel for ``probe_status_code`` — kept as ``0`` so
@@ -131,7 +129,12 @@ class AccountsService:
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
 
-    async def list_accounts(self, *, account_ids: list[str] | None = None) -> list[AccountSummary]:
+    async def list_accounts(
+        self,
+        *,
+        account_ids: list[str] | None = None,
+        runtime_provider: Callable[[], Awaitable[dict[str, RuntimeState]]] | None = None,
+    ) -> list[AccountSummary]:
         accounts = (
             await self._repo.list_accounts_by_ids(account_ids)
             if account_ids is not None
@@ -231,6 +234,7 @@ class AccountsService:
             additional_quotas_by_account=additional_quotas_by_account,
             limit_warmups_by_account=limit_warmups_by_account,
             encryptor=self._encryptor,
+            routing_runtime=await runtime_provider() if runtime_provider is not None else None,
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
@@ -346,7 +350,7 @@ class AccountsService:
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account, ignore_refresh_disabled=True)
+            usage_written = await self._usage_updater.wake_and_refresh(account)
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account
@@ -764,6 +768,7 @@ class AccountsService:
             access_token=access_token,
             chatgpt_account_id=probe_account.chatgpt_account_id,
             model=probe_model,
+            route=await self._resolve_usage_reset_credit_route(probe_account, operation="account_probe"),
         )
 
         usage_refresh_fetch_succeeded: bool | None = None
@@ -812,49 +817,14 @@ class AccountsService:
         access_token: str,
         chatgpt_account_id: str | None,
         model: str,
+        route: ResolvedUpstreamRoute | None = None,
     ) -> int:
-        settings = get_settings()
-        base = settings.upstream_base_url.rstrip("/")
-        if "/backend-api" not in base:
-            base = f"{base}/backend-api"
-        url = f"{base}/codex/responses"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "text/event-stream",
-            "Content-Type": "application/json",
-        }
-        if chatgpt_account_id and not chatgpt_account_id.startswith(("email_", "local_")):
-            headers["chatgpt-account-id"] = chatgpt_account_id
-        body = {
-            "model": model,
-            "instructions": "Respond with a single dot.",
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "."}],
-                }
-            ],
-            "max_output_tokens": 1,
-            "stream": True,
-            "store": False,
-        }
-        timeout = aiohttp.ClientTimeout(
-            total=PROBE_REQUEST_TIMEOUT_SECONDS,
-            sock_connect=PROBE_CONNECT_TIMEOUT_SECONDS,
+        return await send_usage_probe(
+            access_token=access_token,
+            chatgpt_account_id=chatgpt_account_id,
+            model=model,
+            route=route,
         )
-        try:
-            async with lease_http_session() as session:
-                async with session.post(url, headers=headers, json=body, timeout=timeout) as resp:
-                    # Initiating the request is enough to wake the upstream
-                    # rate-limiter; we do not consume the SSE body.
-                    return resp.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            logger.warning(
-                "Probe upstream request failed account=%s error=%s",
-                chatgpt_account_id,
-                exc,
-            )
-            return PROBE_NETWORK_FAILURE_STATUS
 
 
 def _opencode_auth_export_filename(account: Account) -> str:

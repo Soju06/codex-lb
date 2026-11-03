@@ -761,11 +761,11 @@ async def test_codex_usage_reset_consume_forwards_and_refreshes(async_client, db
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(
+        async def wake_and_refresh(
             self,
             account: Account,
             *,
-            ignore_refresh_disabled: bool = False,
+            ignore_refresh_disabled: bool = True,
             access_token_override: str | None = None,
         ) -> bool:
             refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}:{access_token_override}")
@@ -837,11 +837,11 @@ async def test_codex_usage_reset_consume_refreshes_matched_workspace_account(asy
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(
+        async def wake_and_refresh(
             self,
             account: Account,
             *,
-            ignore_refresh_disabled: bool = False,
+            ignore_refresh_disabled: bool = True,
             access_token_override: str | None = None,
         ) -> bool:
             del ignore_refresh_disabled

@@ -1662,9 +1662,9 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     stale = await async_client.get("/api/accounts")
     assert stale.status_code == 200
     stale_account = next(item for item in stale.json()["accounts"] if item["accountId"] == "acc_stuck_status")
-    assert stale_account["status"] == "rate_limited"
-    # The sample's reset elapsed, so the display shows the window as absent
-    # even while the stale status awaits reconciliation.
+    assert stale_account["status"] == "active"
+    # The badge now uses the router's elapsed-cooldown decision even before
+    # background reconciliation persists it. The expired window stays absent.
     assert stale_account["usage"]["primaryRemainingPercent"] is None
 
     async with SessionLocal() as session:

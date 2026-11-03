@@ -30,7 +30,7 @@ from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.updater import UsageUpdater
 
 if TYPE_CHECKING:
-    from app.modules.proxy.load_balancer import LoadBalancer
+    from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 
 
 class _RateLimitServiceProtocol(Protocol):
@@ -74,6 +74,10 @@ def _has_available_usage_account(
 
 
 class _RateLimitMixin:
+    async def account_runtime_snapshot(self) -> dict[str, RuntimeState]:
+        proxy = cast(_RateLimitServiceProtocol, self)
+        return await proxy._load_balancer.account_runtime_snapshot()
+
     async def record_account_probe_result(
         self,
         *,

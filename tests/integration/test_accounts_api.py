@@ -227,7 +227,7 @@ async def test_account_usage_reset_consume_consumes_credit_and_refreshes(async_c
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
+        async def wake_and_refresh(self, account: Account, *, ignore_refresh_disabled: bool = True) -> bool:
             refreshed_account_ids.append(f"{account.id}:{ignore_refresh_disabled}")
             return True
 
@@ -305,7 +305,7 @@ async def test_account_usage_reset_consume_refreshes_usage_with_post_401_account
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-        async def force_refresh(self, account: Account, *, ignore_refresh_disabled: bool = False) -> bool:
+        async def wake_and_refresh(self, account: Account, *, ignore_refresh_disabled: bool = True) -> bool:
             assert ignore_refresh_disabled is True
             refreshed_access_tokens.append(encryptor.decrypt(account.access_token_encrypted))
             return True

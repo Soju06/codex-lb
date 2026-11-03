@@ -328,3 +328,9 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Stateless Responses quota recovery
+
+When HTTP streaming receives a quota rejection before exposing output, an unanchored request can be replayed unchanged on another eligible account. The input remains intact, including compaction and reasoning ciphertext, tool results, agent messages and future inline items. Stored continuation anchors, hosted-resource references, MCP approval records and explicit owner policies retain their original ownership. A declared MCP tool or inline computer result alone is not such a reference.
+
+Legacy session affinity may be softened when an otherwise movable turn's old account is unavailable or has reached quota. For example, five successive quota rejections can lead to a sixth eligible account receiving exactly the original request. The retry bound is 64 accounts or the existing request deadline; other failures keep their previous budgets. The upstream provider still decides whether it accepts opaque ciphertext produced under another account.

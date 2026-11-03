@@ -1,0 +1,6 @@
+- [x] `crates/codex-lb-egress/src/http.rs`: define `CODEX_TCP_KEEPALIVE`, `CODEX_H2_KEEP_ALIVE_INTERVAL`, and `CODEX_H2_KEEP_ALIVE_TIMEOUT` constants.
+- [x] `crates/codex-lb-egress/src/http.rs`: configure `tcp_keepalive`, `http2_keep_alive_interval`, `http2_keep_alive_timeout`, and `http2_keep_alive_while_idle` on `ClientPool::get` `reqwest::Client::builder()`.
+- [x] `crates/codex-lb-egress/src/http.rs`: add unit tests for keepalive constant spec verification and idempotent client construction across test suites.
+- [x] `crates/codex-lb-egress-worker/tests/http_protocol.rs`: add integration test `stream_remains_active_across_quiet_pause_and_connection_reuses` verifying stream activity and client reuse across pauses.
+- [x] `openspec/changes/native-egress-http-keepalive/specs/outbound-http-clients/spec.md`: document normative requirement and scenarios for native egress pooled client keepalive.
+- [x] Verification: run `cargo test --workspace`, `uv run pytest tests/unit/test_native_egress.py`, `uv run pytest tests/integration/test_native_sse_egress.py`, `npx --yes @fission-ai/openspec@1.11.0 validate --type change --strict --no-interactive -- native-egress-http-keepalive`, and `npx --yes @fission-ai/openspec@1.11.0 validate --specs`.

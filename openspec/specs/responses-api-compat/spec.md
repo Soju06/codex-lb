@@ -6372,7 +6372,7 @@ A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in for
 #### Scenario: Next request after the wedge completes on the fresh path
 
 - **GIVEN** a session key quarantined after a reattach that streamed events without `response.created`
-- **WHEN** a later request arrives for the same key with a full-conversation-resend payload and no client `previous_response_id`
+- **WHEN** a later request arrives for the same key with a verified safe full-conversation-resend payload and no client `previous_response_id`
 - **THEN** the proxy does not inject the durable anchor for that request
 - **AND** the request is sent upstream unanchored with the client's own full payload
 - **AND** the request can complete normally instead of rebuilding the identical wedged reattach

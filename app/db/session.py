@@ -36,7 +36,7 @@ from app.db.sqlite_utils import (
     read_sqlite_runstate_record,
     release_sqlite_runstate_lock,
     sqlalchemy_sqlite_url,
-    sqlite_db_path_from_url,
+    sqlite_engine_db_path,
     sqlite_url_is_memory,
     write_sqlite_runstate,
 )
@@ -388,7 +388,7 @@ class _SqliteBackupCreator(Protocol):
 
 
 def _ensure_sqlite_dir(url: str) -> None:
-    sqlite_path = sqlite_db_path_from_url(url)
+    sqlite_path = sqlite_engine_db_path(url)
     if sqlite_path is None:
         return
 
@@ -499,7 +499,7 @@ def mark_sqlite_shutdown_clean() -> None:
     scan, which is what keeps an operator restart from paying a whole-file read
     that grows with the store.
     """
-    sqlite_path = sqlite_db_path_from_url(normalize_sqlite_url(_settings.database_url))
+    sqlite_path = sqlite_engine_db_path(_settings.database_url)
     if sqlite_path is None:
         return
     if _sqlite_lifetime_lock is None or _sqlite_lifetime_lock_path != sqlite_path:
@@ -1079,7 +1079,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def _init_db() -> None:
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
-    sqlite_path = sqlite_db_path_from_url(database_url)
+    sqlite_path = sqlite_engine_db_path(database_url)
     if sqlite_path is not None:
         # Read the prior transition first, then fence this process as RUNNING
         # before deciding whether a prior CLEAN record permits skipping the
@@ -1241,7 +1241,7 @@ async def init_db() -> None:
     """Initialize the database while fencing one process onto file SQLite."""
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
-    sqlite_path = sqlite_db_path_from_url(database_url)
+    sqlite_path = sqlite_engine_db_path(database_url)
     if sqlite_path is None:
         _release_sqlite_lifetime_lock()
         await _init_db()

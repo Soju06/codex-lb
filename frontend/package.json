@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.25.0-beta.9",
   "type": "module",
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "generate:bun-nix": "bun2nix -o bun.nix",
     "dev": "vite",
@@ -29,7 +29,7 @@
     "i18next": "^26.7.1",
     "i18next-browser-languagedetector": "^8.3.0",
     "input-otp": "^1.5.0",
-    "lucide-react": "^1.67.0",
+    "lucide-react": "^1.68.0",
     "radix-ui": "^1.8.1",
     "react": "^19.3.1",
     "react-day-picker": "^10.0.2",

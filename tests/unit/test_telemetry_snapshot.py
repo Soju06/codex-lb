@@ -387,7 +387,7 @@ async def test_unmeasurable_database_size_is_unknown_and_logs_original_exception
             raise error
         return real_stat(path, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr("app.modules.telemetry.snapshot.sqlite_db_path_from_url", lambda _url: str(target))
+    monkeypatch.setattr("app.modules.telemetry.snapshot.sqlite_engine_db_path", lambda _url: str(target))
     monkeypatch.setattr(Path, "stat", fail_stat)
     builder = TelemetrySnapshotBuilder(async_session)
 

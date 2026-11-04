@@ -326,6 +326,16 @@ def sqlite_db_path_from_sqlalchemy_url(url: str) -> Path | None:
     return sqlite_db_path_from_url(url, decoded_path=raw_path)
 
 
+def sqlite_engine_db_path(url: str) -> Path | None:
+    """Filesystem path of the database file the engine opens for a settings-form URL.
+
+    The engine is created from :func:`sqlalchemy_sqlite_url`, which keeps ``#``
+    in the path, so file-side consumers (locks, run-state, backups) must resolve
+    the path the same way instead of truncating at ``#``.
+    """
+    return sqlite_db_path_from_sqlalchemy_url(sqlalchemy_sqlite_url(url))
+
+
 def _integrity_check_pragma(mode: SqliteIntegrityCheckMode) -> str:
     if mode == SqliteIntegrityCheckMode.QUICK:
         return "PRAGMA quick_check;"

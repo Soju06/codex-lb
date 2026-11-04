@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Sequence
 
 from app.core.config.settings import get_settings
-from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_db_path_from_url
+from app.db.sqlite_utils import IntegrityCheck, check_sqlite_integrity, sqlite_connection, sqlite_engine_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +223,7 @@ def _resolve_source_path(db_path: str | None) -> Path:
     if db_path:
         return Path(db_path).expanduser()
     settings = get_settings()
-    resolved = sqlite_db_path_from_url(settings.database_url)
+    resolved = sqlite_engine_db_path(settings.database_url)
     if resolved is None:
         raise RuntimeError("database_url is not a sqlite file path")
     return resolved

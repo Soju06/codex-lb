@@ -118,9 +118,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Run frontend lint
         run: make frontend-lint
@@ -148,9 +148,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Run frontend type check
         run: make frontend-typecheck
@@ -181,9 +181,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       # PRs run vitest without coverage instrumentation for a faster signal;
       # main pushes and the merge queue keep the full coverage run.
@@ -218,9 +218,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build frontend
         run: make frontend-build
@@ -248,9 +248,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Cache Playwright browsers
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
@@ -408,9 +408,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
@@ -463,9 +463,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
@@ -561,9 +561,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
         if: needs.changes.outputs.backend == 'true'
@@ -658,9 +658,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
@@ -856,9 +856,9 @@ jobs:
           path: |
             ~/.bun/install/cache
             frontend/node_modules
-          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          key: bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
           restore-keys: |
-            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+            bun-1.4.4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Verify bun.nix is generated from bun.lock
         run: |

@@ -453,6 +453,59 @@ async def test_startup_init_db_preserves_literal_percent_data_dir_path(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_startup_init_db_keeps_hash_in_data_dir_path(tmp_path, monkeypatch) -> None:
+    """Regression: file-side startup state follows the engine's path, not a ``#``-truncated one."""
+
+    from app.db import session as session_module
+    from app.db.sqlite_utils import IntegrityCheck
+
+    hash_db_path = tmp_path / "a#b" / "store.db"
+    hash_url = f"sqlite+aiosqlite:///{hash_db_path}"
+    checked_paths: list[str] = []
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        SimpleNamespace(
+            database_url=hash_url,
+            database_sqlite_startup_check_mode="quick",
+            database_migrate_on_startup=True,
+            database_sqlite_pre_migrate_backup_enabled=False,
+            database_migrations_fail_fast=True,
+        ),
+    )
+
+    def fake_check_sqlite_integrity(path, *, mode):
+        del mode
+        checked_paths.append(str(path))
+        return IntegrityCheck(ok=True, details=None)
+
+    async def fake_run_startup_migrations(database_url: str):
+        return SimpleNamespace(
+            current_revision="head",
+            bootstrap=SimpleNamespace(stamped_revision=None, legacy_row_count=0),
+        )
+
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", fake_check_sqlite_integrity)
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda database_url: SimpleNamespace(needs_upgrade=False),
+            fake_run_startup_migrations,
+            lambda database_url: (),
+        ),
+    )
+
+    await session_module.init_db()
+
+    assert make_url(sqlalchemy_sqlite_url(hash_url)).database == str(hash_db_path)
+    assert checked_paths == [str(hash_db_path)]
+    assert hash_db_path.parent.is_dir()
+    assert session_module._sqlite_lifetime_lock_path == hash_db_path
+
+
+@pytest.mark.asyncio
 async def test_dashboard_usage_sqlite_fast_path_decodes_percent_encoded_bind_url(tmp_path, monkeypatch) -> None:
     """Regression: dashboard/account usage reads open the real decoded DB file.
 

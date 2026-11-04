@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
@@ -195,7 +195,7 @@ async def test_ensure_fresh_detached_refresh_owns_session_on_caller_cancel(monke
     scope_state = {"opened": False, "closed": False}
 
     @asynccontextmanager
-    async def _refresh_scope() -> AsyncIterator[AccountsRepositoryPort]:
+    async def _refresh_scope() -> AsyncGenerator[AccountsRepositoryPort]:
         scope_state["opened"] = True
         try:
             yield cast(AccountsRepositoryPort, owned_repo)
@@ -571,7 +571,7 @@ async def test_refresh_account_does_not_promote_unknown_workspace_into_taken_slo
 @pytest.mark.asyncio
 async def test_refresh_account_converts_upstream_route_failure_to_refresh_error(monkeypatch):
     @asynccontextmanager
-    async def fake_background_session() -> AsyncIterator[object]:
+    async def fake_background_session() -> AsyncGenerator[object]:
         yield object()
 
     async def fail_resolve_route(*_args: object, **_kwargs: object) -> None:
@@ -826,7 +826,7 @@ async def test_ensure_fresh_singleflight_coalesces_owned_and_nonowned_sessions(m
         )
 
     @asynccontextmanager
-    async def _refresh_scope() -> AsyncIterator[AccountsRepositoryPort]:
+    async def _refresh_scope() -> AsyncGenerator[AccountsRepositoryPort]:
         scope_state["opened"] = True
         try:
             yield cast(AccountsRepositoryPort, owned_repo)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import cast
@@ -246,7 +246,7 @@ def _tick_scheduler(
     repo = _Repo([account])
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     async def _single_live_replica() -> int:
@@ -356,7 +356,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_active_and_skips_other
     calls: list[str] = []
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(
@@ -387,7 +387,7 @@ async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changin
     calls: list[str] = []
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(
@@ -424,7 +424,7 @@ async def test_auth_guardian_refresh_once_survives_candidate_session_close() -> 
             await session.commit()
 
         @asynccontextmanager
-        async def repo_factory() -> AsyncIterator[AccountsRepository]:
+        async def repo_factory() -> AsyncGenerator[AccountsRepository]:
             session: AsyncSession = session_factory()
             try:
                 yield AccountsRepository(session)
@@ -464,7 +464,7 @@ async def test_auth_guardian_skips_pass_when_dynamic_ring_shows_multiple_replica
     calls: list[str] = []
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     async def _two_live_replicas() -> int:
@@ -505,7 +505,7 @@ async def test_auth_guardian_runs_when_dynamic_ring_has_single_replica() -> None
     calls: list[str] = []
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     async def _one_live_replica() -> int:
@@ -542,7 +542,7 @@ async def test_auth_guardian_ignores_dynamic_ring_when_leader_election_enabled()
     ring_counted = False
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     async def _count_ring() -> int:
@@ -584,7 +584,7 @@ async def test_auth_guardian_refresh_once_invalidates_account_selection_cache(
     cache = _AccountSelectionCache()
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     monkeypatch.setattr(guardian_module, "get_account_selection_cache", lambda: cache)
@@ -626,7 +626,7 @@ async def test_auth_guardian_transport_failure_does_not_mark_status() -> None:
     }
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(
@@ -669,7 +669,7 @@ async def test_auth_guardian_permanent_refresh_failure_invalidates_account_selec
     }
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     monkeypatch.setattr(guardian_module, "get_account_selection_cache", lambda: cache)
@@ -713,7 +713,7 @@ async def test_auth_guardian_run_loop_survives_transient_pass_failure(caplog: py
     repo = _FlakyRepo([])
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_FlakyRepo]:
+    async def repo_factory() -> AsyncGenerator[_FlakyRepo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(
@@ -750,7 +750,7 @@ async def test_auth_guardian_skips_backoff_before_batch_limit() -> None:
     calls: list[str] = []
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(
@@ -796,7 +796,7 @@ async def test_auth_guardian_waits_for_refresh_before_cancelled_candidate_exits(
             return account
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_Repo]:
+    async def repo_factory() -> AsyncGenerator[_Repo]:
         nonlocal repo_exited
         try:
             yield repo

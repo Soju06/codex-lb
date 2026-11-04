@@ -5,11 +5,11 @@ import logging
 import re
 import time
 import warnings
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, cast
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -191,7 +191,7 @@ def _required_sqlalchemy_url(config: Config) -> str:
 
 
 @contextmanager
-def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
+def _sync_connection(sync_database_url: str) -> Generator[Connection]:
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.connect() as connection:
@@ -201,7 +201,7 @@ def _sync_connection(sync_database_url: str) -> Iterator[Connection]:
 
 
 @contextmanager
-def _sync_transaction(sync_database_url: str) -> Iterator[Connection]:
+def _sync_transaction(sync_database_url: str) -> Generator[Connection]:
     engine = create_engine(sync_database_url, future=True)
     try:
         with engine.begin() as connection:
@@ -628,18 +628,19 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
     return False
 
 
-_OBJECT_ADDRESS_RE = re.compile(r" object at 0x[0-9a-fA-F]+>")
+_OBJECT_ADDRESS_RE = re.compile(r" at 0x[0-9a-fA-F]+>")
 
 
 def _stable_diff_repr(diff: object) -> str:
     """Render an autogenerate diff without CPython object addresses.
 
-    SQLAlchemy renders constraint members as ``<... object at 0x7f...>``, so the
-    repr of an otherwise identical foreign-key diff differs between two calls in
-    the same process. Drift output is compared and shown to operators, so it has
-    to be stable.
+    SQLAlchemy renders constraint members as ``<... object at 0x7f...>`` and
+    callable column defaults as ``<function ... at 0x7f...>`` (SQLAlchemy 2.1.8+
+    wraps the callable afresh on every column copy), so the repr of an otherwise
+    identical diff differs between two calls in the same process. Drift output
+    is compared and shown to operators, so it has to be stable.
     """
-    return _OBJECT_ADDRESS_RE.sub(" object>", repr(diff))
+    return _OBJECT_ADDRESS_RE.sub(">", repr(diff))
 
 
 def check_schema_drift(database_url: str) -> tuple[str, ...]:

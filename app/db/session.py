@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -34,7 +35,8 @@ from app.db.sqlite_utils import (
     normalize_sqlite_url,
     read_sqlite_runstate_record,
     release_sqlite_runstate_lock,
-    sqlite_db_path_from_url,
+    sqlalchemy_sqlite_url,
+    sqlite_engine_db_path,
     sqlite_url_is_memory,
     write_sqlite_runstate,
 )
@@ -354,13 +356,13 @@ def _create_main_engine(url: str) -> AsyncEngine:
     is_sqlite_memory = _is_sqlite_memory_url(url)
     if is_sqlite_memory:
         main_engine = create_async_engine(
-            url,
+            sqlalchemy_sqlite_url(url),
             echo=False,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     else:
         main_engine = create_async_engine(
-            url,
+            sqlalchemy_sqlite_url(url),
             echo=False,
             **_sqlite_file_async_engine_kwargs(),
         )
@@ -386,7 +388,7 @@ class _SqliteBackupCreator(Protocol):
 
 
 def _ensure_sqlite_dir(url: str) -> None:
-    sqlite_path = sqlite_db_path_from_url(url)
+    sqlite_path = sqlite_engine_db_path(url)
     if sqlite_path is None:
         return
 
@@ -497,7 +499,7 @@ def mark_sqlite_shutdown_clean() -> None:
     scan, which is what keeps an operator restart from paying a whole-file read
     that grows with the store.
     """
-    sqlite_path = sqlite_db_path_from_url(normalize_sqlite_url(_settings.database_url))
+    sqlite_path = sqlite_engine_db_path(_settings.database_url)
     if sqlite_path is None:
         return
     if _sqlite_lifetime_lock is None or _sqlite_lifetime_lock_path != sqlite_path:
@@ -985,7 +987,7 @@ def init_background_db(url: str | None = None) -> None:
             _background_session_factory = SessionLocal
             return
         _background_engine = create_async_engine(
-            db_url,
+            sqlalchemy_sqlite_url(db_url),
             echo=False,
             **_sqlite_file_async_engine_kwargs(),
         )
@@ -1000,7 +1002,7 @@ def init_background_db(url: str | None = None) -> None:
 
 
 @asynccontextmanager
-async def get_background_session() -> AsyncIterator[AsyncSession]:
+async def get_background_session() -> AsyncGenerator[AsyncSession]:
     """Session provider for background tasks, schedulers, and auth dependencies.
 
     Uses the separate background pool if initialized, otherwise falls back to main pool.
@@ -1050,7 +1052,7 @@ async def relax_commit_durability(session: AsyncSession) -> None:
 
 
 @asynccontextmanager
-async def sqlite_writer_section() -> AsyncIterator[None]:
+async def sqlite_writer_section() -> AsyncGenerator[None]:
     """Serialize local SQLite write transactions without throttling upstream work."""
     global _sqlite_writer_lock
     database_url = normalize_sqlite_url(_settings.database_url)
@@ -1077,7 +1079,7 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def _init_db() -> None:
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
-    sqlite_path = sqlite_db_path_from_url(database_url)
+    sqlite_path = sqlite_engine_db_path(database_url)
     if sqlite_path is not None:
         # Read the prior transition first, then fence this process as RUNNING
         # before deciding whether a prior CLEAN record permits skipping the
@@ -1239,7 +1241,7 @@ async def init_db() -> None:
     """Initialize the database while fencing one process onto file SQLite."""
     database_url = normalize_sqlite_url(_settings.database_url)
     _ensure_sqlite_dir(database_url)
-    sqlite_path = sqlite_db_path_from_url(database_url)
+    sqlite_path = sqlite_engine_db_path(database_url)
     if sqlite_path is None:
         _release_sqlite_lifetime_lock()
         await _init_db()

@@ -5,7 +5,7 @@ import os
 import sqlite3
 import tempfile
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -93,7 +93,7 @@ class SqliteRunStateRecord:
 
 
 @contextmanager
-def sqlite_connection(path: str | Path) -> Iterator[sqlite3.Connection]:
+def sqlite_connection(path: str | Path) -> Generator[sqlite3.Connection]:
     connection = sqlite3.connect(str(path))
     try:
         with connection:
@@ -181,7 +181,12 @@ def _sqlite_uri_file_path(path: str) -> str | None:
     return resolved
 
 
-def sqlite_db_path_from_url(url: str) -> Path | None:
+def sqlite_db_path_from_url(url: str, *, decoded_path: str | None = None) -> Path | None:
+    """Resolve the filesystem path of a SQLite URL.
+
+    ``decoded_path`` is an already-decoded database portion (no query/fragment
+    splitting is applied to it), so ``#``, ``?`` and ``%`` stay literal.
+    """
     if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
         return None
 
@@ -191,8 +196,10 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
         return None
 
     path_start = marker_index + len(marker)
-    path = url[path_start:]
-    if _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
+    path = url[path_start:] if decoded_path is None else decoded_path
+    if decoded_path is not None:
+        pass
+    elif _sqlite_path_is_raw_windows_drive(path) or _sqlite_path_is_raw_windows_unc(path):
         # Raw Windows drive and UNC paths are filesystem paths, not URL-encoded
         # forms: a `#` is a legal path character there (e.g. the decoded output
         # of `normalize_sqlite_url()`), so it must not be stripped as a URL
@@ -208,7 +215,8 @@ def sqlite_db_path_from_url(url: str) -> Path | None:
     # path. Do not unquote arbitrary `%xx` sequences here: settings builds the
     # default SQLite URL directly from `data_dir`, so a valid literal path such
     # as `/var/lib/codex%20lb/store.db` must remain literal.
-    path = _decode_sqlalchemy_windows_sqlite_path(path)
+    if decoded_path is None:
+        path = _decode_sqlalchemy_windows_sqlite_path(path)
 
     if not path or path == ":memory:" or _sqlite_uri_is_memory(url, path_start, path):
         return None
@@ -269,6 +277,63 @@ def normalize_sqlite_url(url: str) -> str:
 
     decoded_path = _decode_sqlalchemy_windows_sqlite_path(path)
     return f"{url[:path_start]}{decoded_path}{url[suffix_index:]}"
+
+
+def sqlalchemy_sqlite_url(url: str) -> str:
+    """Return ``url`` in the form SQLAlchemy 2.1 parses back to the same file.
+
+    Throughout the app a SQLite URL string carries a *raw* filesystem path
+    (``settings`` builds it from ``data_dir``, and ``sqlite_db_path_from_url``
+    only decodes the Windows forms SQLAlchemy renders). SQLAlchemy 2.1
+    percent-decodes the database portion of every URL it parses
+    (https://docs.sqlalchemy.org/en/21/changelog/migration_21.html#url-stringify-and-parse-now-supports-url-escaping-for-the-database-portion),
+    so a path with a literal ``%`` (``/var/lib/codex%20lb``) would silently open
+    a different file. Escape the ``%`` of the path so SQLAlchemy decodes it back
+    to the raw path we mean. In-memory URLs, URL queries and non-SQLite URLs are
+    returned unchanged.
+    """
+    url = normalize_sqlite_url(url)
+    if not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
+        return url
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0:
+        return url
+    path_start = marker_index + len(marker)
+    query_index = url.find("?", path_start)
+    path_end = len(url) if query_index < 0 else query_index
+    path = url[path_start:path_end]
+    if "%" not in path:
+        return url
+    return f"{url[:path_start]}{path.replace('%', '%25')}{url[path_end:]}"
+
+
+def sqlite_db_path_from_sqlalchemy_url(url: str) -> Path | None:
+    """``sqlite_db_path_from_url`` for a URL already in SQLAlchemy 2.1 form.
+
+    Inverse of :func:`sqlalchemy_sqlite_url`: percent-decode the database
+    portion (as SQLAlchemy does) to recover the raw path the rest of the app
+    reasons about.
+    """
+    marker = ":///"
+    marker_index = url.find(marker)
+    if marker_index < 0 or not (url.startswith("sqlite+aiosqlite:") or url.startswith("sqlite:")):
+        return sqlite_db_path_from_url(url)
+    path_start = marker_index + len(marker)
+    query_index = url.find("?", path_start)
+    path_end = len(url) if query_index < 0 else query_index
+    raw_path = urllib.parse.unquote(url[path_start:path_end])
+    return sqlite_db_path_from_url(url, decoded_path=raw_path)
+
+
+def sqlite_engine_db_path(url: str) -> Path | None:
+    """Filesystem path of the database file the engine opens for a settings-form URL.
+
+    The engine is created from :func:`sqlalchemy_sqlite_url`, which keeps ``#``
+    in the path, so file-side consumers (locks, run-state, backups) must resolve
+    the path the same way instead of truncating at ``#``.
+    """
+    return sqlite_db_path_from_sqlalchemy_url(sqlalchemy_sqlite_url(url))
 
 
 def _integrity_check_pragma(mode: SqliteIntegrityCheckMode) -> str:

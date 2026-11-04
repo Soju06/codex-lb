@@ -6,9 +6,9 @@ import signal
 import socket
 import sys
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator
 
 import httpx
 import pytest
@@ -70,7 +70,7 @@ async def _run_server(
     drain_timeout_seconds: float,
     completion_delay_seconds: float = 0.0,
     post_drain_cleanup_timeout_seconds: float = 25.0,
-) -> AsyncIterator[_RunningServer]:
+) -> AsyncGenerator[_RunningServer]:
     port = _unused_local_port()
     process = await asyncio.create_subprocess_exec(
         sys.executable,

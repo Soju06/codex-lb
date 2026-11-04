@@ -133,7 +133,7 @@ describe("UseragentDistributionDonut", () => {
     expect(unknownLegendLabel).toBeDefined();
     expect(unknownLegendRow).not.toBeNull();
     expect((unknownLegendRow?.firstElementChild as HTMLElement) ?? null).toHaveStyle({
-      background: "#9ca3af",
+      backgroundColor: "#9ca3af",
     });
   });
 
@@ -153,7 +153,7 @@ describe("UseragentDistributionDonut", () => {
     expect(unknownLegendLabel).toBeDefined();
     expect(unknownLegendRow).not.toBeNull();
     expect((unknownLegendRow?.firstElementChild as HTMLElement) ?? null).toHaveStyle({
-      background: "#3b82f6",
+      backgroundColor: "#3b82f6",
     });
   });
 

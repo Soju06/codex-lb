@@ -5,7 +5,7 @@ import contextlib
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -339,7 +339,7 @@ async def _count_live_bridge_ring_members() -> int:
 
 
 @asynccontextmanager
-async def _default_accounts_repo_factory() -> AsyncIterator[AccountsRepository]:
+async def _default_accounts_repo_factory() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
 

@@ -40,7 +40,7 @@ def main() -> None:
             [
                 "npx",
                 "--yes",
-                "@fission-ai/openspec@1.11.0",
+                "@fission-ai/openspec@1.16.0",
                 "validate",
                 "--type",
                 "change",

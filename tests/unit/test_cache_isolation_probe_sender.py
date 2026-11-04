@@ -9,7 +9,7 @@ before the next sequential call starts.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
@@ -59,7 +59,7 @@ def _completed_event(*, input_tokens: int, cached_tokens: int) -> str:
 
 
 @asynccontextmanager
-async def _unused_accounts_repo() -> AsyncIterator[AccountsRepository]:
+async def _unused_accounts_repo() -> AsyncGenerator[AccountsRepository]:
     """Every test below patches the two methods that would open a repository."""
 
     raise AssertionError("the probe sender must not open an accounts repository here")

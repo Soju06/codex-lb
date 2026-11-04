@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
@@ -91,7 +91,7 @@ async def _enable_api_key_auth(async_client) -> None:
 
 
 @asynccontextmanager
-async def stub_source_upstreams() -> AsyncIterator[Callable[..., Awaitable[str]]]:
+async def stub_source_upstreams() -> AsyncGenerator[Callable[..., Awaitable[str]]]:
     """Run stub OpenAI-compatible upstreams for one test; yields ``start(handler) -> base_url``.
 
     Test modules wrap this in a local ``source_upstream`` fixture (a fixture

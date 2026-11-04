@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.13.1 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv-bin
 
-FROM rust:1.99.0-slim-bookworm AS native-egress-build
+FROM rust:1.99.1-slim-trixie AS native-egress-build
 
 WORKDIR /src
 
@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --package codex-lb-egress-worker --bin codex-lb-native-egress \
     && cp target/release/codex-lb-native-egress /tmp/codex-lb-native-egress
 
-FROM oven/bun:1.4.3-alpine AS frontend-build
+FROM oven/bun:1.4.4-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 COPY frontend ./
 RUN bun run build
 
-FROM python:3.14-slim AS python-build
+FROM python:3.14-slim-trixie AS python-build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -41,7 +41,7 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
 
-FROM python:3.14-slim AS runtime
+FROM python:3.14-slim-trixie AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -59,7 +59,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip uninstall -y pip setuptools wheel || true \
-    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.13 \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
     && rm -rf /usr/local/lib/python*/site-packages/pip* \
         /usr/local/lib/python*/site-packages/setuptools* \
         /usr/local/lib/python*/site-packages/wheel*

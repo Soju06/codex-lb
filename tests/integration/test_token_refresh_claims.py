@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -160,7 +160,7 @@ async def test_invalid_refresh_token_payload_requires_reauth_and_gates_routing_o
             return InvalidRefreshTokenResponse()
 
     @asynccontextmanager
-    async def fake_lease_http_session(_session: object) -> AsyncIterator[InvalidRefreshTokenSession]:
+    async def fake_lease_http_session(_session: object) -> AsyncGenerator[InvalidRefreshTokenSession]:
         yield InvalidRefreshTokenSession()
 
     monkeypatch.setattr(refresh_module, "lease_http_session", fake_lease_http_session)

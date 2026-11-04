@@ -29,7 +29,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -215,7 +215,7 @@ def default_probe_model() -> str | None:
 
 
 @contextlib.asynccontextmanager
-async def _accounts_repo() -> AsyncIterator[AccountsRepository]:
+async def _accounts_repo() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         try:
             yield AccountsRepository(session)

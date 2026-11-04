@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import timedelta
 from uuid import uuid4
@@ -31,7 +31,7 @@ def _require_postgres() -> None:
 
 
 @contextmanager
-def _captured_statements() -> Iterator[list[str]]:
+def _captured_statements() -> Generator[list[str]]:
     statements: list[str] = []
 
     def _record(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]

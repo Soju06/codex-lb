@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import errno
+import importlib
 import json
 import logging
 import sys
@@ -126,6 +127,10 @@ def _install_fake_otel(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     opentelemetry_module = ModuleType("opentelemetry")
     opentelemetry_module.__path__ = []
     setattr(opentelemetry_module, "trace", trace_module)
+    # FastAPI >= 0.162 imports these itself when the test client starts the
+    # lifespan, so the fake package has to keep the real ones reachable.
+    setattr(opentelemetry_module, "_logs", importlib.import_module("opentelemetry._logs"))
+    setattr(opentelemetry_module, "metrics", importlib.import_module("opentelemetry.metrics"))
 
     sdk_module = ModuleType("opentelemetry.sdk")
     sdk_module.__path__ = []

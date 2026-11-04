@@ -81,7 +81,7 @@ def test_pr_uses_merge_base_and_event_head_in_merge_checkout(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     validations = [line for line in result.stdout.splitlines() if line.startswith("VALIDATE ")]
     assert validations == [
-        "VALIDATE --yes @fission-ai/openspec@1.11.0 validate --type change --strict --no-interactive -- touched"
+        "VALIDATE --yes @fission-ai/openspec@1.16.0 validate --type change --strict --no-interactive -- touched"
     ]
 
 

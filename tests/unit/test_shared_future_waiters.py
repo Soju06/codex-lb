@@ -13,6 +13,7 @@ production incident).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 
 import pytest
 
@@ -141,7 +142,10 @@ async def test_timed_wait_runs_through_injected_scheduler_and_untimed_wait_does_
     recorded: list[tuple[object, float | None]] = []
 
     class RecordingScheduler(RealScheduler):
-        async def wait_for(self, fut, timeout):
+        # RealScheduler.wait_for is a plain class attribute (staticmethod alias); the
+        # intentional test override of that seam trips the mutable-override check.
+        @staticmethod
+        async def wait_for[T](fut: Awaitable[T], timeout: float | None) -> T:  # ty: ignore[invalid-mutable-override]
             recorded.append((fut, timeout))
             return await asyncio.wait_for(fut, timeout)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -106,7 +106,7 @@ class FirewallRepositoryFake:
 
 
 @asynccontextmanager
-async def _session() -> AsyncIterator[None]:
+async def _session() -> AsyncGenerator[None]:
     yield None
 
 

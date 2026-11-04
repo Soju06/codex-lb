@@ -35,7 +35,7 @@ from app.db.models import (
     QuotaPlannerSettings,
     RequestLog,
 )
-from app.db.sqlite_utils import sqlite_db_path_from_url
+from app.db.sqlite_utils import sqlite_engine_db_path
 from app.modules.reports.repository import ReportsRepository, _report_conditions
 from app.modules.settings.repository import SettingsRepository
 from app.modules.telemetry.clients import ClientCount, catalog_model_name, client_shares
@@ -433,7 +433,7 @@ class TelemetrySnapshotBuilder:
         if self._session.get_bind().dialect.name == "postgresql":
             result = await self._session.execute(text("SELECT pg_database_size(current_database())"))
             return int(result.scalar_one())
-        path = sqlite_db_path_from_url(self._settings.database_url)
+        path = sqlite_engine_db_path(self._settings.database_url)
         if path is None:
             return None
         try:

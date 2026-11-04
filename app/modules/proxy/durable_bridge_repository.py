@@ -4362,7 +4362,7 @@ _SNAPSHOT_COLUMNS = (
 )
 
 
-def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSessionSnapshot:
+def _returned_row_to_snapshot(row: Row) -> DurableBridgeSessionSnapshot:
     mapping = row._mapping
     continuity_abandoned = _bridge_continuity_is_abandoned(
         mapping[HttpBridgeSessionRecord.continuity_abandoned_at],

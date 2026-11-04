@@ -6377,14 +6377,22 @@ A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in for
 - **AND** the request is sent upstream unanchored with the client's own full payload
 - **AND** the request can complete normally instead of rebuilding the identical wedged reattach
 
-#### Scenario: Suppressed anchor does not come back through session state
+#### Scenario: Safe fresh resend does not rehydrate a suppressed anchor
 
-- **GIVEN** a quarantined session key and a full-conversation-resend payload whose stored durable prefix is trimmable but whose fresh suffix does not retain the prior output
+- **GIVEN** a quarantined session key and a full-conversation-resend payload whose stored durable prefix is trimmable and whose fresh suffix retains the prior output or exactly matches the pending tool-call manifest
 - **WHEN** the fresh-reattach durable-anchor injection is skipped because of the quarantine
 - **THEN** the durable anchor is not rehydrated into the fresh session's completed-response state
 - **AND** the session-level injection does not re-add the same anchor or trim the stored prefix
 - **AND** the dispatch goes upstream genuinely unanchored with the client's untrimmed payload
 - **AND** the suppression applies even when the fresh-reattach injection was already ineligible for other reasons (for example a conversation-scoped payload, a live alias session, or an active-owner forward that falls back to a local rebind)
+
+#### Scenario: Incomplete fresh resend keeps the poisoned anchor fail-closed
+
+- **GIVEN** a quarantined session key and a full-conversation-resend payload whose stored durable prefix is trimmable but whose fresh suffix omits the prior output and does not exactly match the pending tool-call manifest
+- **WHEN** the fresh-reattach durable-anchor injection would otherwise be skipped because of the quarantine
+- **THEN** the service retains the proxy-owned anchor through submission
+- **AND** the request fails with `bridge_previous_response_not_found` before upstream dispatch
+- **AND** the incomplete payload is not sent unanchored without the context its anchor provides
 
 #### Scenario: A poison quarantine outlives the cooldown that armed it
 

@@ -1804,15 +1804,47 @@ class _HTTPBridgeStreamingMixin:
                         and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
                         for key in anchor_planning_keys
                     )
-            if payload_looks_like_full_resend and (
-                fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned
+            if (
+                payload_looks_like_full_resend
+                and not durable_full_resend_has_safe_fresh_context
+                and durable_lookup.latest_response_id is not None
+                and (fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned)
+            ):
+                # A cumulative payload that omits both the prior output and
+                # the exact pending-tool manifest cannot replace the dead
+                # anchor with a context-free fresh turn. Keep the request
+                # fail-closed so the client can resend the actual history.
+                _log_http_bridge_event(
+                    "previous_response_poisoned_anchor_fail_fast",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail="outcome=incomplete_full_resend_fail_closed",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
+                )
+                raise ProxyResponseError(
+                    404,
+                    openai_error(
+                        "bridge_previous_response_not_found",
+                        "The reattached anchor for this session was proven dead; resend the full conversation.",
+                    ),
+                )
+            if (
+                payload_looks_like_full_resend
+                and durable_full_resend_has_safe_fresh_context
+                and (fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned)
             ):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
-                # conversation, so send it unanchored on the fresh path
-                # instead of rebuilding the same reattach. Delta-only
-                # payloads keep the anchor: it is their only way to convey
-                # prior context (same boundary as the fenced anchor clear).
+                # conversation, so send it unanchored on the fresh path instead
+                # of rebuilding the same reattach. An incomplete cumulative
+                # payload must keep the anchor and fail closed below: removing
+                # it would submit a request that cannot carry the context it
+                # depends on. Delta-only payloads keep the anchor: it is their
+                # only way to convey prior context (same boundary as the fenced
+                # anchor clear).
                 # Evaluated independently of the fresh-reattach eligibility
                 # above: even when that gate is already false (for example a
                 # conversation-scoped payload, a live alias session, or an

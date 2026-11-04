@@ -16797,16 +16797,15 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatches_unanchored(
+async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_fails_closed(
     async_client, app_instance, monkeypatch
 ):
-    """Regression for the #1534 session-state side door: a quarantined
-    full-resend whose durable prefix is trimmable but whose fresh suffix does
-    NOT retain the prior output must go upstream genuinely unanchored. Before
-    the fix, the early durable-anchor injection was suppressed but session
-    hydration restored ``last_completed_response_id`` and the session-level
-    injection re-added the same anchor and trimmed the prefix — rebuilding the
-    wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
+    """A quarantined anchor must not be bypassed by an incomplete resend.
+
+    A full resend whose fresh suffix omits the prior output cannot safely run
+    without the anchor. It therefore keeps the proxy-owned anchor and returns
+    the existing poisoned-anchor response before dispatching upstream.
+    """
     _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
@@ -16958,15 +16957,12 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
 
-    # The dispatch must be genuinely unanchored: no early durable injection,
-    # no session-level re-injection of the same anchor, no prefix trim.
-    assert third.status_code == 200, third.text
-    assert third.json()["id"] == "resp_quarantine_unsafe_fresh_1"
-    assert connect_count == 3
-    assert len(fresh_upstream.sent_text) == 1
-    fresh_payload = json.loads(fresh_upstream.sent_text[0])
-    assert "previous_response_id" not in fresh_payload
-    assert fresh_payload["input"] == unsafe_suffix_resend
+    # The incomplete resend must retain the dead anchor and fail before any
+    # fresh upstream socket is used; sending it unanchored would lose context.
+    assert third.status_code == 404, third.text
+    assert third.json()["error"]["code"] == "bridge_previous_response_not_found"
+    assert connect_count == 2
+    assert not fresh_upstream.sent_text
 
 
 @pytest.mark.asyncio
@@ -17183,6 +17179,16 @@ async def test_http_bridge_split_turn_state_row_honors_thread_anchor_fence(
     if request_kind not in {"other-scope", "cached-miss"}:
         assert await service._load_http_bridge_retry_circuit(original)
     full_input = [*historical_input, {"role": "user", "content": "continue"}]
+    if request_kind in {"full", "cached-miss"}:
+        full_input.insert(
+            len(historical_input),
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "OK"}],
+            },
+        )
     retry_body = {**body, "input": full_input}
     if request_kind == "delta":
         retry_body["input"] = "continue"
@@ -17193,7 +17199,11 @@ async def test_http_bridge_split_turn_state_row_honors_thread_anchor_fence(
             # A fence written after the planning cache's confirmed miss is
             # first learned at submit. That first refusal must not loop:
             # the very next full resend sees it through the fallback key.
-            first_refusal = await client.post(path, json=retry_body, headers=headers)
+            first_refusal_body = {
+                **retry_body,
+                "input": [*historical_input, {"role": "user", "content": "continue"}],
+            }
+            first_refusal = await client.post(path, json=first_refusal_body, headers=headers)
             assert first_refusal.status_code == 404, first_refusal.text
             assert all(not upstream.sent_text for upstream in upstreams[1:])
         retry = await client.post(path, json=retry_body, headers=headers)

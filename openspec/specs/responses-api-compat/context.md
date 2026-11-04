@@ -339,9 +339,12 @@ planning trims a complete client history against the old anchor and submission
 rejects it on the destination, causing the next full resend to repeat the loop.
 
 For example, old turn-state row T retains a 240-item prefix while thread B has
-abandoned that anchor. A 244-item full resend must reach the original account
-with all 244 items, without an injected anchor. A delta still needs its prior
-context; explicit client anchors, sibling keys, and other API-key scopes retain
-their existing behavior. The submit-time fence still handles evidence that
-arrives after planning, including a recently cached miss; this change does not
-remove that final race check or merge historical durable records.
+abandoned that anchor. A verified 244-item full resend must reach the original
+account with all 244 items, without an injected anchor. A cumulative resend
+whose suffix omits the prior assistant output is not a safe fresh resend: it
+retains the anchor and fails closed rather than silently losing context. A
+delta still needs its prior context; explicit client anchors, sibling keys,
+and other API-key scopes retain their existing behavior. The submit-time fence
+still handles evidence that arrives after planning, including a recently
+cached miss; this change does not remove that final race check or merge
+historical durable records.

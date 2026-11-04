@@ -1806,6 +1806,7 @@ class _HTTPBridgeStreamingMixin:
                     )
             if (
                 payload_looks_like_full_resend
+                and payload.previous_response_id is None
                 and not durable_full_resend_has_safe_fresh_context
                 and durable_lookup.latest_response_id is not None
                 and (fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned)

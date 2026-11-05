@@ -41,6 +41,8 @@ async def _setup(client, *, scoped_to_ordinary=False, enabled=True, allow_second
     async with SessionLocal() as session:
         for account in (await session.scalars(select(Account))).all():
             account.security_work_authorized = account.id != ids["ordinary"]
+            if account.id == ids["ordinary"]:
+                account.routing_policy = "burn_first"
         await session.commit()
     settings = await client.put("/api/settings", json={"apiKeyAuthEnabled": True, "stickyThreadsEnabled": False})
     assert settings.status_code == 200
@@ -72,12 +74,15 @@ def _install_upstream(
     async def keep_fresh(self, account, *args, **kwargs):
         return account
 
-    async def stream(payload, headers, access_token, account_id, **kwargs):
+    def record_attempt(payload, account_id):
         calls.append((account_id, payload.to_payload()))
         if reject_first_account and account_id == calls[0][0]:
             raise ProxyResponseError(429, openai_error("rate_limit_exceeded", "Test account quota exhausted"))
         if reject:
             raise ProxyResponseError(403, openai_error("model_not_found", "The model is unavailable for this account"))
+
+    async def stream(payload, headers, access_token, account_id, **kwargs):
+        record_attempt(payload, account_id)
         for kind in ("response.created", "response.completed"):
             event = {
                 "type": kind,
@@ -91,11 +96,7 @@ def _install_upstream(
             yield "data: " + json.dumps(event) + "\n\n"
 
     async def compact(payload, headers, access_token, account_id, **kwargs):
-        calls.append((account_id, payload.to_payload()))
-        if reject_first_account and account_id == calls[0][0]:
-            raise ProxyResponseError(429, openai_error("rate_limit_exceeded", "Test account quota exhausted"))
-        if reject:
-            raise ProxyResponseError(403, openai_error("model_not_found", "The model is unavailable for this account"))
+        record_attempt(payload, account_id)
         return CompactResponsePayload.model_validate(
             {
                 "id": f"resp_native_compact_{len(calls)}" if unique_response_ids else "resp_native_compact",
@@ -119,7 +120,7 @@ def _payload(identifier):
     payload = {"model": "gpt-5.1", "instructions": "", "input": "test", "stream": True}
     if identifier == "legacy":
         payload["model"] = "gpt-daybreak-blue-latest"
-    else:
+    elif identifier == "native":
         payload["access_programs"] = {"cyber": "daybreak_blue"}
     return payload
 
@@ -165,7 +166,7 @@ async def test_http_daybreak_previous_response_keeps_constraint(async_client, mo
     calls = _install_upstream(monkeypatch)
     response = await async_client.post(ROUTES[0], json=_payload("native"), headers=headers)
     assert response.status_code == 200, response.text
-    payload = {"model": "gpt-5.1", "instructions": "", "input": "continue", "stream": True}
+    payload = _payload("ordinary")
     payload["previous_response_id"] = "resp_native_http"
     response = await async_client.post(path, json=payload, headers=headers)
     assert response.status_code == 200, response.text
@@ -291,7 +292,7 @@ async def test_http_enforced_daybreak_model_obeys_eligibility(async_client, monk
     update = await async_client.patch("/api/api-keys/" + key_id, json={"enforcedModel": "gpt-daybreak-blue-latest"})
     assert update.status_code == 200, update.text
     calls = _install_upstream(monkeypatch, forbid_sources=case != "disabled")
-    payload = {"model": "gpt-5.1", "instructions": "", "input": "test", "stream": True}
+    payload = _payload("ordinary")
     if case == "standard_conflict":
         payload["access_programs"] = {"cyber": "standard"}
     response = await async_client.post(path, json=payload, headers=headers)
@@ -317,12 +318,7 @@ async def test_http_daybreak_conversation_isolation_preserves_burn_first(
 ):
     headers = await _setup(async_client)
     calls = _install_upstream(monkeypatch, forbid_sources=False, unique_response_ids=True)
-    async with SessionLocal() as session:
-        ordinary = await session.get(Account, generate_unique_account_id("ordinary", "ordinary@example.com"))
-        assert ordinary is not None
-        ordinary.routing_policy = "burn_first"
-        await session.commit()
-    ordinary_payload = {"model": "gpt-5.1", "instructions": "", "input": "ordinary", "stream": True}
+    ordinary_payload = _payload("ordinary")
     shared_headers = {**headers, "session_id": "shared-provider", "x-codex-parent-thread-id": "shared-task"}
     requests = [
         ("shared-task:2", _payload(identifier)),
@@ -354,13 +350,10 @@ async def test_http_new_window_ignores_legacy_broad_markers(async_client, monkey
                 CapabilityLineageAlias(kind="turn_state", value="legacy-turn"),
             ),
         )
-        ordinary = await session.get(Account, generate_unique_account_id("ordinary", "ordinary@example.com"))
-        assert ordinary is not None
-        ordinary.routing_policy = "burn_first"
         await session.commit()
     response = await async_client.post(
         path,
-        json={"model": "gpt-5.1", "instructions": "", "input": "fresh discussion", "stream": True},
+        json=_payload("ordinary"),
         headers={**headers, "session_id": "legacy-session", "x-codex-window-id": "legacy-task:4"},
     )
     assert response.status_code == 200, response.text
@@ -374,10 +367,7 @@ async def test_http_mid_conversation_daybreak_switch_preserves_account_ownership
     headers = await _setup(async_client)
     headers["x-codex-window-id"] = "switching-conversation:1"
     calls = _install_upstream(monkeypatch, forbid_sources=False, unique_response_ids=True)
-    ordinary_id = generate_unique_account_id("ordinary", "ordinary@example.com")
-    result = await async_client.put(f"/api/accounts/{ordinary_id}/routing-policy", json={"routingPolicy": "burn_first"})
-    assert result.status_code == 200, result.text
-    ordinary = {"model": "gpt-5.1", "instructions": "", "input": "start ordinary", "stream": True}
+    ordinary = _payload("ordinary")
     response = await async_client.post(ROUTES[0], json=ordinary, headers=headers)
     assert response.status_code == 200, response.text
     assert [account for account, _ in calls] == ["ordinary"]

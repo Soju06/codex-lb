@@ -12082,6 +12082,20 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
         assert "resp_ws_grouped_anchor" not in message
 
 
+def _stub_capability_websocket_policy(monkeypatch, api_key, authorization):
+    async def authorize(value, *, request=None):
+        assert value == authorization
+        return api_key
+
+    cache = SimpleNamespace(get=AsyncMock(side_effect=_websocket_settings))
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: cache)
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", authorize)
+    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", authorize)
+    monkeypatch.setattr(proxy_module.ProxyService, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+
+
 @pytest.mark.parametrize(
     "capability_carrier",
     [
@@ -12106,6 +12120,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         api_key = dataclasses.replace(api_key, enforced_model="gpt-daybreak-blue-latest")
     if capability_carrier in {"native_disabled", "enforced_legacy_disabled"}:
         api_key = dataclasses.replace(api_key, automatic_daybreak_routing=False)
+    _stub_capability_websocket_policy(monkeypatch, api_key, "Bearer capability-upfront")
     cyber_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
@@ -12116,28 +12131,6 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
     forwarded_capability_headers: list[bool] = []
-
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
-        del request
-        assert authorization == "Bearer capability-upfront"
-        return api_key
-
-    async def keep_authenticated_api_key_policy(self, current_api_key):
-        del self
-        assert current_api_key == api_key
-        return current_api_key
-
-    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
-        del self, _kwargs
-        assert current_api_key == api_key
-        return None
 
     async def configured_source(source_model, current_api_key, *, raw_model=None):
         del current_api_key, raw_model
@@ -12168,21 +12161,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         forwarded_capability_headers.append(any(name.lower() == REQUIRED_CAPABILITY_HEADER for name in headers))
         return account, cyber_upstream
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_refresh_websocket_api_key_policy",
-        keep_authenticated_api_key_policy,
-    )
     monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_reserve_websocket_api_key_usage",
-        bypass_api_key_usage_reservation,
-    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -13165,6 +13144,7 @@ def test_backend_responses_websocket_capability_conversation_isolation_reselects
     list_input,
 ):
     api_key = _capability_test_api_key("key_ws_capability_inheritance")
+    _stub_capability_websocket_policy(monkeypatch, api_key, "Bearer capability-inheritance")
 
     class _TurnStateUpstreamWebSocket(_SequencedUpstreamWebSocket):
         def response_header(self, name: str) -> str | None:
@@ -13200,28 +13180,6 @@ def test_backend_responses_websocket_capability_conversation_isolation_reselects
     opened_account_ids: list[str] = []
     opened_headers: list[dict[str, str]] = []
     source_checks: list[str | None] = []
-
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
-        del request
-        assert authorization == "Bearer capability-inheritance"
-        return api_key
-
-    async def keep_authenticated_api_key_policy(self, current_api_key):
-        del self
-        assert current_api_key == api_key
-        return current_api_key
-
-    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
-        del self, _kwargs
-        assert current_api_key == api_key
-        return None
 
     async def configured_source(source_model, current_api_key, *, raw_model=None):
         del current_api_key, raw_model
@@ -13262,19 +13220,6 @@ def test_backend_responses_websocket_capability_conversation_isolation_reselects
         upstreams = cyber_upstreams if "_cyber_" in account.id else ordinary_upstreams
         return account, upstreams.popleft()
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_refresh_websocket_api_key_policy",
-        keep_authenticated_api_key_policy,
-    )
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_reserve_websocket_api_key_usage",
-        bypass_api_key_usage_reservation,
-    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_resolve_file_account_for_responses",
@@ -13661,6 +13606,7 @@ def test_backend_responses_websocket_capability_pending_conflict_keeps_active_so
     required_first,
 ):
     api_key = _capability_test_api_key("key_ws_capability_pending_conflict")
+    _stub_capability_websocket_policy(monkeypatch, api_key, "Bearer capability-pending-conflict")
     active_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
@@ -13670,28 +13616,6 @@ def test_backend_responses_websocket_capability_pending_conflict_keeps_active_so
     )
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
-
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
-        del request
-        assert authorization == "Bearer capability-pending-conflict"
-        return api_key
-
-    async def keep_authenticated_api_key_policy(self, current_api_key):
-        del self
-        assert current_api_key == api_key
-        return current_api_key
-
-    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
-        del self, _kwargs
-        assert current_api_key == api_key
-        return None
 
     async def fake_select_websocket_connect_account(
         self,
@@ -13718,20 +13642,6 @@ def test_backend_responses_websocket_capability_pending_conflict_keeps_active_so
         assert len(opened_account_ids) == 1
         return account, active_upstream
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_refresh_websocket_api_key_policy",
-        keep_authenticated_api_key_policy,
-    )
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_reserve_websocket_api_key_usage",
-        bypass_api_key_usage_reservation,
-    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",

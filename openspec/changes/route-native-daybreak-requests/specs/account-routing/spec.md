@@ -8,22 +8,17 @@ Automatic Daybreak routing MUST pass the existing security-work-authorized requi
 - **THEN** the request fails before ordinary-account dispatch
 
 ### Requirement: DBB affinity does not rewrite ordinary process locality
-
-Required routing MUST use conversation affinity without reading or seeding the
-shared ordinary process preference. This MUST preserve existing ordinary
-account-selection rules, API-key scope, hard ownership, retry eligibility and
-reservation settlement. DBB routing MUST NOT enable affinity when all applicable
-affinity controls are disabled.
+Required routing MUST use conversation affinity without reading or seeding the ordinary process preference. It MUST preserve ordinary selection, key scope, ownership, retry and settlement rules, and MUST NOT enable disabled affinity controls.
 
 #### Scenario: DBB-first traffic preserves ordinary burn_first
-- **WHEN** a DBB conversation is selected before ordinary traffic in a shared process
-- **THEN** a separate ordinary conversation still selects its burn_first account
+- **WHEN** DBB work precedes a separate ordinary conversation in a shared process
+- **THEN** the ordinary conversation still selects its burn_first account
 
-#### Scenario: Mid-conversation DBB switch respects ownership
-- **WHEN** an ordinary conversation requests DBB on a DBB-incapable account
-- **THEN** an account-neutral request can select a capable account
-- **AND** existing account-owned response IDs, files or opaque history cannot be transferred to an incompatible subscription
+#### Scenario: Mid-conversation switch preserves ownership
+- **WHEN** an ordinary conversation requests DBB on an incapable account
+- **THEN** account-neutral work can select a capable account
+- **AND** incompatible response IDs, files or opaque history cannot transfer accounts
 
 #### Scenario: Disabled affinity stays disabled
-- **WHEN** session, cache, and thread affinity are disabled
-- **THEN** a DBB request with a prompt cache key does not create a sticky selection policy
+- **WHEN** session, cache and thread affinity are disabled
+- **THEN** a DBB prompt cache key does not create stickiness

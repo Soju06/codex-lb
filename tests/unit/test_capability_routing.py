@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -210,21 +211,29 @@ async def test_capability_router_restores_inherited_requirement_and_fails_closed
     assert _error_code(exc_info.value) == CAPABILITY_LINEAGE_UNAVAILABLE_CODE
 
 
-@pytest.mark.parametrize("program", [None, {}, {"cyber": "standard"}])
-def test_native_non_daybreak_program_keeps_ordinary_intent(program: JsonValue) -> None:
-    payload = {} if program is None else {"access_programs": program}
-    assert parse_routing_intent({}, api_key=_api_key(), request_payload=payload) == RoutingIntent.empty()
-
-
-def test_native_blue_needs_no_custom_carrier_and_preserves_payload() -> None:
-    payload = {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}
-    intent = parse_routing_intent({}, api_key=_api_key(), request_payload=payload)
-    assert intent.requires_trusted_cyber
-    assert payload == {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}
-    assert (
-        parse_routing_intent({REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}, api_key=_api_key(), request_payload=payload)
-        == intent
+@pytest.mark.parametrize(
+    "payload,required",
+    [
+        ({}, False),
+        ({"access_programs": {}}, False),
+        ({"access_programs": {"cyber": "standard"}}, False),
+        ({"model": "gpt-daybreak-blue-latest"}, True),
+        ({"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}, True),
+    ],
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_automatic_daybreak_routing_is_per_key(payload: dict[str, JsonValue], required: bool, enabled: bool) -> None:
+    original = deepcopy(payload)
+    key = replace(_api_key(), automatic_daybreak_routing=enabled)
+    assert parse_routing_intent({}, api_key=key, request_payload=payload).requires_trusted_cyber == (
+        enabled and required
     )
+    assert payload == original
+    # Matching native/custom intent agrees, even when automatic recognition is off.
+    if required:
+        assert parse_routing_intent(
+            {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}, api_key=key, request_payload=payload
+        ).requires_trusted_cyber
 
 
 @pytest.mark.parametrize(
@@ -265,19 +274,6 @@ def test_explicit_standard_conflicts_with_custom_required_intent() -> None:
             request_payload={"access_programs": {"cyber": "standard"}},
         )
     assert _error_code(exc.value) == "unsupported_access_program"
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"model": "gpt-daybreak-blue-latest"},
-        {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}},
-    ],
-)
-def test_automatic_daybreak_routing_is_per_key(payload: dict[str, JsonValue]) -> None:
-    assert parse_routing_intent({}, api_key=_api_key(), request_payload=payload).requires_trusted_cyber
-    disabled = replace(_api_key(), automatic_daybreak_routing=False)
-    assert parse_routing_intent({}, api_key=disabled, request_payload=payload) == RoutingIntent.empty()
 
 
 def test_disabled_automatic_routing_preserves_existing_custom_carrier() -> None:

@@ -8,10 +8,14 @@
 ## Verification
 - [x] Validate routing, API-key lifecycle, replay and migration regression tests on current main.
 - [x] Run the relevant lint, type, dashboard, documentation and OpenSpec checks.
-- [x] Review the final feature diff and add current-baseline before/after screenshots and a routing diagram.
+- [x] Review the final feature diff and add before/after screenshots.
 
 ## Conversation isolation correction
 - [x] Add failing HTTP/compact and WebSocket regressions for ordinary parent/sibling routing, shared session identifiers, same-conversation persistence, and mid-session switching.
 - [x] Restrict capability aliases to the conversation and direct continuations, and prevent DBB from rewriting ordinary process locality.
 - [x] Verify socket transitions, ownership, restricted retries, persistence failures, and existing routing rules.
 Deployment and fork-PR publication are tracked separately in the operator workflow; they do not change this routing contract.
+
+## Simplification
+- [x] Consolidate duplicated contract/context and test setup without changing routing behavior or removing regression cases.
+- [x] Re-run affected tests, typing, lint and OpenSpec validation; record the required CI hook outcome.

@@ -321,9 +321,6 @@ Canonical background JSON acknowledgements with status `queued` or `in_progress`
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
 
-
-Automatic Daybreak routing is opt-in per API key. It recognizes a legacy DBB model or the native Blue selector and reuses the existing account Trusted Cyber eligibility flag. One all-accounts key can therefore serve ordinary and Daybreak requests without custom client markers. Ordinary omission leaves upstream mode defaults unchanged. The same mandatory eligible-pool constraint applies to Responses WebSockets, HTTP Responses and compact. Required HTTP requests use direct subscription transport, avoiding external model sources and bridge socket reuse. Empty eligible pools fail without ordinary fallback. Native-field delivery by a custom Codex provider is a separate compatibility concern (upstream #2580).
-
 ## Routed file transport failover
 
 File operations follow the existing pre-visible unary retry policy. The file client carries typed dispatch provenance through its service adapter so a refused account-proxy connection can retry another eligible account even though credential-safe transport messages omit low-level details. Typed replay eligibility takes precedence over message text: a proxy endpoint named `timeout-primary` must not turn a TLS verification failure into a retry.
@@ -332,18 +329,12 @@ For example, an unpinned upload whose account A cannot connect to its proxy can 
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
 
-## Conversation isolation correction
+## Automatic Daybreak routing
 
-The prior task-wide aliases let one DBB child constrain its ordinary parent and
-siblings. Capability requirements now follow an exact conversation and direct
-response continuations. For example, task:2 can remain DBB while task:1 and
-task:3 retain ordinary routing. Frame window metadata overrides compatibility
-headers; thread-id is the fallback before shared session/turn identities.
+The per-key toggle defaults off and reuses account Trusted Cyber eligibility; it does not grant upstream entitlement. Legacy Blue models and the native Blue selector use the same constrained pool on WebSocket, HTTP Responses and compact. Required HTTP requests bypass external sources and the session bridge. Native-field delivery by custom Codex providers remains a separate client concern (#2580).
 
-DBB selection uses the existing thread affinity without seeding the shared
-process preference. This prevents DBB-first traffic from pinning later ordinary
-work to its account. Ordinary selection, ownership, scope and retry rules stay
-in force. A movable mid-session request can select a capable account; an
-incompatible account-owned anchor fails closed. Existing exact conversation
-markers remain restricted. Broad legacy markers are retained for clients that
-lack a specific identity, but do not constrain newly identified conversations.
+A DBB child previously constrained ordinary parents and siblings through shared task aliases, process affinity and inferred response anchors. Restrictions now follow the exact conversation and direct response continuations. For example, `task:2` stays restricted while `task:1` and `task:3` retain normal routing, including burn_first. Per-frame window metadata takes precedence over window headers, then thread identity; clients without either retain the legacy session/turn fallback.
+
+DBB selection reuses thread affinity without reading or updating ordinary process preferences. Inferred WebSocket anchors also require the same conversation identity. Ordinary selection, key scope, disabled-affinity controls, retries and reservation settlement remain unchanged. A mid-session switch can move account-neutral work; incompatible account-owned history fails closed.
+
+Existing opaque markers are retained. Fresh identified conversations ignore broad legacy markers, while previously restricted conversations remain restricted. If the eligible pool is empty, DBB work fails without ordinary fallback.

@@ -91,9 +91,10 @@ def _naive_utc(value: datetime) -> datetime:
 class _DemandCountParams:
     """Listing filters that map losslessly onto demand-rollup dimensions.
 
-    Built only when the listing carries no free-text search and no
-    error-code splits — the demand grain has no error_code dimension, and
-    search reaches related tables. Everything else (time bounds, accounts,
+    Built only when the listing carries no free-text search, no
+    error-code splits and no upstream filter — the demand grain has no
+    error_code or model_source_id dimension, and search reaches related
+    tables. Everything else (time bounds, accounts,
     api keys, model/effort pairs, statuses, soft-delete exclusion) is a
     demand dimension, so the folded window can be counted from the rollup.
     """
@@ -117,6 +118,12 @@ class RequestLogsResult:
     aggregated_cost_usd: float | None = None
 
 
+# Upstream filter value for rows with no model source: the built-in
+# subscription route family, including failures recorded before an account
+# was selected (issue #1870).
+SUBSCRIPTION_POOL_UPSTREAM = "subscription_pool"
+
+
 # The exact COUNT(*) behind the request-log listing's "X-Y of N" scans the
 # whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
 # poll and every pagination click even though the displayed total is
@@ -127,6 +134,18 @@ _COUNT_CACHE_TTL_SECONDS = 30.0
 _COUNT_CACHE_MAX_ENTRIES = 256
 _CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 _recent_count_cache: dict[tuple, tuple[int, float]] = {}
+
+
+def _upstream_condition(upstreams: list[str]) -> ColumnElement[bool]:
+    """OR of the selected upstreams: `subscription_pool` is a NULL
+    `model_source_id`; any other value is an exact source ID."""
+    source_ids = sorted({value for value in upstreams if value != SUBSCRIPTION_POOL_UPSTREAM})
+    clauses: list[ColumnElement[bool]] = []
+    if SUBSCRIPTION_POOL_UPSTREAM in upstreams:
+        clauses.append(RequestLog.model_source_id.is_(None))
+    if source_ids:
+        clauses.append(RequestLog.model_source_id.in_(source_ids))
+    return or_(*clauses)
 
 
 def _escape_like(value: str) -> str:
@@ -1268,6 +1287,7 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
         *,
+        upstreams: list[str] | None = None,
         cache_mode: str = "since",
         timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
@@ -1286,6 +1306,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=include_success,
             include_cancelled=include_cancelled,
             include_error_other=include_error_other,
@@ -1313,7 +1334,9 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        if search is None and not error_codes_in and not error_codes_excluding:
+        # The demand rollup has no model-source dimension, so an upstream
+        # filter must count raw rows (issue #1870).
+        if search is None and not error_codes_in and not error_codes_excluding and not upstreams:
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1346,6 +1369,7 @@ class RequestLogsRepository:
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+            tuple(sorted(set(upstreams))) if upstreams else None,
             include_sensitive_metadata,
             include_account_identity,
             include_api_key_identity,
@@ -1653,6 +1677,7 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        upstreams: list[str] | None = None,
         include_success: bool = True,
         include_cancelled: bool = True,
         include_error_other: bool = True,
@@ -1693,6 +1718,8 @@ class RequestLogsRepository:
                 conditions.append(RequestLog.model.in_(models))
             if reasoning_efforts:
                 conditions.append(RequestLog.reasoning_effort.in_(reasoning_efforts))
+        if upstreams:
+            conditions.append(_upstream_condition(upstreams))
 
         status_conditions = []
         if include_success:

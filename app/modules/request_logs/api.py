@@ -60,6 +60,11 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     return ServiceRequestLogModelOption(model=model, reasoning_effort=effort or None)
 
 
+def _normalize_upstreams(values: list[str] | None) -> list[str] | None:
+    normalized = sorted({value.strip() for value in values or () if value and value.strip()})
+    return normalized or None
+
+
 def _resolve_request_log_since(
     timeframe: str | None,
     since: datetime | None,
@@ -83,6 +88,7 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    upstream: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -110,6 +116,7 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        upstreams=_normalize_upstreams(upstream),
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
         include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),

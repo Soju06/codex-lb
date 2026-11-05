@@ -733,7 +733,7 @@ describe("DashboardPage", () => {
         timeframe: "24h",
         accountIds: ["acc_primary"],
         apiKeyIds: ["key_1"],
-        upstreams: [],
+        upstreams: ["src_vllm", "src_not_in_options"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
         conversationId: "conv_page_summary",
@@ -762,6 +762,9 @@ describe("DashboardPage", () => {
           apiKeys: [{ id: "key_1", name: "Primary Key" }],
           modelOptions: [{ model: "gpt-5.1", reasoningEffort: "high" }],
           statuses: ["ok"],
+          upstreams: [
+            { id: "src_vllm", type: "model_source", displayName: "Local vLLM", modelSourceKind: "openai_compatible", isDeleted: false },
+          ],
         },
         error: null,
       },
@@ -821,6 +824,9 @@ describe("DashboardPage", () => {
     expect(summaryEl.textContent).toMatch(/primary@example\.com/);
     // Uses user-facing API key name, not raw ID
     expect(summaryEl.textContent).toMatch(/Primary Key/);
+    // Lists the upstream selection by label, falling back to the id when options lack it
+    expect(summaryEl.textContent).toMatch(/Local vLLM, src_not_in_options/);
+    expect(summaryEl.textContent).not.toMatch(/src_vllm/);
     // Uses search value, not raw API key ID
     expect(summaryEl.textContent).toMatch(/"quota"/);
     // No raw IDs or internal encodings leak

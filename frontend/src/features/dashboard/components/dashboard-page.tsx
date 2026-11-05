@@ -337,6 +337,11 @@ export function DashboardPage() {
       });
       suffixParts.push(labels.join(", "));
     }
+    if (filters.upstreams.length > 0) {
+      // Fall back to the stable id when the options have not loaded or no longer list it.
+      const labels = filters.upstreams.map((id) => upstreamOptions.find((o) => o.value === id)?.label ?? id);
+      suffixParts.push(labels.join(", "));
+    }
     if (filters.search) {
       suffixParts.push(`"${filters.search}"`);
     }
@@ -367,7 +372,7 @@ export function DashboardPage() {
         ]}
       />
     );
-  }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, blurred]);
+  }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, upstreamOptions, blurred]);
 
   const statusOptions = useMemo(
     () =>

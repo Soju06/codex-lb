@@ -969,10 +969,18 @@ On startup, the system MUST remove ordinary persisted HTTP bridge session rows o
 ### Requirement: Trusted capability requirements are monotonic across lineage
 
 Before dispatch, the proxy MUST persist an authenticated `trusted_cyber`
-requirement as API-key-scoped, domain-separated opaque hashes for every known
-session, accepted or synthesized turn-state, previous-response, and Codex task
-lineage alias. Marker writes MUST be monotonic and MUST NOT store raw lineage
-or account identifiers.
+requirement as API-key-scoped, domain-separated opaque conversation hashes.
+Marker writes MUST be monotonic and MUST NOT store raw lineage or account identifiers.
+
+DBB restrictions MUST persist within the requesting conversation and its direct
+response continuations. A specific conversation MUST use per-frame
+`client_metadata["x-codex-window-id"]` before the compatibility window header,
+then `thread-id` when no window exists. Shared parent-task identities MUST NOT
+propagate restrictions to separate conversations. When a specific conversation
+exists, shared process-session and turn-state markers MUST NOT merge its peers.
+Without a specific conversation identity, existing session and turn-state
+fallback identities MUST remain supported. Response aliases MUST remain
+API-key-scoped and restore the requirement on direct continuations.
 
 A later authenticated request MUST restore REQUIRED before account selection
 when any presented alias matches under the same API-key scope. It MUST persist
@@ -1017,6 +1025,19 @@ or penalize the upstream account.
 #### Scenario: Persistence uncertainty cannot downgrade
 - **WHEN** required lineage cannot be read or established durably
 - **THEN** the request fails before ordinary account selection or dispatch
+
+#### Scenario: Separate ordinary parent and sibling keep normal selection
+- **WHEN** a DBB child shares a parent-task and process-session identity with ordinary parent and sibling conversations
+- **THEN** its own later turns remain restricted even with a generic model or explicit standard intent
+- **AND** the separate ordinary conversations retain normal routing including burn_first
+
+#### Scenario: Frame metadata chooses its conversation
+- **WHEN** a frame's window metadata differs from its compatibility window header
+- **THEN** only the frame's conversation establishes or restores the requirement
+
+#### Scenario: New conversation ignores legacy broad markers
+- **WHEN** a fresh window shares only task or process identifiers with legacy capability markers
+- **THEN** the new conversation retains normal selection
 
 ### Requirement: Compact previous_response_id anchors are account-scoped
 

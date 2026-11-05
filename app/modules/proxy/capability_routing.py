@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,15 +17,12 @@ from app.modules.proxy.capability_lineage import (
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 REQUIRED_CAPABILITY_HEADER = CODEX_LB_REQUIRED_CAPABILITY_HEADER
-CODEX_PARENT_THREAD_ID_HEADER = "x-codex-parent-thread-id"
 CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 CAPABILITY_SIGNAL_UNTRUSTED_CODE = "capability_signal_untrusted"
 UNSUPPORTED_REQUIRED_CAPABILITY_CODE = "unsupported_required_capability"
 CAPABILITY_LINEAGE_UNAVAILABLE_CODE = "capability_lineage_unavailable"
 CAPABILITY_ROUTING_UNAVAILABLE_CODE = "capability_routing_unavailable"
 CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE = "Required capability routing is unavailable; retry later."
-
-_TERMINAL_WINDOW_SLOT_RE = re.compile(r":\d+$")
 
 
 class RoutingCapability(StrEnum):
@@ -105,6 +101,22 @@ class CapabilityRouter:
         )
 
 
+def capability_conversation_alias(
+    headers: Mapping[str, str], *, client_metadata: JsonValue | None = None
+) -> CapabilityLineageAlias | None:
+    # Frame metadata overrides compatibility headers, matching response.create
+    # projection. A thread is more specific than a shared process identity.
+    for kind, values in (
+        ("codex_window", _metadata_string_values(client_metadata, CODEX_WINDOW_ID_HEADER)),
+        ("codex_window", _header_values(headers, CODEX_WINDOW_ID_HEADER)),
+        ("codex_thread", _header_values(headers, "thread-id")),
+    ):
+        for value in values:
+            if value.strip():
+                return CapabilityLineageAlias(kind=kind, value=value.strip())
+    return None
+
+
 def capability_lineage_aliases(
     headers: Mapping[str, str],
     *,
@@ -114,26 +126,15 @@ def capability_lineage_aliases(
     client_metadata: JsonValue | None = None,
 ) -> tuple[CapabilityLineageAlias, ...]:
     aliases: list[CapabilityLineageAlias] = []
-    _append_alias(aliases, "session_header", session_id)
-    _append_alias(aliases, "turn_state", turn_state)
+    # Shared task/process aliases must not merge separate conversations.
+    conversation = capability_conversation_alias(headers, client_metadata=client_metadata)
+    if conversation is None:
+        _append_alias(aliases, "session_header", session_id)
+        _append_alias(aliases, "turn_state", turn_state)
     for previous_response_id in previous_response_ids:
         _append_alias(aliases, "previous_response", previous_response_id)
-
-    parent_thread_ids = (
-        *_header_values(headers, CODEX_PARENT_THREAD_ID_HEADER),
-        *_metadata_string_values(client_metadata, CODEX_PARENT_THREAD_ID_HEADER),
-    )
-    for parent_thread_id in parent_thread_ids:
-        _append_alias(aliases, "codex_task", parent_thread_id)
-
-    window_ids = (
-        *_header_values(headers, CODEX_WINDOW_ID_HEADER),
-        *_metadata_string_values(client_metadata, CODEX_WINDOW_ID_HEADER),
-    )
-    for window_id in window_ids:
-        _append_alias(aliases, "codex_window", window_id)
-        stable_task_id = _TERMINAL_WINDOW_SLOT_RE.sub("", window_id.strip())
-        _append_alias(aliases, "codex_task", stable_task_id)
+    if conversation is not None:
+        aliases.append(conversation)
     return normalize_capability_lineage_aliases(aliases)
 
 

@@ -139,30 +139,35 @@ def test_strip_capability_metadata_removes_only_internal_key() -> None:
     assert metadata["X-Codex-LB-Required-Capability"] == "trusted_cyber"
 
 
-def test_capability_lineage_aliases_preserve_domains_and_stable_task_root() -> None:
-    aliases = capability_lineage_aliases(
-        {
-            "x-codex-parent-thread-id": "task-parent",
-            "x-codex-window-id": "task-root:2",
-        },
-        session_id="same-visible-id",
-        turn_state="same-visible-id",
-        previous_response_ids=("resp-1",),
-        client_metadata={
-            "x-codex-parent-thread-id": "task-root",
-            "x-codex-window-id": "task-metadata:3",
-        },
+def test_capability_lineage_aliases_use_authoritative_conversation():
+    assert capability_lineage_aliases(
+        {"x-codex-parent-thread-id": "task", "x-codex-window-id": "task:1", "thread-id": "thread"},
+        session_id="shared-process",
+        turn_state="shared-turn",
+        previous_response_ids=("response",),
+        client_metadata={"x-codex-window-id": "task:2"},
+    ) == (
+        CapabilityLineageAlias(kind="previous_response", value="response"),
+        CapabilityLineageAlias(kind="codex_window", value="task:2"),
     )
 
-    assert aliases == (
-        CapabilityLineageAlias(kind="session_header", value="same-visible-id"),
-        CapabilityLineageAlias(kind="turn_state", value="same-visible-id"),
-        CapabilityLineageAlias(kind="previous_response", value="resp-1"),
-        CapabilityLineageAlias(kind="codex_task", value="task-parent"),
-        CapabilityLineageAlias(kind="codex_task", value="task-root"),
-        CapabilityLineageAlias(kind="codex_window", value="task-root:2"),
-        CapabilityLineageAlias(kind="codex_window", value="task-metadata:3"),
-        CapabilityLineageAlias(kind="codex_task", value="task-metadata"),
+
+def test_capability_lineage_aliases_use_thread_before_shared_process():
+    assert capability_lineage_aliases(
+        {"thread-id": "thread", "x-codex-parent-thread-id": "parent"}, session_id="process", turn_state="turn"
+    ) == (CapabilityLineageAlias(kind="codex_thread", value="thread"),)
+
+
+def test_capability_lineage_aliases_preserve_fallback_without_conversation():
+    assert capability_lineage_aliases(
+        {"x-codex-parent-thread-id": "parent"},
+        session_id="process",
+        turn_state="turn",
+        previous_response_ids=("response",),
+    ) == (
+        CapabilityLineageAlias(kind="session_header", value="process"),
+        CapabilityLineageAlias(kind="turn_state", value="turn"),
+        CapabilityLineageAlias(kind="previous_response", value="response"),
     )
 
 

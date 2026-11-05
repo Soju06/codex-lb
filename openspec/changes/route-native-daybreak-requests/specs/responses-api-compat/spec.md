@@ -40,3 +40,54 @@ For an opted-in authenticated key, Responses WebSocket, HTTP Responses and compa
 - **THEN** selection and retries MUST require Trusted Cyber eligibility within the key scope
 - **AND** an explicit native `standard` selector MUST fail as a conflict before dispatch
 - **AND** unrelated WebSocket control frames without selectors MUST retain their existing behavior
+
+## MODIFIED Requirements
+
+### Requirement: A late capability cannot reuse an ordinary upstream socket
+
+A later REQUIRED frame MUST NOT reuse an upstream socket selected for an
+ordinary request on the same downstream WebSocket. An idle ordinary socket
+MUST be retired before capable
+reselection. If another frame is still pending, the proxy MUST fail closed
+rather than change the account requirement beneath in-flight work. The socket's
+selection contract, not whether its account happened to have the capability
+grant, MUST determine whether it was selected as ordinary. Before reusing a
+REQUIRED-selected socket, the proxy MUST revalidate the pinned account and its
+current capability grant through the canonical selector.
+
+#### Scenario: Idle ordinary socket is replaced
+- **WHEN** an idle downstream session previously selected an ordinary account
+  and a later frame establishes REQUIRED
+- **THEN** the ordinary upstream is retired before the frame is sent
+- **AND** the replacement selection requires a security-work-authorized account
+
+#### Scenario: Pending ordinary work blocks a requirement change
+- **WHEN** ordinary work is still pending and a later frame establishes REQUIRED
+- **THEN** the later frame fails before upstream send
+- **AND** the pending frame's account and request state are not rewritten
+
+#### Scenario: Revoked capability grant prevents socket reuse
+- **WHEN** a socket was selected for REQUIRED but its pinned account's grant is
+  no longer valid at canonical revalidation
+- **THEN** the stale socket does not receive the next REQUIRED frame
+- **AND** an idle socket is retired before constrained reselection
+
+#### Scenario: Revalidation uncertainty fails closed
+- **WHEN** canonical account revalidation cannot complete for a REQUIRED socket
+- **THEN** the frame receives a typed capability-routing-unavailable error
+- **AND** its reservation is settled without forwarding the frame upstream
+
+When a later frame belongs to a separate ordinary conversation, an idle
+REQUIRED-selected socket MUST also be retired before ordinary reselection.
+Pending work MUST prevent this reverse switch. Explicit account-owned anchors
+and opaque replay constraints MUST remain enforced across either transition.
+
+#### Scenario: Ordinary conversation follows a DBB frame
+- **WHEN** a later ordinary frame identifies a separate conversation on an idle socket selected for REQUIRED
+- **THEN** the upstream is retired before ordinary selection
+- **AND** synthesized account-local turn state is not transferred
+
+#### Scenario: Pending DBB work blocks an ordinary switch
+- **WHEN** a DBB response is still pending and an ordinary frame identifies a separate conversation
+- **THEN** the later frame fails before upstream send
+- **AND** the active response keeps its account and socket

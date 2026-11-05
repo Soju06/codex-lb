@@ -331,3 +331,19 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Conversation isolation correction
+
+The prior task-wide aliases let one DBB child constrain its ordinary parent and
+siblings. Capability requirements now follow an exact conversation and direct
+response continuations. For example, task:2 can remain DBB while task:1 and
+task:3 retain ordinary routing. Frame window metadata overrides compatibility
+headers; thread-id is the fallback before shared session/turn identities.
+
+DBB selection uses the existing thread affinity without seeding the shared
+process preference. This prevents DBB-first traffic from pinning later ordinary
+work to its account. Ordinary selection, ownership, scope and retry rules stay
+in force. A movable mid-session request can select a capable account; an
+incompatible account-owned anchor fails closed. Existing exact conversation
+markers remain restricted. Broad legacy markers are retained for clients that
+lack a specific identity, but do not constrain newly identified conversations.

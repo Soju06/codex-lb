@@ -2259,10 +2259,10 @@ class _WebSocketMixin:
                     request_state is not None
                     and upstream is not None
                     and account is not None
-                    and request_state.require_security_work_authorized
+                    and (request_state.require_security_work_authorized or upstream_requires_security_work_authorized)
                 ):
                     capability_account_reusable = False
-                    if upstream_requires_security_work_authorized:
+                    if request_state.require_security_work_authorized and upstream_requires_security_work_authorized:
                         try:
                             (
                                 revalidated_account,
@@ -3475,6 +3475,7 @@ class _WebSocketMixin:
             sticky_threads_enabled=sticky_threads_enabled,
             api_key=api_key,
             synthesized_turn_state=synthesized_turn_state,
+            require_trusted_cyber=capability_route.require_security_work_authorized,
         )
         affinity_observation = AffinityObservation.from_policy(
             affinity_policy,

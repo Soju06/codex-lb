@@ -6,3 +6,19 @@ Automatic Daybreak routing MUST pass the existing security-work-authorized requi
 #### Scenario: Authorized account is unavailable or outside the key scope
 - **WHEN** no permitted account satisfies Trusted Cyber eligibility and existing routing constraints
 - **THEN** the request fails before ordinary-account dispatch
+
+### Requirement: DBB affinity does not rewrite ordinary process locality
+
+Required routing MUST use conversation affinity without reading or seeding the
+shared ordinary process preference. This MUST preserve existing ordinary
+account-selection rules, API-key scope, hard ownership, retry eligibility and
+reservation settlement.
+
+#### Scenario: DBB-first traffic preserves ordinary burn_first
+- **WHEN** a DBB conversation is selected before ordinary traffic in a shared process
+- **THEN** a separate ordinary conversation still selects its burn_first account
+
+#### Scenario: Mid-conversation DBB switch respects ownership
+- **WHEN** an ordinary conversation requests DBB on a DBB-incapable account
+- **THEN** an account-neutral request can select a capable account
+- **AND** existing account-owned response IDs, files or opaque history cannot be transferred to an incompatible subscription

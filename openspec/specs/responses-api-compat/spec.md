@@ -5892,6 +5892,21 @@ current capability grant through the canonical selector.
 - **THEN** the frame receives a typed capability-routing-unavailable error
 - **AND** its reservation is settled without forwarding the frame upstream
 
+When a later frame belongs to a separate ordinary conversation, an idle
+REQUIRED-selected socket MUST also be retired before ordinary reselection.
+Pending work MUST prevent this reverse switch. Explicit account-owned anchors
+and opaque replay constraints MUST remain enforced across either transition.
+
+#### Scenario: Ordinary conversation follows a DBB frame
+- **WHEN** a later ordinary frame identifies a separate conversation on an idle socket selected for REQUIRED
+- **THEN** the upstream is retired before ordinary selection
+- **AND** synthesized account-local turn state is not transferred
+
+#### Scenario: Pending DBB work blocks an ordinary switch
+- **WHEN** a DBB response is still pending and an ordinary frame identifies a separate conversation
+- **THEN** the later frame fails before upstream send
+- **AND** the active response keeps its account and socket
+
 ### Requirement: Proof-gated recovery attempts are durably fenced
 
 When an HTTP bridge request has a verified, account-neutral, unanchored full

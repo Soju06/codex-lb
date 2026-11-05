@@ -474,6 +474,7 @@ class _StreamingRetryMixin:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            require_trusted_cyber=require_trusted_cyber,
         )
         turn_state_owner_account_id: str | None = None
         turn_state = _sticky_key_from_turn_state_header(headers)

@@ -27,6 +27,7 @@ from app.core.openai.requests import (
 )
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.capability_routing import capability_conversation_alias
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.thread_anchors import (
     build_thread_window,
@@ -462,6 +463,7 @@ def _thread_codex_session_affinity(
     enabled: bool,
     max_age_seconds: int,
     thread_id: str | None = None,
+    seed_process_preference: bool = True,
 ) -> _AffinityPolicy | None:
     if not enabled:
         return None
@@ -481,9 +483,15 @@ def _thread_codex_session_affinity(
         legacy_codex_session_key=legacy_key,
         legacy_continuity_source=("session_header" if identity.process_session is not None else "thread_header"),
         seed_selection_key=(
-            _codex_session_selection_key(identity.process_session) if identity.process_session is not None else None
+            _codex_session_selection_key(identity.process_session)
+            if seed_process_preference and identity.process_session is not None
+            else None
         ),
-        seed_selection_kind=(StickySessionKind.CODEX_SESSION if identity.process_session is not None else None),
+        seed_selection_kind=(
+            StickySessionKind.CODEX_SESSION
+            if seed_process_preference and identity.process_session is not None
+            else None
+        ),
     )
 
 
@@ -756,6 +764,7 @@ def _sticky_key_for_responses_request(
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
     synthesized_turn_state: str | None = None,
+    require_trusted_cyber: bool = False,
 ) -> _AffinityPolicy:
     # This helper only classifies locality keys. Stored-object continuity such
     # as `previous_response_id` is resolved later by ProxyService and must stay
@@ -768,6 +777,11 @@ def _sticky_key_for_responses_request(
     )
     cache_key = resolution.sticky_key
     cache_key_source = resolution.source
+    capability_conversation = (
+        capability_conversation_alias(headers, client_metadata=(payload.model_extra or {}).get("client_metadata"))
+        if require_trusted_cyber
+        else None
+    )
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key and turn_state_key != synthesized_turn_state:
         policy = _AffinityPolicy(
@@ -778,8 +792,10 @@ def _sticky_key_for_responses_request(
     elif (
         thread_affinity := _thread_codex_session_affinity(
             headers,
-            enabled=codex_session_affinity,
+            enabled=codex_session_affinity or (capability_conversation is not None and cache_key is not None),
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            thread_id=capability_conversation.value if capability_conversation is not None else None,
+            seed_process_preference=not require_trusted_cyber,
         )
     ) is not None:
         policy = thread_affinity

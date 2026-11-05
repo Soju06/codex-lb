@@ -13,6 +13,8 @@ from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
 from app.db.models import Account, ApiKey, ApiKeyUsageReservation
 from app.db.session import SessionLocal
+from app.modules.proxy.capability_lineage import CapabilityLineageAlias
+from app.modules.proxy.capability_lineage_repository import CapabilityLineageRepository
 from tests.integration.compact_test_helpers import _make_auth_json
 
 pytestmark = pytest.mark.integration
@@ -62,7 +64,9 @@ async def _setup(client, *, scoped_to_ordinary=False, enabled=True, allow_second
     return {"Authorization": "Bearer " + result.json()["key"]}
 
 
-def _install_upstream(monkeypatch, *, reject=False, forbid_sources=True, reject_first_account=False):
+def _install_upstream(
+    monkeypatch, *, reject=False, forbid_sources=True, reject_first_account=False, unique_response_ids=False
+):
     calls = []
 
     async def keep_fresh(self, account, *args, **kwargs):
@@ -78,7 +82,7 @@ def _install_upstream(monkeypatch, *, reject=False, forbid_sources=True, reject_
             event = {
                 "type": kind,
                 "response": {
-                    "id": "resp_native_http",
+                    "id": f"resp_native_http_{len(calls)}" if unique_response_ids else "resp_native_http",
                     "object": "response",
                     "status": "completed" if kind.endswith("completed") else "in_progress",
                     "output": [],
@@ -94,7 +98,7 @@ def _install_upstream(monkeypatch, *, reject=False, forbid_sources=True, reject_
             raise ProxyResponseError(403, openai_error("model_not_found", "The model is unavailable for this account"))
         return CompactResponsePayload.model_validate(
             {
-                "id": "resp_native_compact",
+                "id": f"resp_native_compact_{len(calls)}" if unique_response_ids else "resp_native_compact",
                 "object": "response.compaction",
                 "output": [{"type": "compaction", "encrypted_content": "opaque-test-content"}],
             }
@@ -302,3 +306,90 @@ async def test_http_enforced_daybreak_model_obeys_eligibility(async_client, monk
         assert response.status_code == 200, response.text
         assert [account for account, _ in calls] == ["ordinary" if case == "disabled" else "blue-in"]
         assert calls[0][1]["model"] == "gpt-daybreak-blue-latest"
+
+
+@pytest.mark.parametrize("path", [ROUTES[0], ROUTES[2], ROUTES[3], ROUTES[4]])
+@pytest.mark.parametrize("identifier", ["native", "legacy"])
+@pytest.mark.parametrize("conversation_header", ["x-codex-window-id", "thread-id"])
+@pytest.mark.parametrize("ordinary_first", [False, True])
+async def test_http_daybreak_conversation_isolation_preserves_burn_first(
+    async_client, monkeypatch, path, identifier, conversation_header, ordinary_first
+):
+    headers = await _setup(async_client)
+    calls = _install_upstream(monkeypatch, forbid_sources=False, unique_response_ids=True)
+    async with SessionLocal() as session:
+        ordinary = await session.get(Account, generate_unique_account_id("ordinary", "ordinary@example.com"))
+        assert ordinary is not None
+        ordinary.routing_policy = "burn_first"
+        await session.commit()
+    ordinary_payload = {"model": "gpt-5.1", "instructions": "", "input": "ordinary", "stream": True}
+    shared_headers = {**headers, "session_id": "shared-provider", "x-codex-parent-thread-id": "shared-task"}
+    requests = [
+        ("shared-task:2", _payload(identifier)),
+        ("shared-task:1", ordinary_payload),
+        ("shared-task:3", ordinary_payload),
+        ("shared-task:2", {**ordinary_payload, "access_programs": {"cyber": "standard"}}),
+    ]
+    if ordinary_first:
+        requests.insert(0, ("shared-task:1", ordinary_payload))
+    for window, payload in requests:
+        response = await async_client.post(path, json=payload, headers={**shared_headers, conversation_header: window})
+        assert response.status_code == 200, response.text
+    expected = ["blue-in", "ordinary", "ordinary", "blue-in"]
+    assert [account for account, _ in calls] == (["ordinary", *expected] if ordinary_first else expected)
+
+
+@pytest.mark.parametrize("path", [ROUTES[0], ROUTES[3]])
+async def test_http_new_window_ignores_legacy_broad_markers(async_client, monkeypatch, path):
+    headers = await _setup(async_client)
+    calls = _install_upstream(monkeypatch, forbid_sources=False)
+    async with SessionLocal() as session:
+        key = (await session.scalars(select(ApiKey))).one()
+        await CapabilityLineageRepository(session).require(
+            capability="trusted_cyber",
+            api_key_scope=key.id,
+            aliases=(
+                CapabilityLineageAlias(kind="codex_task", value="legacy-task"),
+                CapabilityLineageAlias(kind="session_header", value="legacy-session"),
+                CapabilityLineageAlias(kind="turn_state", value="legacy-turn"),
+            ),
+        )
+        ordinary = await session.get(Account, generate_unique_account_id("ordinary", "ordinary@example.com"))
+        assert ordinary is not None
+        ordinary.routing_policy = "burn_first"
+        await session.commit()
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.1", "instructions": "", "input": "fresh discussion", "stream": True},
+        headers={**headers, "session_id": "legacy-session", "x-codex-window-id": "legacy-task:4"},
+    )
+    assert response.status_code == 200, response.text
+    assert [account for account, _ in calls] == ["ordinary"]
+
+
+@pytest.mark.parametrize("with_owner_anchor", [False, True])
+async def test_http_mid_conversation_daybreak_switch_preserves_account_ownership(
+    async_client, monkeypatch, with_owner_anchor
+):
+    headers = await _setup(async_client)
+    headers["x-codex-window-id"] = "switching-conversation:1"
+    calls = _install_upstream(monkeypatch, forbid_sources=False, unique_response_ids=True)
+    ordinary_id = generate_unique_account_id("ordinary", "ordinary@example.com")
+    result = await async_client.put(f"/api/accounts/{ordinary_id}/routing-policy", json={"routingPolicy": "burn_first"})
+    assert result.status_code == 200, result.text
+    ordinary = {"model": "gpt-5.1", "instructions": "", "input": "start ordinary", "stream": True}
+    response = await async_client.post(ROUTES[0], json=ordinary, headers=headers)
+    assert response.status_code == 200, response.text
+    assert [account for account, _ in calls] == ["ordinary"]
+    required = _payload("native")
+    if with_owner_anchor:
+        required["previous_response_id"] = "resp_native_http_1"
+    response = await async_client.post(ROUTES[0], json=required, headers=headers)
+    if with_owner_anchor:
+        assert response.status_code >= 400 or "response.failed" in response.text, response.text
+        assert [account for account, _ in calls] == ["ordinary"]
+    else:
+        assert response.status_code == 200, response.text
+        response = await async_client.post(ROUTES[0], json=ordinary, headers=headers)
+        assert response.status_code == 200, response.text
+        assert [account for account, _ in calls] == ["ordinary", "blue-in", "blue-in"]

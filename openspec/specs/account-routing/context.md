@@ -181,3 +181,19 @@ later failure.
 
 
 Automatic Daybreak routing is opt-in per API key. It recognizes a legacy DBB model or the native Blue selector and reuses the existing account Trusted Cyber eligibility flag. One all-accounts key can therefore serve ordinary and Daybreak requests without custom client markers. Ordinary omission leaves upstream mode defaults unchanged. Responses WebSocket, HTTP Responses and compact use the same constrained eligible pool without ordinary fallback. See [Responses routing context](../responses-api-compat/context.md) for transport and retry details. Native-field delivery by a custom Codex provider is a separate compatibility concern (upstream #2580).
+
+## Conversation isolation correction
+
+The prior task-wide aliases let one DBB child constrain its ordinary parent and
+siblings. Capability requirements now follow an exact conversation and direct
+response continuations. For example, task:2 can remain DBB while task:1 and
+task:3 retain ordinary routing. Frame window metadata overrides compatibility
+headers; thread-id is the fallback before shared session/turn identities.
+
+DBB selection uses the existing thread affinity without seeding the shared
+process preference. This prevents DBB-first traffic from pinning later ordinary
+work to its account. Ordinary selection, ownership, scope and retry rules stay
+in force. A movable mid-session request can select a capable account; an
+incompatible account-owned anchor fails closed. Existing exact conversation
+markers remain restricted. Broad legacy markers are retained for clients that
+lack a specific identity, but do not constrain newly identified conversations.

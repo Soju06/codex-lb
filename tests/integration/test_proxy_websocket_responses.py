@@ -13157,7 +13157,7 @@ def test_direct_responses_websocket_rejects_capability_carrier_on_unsupported_fr
 
 
 @pytest.mark.parametrize("native_program", [False, True])
-def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle_ordinary_socket(
+def test_backend_responses_websocket_capability_conversation_isolation_reselects_idle_socket(
     app_instance,
     monkeypatch,
     native_program,
@@ -13177,13 +13177,22 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
     )
     marker_cyber_upstream = _SequencedUpstreamWebSocket(
         [],
-        deferred_message_batches=[_websocket_response_batch("resp_ws_capability_marker")],
+        deferred_message_batches=[
+            _websocket_response_batch("resp_ws_capability_marker"),
+            _websocket_response_batch("resp_ws_capability_leaked_parent"),
+        ],
     )
     inherited_cyber_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[_websocket_response_batch("resp_ws_capability_inherited")],
     )
-    ordinary_upstreams = deque([ordinary_upstream])
+    returned_ordinary_upstream = _SequencedUpstreamWebSocket(
+        [], deferred_message_batches=[_websocket_response_batch("resp_ws_capability_returned_ordinary")]
+    )
+    sibling_ordinary_upstream = _SequencedUpstreamWebSocket(
+        [], deferred_message_batches=[_websocket_response_batch("resp_ws_capability_sibling_ordinary")]
+    )
+    ordinary_upstreams = deque([ordinary_upstream, returned_ordinary_upstream, sibling_ordinary_upstream])
     cyber_upstreams = deque([marker_cyber_upstream, inherited_cyber_upstream])
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
@@ -13216,6 +13225,9 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
         del current_api_key, raw_model
         source_checks.append(source_model)
         return source_model == "external-inherited-capability-source"
+
+    async def keep_capable_socket(self, account, **_kwargs):
+        return account, None, None
 
     async def resolve_marker_owner(self, payload, _headers):
         del self
@@ -13267,6 +13279,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
         resolve_marker_owner,
     )
     monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
+    monkeypatch.setattr(proxy_module.ProxyService, "_revalidate_open_websocket_account", keep_capable_socket)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -13307,18 +13320,33 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
             assert len(ordinary_upstream.sent_text) == 1
             assert not any(name.lower() == "x-codex-turn-state" for name in opened_headers[1])
 
+            ordinary_websocket.send_text(json.dumps(_websocket_response_create("return to parent conversation")))
+            returned_created = json.loads(ordinary_websocket.receive_text())
+            returned_completed = json.loads(ordinary_websocket.receive_text())
+            assert marker_cyber_upstream.closed is True
+
             with client.websocket_connect(
                 "/backend-api/codex/responses",
                 headers={
                     "Authorization": "Bearer capability-inheritance",
                     "x-codex-window-id": "task-ws-capability-inheritance:3",
                 },
-            ) as inherited_websocket:
-                inherited_request = _websocket_response_create("inherited requirement")
-                inherited_request["model"] = "external-inherited-capability-source"
-                inherited_websocket.send_text(json.dumps(inherited_request))
-                inherited_created = json.loads(inherited_websocket.receive_text())
-                inherited_completed = json.loads(inherited_websocket.receive_text())
+            ) as sibling_websocket:
+                sibling_websocket.send_text(json.dumps(_websocket_response_create("ordinary sibling")))
+                sibling_created = json.loads(sibling_websocket.receive_text())
+                sibling_completed = json.loads(sibling_websocket.receive_text())
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers={
+                    "Authorization": "Bearer capability-inheritance",
+                    "x-codex-window-id": "task-ws-capability-inheritance:2",
+                },
+            ) as continuation_websocket:
+                continued_request = _websocket_response_create("same DBB conversation without selector")
+                continued_request["model"] = "external-inherited-capability-source"
+                continuation_websocket.send_text(json.dumps(continued_request))
+                inherited_created = json.loads(continuation_websocket.receive_text())
+                inherited_completed = json.loads(continuation_websocket.receive_text())
 
     assert ordinary_created["response"]["id"] == "resp_ws_capability_ordinary"
     assert ordinary_completed["type"] == "response.completed"
@@ -13326,13 +13354,19 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
     assert marker_completed["type"] == "response.completed"
     assert inherited_created["response"]["id"] == "resp_ws_capability_inherited"
     assert inherited_completed["type"] == "response.completed"
-    assert selection_requirements == [False, True, True]
+    assert returned_created["response"]["id"] == "resp_ws_capability_returned_ordinary"
+    assert returned_completed["type"] == "response.completed"
+    assert sibling_created["response"]["id"] == "resp_ws_capability_sibling_ordinary"
+    assert sibling_completed["type"] == "response.completed"
+    assert selection_requirements == [False, True, False, False, True]
     assert opened_account_ids == [
         "acct_ws_capability_ordinary_1",
         "acct_ws_capability_cyber_1",
+        "acct_ws_capability_ordinary_2",
+        "acct_ws_capability_ordinary_3",
         "acct_ws_capability_cyber_2",
     ]
-    assert source_checks == ["gpt-5.4"]
+    assert source_checks and set(source_checks) == {"gpt-5.4"}
     assert len(inherited_cyber_upstream.sent_text) == 1
 
 
@@ -13610,32 +13644,20 @@ def test_backend_responses_websocket_capability_revalidation_error_releases_fram
     assert len(upstream.sent_text) == 1
 
 
-def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_ordinary_socket(
+@pytest.mark.parametrize("required_first", [False, True])
+def test_backend_responses_websocket_capability_pending_conflict_keeps_active_socket(
     app_instance,
     monkeypatch,
+    required_first,
 ):
     api_key = _capability_test_api_key("key_ws_capability_pending_conflict")
-    ordinary_upstream = _SequencedUpstreamWebSocket(
+    active_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
             _websocket_response_batch("resp_ws_capability_pending", completed=False),
             _websocket_response_batch("resp_ws_capability_conflict_leak", completed=False),
         ],
     )
-    reopened_ordinary_upstream = _SequencedUpstreamWebSocket(
-        [],
-        deferred_message_batches=[_websocket_response_batch("resp_ws_capability_conflict_reopened")],
-    )
-    marker_cyber_upstream = _SequencedUpstreamWebSocket(
-        [],
-        deferred_message_batches=[_websocket_response_batch("resp_ws_capability_conflict_marker")],
-    )
-    unexpected_cyber_upstream = _SequencedUpstreamWebSocket(
-        [],
-        deferred_message_batches=[_websocket_response_batch("resp_ws_capability_conflict_reconnected")],
-    )
-    ordinary_upstreams = deque([ordinary_upstream, reopened_ordinary_upstream])
-    cyber_upstreams = deque([marker_cyber_upstream, unexpected_cyber_upstream])
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
 
@@ -13675,8 +13697,7 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
         account_index = selection_requirements.count(require_security_work_authorized)
         return SimpleNamespace(
             id=f"acct_ws_capability_conflict_{account_kind}_{account_index}",
-            # This socket was selected under the ordinary contract even though
-            # the selected account itself currently has the capability grant.
+            # The account flag does not establish the socket selection contract.
             security_work_authorized=True,
         )
 
@@ -13684,8 +13705,8 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
         del self, _kwargs
         assert not any(name.lower() == REQUIRED_CAPABILITY_HEADER for name in headers)
         opened_account_ids.append(account.id)
-        upstreams = cyber_upstreams if "_cyber_" in account.id else ordinary_upstreams
-        return account, upstreams.popleft()
+        assert len(opened_account_ids) == 1
+        return account, active_upstream
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -13719,38 +13740,27 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
                 "Authorization": "Bearer capability-pending-conflict",
                 "x-codex-window-id": "task-ws-capability-pending-conflict:1",
             },
-        ) as ordinary_websocket:
-            ordinary_websocket.send_text(json.dumps(_websocket_response_create("long ordinary response")))
-            pending_created = json.loads(ordinary_websocket.receive_text())
-
-            with client.websocket_connect(
-                "/backend-api/codex/responses",
-                headers={
-                    "Authorization": "Bearer capability-pending-conflict",
-                    "x-codex-window-id": "task-ws-capability-pending-conflict:2",
-                    REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
-                },
-            ) as marker_websocket:
-                marker_websocket.send_text(json.dumps(_websocket_response_create("establish requirement")))
-                marker_created = json.loads(marker_websocket.receive_text())
-                marker_completed = json.loads(marker_websocket.receive_text())
-
-            ordinary_websocket.send_text(json.dumps(_websocket_response_create("must not cross accounts")))
-            conflict = json.loads(ordinary_websocket.receive_text())
-
+        ) as active_websocket:
+            initial_request = _websocket_response_create("long response")
+            if required_first:
+                initial_request["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
+            active_websocket.send_text(json.dumps(initial_request))
+            pending_created = json.loads(active_websocket.receive_text())
+            conflicting_request = _websocket_response_create("must not cross accounts")
+            conflicting_request["client_metadata"] = {"x-codex-window-id": "different-conversation:2"}
+            if not required_first:
+                conflicting_request["client_metadata"][REQUIRED_CAPABILITY_HEADER] = "trusted_cyber"
+            active_websocket.send_text(json.dumps(conflicting_request))
+            conflict = json.loads(active_websocket.receive_text())
             assert conflict["type"] == "response.failed"
             assert conflict["response"]["error"]["code"] == "continuity_owner_conflict"
-            assert ordinary_upstream.closed is False
-            assert len(ordinary_upstream.sent_text) == 1
-            assert selection_requirements == [False, True]
+            assert active_upstream.closed is False
+            assert len(active_upstream.sent_text) == 1
+            assert selection_requirements == [required_first]
 
     assert pending_created["response"]["id"] == "resp_ws_capability_pending"
-    assert marker_created["response"]["id"] == "resp_ws_capability_conflict_marker"
-    assert marker_completed["type"] == "response.completed"
-    assert opened_account_ids == [
-        "acct_ws_capability_conflict_ordinary_1",
-        "acct_ws_capability_conflict_cyber_1",
-    ]
+    account_kind = "cyber" if required_first else "ordinary"
+    assert opened_account_ids == [f"acct_ws_capability_conflict_{account_kind}_1"]
 
 
 # --- Reproduction for #1384 takeover (narrowed scope): accepted, output-free capacity failure ---

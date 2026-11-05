@@ -4322,3 +4322,180 @@ async def test_v1_responses_disconnect_stamp_reaches_traced_response_through_rea
         "request_id=req_delivery_trace_stamp surface=responses outcome=terminal_after_disconnect "
         "terminal=response.completed"
     ) in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("code", ["usage_limit_reached", "no_accounts"])
+async def test_selector_refusal_proves_no_upstream_attempt(async_client, monkeypatch, path, stream, code):
+    async def select_none(*args, **kwargs):
+        return proxy_module.AccountSelection(account=None, error_message="No eligible account", error_code=code)
+
+    async def never_dispatch(*args, **kwargs):
+        raise AssertionError("initial selector refusal dispatched upstream")
+        yield ""
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_none)
+    monkeypatch.setattr(proxy_module.ProxyService, "_stream_once", never_dispatch)
+    response = await async_client.post(path, json={"model": "gpt-5.4", "input": [], "stream": stream})
+    assert response.status_code == (429 if code == "usage_limit_reached" else 200 if stream else 503)
+    assert response.headers.get("X-Codex-LB-No-Upstream-Attempt") == "1"
+    if response.status_code == 200:
+        event = _extract_first_event([line for line in response.text.splitlines() if line])
+        assert event["response"]["error"]["code"] == code
+    else:
+        assert response.json()["error"]["code"] == code
+
+
+async def _marker_account(async_client):
+    account_id = "selector_marker_account"
+    auth = _make_auth_json(account_id, "selector-marker@example.com")
+    response = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth), "application/json")}
+    )
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        account = await session.get(Account, generate_unique_account_id(account_id, "selector-marker@example.com"))
+        assert account is not None
+        return account
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("code", ["usage_limit_reached", "no_accounts"])
+async def test_later_selector_refusal_does_not_prove_no_upstream(async_client, monkeypatch, path, stream, code):
+    from app.core.errors import openai_error
+
+    account = await _marker_account(async_client)
+    selections = 0
+    attempts = 0
+
+    async def select_then_refuse(*args, **kwargs):
+        nonlocal selections
+        selections += 1
+        if selections == 1:
+            return proxy_module.AccountSelection(account=account, error_message=None, error_code=None)
+        return proxy_module.AccountSelection(account=None, error_message="No eligible replacement", error_code=code)
+
+    async def reject_upstream(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise proxy_client_module.ProxyResponseError(429, openai_error("usage_limit_reached", "Upstream quota"))
+        yield ""
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_then_refuse)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", reject_upstream)
+    response = await async_client.post(path, json={"model": "gpt-5.4", "input": [], "stream": stream})
+    assert attempts == 1
+    assert selections >= 2
+    assert "X-Codex-LB-No-Upstream-Attempt" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("kind", ["quota", "timeout", "spoofed_no_accounts"])
+async def test_upstream_failure_cannot_supply_selector_proof(async_client, monkeypatch, path, stream, kind):
+    from app.core.errors import openai_error
+
+    await _marker_account(async_client)
+    attempts = 0
+
+    async def fail_upstream(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if kind == "spoofed_no_accounts":
+            # A provider-supplied error frame is ordinary wire text, never local typed provenance.
+            yield (
+                'data: {"type":"response.failed","response":{"error":{"type":"server_error",'
+                '"code":"no_accounts","message":"No accounts","no_upstream_attempt":true}}}\n\n'
+            )
+            return
+        code = "usage_limit_reached" if kind == "quota" else "upstream_request_timeout"
+        raise proxy_client_module.ProxyResponseError(
+            429 if kind == "quota" else 504, openai_error(code, "Upstream failure")
+        )
+        yield ""
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(proxy_module, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", fresh)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_upstream)
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.4", "input": [], "stream": stream},
+        headers={"X-Codex-LB-No-Upstream-Attempt": "1"},
+    )
+    assert attempts >= 1
+    assert "X-Codex-LB-No-Upstream-Attempt" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_active_bridge_does_not_publish_raw_selector_proof(async_client, monkeypatch, stream):
+    from app.core.errors import openai_error
+    from app.modules.proxy.selection_errors import UnattemptedSelectorError, UnattemptedSelectorEvent
+
+    async def active_bridge(*args, **kwargs):
+        return True
+
+    async def bridge_fallback(*args, **kwargs):
+        if stream:
+            yield UnattemptedSelectorEvent(
+                'data: {"type":"response.failed","response":{"error":{"type":"server_error",'
+                '"code":"no_accounts","message":"Nested raw refusal"}}}\n\n'
+            )
+        else:
+            raise UnattemptedSelectorError(503, openai_error("no_accounts", "Nested raw refusal"))
+
+    monkeypatch.setattr(proxy_api_module, "_http_bridge_active_for_request", active_bridge)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", bridge_fallback)
+    response = await async_client.post("/v1/responses", json={"model": "gpt-5.4", "input": [], "stream": stream})
+    assert "X-Codex-LB-No-Upstream-Attempt" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("stream", [True, False])
+async def test_refresh_then_selector_refusal_does_not_prove_no_upstream(async_client, monkeypatch, path, stream):
+    from app.core.auth.refresh import RefreshError
+
+    account = await _marker_account(async_client)
+    selections = 0
+    refresh_attempts = 0
+
+    async def select_then_refuse(*args, **kwargs):
+        nonlocal selections
+        selections += 1
+        if selections == 1:
+            return proxy_module.AccountSelection(account=account, error_message=None, error_code=None)
+        return proxy_module.AccountSelection(
+            account=None, error_message="No eligible replacement", error_code="usage_limit_reached"
+        )
+
+    async def refresh_conflict(*args, **kwargs):
+        nonlocal refresh_attempts
+        refresh_attempts += 1
+        # A rotating-token exchange can have succeeded before persistence loses a race.
+        raise RefreshError("token_persist_conflict", "Synthetic post-exchange conflict", False)
+
+    async def never_dispatch(*args, **kwargs):
+        raise AssertionError("refresh failure must not dispatch a Responses generation")
+        yield ""
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_then_refuse)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh", refresh_conflict)
+    monkeypatch.setattr(proxy_module.ProxyService, "_stream_once", never_dispatch)
+    response = await async_client.post(path, json={"model": "gpt-5.4", "input": [], "stream": stream})
+    assert response.status_code == 429
+    assert refresh_attempts == 1
+    assert selections == 2
+    assert "X-Codex-LB-No-Upstream-Attempt" not in response.headers

@@ -36746,41 +36746,22 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     unanchored instead of restoring the wedged durable anchor through session
     hydration and session-level injection."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    historical_input = [
-        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
-        {
-            "type": "additional_tools",
-            "role": "developer",
-            "tools": [{"type": "custom", "name": "shell"}],
-        },
-        {
-            "type": "message",
-            "role": "developer",
-            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
-        },
-        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
-        {
-            "type": "custom_tool_call",
-            "call_id": "call_historical_shell",
-            "name": "shell",
-            "input": "printf historical",
-        },
-        {"role": "developer", "content": [{"type": "input_text", "text": "historical control"}]},
-        {
-            "type": "custom_tool_call_output",
-            "call_id": "call_historical_shell",
-            "output": "historical",
-        },
-    ]
-    # Full resend with a trimmable durable prefix and a fresh suffix that does
-    # NOT retain the prior output (plain user turn).
+    historical_input = [{"role": "user", "content": [{"type": "input_text", "text": "first question"}]}]
+    # Full resend with a trimmable durable prefix and a fresh suffix that
+    # retains the prior output before the new user turn.
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "test",
             "input": [
                 *historical_input,
-                {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "first answer"}],
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]},
             ],
         }
     )
@@ -36876,6 +36857,7 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service._durable_bridge, "lookup_recovery_attempt", AsyncMock(return_value=None))
     # The bypass shape: a live (alias) session makes the fresh-reattach
     # durable-anchor gate false before the quarantine is ever consulted.
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
@@ -36903,7 +36885,7 @@ async def test_stream_http_bridge_quarantined_full_resend_stays_unanchored_when_
     # through session hydration or session-level injection, and the client's
     # payload was not prefix-trimmed against the durable stored context.
     assert "previous_response_id" not in dispatched_payload
-    assert len(dispatched_payload["input"]) == len(historical_input) + 1
+    assert len(dispatched_payload["input"]) == len(payload.input)
     assert fresh_session.last_completed_response_id is None
 
 
@@ -36914,44 +36896,26 @@ async def test_stream_http_bridge_tombstoned_full_resend_stays_unanchored(
     """A transitional abandonment tombstone must fence anchor injection the
     same way a quarantine does: a crash between a poison settle and its
     registration leaves the old poisoned anchor stored behind a zero-count
-    tombstone that arms no quarantine, and a full resend planned on another
-    worker must dispatch unanchored instead of reattaching the dead anchor."""
+    tombstone that arms no quarantine, and a verified full resend planned on
+    another worker must dispatch unanchored instead of reattaching the dead
+    anchor."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    historical_input = [
-        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
-        {
-            "type": "additional_tools",
-            "role": "developer",
-            "tools": [{"type": "custom", "name": "shell"}],
-        },
-        {
-            "type": "message",
-            "role": "developer",
-            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
-        },
-        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
-        {
-            "type": "custom_tool_call",
-            "call_id": "call_historical_shell",
-            "name": "shell",
-            "input": "printf historical",
-        },
-        {"role": "developer", "content": [{"type": "input_text", "text": "historical control"}]},
-        {
-            "type": "custom_tool_call_output",
-            "call_id": "call_historical_shell",
-            "output": "historical",
-        },
-    ]
-    # Full resend with a trimmable durable prefix and a fresh suffix that does
-    # NOT retain the prior output (plain user turn).
+    historical_input = [{"role": "user", "content": [{"type": "input_text", "text": "first question"}]}]
+    # Full resend with a trimmable durable prefix and a fresh suffix that
+    # retains the prior output before the new user turn.
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.6-sol",
             "instructions": "test",
             "input": [
                 *historical_input,
-                {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "first answer"}],
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "follow-up"}]},
             ],
         }
     )
@@ -37049,6 +37013,7 @@ async def test_stream_http_bridge_tombstoned_full_resend_stays_unanchored(
     monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_runtime_config", lambda *args: runtime_config)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service._durable_bridge, "lookup_recovery_attempt", AsyncMock(return_value=None))
     # The bypass shape: a live (alias) session makes the fresh-reattach
     # durable-anchor gate false before the quarantine is ever consulted.
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=True))
@@ -37076,7 +37041,7 @@ async def test_stream_http_bridge_tombstoned_full_resend_stays_unanchored(
     # through session hydration or session-level injection, and the client's
     # payload was not prefix-trimmed against the durable stored context.
     assert "previous_response_id" not in dispatched_payload
-    assert len(dispatched_payload["input"]) == len(historical_input) + 1
+    assert len(dispatched_payload["input"]) == len(payload.input)
     assert fresh_session.last_completed_response_id is None
 
 
@@ -39082,6 +39047,7 @@ async def test_stream_via_http_bridge_probe_after_poisoned_circuit_is_unanchored
     )
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
+        lookup_recovery_attempt=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
         lookup_request_targets=AsyncMock(
             return_value=proxy_service.DurableBridgeLookup(
@@ -39096,6 +39062,10 @@ async def test_stream_via_http_bridge_probe_after_poisoned_circuit_is_unanchored
                 state=HttpBridgeSessionState.ACTIVE,
                 latest_turn_state="http_turn_1",
                 latest_response_id="resp_poisoned",
+                latest_input_item_count=1,
+                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(
+                    [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first"}]}]
+                ),
             )
         ),
     )
@@ -41888,6 +41858,12 @@ async def test_canonicalized_continuity_loads_the_canonical_circuit_before_injec
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
     ]
     full_input = stored_prefix + [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "reply"}],
+        },
         {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
 
@@ -41903,6 +41879,7 @@ async def test_canonicalized_continuity_loads_the_canonical_circuit_before_injec
 
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(side_effect=lookup_retry_circuit),
+        lookup_recovery_attempt=AsyncMock(return_value=None),
         persist_retry_circuit=AsyncMock(return_value=None),
         lookup_request_targets=AsyncMock(
             return_value=proxy_service.DurableBridgeLookup(

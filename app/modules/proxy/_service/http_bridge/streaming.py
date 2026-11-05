@@ -122,6 +122,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
+    _turn_keys,
 )
 from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
@@ -1767,8 +1768,30 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
+            anchor_planning_keys = {bridge_session_key}
+            if (
+                payload_looks_like_full_resend
+                and incoming_turn_state_header is not None
+                and incoming_turn_state_header.startswith("http_turn_")
+                and not is_http_bridge_account_neutral_replay(
+                    kind=bridge_session_key.affinity_kind, key=bridge_session_key.affinity_key
+                )
+            ):
+                # Acquisition can resolve an absent local turn-state alias to
+                # the thread/session fallback, even when durable lookup found
+                # an older turn-state row. Honor that destination's fence
+                # before injecting and trimming against the older anchor.
+                _, fallback_key = _turn_keys(headers, api_key, bridge_session_key, session_header_fallback_key)
+                if fallback_key is not None and fallback_key not in anchor_planning_keys:
+                    await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                        fallback_key, request_model=payload.model
+                    )
+                    anchor_planning_keys.add(fallback_key)
+            fresh_reattach_anchor_quarantined = payload_looks_like_full_resend and any(
+                _http_bridge_session_key_quarantined(self, key) for key in anchor_planning_keys
+            )
             fresh_reattach_anchor_tombstoned = False
-            if payload_looks_like_full_resend and not _http_bridge_session_key_quarantined(self, bridge_session_key):
+            if payload_looks_like_full_resend and not fresh_reattach_anchor_quarantined:
                 # A transitional abandonment tombstone fences the stored
                 # anchor the same way a quarantine does: a crash between a
                 # poison settle and its registration leaves the old
@@ -1776,20 +1799,53 @@ class _HTTPBridgeStreamingMixin:
                 # arms no quarantine, and injecting it here would defeat
                 # the crash-safe settle-to-registration transition.
                 async with self._http_bridge_retry_circuit_lock:
-                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
-                fresh_reattach_anchor_tombstoned = bool(
-                    tombstone_state is not None
-                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                    fresh_reattach_anchor_tombstoned = any(
+                        (state := self._http_bridge_retry_circuits.get(key)) is not None
+                        and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        for key in anchor_planning_keys
+                    )
+            if (
+                payload_looks_like_full_resend
+                and payload.previous_response_id is None
+                and not durable_full_resend_has_safe_fresh_context
+                and durable_lookup.latest_response_id is not None
+                and (fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned)
+            ):
+                # A cumulative payload that omits both the prior output and
+                # the exact pending-tool manifest cannot replace the dead
+                # anchor with a context-free fresh turn. Keep the request
+                # fail-closed so the client can resend the actual history.
+                _log_http_bridge_event(
+                    "previous_response_poisoned_anchor_fail_fast",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail="outcome=incomplete_full_resend_fail_closed",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
                 )
-            if payload_looks_like_full_resend and (
-                _http_bridge_session_key_quarantined(self, bridge_session_key) or fresh_reattach_anchor_tombstoned
+                raise ProxyResponseError(
+                    404,
+                    openai_error(
+                        "bridge_previous_response_not_found",
+                        "The reattached anchor for this session was proven dead; resend the full conversation.",
+                    ),
+                )
+            if (
+                payload_looks_like_full_resend
+                and durable_full_resend_has_safe_fresh_context
+                and (fresh_reattach_anchor_quarantined or fresh_reattach_anchor_tombstoned)
             ):
                 # The previous attach on this key proved silent/wedged
                 # (#1534). The client's own payload already carries the full
-                # conversation, so send it unanchored on the fresh path
-                # instead of rebuilding the same reattach. Delta-only
-                # payloads keep the anchor: it is their only way to convey
-                # prior context (same boundary as the fenced anchor clear).
+                # conversation, so send it unanchored on the fresh path instead
+                # of rebuilding the same reattach. An incomplete cumulative
+                # payload must keep the anchor and fail closed below: removing
+                # it would submit a request that cannot carry the context it
+                # depends on. Delta-only payloads keep the anchor: it is their
+                # only way to convey prior context (same boundary as the fenced
+                # anchor clear).
                 # Evaluated independently of the fresh-reattach eligibility
                 # above: even when that gate is already false (for example a
                 # conversation-scoped payload, a live alias session, or an
@@ -3213,10 +3269,28 @@ class _HTTPBridgeStreamingMixin:
             # new conversation and silently drop the prior context, which
             # the delta-only contract forbids. Fail closed instead so the
             # client resends its full history.
-            unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            delta_fence_keys = {bridge_session_key}
+            if (
+                incoming_turn_state_header is not None
+                and incoming_turn_state_header.startswith("http_turn_")
+                and not is_http_bridge_account_neutral_replay(
+                    kind=bridge_session_key.affinity_kind, key=bridge_session_key.affinity_key
+                )
+            ):
+                _, fallback_key = _turn_keys(headers, api_key, bridge_session_key, session_header_fallback_key)
+                if fallback_key is not None and fallback_key not in delta_fence_keys:
+                    await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                        fallback_key, request_model=effective_payload.model
+                    )
+                    delta_fence_keys.add(fallback_key)
+            unanchored_delta_poisoned = any(
+                _http_bridge_session_key_poison_quarantined(self, key) for key in delta_fence_keys
+            )
             if not unanchored_delta_poisoned:
                 await self._load_http_bridge_retry_circuit(session)
-                unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+                unanchored_delta_poisoned = any(
+                    _http_bridge_session_key_poison_quarantined(self, key) for key in delta_fence_keys
+                )
             if not unanchored_delta_poisoned:
                 # A settled abandonment leaves neither a quarantine nor a
                 # poison row; the tombstone detail on the zeroed circuit row
@@ -3224,11 +3298,11 @@ class _HTTPBridgeStreamingMixin:
                 # replica reads before dispatching a delta as a brand-new
                 # conversation.
                 async with self._http_bridge_retry_circuit_lock:
-                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
-                unanchored_delta_poisoned = bool(
-                    tombstone_state is not None
-                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                )
+                    unanchored_delta_poisoned = any(
+                        (state := self._http_bridge_retry_circuits.get(key)) is not None
+                        and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        for key in delta_fence_keys
+                    )
             if unanchored_delta_poisoned:
                 _log_http_bridge_event(
                     "previous_response_poisoned_anchor_fail_fast",

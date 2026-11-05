@@ -96,6 +96,8 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
+  /** Upstream filter labels keyed by model-source ID, used for row badges. */
+  modelSourceLabels?: ReadonlyMap<string, string>;
   total: number;
   limit: number;
   offset: number;
@@ -306,6 +308,7 @@ function formatCompactElapsed(ms: number | null | undefined): string | null {
 export function RecentRequestsTable({
   requests,
   accounts,
+  modelSourceLabels,
   total,
   limit,
   offset,
@@ -444,7 +447,9 @@ export function RecentRequestsTable({
                           className="max-w-full text-[10px] font-normal"
                           title={request.modelSourceId}
                         >
-                          <span className="truncate">{t("dashboard.requests.modelSourceBadge")}</span>
+                          <span className="truncate">
+                            {modelSourceLabels?.get(request.modelSourceId) ?? t("dashboard.requests.modelSourceBadge")}
+                          </span>
                         </Badge>
                       </div>
                     ) : null}

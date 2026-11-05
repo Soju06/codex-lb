@@ -282,6 +282,10 @@ export function DashboardPage() {
     () => buildUpstreamOptions(optionsQuery.data?.upstreams ?? [], t),
     [optionsQuery.data?.upstreams, t],
   );
+  const modelSourceLabels = useMemo(
+    () => new Map(upstreamOptions.map((option) => [option.value, option.label])),
+    [upstreamOptions],
+  );
 
   const blurred = usePrivacyStore((s) => s.blurred);
 
@@ -648,6 +652,7 @@ export function DashboardPage() {
                       <RecentRequestsTable
                         requests={view.requestLogs}
                         accounts={overview?.accounts ?? []}
+                        modelSourceLabels={modelSourceLabels}
                         total={logPage.total}
                         visibleColumns={visibleColumns}
                         columnWidths={columnWidths}

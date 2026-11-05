@@ -1654,6 +1654,24 @@ describe("RecentRequestsTable model-source attribution", () => {
     expect(within(dialog).getByText("openai_compatible")).toBeInTheDocument();
   });
 
+  it("labels the badge with the upstream name so two sources stay distinct", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        accounts={[]}
+        modelSourceLabels={new Map([["src_a", "Local vLLM"], ["src_b", "Backup gateway"]])}
+        requests={[
+          { ...LAYOUT_REQUEST, requestId: "req-a", accountId: null, modelSourceId: "src_a", modelSourceKind: "openai_compatible" },
+          { ...LAYOUT_REQUEST, requestId: "req-b", accountId: null, modelSourceId: "src_b", modelSourceKind: "openai_compatible" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Local vLLM").closest("[title]")).toHaveAttribute("title", "src_a");
+    expect(screen.getByText("Backup gateway").closest("[title]")).toHaveAttribute("title", "src_b");
+  });
+
   it("renders subscription rows without model-source attribution", () => {
     render(
       <RecentRequestsTable

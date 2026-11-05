@@ -59,13 +59,18 @@ The dashboard request logs view SHALL allow operators to filter rows by one or m
 
 ### Requirement: Request-log rows show model-source attribution
 
-The dashboard request-log table SHALL mark rows that carry a `modelSourceId` with a compact model-source badge, and the request details SHALL show the full model-source ID and kind. Rows without a model source MUST render as before.
+The dashboard request-log table SHALL mark rows that carry a `modelSourceId` with a compact model-source badge, labelled with that source's upstream filter label when the options response provides one and a generic model-source label otherwise, with the source ID available as its tooltip. The request details SHALL show the full model-source ID and kind. Rows without a model source MUST render as before.
 
 #### Scenario: Model-source row badge and details
 - **GIVEN** a request-log row with `modelSourceId = src_a` and `modelSourceKind = openai_compatible`
 - **WHEN** the request logs table renders
 - **THEN** the row shows a model-source badge
 - **AND** the request details show `src_a` and `openai_compatible`
+
+#### Scenario: Two sources serving the same model are distinct in the table
+- **GIVEN** rows from `src_a` labelled `Local vLLM` and `src_b` labelled `Backup gateway` in the upstream options
+- **WHEN** the request logs table renders
+- **THEN** each row's badge shows its own upstream label
 
 #### Scenario: Subscription row unchanged
 - **GIVEN** a request-log row without `modelSourceId`

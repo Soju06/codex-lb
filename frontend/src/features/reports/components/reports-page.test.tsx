@@ -145,7 +145,7 @@ describe("ReportsPage", () => {
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue({ accounts: [] });
-    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [], upstreams: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -875,7 +875,7 @@ describe("ReportsPage", () => {
     );
     getRequestLogOptionsMock
       .mockRejectedValueOnce(new Error("api keys backend timeout"))
-      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [], upstreams: [] });
 
     renderWithProviders(<ReportsPage />);
 
@@ -919,6 +919,7 @@ describe("ReportsPage", () => {
       ],
       modelOptions: [],
       statuses: [],
+      upstreams: [],
     });
 
     renderWithProviders(<ReportsPage />);

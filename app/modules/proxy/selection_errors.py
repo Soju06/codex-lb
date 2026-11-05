@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.resilience.overload import is_local_overload_error_code
 
@@ -39,3 +40,21 @@ def selection_failure_response(selection: SelectionFailure) -> tuple[int, OpenAI
     if is_local_overload_error_code(code):
         return 429, openai_error(code, message, error_type="rate_limit_error")
     return 503, openai_error(code, message)
+
+
+NO_UPSTREAM_ATTEMPT_HEADER = "X-Codex-LB-No-Upstream-Attempt"
+
+
+class UnattemptedSelectorError(ProxyResponseError):
+    """Local selector refusal with proof that this whole stream never entered an upstream attempt."""
+
+
+class UnattemptedSelectorEvent(str):
+    """The same trusted provenance on an existing SSE terminal, without changing its wire body."""
+
+
+def unattempted_selector_headers(value: ProxyResponseError | str) -> dict[str, str]:
+    """Only local types carry proof; upstream/client headers, payloads and error strings never do."""
+    if isinstance(value, (UnattemptedSelectorError, UnattemptedSelectorEvent)):
+        return {NO_UPSTREAM_ATTEMPT_HEADER: "1"}
+    return {}

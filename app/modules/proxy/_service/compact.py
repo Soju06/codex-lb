@@ -477,7 +477,12 @@ def _sticky_key_for_compact_request(
     elif (
         thread_affinity := _thread_codex_session_affinity(
             headers,
-            enabled=codex_session_affinity or (capability_conversation is not None and cache_key is not None),
+            enabled=codex_session_affinity
+            or (
+                capability_conversation is not None
+                and cache_key is not None
+                and (openai_cache_affinity or sticky_threads_enabled)
+            ),
             max_age_seconds=openai_cache_affinity_max_age_seconds,
             thread_id=capability_conversation.value if capability_conversation is not None else None,
             seed_process_preference=not require_trusted_cyber,

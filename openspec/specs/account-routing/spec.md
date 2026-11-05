@@ -1245,7 +1245,8 @@ Automatic Daybreak routing MUST pass the existing security-work-authorized requi
 Required routing MUST use conversation affinity without reading or seeding the
 shared ordinary process preference. This MUST preserve existing ordinary
 account-selection rules, API-key scope, hard ownership, retry eligibility and
-reservation settlement.
+reservation settlement. DBB routing MUST NOT enable affinity when all applicable
+affinity controls are disabled.
 
 #### Scenario: DBB-first traffic preserves ordinary burn_first
 - **WHEN** a DBB conversation is selected before ordinary traffic in a shared process
@@ -1255,3 +1256,7 @@ reservation settlement.
 - **WHEN** an ordinary conversation requests DBB on a DBB-incapable account
 - **THEN** an account-neutral request can select a capable account
 - **AND** existing account-owned response IDs, files or opaque history cannot be transferred to an incompatible subscription
+
+#### Scenario: Disabled affinity stays disabled
+- **WHEN** session, cache, and thread affinity are disabled
+- **THEN** a DBB request with a prompt cache key does not create a sticky selection policy

@@ -13,5 +13,5 @@
 ## Conversation isolation correction
 - [x] Add failing HTTP/compact and WebSocket regressions for ordinary parent/sibling routing, shared session identifiers, same-conversation persistence, and mid-session switching.
 - [x] Restrict capability aliases to the conversation and direct continuations, and prevent DBB from rewriting ordinary process locality.
-- [ ] Verify socket transitions, ownership, restricted retries, persistence failures, and existing routing rules.
+- [x] Verify socket transitions, ownership, restricted retries, persistence failures, and existing routing rules.
 Deployment and fork-PR publication are tracked separately in the operator workflow; they do not change this routing contract.

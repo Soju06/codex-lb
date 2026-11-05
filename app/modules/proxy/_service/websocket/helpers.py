@@ -342,6 +342,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.capability_lineage import CapabilityLineageAlias
 from app.modules.proxy.capability_routing import invalid_access_program_error
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
@@ -703,6 +704,7 @@ def _prepare_websocket_request_state_for_account_switch(
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
     """Drop the completed-response anchor and the state that only exists for it."""
     continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_conversation_alias = None
     continuity_state.last_completed_input_count = 0
     continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = []
@@ -715,9 +717,12 @@ def _websocket_continuity_anchor_for_payload(
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
     api_key_id: str | None = None,
+    conversation_alias: CapabilityLineageAlias | None = None,
 ) -> _WebSocketContinuityAnchor | None:
     """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
+        return None
+    if continuity_state.last_completed_conversation_alias != conversation_alias:
         return None
     if responses_payload.previous_response_id is not None:
         return None
@@ -824,6 +829,7 @@ def _record_websocket_continuity_completion(
     # is cleared rather than left stale when the completed turn cannot
     # provide one.
     continuity_state.last_completed_response_id = response_id
+    continuity_state.last_completed_conversation_alias = request_state.conversation_alias
     if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
         continuity_state.last_completed_input_count = request_state.input_item_count
         continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint

@@ -294,3 +294,71 @@ def test_enforced_model_does_not_create_control_frame_intent() -> None:
     reject_capability_signal_outside_response_create(
         api_key=key, client_metadata=None, request_payload={"type": "session.update"}
     )
+
+
+def test_websocket_inferred_prefix_anchor_stays_with_its_conversation():
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy import service as proxy_service
+
+    conversation = CapabilityLineageAlias(kind="codex_window", value="task:2")
+    prefix = [{"role": "user", "content": "shared prefix"}]
+    completed = proxy_service._WebSocketRequestState(
+        request_id="completed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=1,
+        input_full_fingerprint=proxy_service._fingerprint_input_items(prefix),
+        conversation_alias=conversation,
+    )
+    continuity = proxy_service._WebSocketContinuityState()
+    proxy_service._record_websocket_continuity_completion(
+        continuity, request_state=completed, response_id="resp_completed"
+    )
+    payload = ResponsesRequest(model="gpt-5.1", instructions="", input=[*prefix, {"role": "user", "content": "next"}])
+    same = proxy_service._websocket_continuity_anchor_for_payload(
+        continuity, responses_payload=payload, codex_session_affinity=True, conversation_alias=conversation
+    )
+    assert same is not None and same.previous_response_id == "resp_completed"
+    assert (
+        proxy_service._websocket_continuity_anchor_for_payload(
+            continuity,
+            responses_payload=payload,
+            codex_session_affinity=True,
+            conversation_alias=CapabilityLineageAlias(kind="codex_window", value="task:1"),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_required_routing_keeps_disabled_stickiness_disabled(compact):
+    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+    from app.modules.proxy._service.compact import _sticky_key_for_compact_request
+    from app.modules.proxy.affinity import _sticky_key_for_responses_request
+
+    headers = {"x-codex-window-id": "task:2", "session_id": "shared-process"}
+    if compact:
+        policy = _sticky_key_for_compact_request(
+            ResponsesCompactRequest(model="gpt-5.1", instructions="", input="fresh", prompt_cache_key="shared-cache"),
+            headers,
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=1800,
+            sticky_threads_enabled=False,
+            require_trusted_cyber=True,
+        )
+    else:
+        policy = _sticky_key_for_responses_request(
+            ResponsesRequest(model="gpt-5.1", instructions="", input="fresh", prompt_cache_key="shared-cache"),
+            headers,
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=1800,
+            sticky_threads_enabled=False,
+            require_trusted_cyber=True,
+        )
+    assert policy.key is None
+    assert policy.kind is None

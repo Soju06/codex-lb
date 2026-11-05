@@ -42,6 +42,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.proxy.affinity import _AffinityPolicy
 from app.modules.proxy.affinity_observation import AffinityObservation
+from app.modules.proxy.capability_lineage import CapabilityLineageAlias
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
@@ -1212,6 +1213,7 @@ class _WebSocketRequestState:
     replay_required_account_id: str | None = None
     require_security_work_authorized: bool = False
     durable_capability_lineage_required: bool = False
+    conversation_alias: CapabilityLineageAlias | None = None
     file_required_preferred_account: bool = False
     bridge_soft_capacity_reroute_allowed: bool = False
     error_code_override: str | None = None
@@ -1558,6 +1560,7 @@ class _WebSocketContinuityState:
     last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     responses_lite_model: str | None = None
     responses_lite_response_id: str | None = None
+    last_completed_conversation_alias: CapabilityLineageAlias | None = None
 
 
 @dataclass(frozen=True, slots=True)

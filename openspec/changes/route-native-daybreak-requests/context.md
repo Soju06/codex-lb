@@ -50,3 +50,5 @@ in force. A movable mid-session request can select a capable account; an
 incompatible account-owned anchor fails closed. Existing exact conversation
 markers remain restricted. Broad legacy markers are retained for clients that
 lack a specific identity, but do not constrain newly identified conversations.
+
+Matching list input exposed an additional propagation path: automatic WebSocket continuity could inject a DBB response ID before capability routing. The existing continuity state now records its completed conversation identity; only inferred anchors require an identity match. Explicit response-ID ownership and continuation rules remain intact.

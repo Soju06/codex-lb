@@ -81,6 +81,9 @@ When a later frame belongs to a separate ordinary conversation, an idle
 REQUIRED-selected socket MUST also be retired before ordinary reselection.
 Pending work MUST prevent this reverse switch. Explicit account-owned anchors
 and opaque replay constraints MUST remain enforced across either transition.
+An automatically inferred previous-response anchor MUST belong to the same
+conversation identity as the incoming frame. A matching input prefix alone
+MUST NOT create continuity across distinct conversations.
 
 #### Scenario: Ordinary conversation follows a DBB frame
 - **WHEN** a later ordinary frame identifies a separate conversation on an idle socket selected for REQUIRED
@@ -91,3 +94,8 @@ and opaque replay constraints MUST remain enforced across either transition.
 - **WHEN** a DBB response is still pending and an ordinary frame identifies a separate conversation
 - **THEN** the later frame fails before upstream send
 - **AND** the active response keeps its account and socket
+
+#### Scenario: Matching input does not imply cross-conversation continuity
+- **WHEN** an ordinary frame in a separate conversation shares a list input prefix with the preceding DBB frame
+- **THEN** the proxy does not inject the DBB response ID into that frame
+- **AND** ordinary selection remains available while explicit response-ID continuations remain owner-bound

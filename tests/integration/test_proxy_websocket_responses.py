@@ -13156,11 +13156,13 @@ def test_direct_responses_websocket_rejects_capability_carrier_on_unsupported_fr
     assert len(upstream.sent_text) == 1
 
 
+@pytest.mark.parametrize("list_input", [False, True])
 @pytest.mark.parametrize("native_program", [False, True])
 def test_backend_responses_websocket_capability_conversation_isolation_reselects_idle_socket(
     app_instance,
     monkeypatch,
     native_program,
+    list_input,
 ):
     api_key = _capability_test_api_key("key_ws_capability_inheritance")
 
@@ -13309,6 +13311,8 @@ def test_backend_responses_websocket_capability_conversation_isolation_reselects
                 "x-codex-window-id": "task-ws-capability-inheritance:2",
                 REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
             }
+            if list_input:
+                marker_request["input"] = [{"role": "user", "content": "shared input prefix"}]
             if native_program:
                 marker_request["client_metadata"].pop(REQUIRED_CAPABILITY_HEADER)
                 marker_request["access_programs"] = {"cyber": "daybreak_blue"}
@@ -13320,7 +13324,13 @@ def test_backend_responses_websocket_capability_conversation_isolation_reselects
             assert len(ordinary_upstream.sent_text) == 1
             assert not any(name.lower() == "x-codex-turn-state" for name in opened_headers[1])
 
-            ordinary_websocket.send_text(json.dumps(_websocket_response_create("return to parent conversation")))
+            returned_request = _websocket_response_create("return to parent conversation")
+            if list_input:
+                returned_request["input"] = [
+                    {"role": "user", "content": "shared input prefix"},
+                    {"role": "user", "content": "fresh ordinary conversation"},
+                ]
+            ordinary_websocket.send_text(json.dumps(returned_request))
             returned_created = json.loads(ordinary_websocket.receive_text())
             returned_completed = json.loads(ordinary_websocket.receive_text())
             assert marker_cyber_upstream.closed is True

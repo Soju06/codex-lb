@@ -33,6 +33,7 @@ from app.db.models import (
     Account,
     AccountUsageRollupState,
     ApiKey,
+    ModelSource,
     RequestDemandQuarterRollup,
     RequestKind,
     RequestLog,
@@ -122,6 +123,18 @@ class RequestLogsResult:
 # subscription route family, including failures recorded before an account
 # was selected (issue #1870).
 SUBSCRIPTION_POOL_UPSTREAM = "subscription_pool"
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLogUpstreamFacet:
+    has_subscription_pool: bool
+    model_source_ids: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSourceLabel:
+    name: str
+    kind: str
 
 
 # The exact COUNT(*) behind the request-log listing's "X-Y of N" scans the
@@ -1513,6 +1526,7 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        upstreams: list[str] | None = None,
     ) -> tuple[list[str], list[tuple[str, str | None]], list[str], list[tuple[str, str | None]]]:
         filters = self._build_filters(
             since=since,
@@ -1522,6 +1536,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=True,
             include_cancelled=True,
             include_error_other=True,
@@ -1537,6 +1552,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=True,
             include_cancelled=True,
             include_error_other=True,
@@ -1545,7 +1561,9 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
-        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        unfiltered = not any(
+            (since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts, upstreams)
+        )
         if unfiltered:
             # PostgreSQL has no loose index scan: with no user filters each
             # DISTINCT below is a full pass over request_logs, four times per
@@ -1592,6 +1610,78 @@ class RequestLogsRepository:
         api_key_ids = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, api_key_ids, status_values
+
+    async def list_upstream_facet(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
+        model_options: list[tuple[str, str | None]] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
+    ) -> RequestLogUpstreamFacet:
+        """Observed upstreams for the options panel. Takes no upstream
+        selection: the facet ignores its own filter so another upstream can
+        be added without clearing the first (issue #1870)."""
+        filters = self._build_filters(
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            api_key_ids=api_key_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=True,
+            include_cancelled=True,
+            include_error_other=True,
+            error_codes_in=None,
+            error_codes_excluding=None,
+            exclude_soft_deleted=True,
+        )
+        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        if unfiltered:
+            # Skip-scan idx_logs_model_source_time, same bounded contract as
+            # the other unfiltered facets.
+            source_ids = await self._distinct_skip_scan(RequestLog.model_source_id, filters.conditions)
+        else:
+            source_stmt = (
+                select(RequestLog.model_source_id)
+                .where(RequestLog.model_source_id.is_not(None), *filters.conditions)
+                .distinct()
+                .order_by(RequestLog.model_source_id.asc())
+            )
+            source_ids = [value for (value,) in (await self._session.execute(source_stmt)).all() if value]
+        pool_probe = select(RequestLog.id).where(*filters.conditions, RequestLog.model_source_id.is_(None)).limit(1)
+        has_subscription_pool = (await self._session.execute(pool_probe)).scalar_one_or_none() is not None
+        return RequestLogUpstreamFacet(
+            has_subscription_pool=has_subscription_pool,
+            model_source_ids=[value for value in source_ids if value],
+        )
+
+    async def get_model_source_labels(self, source_ids: list[str]) -> dict[str, ModelSourceLabel]:
+        """Current name and kind only; base URLs and credentials are never read."""
+        unique_ids = sorted({source_id for source_id in source_ids if source_id})
+        if not unique_ids:
+            return {}
+        result = await self._session.execute(
+            select(ModelSource.id, ModelSource.name, ModelSource.kind).where(ModelSource.id.in_(unique_ids))
+        )
+        return {source_id: ModelSourceLabel(name=name, kind=kind) for source_id, name, kind in result.all()}
+
+    async def get_persisted_model_source_kinds(self, source_ids: list[str]) -> dict[str, str | None]:
+        """Latest `model_source_kind` recorded on request logs for sources
+        whose `model_sources` row is gone; one indexed probe per ID."""
+        kinds: dict[str, str | None] = {}
+        for source_id in sorted({source_id for source_id in source_ids if source_id}):
+            stmt = (
+                select(RequestLog.model_source_kind)
+                .where(RequestLog.model_source_id == source_id, RequestLog.model_source_kind.is_not(None))
+                .order_by(RequestLog.requested_at.desc())
+                .limit(1)
+            )
+            kinds[source_id] = (await self._session.execute(stmt)).scalar_one_or_none()
+        return kinds
 
     async def _distinct_skip_scan(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from app.modules.request_logs.mappers import (
     QUOTA_CODES,
@@ -10,10 +11,12 @@ from app.modules.request_logs.mappers import (
     to_request_log_entry,
 )
 from app.modules.request_logs.repository import (
+    SUBSCRIPTION_POOL_UPSTREAM,
     ConversationDetailsResult,
     ConversationFacet,
     ConversationListResult,
     RequestLogsRepository,
+    RequestLogUpstreamFacet,
 )
 from app.modules.request_logs.schemas import (
     ConversationEntry,
@@ -38,6 +41,15 @@ class RequestLogApiKeyOption:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestLogUpstreamOption:
+    id: str
+    type: Literal["subscription_pool", "model_source"]
+    display_name: str | None
+    model_source_kind: str | None
+    is_deleted: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RequestLogStatusFilter:
     include_success: bool
     include_cancelled: bool
@@ -52,6 +64,7 @@ class RequestLogFilterOptions:
     model_options: list[RequestLogModelOption]
     api_keys: list[RequestLogApiKeyOption]
     statuses: list[str]
+    upstreams: list[RequestLogUpstreamOption]
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +183,7 @@ class RequestLogsService:
         model_options: list[RequestLogModelOption] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        upstreams: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
@@ -180,6 +194,16 @@ class RequestLogsService:
             option_api_key_ids,
             status_values,
         ) = await self._repo.list_filter_options(
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            api_key_ids=api_key_ids,
+            model_options=normalized_model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
+        )
+        upstream_facet = await self._repo.list_upstream_facet(
             since=since,
             until=until,
             account_ids=account_ids,
@@ -206,7 +230,46 @@ class RequestLogsService:
             ],
             api_keys=option_api_keys,
             statuses=_normalize_status_values(status_values),
+            upstreams=await self._resolve_upstream_options(upstream_facet),
         )
+
+    async def _resolve_upstream_options(self, facet: RequestLogUpstreamFacet) -> list[RequestLogUpstreamOption]:
+        labels = await self._repo.get_model_source_labels(facet.model_source_ids)
+        deleted_ids = [source_id for source_id in facet.model_source_ids if source_id not in labels]
+        persisted_kinds = await self._repo.get_persisted_model_source_kinds(deleted_ids) if deleted_ids else {}
+        sources = [
+            RequestLogUpstreamOption(
+                id=source_id,
+                type="model_source",
+                display_name=labels[source_id].name,
+                model_source_kind=labels[source_id].kind,
+                is_deleted=False,
+            )
+            if source_id in labels
+            else RequestLogUpstreamOption(
+                id=source_id,
+                type="model_source",
+                display_name=None,
+                model_source_kind=persisted_kinds.get(source_id),
+                is_deleted=True,
+            )
+            for source_id in facet.model_source_ids
+        ]
+        sources.sort(key=lambda option: (option.is_deleted, (option.display_name or option.id).lower(), option.id))
+        pool = (
+            [
+                RequestLogUpstreamOption(
+                    id=SUBSCRIPTION_POOL_UPSTREAM,
+                    type="subscription_pool",
+                    display_name=None,
+                    model_source_kind=None,
+                    is_deleted=False,
+                )
+            ]
+            if facet.has_subscription_pool
+            else []
+        )
+        return [*pool, *sources]
 
     async def list_conversations(
         self,

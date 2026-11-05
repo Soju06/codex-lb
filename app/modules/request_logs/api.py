@@ -24,6 +24,7 @@ from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
     RequestLogsResponse,
+    RequestLogUpstreamOption,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
 
@@ -139,6 +140,7 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    upstream: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -159,6 +161,7 @@ async def list_request_log_filter_options(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        upstreams=_normalize_upstreams(upstream),
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,
@@ -174,6 +177,16 @@ async def list_request_log_filter_options(
         if principal.has(Permission.API_KEYS_READ)
         else [],
         statuses=options.statuses,
+        upstreams=[
+            RequestLogUpstreamOption(
+                id=option.id,
+                type=option.type,
+                display_name=option.display_name,
+                model_source_kind=option.model_source_kind,
+                is_deleted=option.is_deleted,
+            )
+            for option in options.upstreams
+        ],
     )
 
 

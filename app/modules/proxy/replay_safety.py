@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from app.core.openai.requests import extract_input_file_ids
 from app.core.types import JsonValue
+from app.core.utils.json_guards import is_json_mapping
 
 _TOOL_CALL_TYPE_BY_OUTPUT_TYPE = {
     "function_call_output": "function_call",
@@ -123,6 +124,7 @@ _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
 )
 _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
     {
+        "access_programs",
         "conversation",
         "client_metadata",
         "include",
@@ -713,6 +715,12 @@ def responses_payload_is_account_neutral_fresh_replay(payload: Mapping[str, Json
         return False
     if any(key not in _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION for key in payload):
         return False
+    if "access_programs" in payload:
+        programs = payload["access_programs"]
+        if not is_json_mapping(programs) or any(key != "cyber" for key in programs):
+            return False
+        if "cyber" in programs and programs["cyber"] not in ("standard", "daybreak_blue"):
+            return False
     if not _reasoning_config_is_account_neutral(payload.get("reasoning")):
         return False
     if not _tool_choice_is_account_neutral(payload.get("tool_choice")):

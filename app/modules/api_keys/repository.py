@@ -358,6 +358,7 @@ class ApiKeysRepository:
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
+        automatic_daybreak_routing: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         allowed_reasoning_efforts: str | None | _Unset = _UNSET,
@@ -393,6 +394,9 @@ class ApiKeysRepository:
         if apply_to_codex_model is not _UNSET:
             assert isinstance(apply_to_codex_model, bool)
             row.apply_to_codex_model = apply_to_codex_model
+        if automatic_daybreak_routing is not _UNSET:
+            assert isinstance(automatic_daybreak_routing, bool)
+            row.automatic_daybreak_routing = automatic_daybreak_routing
         if enforced_model is not _UNSET:
             assert enforced_model is None or isinstance(enforced_model, str)
             row.enforced_model = enforced_model

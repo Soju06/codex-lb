@@ -780,6 +780,7 @@ class _CompactMixin:
         client_ip: str | None = None,
         forwarded_request: bool = False,
         forwarded_file_owner_account_id: str | None = None,
+        require_trusted_cyber: bool = False,
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
@@ -1292,7 +1293,7 @@ class _CompactMixin:
             # owner-bound handling instead of moving the history to another
             # account.
             owner_quota_failover_eligible = False
-            require_security_work_authorized = False
+            require_security_work_authorized = require_trusted_cyber
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
@@ -1319,6 +1320,7 @@ class _CompactMixin:
                 if not account:
                     if (
                         require_security_work_authorized
+                        and not require_trusted_cyber
                         and selection.error_code == _no_security_work_authorized_accounts_code()
                         and last_exc is not None
                     ):

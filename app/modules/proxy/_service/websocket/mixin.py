@@ -2053,7 +2053,11 @@ class _WebSocketMixin:
                                 reject_capability_signal_outside_response_create(
                                     api_key=api_key,
                                     client_metadata=payload.get("client_metadata"),
-                                    client_metadata_values=_websocket_capability_metadata_values(payload),
+                                    client_metadata_values=_websocket_capability_metadata_values(
+                                        payload,
+                                        validate_native_programs=bool(api_key and api_key.automatic_daybreak_routing),
+                                    ),
+                                    request_payload=payload,
                                 )
                             except ProxyResponseError as exc:
                                 async with client_send_lock:
@@ -3164,7 +3168,12 @@ class _WebSocketMixin:
             api_key=refreshed_api_key,
             client_metadata=raw_client_metadata,
             header_values=capability_header_values,
-            client_metadata_values=_websocket_capability_metadata_values(payload),
+            client_metadata_values=_websocket_capability_metadata_values(
+                payload,
+                validate_native_programs=bool(refreshed_api_key and refreshed_api_key.automatic_daybreak_routing),
+            ),
+            request_payload=payload,
+            effective_model=effective_model_for_api_key(refreshed_api_key, None),
         )
         validate_top_level_compaction_trigger_input_shape(payload)
         responses_payload = normalize_responses_request_payload(
@@ -3343,6 +3352,7 @@ class _WebSocketMixin:
                 client_metadata=client_metadata,
             ),
         )
+        source_route_excluded = source_route_excluded or capability_route.require_security_work_authorized
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,

@@ -321,6 +321,9 @@ Canonical background JSON acknowledgements with status `queued` or `in_progress`
 
 Issue #2149 bounds aggregate detached-session lock waiting during request finalization. A sweep shares five seconds: if its first attempt consumes three seconds, the next receives two, and later attempts stop at expiry. Deferred generations remain tracked for later requests and their lifecycle owners. The deadline does not cancel resource-close owners or replace their existing close timeout.
 
+
+Automatic Daybreak routing is opt-in per API key. It recognizes a legacy DBB model or the native Blue selector and reuses the existing account Trusted Cyber eligibility flag. One all-accounts key can therefore serve ordinary and Daybreak requests without custom client markers. Ordinary omission leaves upstream mode defaults unchanged. The same mandatory eligible-pool constraint applies to Responses WebSockets, HTTP Responses and compact. Required HTTP requests use direct subscription transport, avoiding external model sources and bridge socket reuse. Empty eligible pools fail without ordinary fallback. Native-field delivery by a custom Codex provider is a separate compatibility concern (upstream #2580).
+
 ## Routed file transport failover
 
 File operations follow the existing pre-visible unary retry policy. The file client carries typed dispatch provenance through its service adapter so a refused account-proxy connection can retry another eligible account even though credential-safe transport messages omit low-level details. Typed replay eligibility takes precedence over message text: a proxy endpoint named `timeout-primary` must not turn a TLS verification failure into a retry.

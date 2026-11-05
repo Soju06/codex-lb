@@ -1028,12 +1028,12 @@ async def test_compact_transport_without_subscription_provenance_omits_routing_h
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/backend-api/codex/responses/compact/", "/v1/responses/compact/"])
-async def test_compact_trailing_slash_rejection_does_not_dispatch(async_client, monkeypatch, path: str):
+async def test_compact_trailing_slash_alias_is_supported_without_dispatch(async_client, monkeypatch, path: str):
     compact = AsyncMock()
     monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
     response = await async_client.post(path, json={"model": "gpt-5.6-sol", "instructions": "hi", "input": []})
-    assert response.status_code == 405
-    assert response.json()["error"]["code"] == "invalid_request_error"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
     compact.assert_not_awaited()
 
 

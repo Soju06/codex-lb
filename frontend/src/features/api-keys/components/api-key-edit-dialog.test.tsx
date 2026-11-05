@@ -12,6 +12,11 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
 
+const CHECKBOXES = [
+  ["codex /model", "Apply to codex /model", "applyToCodexModel"],
+  ["automatic Daybreak routing", "Automatic Daybreak routing", "automaticDaybreakRouting"],
+] as const;
+
 describe("ApiKeyEditDialog", () => {
   function ControlledApiKeyEditDialog({
     apiKey = createApiKey({ allowedModels: [] }),
@@ -450,7 +455,7 @@ describe("ApiKeyEditDialog", () => {
     expect(onSubmit.mock.calls[0][0].assignedSourceIds).toEqual([]);
   });
 
-  it("submits the codex /model checkbox value", async () => {
+  it.each(CHECKBOXES)("submits the %s checkbox value", async (_name, label, field) => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -464,28 +469,28 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
-    await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
+    await user.click(screen.getByRole("checkbox", { name: label }));
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
 
-    expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+    expect(onSubmit.mock.calls[0][0][field]).toBe(true);
   });
 
-  it("shows the stored codex /model checkbox value", () => {
+  it.each(CHECKBOXES)("shows the stored %s checkbox value", (_name, label, field) => {
     renderWithProviders(
       <ApiKeyEditDialog
         open
         busy={false}
-        apiKey={createApiKey({ applyToCodexModel: true })}
+        apiKey={createApiKey({ [field]: true })}
         onOpenChange={vi.fn()}
         onSubmit={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: label })).toBeChecked();
   });
 
   it("submits opportunistic traffic class", async () => {
@@ -552,5 +557,36 @@ describe("hasLimitRuleChanges", () => {
     const reordered: LimitRuleCreate[] = [initial[1], initial[0]];
 
     expect(hasLimitRuleChanges(initial, reordered)).toBe(false);
+  });
+
+  it("omits limits from payload when only name changes", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const apiKey = createApiKey();
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={apiKey}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.name).toBe("Renamed key");
+    expect(payload.automaticDaybreakRouting).toBe(false);
+    expect("assignedAccountIds" in payload).toBe(false);
+    expect("limits" in payload).toBe(false);
   });
 });

@@ -4696,3 +4696,25 @@ async def test_stream_without_api_key_auth_skips_settlement(async_client, monkey
         assert response.status_code == 200
         lines = [line async for line in response.aiter_lines() if line]
         assert len(lines) >= 1  # stream completed without error
+
+
+async def test_automatic_daybreak_routing_create_update_and_auth_cache(async_client):
+    from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
+
+    created = await async_client.post("/api/api-keys/", json={"name": "Daybreak opt-in"})
+    assert created.status_code == 200
+    initial = created.json()
+    assert initial["automaticDaybreakRouting"] is False
+    authorization = "Bearer " + initial["key"]
+    assert (await validate_required_proxy_api_key_authorization(authorization)).automatic_daybreak_routing is False
+
+    enabled = await async_client.patch("/api/api-keys/" + initial["id"], json={"automaticDaybreakRouting": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["automaticDaybreakRouting"] is True
+    assert (await validate_required_proxy_api_key_authorization(authorization)).automatic_daybreak_routing is True
+
+    renamed = await async_client.patch("/api/api-keys/" + initial["id"], json={"name": "Still enabled"})
+    assert renamed.json()["automaticDaybreakRouting"] is True
+    disabled = await async_client.patch("/api/api-keys/" + initial["id"], json={"automaticDaybreakRouting": False})
+    assert disabled.json()["automaticDaybreakRouting"] is False
+    assert (await validate_required_proxy_api_key_authorization(authorization)).automatic_daybreak_routing is False

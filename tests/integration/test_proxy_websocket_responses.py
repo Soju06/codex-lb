@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import hashlib
 import json
 import logging
@@ -599,6 +600,7 @@ def _capability_test_api_key(key_id: str) -> ApiKeyData:
     return ApiKeyData(
         id=key_id,
         name="Capability routing test",
+        automatic_daybreak_routing=True,
         key_prefix="sk-capability",
         allowed_models=None,
         enforced_model=None,
@@ -839,7 +841,7 @@ def _codex_profile_provider(profile_name: str | None) -> tuple[str, str, dict[st
     return provider_id, model, provider
 
 
-async def _create_profile_authorization(name: str) -> str:
+async def _create_profile_authorization(name: str, automatic_daybreak_routing: bool = False) -> str:
     settings = await get_settings_cache().get()
     assert settings.api_key_auth_enabled is False
     async with SessionLocal() as session:
@@ -847,6 +849,7 @@ async def _create_profile_authorization(name: str) -> str:
             ApiKeyCreateData(
                 name=name,
                 allowed_models=None,
+                automatic_daybreak_routing=automatic_daybreak_routing,
             )
         )
     return f"Bearer {created_key.key}"
@@ -1028,14 +1031,27 @@ def test_codex_provider_profiles_route_before_first_account_attempt(
     ],
     ids=["backend", "backend-v1-alias", "v1", "backend-compact", "v1-compact"],
 )
+@pytest.mark.parametrize(
+    "daybreak_identifier",
+    ["custom_header", "unsupported_program", "invalid_program_type"],
+)
 def test_daybreak_profile_http_fallback_fails_closed_before_routing(
     app_instance,
     monkeypatch,
     path,
     payload,
+    daybreak_identifier,
 ):
     _provider_id, _model, provider = _codex_profile_provider("daybreak-blue")
     provider_headers = cast(dict[str, str], provider["http_headers"])
+    native_program = daybreak_identifier != "custom_header"
+    if native_program:
+        provider_headers = {}
+        programs = {
+            "unsupported_program": {"cyber": "daybreak_red"},
+            "invalid_program_type": "daybreak_blue",
+        }
+        payload = {**payload, "access_programs": programs[daybreak_identifier]}
 
     async def fail_before_routing(*_args, **_kwargs):
         pytest.fail("capability-bearing HTTP fallback must fail before routing")
@@ -1046,11 +1062,16 @@ def test_daybreak_profile_http_fallback_fails_closed_before_routing(
 
     with TestClient(
         app_instance,
-        base_url="http://lb.example",
-        client=("203.0.113.10", 50000),
+        base_url="http://localhost" if native_program else "http://lb.example",
+        client=("127.0.0.1" if native_program else "203.0.113.10", 50000),
     ) as client:
         assert client.portal is not None
-        authorization = client.portal.call(_create_profile_authorization, "Inert Daybreak HTTP fallback")
+        authorization = client.portal.call(
+            _create_profile_authorization, "Inert Daybreak HTTP fallback", native_program
+        )
+        if native_program:
+            settings_response = client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+            assert settings_response.status_code == 200
         response = client.post(
             path,
             json=payload,
@@ -1058,6 +1079,9 @@ def test_daybreak_profile_http_fallback_fails_closed_before_routing(
         )
 
     assert response.status_code == 400
+    if daybreak_identifier in {"unsupported_program", "invalid_program_type"}:
+        assert response.json()["error"]["code"] == "unsupported_access_program"
+        return
     assert response.json() == {
         "error": {
             "code": "required_capability_transport_unsupported",
@@ -12058,16 +12082,36 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
         assert "resp_ws_grouped_anchor" not in message
 
 
-@pytest.mark.parametrize("capability_carrier", ["handshake", "response_create"])
+@pytest.mark.parametrize(
+    "capability_carrier",
+    [
+        "handshake",
+        "response_create",
+        "native_program",
+        "native_standard",
+        "legacy_model",
+        "enforced_legacy_model",
+        "enforced_legacy_disabled",
+        "native_disabled",
+        "ordinary",
+    ],
+)
 def test_backend_responses_websocket_trusted_capability_routes_before_first_account_attempt(
     app_instance,
     monkeypatch,
     capability_carrier,
 ):
     api_key = _capability_test_api_key("key_ws_capability_upfront")
+    if capability_carrier in {"enforced_legacy_model", "enforced_legacy_disabled"}:
+        api_key = dataclasses.replace(api_key, enforced_model="gpt-daybreak-blue-latest")
+    if capability_carrier in {"native_disabled", "enforced_legacy_disabled"}:
+        api_key = dataclasses.replace(api_key, automatic_daybreak_routing=False)
     cyber_upstream = _SequencedUpstreamWebSocket(
         [],
-        deferred_message_batches=[_websocket_response_batch("resp_ws_capability_upfront")],
+        deferred_message_batches=[
+            _websocket_response_batch("resp_ws_capability_upfront"),
+            _websocket_response_batch("resp_ws_capability_reuse"),
+        ],
     )
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
@@ -12094,6 +12138,13 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         del self, _kwargs
         assert current_api_key == api_key
         return None
+
+    async def configured_source(source_model, current_api_key, *, raw_model=None):
+        del current_api_key, raw_model
+        return (
+            capability_carrier in {"enforced_legacy_model", "enforced_legacy_disabled"}
+            and source_model == "gpt-daybreak-blue-latest"
+        )
 
     async def fake_select_websocket_connect_account(
         self,
@@ -12126,6 +12177,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         "_refresh_websocket_api_key_policy",
         keep_authenticated_api_key_policy,
     )
+    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_reserve_websocket_api_key_usage",
@@ -12153,11 +12205,17 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
                 REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
             }
         )
-    else:
+    elif capability_carrier == "response_create":
         response_create["client_metadata"] = {
             "x-codex-window-id": "task-ws-capability-upfront:1",
             REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
         }
+    elif capability_carrier in {"native_program", "native_disabled"}:
+        response_create["access_programs"] = {"cyber": "daybreak_blue"}
+    elif capability_carrier == "native_standard":
+        response_create["access_programs"] = {"cyber": "standard"}
+    elif capability_carrier == "legacy_model":
+        response_create["model"] = "gpt-daybreak-blue-latest"
 
     with TestClient(app_instance) as client:
         with client.websocket_connect(
@@ -12166,15 +12224,38 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         ) as websocket:
             websocket.send_text(json.dumps(response_create))
             created = json.loads(websocket.receive_text())
+            if capability_carrier == "enforced_legacy_disabled":
+                assert created["type"] == "error"
+                assert created["status"] == 503
+                assert created["error"]["code"] == "model_source_requires_http_transport"
+                assert selection_requirements == []
+                assert opened_account_ids == []
+                assert forwarded_capability_headers == []
+                return
             completed = json.loads(websocket.receive_text())
+            if capability_carrier == "enforced_legacy_model":
+                reuse_request = _websocket_response_create("reuse source-owned required socket")
+                websocket.send_text(json.dumps(reuse_request))
+                reused_created = json.loads(websocket.receive_text())
+                reused_completed = json.loads(websocket.receive_text())
 
     assert created["response"]["id"] == "resp_ws_capability_upfront"
     assert completed["type"] == "response.completed"
-    assert selection_requirements == [True]
-    assert opened_account_ids == ["acct_ws_capability_cyber"]
-    assert forwarded_capability_headers == [False]
+    required = capability_carrier not in {"native_standard", "native_disabled", "enforced_legacy_disabled", "ordinary"}
+    expected_requests = 2 if capability_carrier == "enforced_legacy_model" else 1
+    expected_account_kind = "cyber" if required else "ordinary"
+    assert selection_requirements == [required] * expected_requests
+    assert opened_account_ids == [f"acct_ws_capability_{expected_account_kind}"] * expected_requests
+    assert forwarded_capability_headers == [False] * expected_requests
     forwarded_payload = json.loads(cyber_upstream.sent_text[0])
     assert REQUIRED_CAPABILITY_HEADER not in {key.lower() for key in forwarded_payload.get("client_metadata", {})}
+    if capability_carrier in {"native_program", "native_disabled"}:
+        assert forwarded_payload["access_programs"] == {"cyber": "daybreak_blue"}
+    if capability_carrier == "enforced_legacy_model":
+        assert forwarded_payload["model"] == "gpt-daybreak-blue-latest"
+        assert reused_created["response"]["id"] == "resp_ws_capability_reuse"
+        assert reused_completed["type"] == "response.completed"
+        assert len(cyber_upstream.sent_text) == 2
 
 
 @pytest.mark.parametrize(
@@ -12554,9 +12635,11 @@ def test_backend_responses_websocket_capability_response_lineage_write_failure_f
     assert upstream.closed is True
 
 
+@pytest.mark.parametrize("native_program", [False, True])
 def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_before_upstream(
     app_instance,
     monkeypatch,
+    native_program,
 ):
     api_key = _capability_test_api_key("key_ws_capability_empty_pool")
     selection_requirements: list[bool] = []
@@ -12628,6 +12711,10 @@ def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_
         REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
     }
 
+    if native_program:
+        response_create.pop("client_metadata", None)
+        response_create["access_programs"] = {"cyber": "daybreak_blue"}
+
     with TestClient(app_instance) as client:
         with client.websocket_connect(
             "/backend-api/codex/responses",
@@ -12649,9 +12736,11 @@ def test_backend_responses_websocket_trusted_capability_empty_pool_fails_closed_
     assert upstream_opened is False
 
 
+@pytest.mark.parametrize("native_program", [False, True])
 def test_backend_responses_websocket_durable_capability_model_rejection_keeps_typed_empty_pool(
     app_instance,
     monkeypatch,
+    native_program,
 ):
     api_key = _capability_test_api_key("key_ws_capability_model_rejection")
     model_rejecting_account = proxy_module.Account(
@@ -12763,6 +12852,10 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
     request = _websocket_response_create("security task on a model-capable account")
     request["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
 
+    if native_program:
+        request["client_metadata"] = {}
+        request["access_programs"] = {"cyber": "daybreak_blue"}
+
     with TestClient(app_instance) as client:
         with client.websocket_connect(
             "/backend-api/codex/responses",
@@ -12770,6 +12863,7 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
         ) as websocket:
             websocket.send_text(json.dumps(request))
             warning = json.loads(websocket.receive_text())
+            assert warning.get("type") == "codex_lb.warning", warning
             terminal = json.loads(websocket.receive_text())
 
     assert warning["warning"]["code"] == "no_security_work_authorized_accounts"
@@ -12787,7 +12881,18 @@ def test_backend_responses_websocket_durable_capability_model_rejection_keeps_ty
 @pytest.mark.parametrize("websocket_path", ["/backend-api/codex/responses", "/v1/responses"])
 @pytest.mark.parametrize(
     "invalid_carrier_kind",
-    ["header_and_metadata", "raw_headers", "raw_metadata_containers", "raw_metadata_keys", "top_level"],
+    [
+        "header_and_metadata",
+        "raw_headers",
+        "raw_metadata_containers",
+        "raw_metadata_keys",
+        "raw_program_containers",
+        "raw_program_keys",
+        "raw_program_blue_keys",
+        "raw_program_model_keys",
+        "top_level",
+        "enforced_standard_conflict",
+    ],
 )
 def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_fail_before_selection(
     app_instance,
@@ -12796,6 +12901,8 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
     websocket_path,
 ):
     api_key = _capability_test_api_key("key_ws_capability_duplicate")
+    if invalid_carrier_kind == "enforced_standard_conflict":
+        api_key = dataclasses.replace(api_key, enforced_model="gpt-daybreak-blue-latest")
     selection_attempted = False
     upstream_opened = False
 
@@ -12859,7 +12966,11 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
     response_create = _websocket_response_create("security task")
     websocket_headers: dict[str, str] | Headers
     request_text = json.dumps(response_create, separators=(",", ":"))
-    if invalid_carrier_kind == "header_and_metadata":
+    if invalid_carrier_kind == "enforced_standard_conflict":
+        response_create["access_programs"] = {"cyber": "standard"}
+        request_text = json.dumps(response_create, separators=(",", ":"))
+        websocket_headers = {"Authorization": "Bearer capability-duplicate"}
+    elif invalid_carrier_kind == "header_and_metadata":
         response_create["client_metadata"] = {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
         request_text = json.dumps(response_create, separators=(",", ":"))
         websocket_headers = {
@@ -12887,6 +12998,17 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
             lowercase_key = json.dumps(REQUIRED_CAPABILITY_HEADER.lower())
             metadata_json = "{" + capability_key + ':"trusted_cyber",' + lowercase_key + ':"trusted_cyber"}'
             request_text = request_text[:-1] + ',"client_metadata":' + metadata_json + "}"
+        elif invalid_carrier_kind == "raw_program_containers":
+            request_text = (
+                request_text[:-1]
+                + ',"access_programs":{"cyber":"daybreak_blue"},"access_programs":{"cyber":"standard"}}'
+            )
+        elif invalid_carrier_kind == "raw_program_keys":
+            request_text = request_text[:-1] + ',"access_programs":{"cyber":"daybreak_blue","cyber":"standard"}}'
+        elif invalid_carrier_kind == "raw_program_blue_keys":
+            request_text = request_text[:-1] + ',"access_programs":{"cyber":"daybreak_blue","cyber":"daybreak_blue"}}'
+        elif invalid_carrier_kind == "raw_program_model_keys":
+            request_text = request_text[:-1] + ',"model":"gpt-daybreak-blue-latest"}'
         else:
             response_create[REQUIRED_CAPABILITY_HEADER] = "trusted_cyber"
             request_text = json.dumps(response_create, separators=(",", ":"))
@@ -12901,7 +13023,12 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
 
     assert error["type"] == "error"
     assert error["status"] == 400
-    assert error["error"]["code"] == "unsupported_required_capability"
+    expected_code = (
+        "unsupported_access_program"
+        if invalid_carrier_kind.startswith("raw_program") or invalid_carrier_kind == "enforced_standard_conflict"
+        else "unsupported_required_capability"
+    )
+    assert error["error"]["code"] == expected_code
     assert selection_attempted is False
     assert upstream_opened is False
 
@@ -12911,6 +13038,7 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
     ("frame_kind", "expected_error_code"),
     [
         ("valid_wrong_frame", "unsupported_required_capability"),
+        ("native_wrong_frame", "unsupported_required_capability"),
         ("malformed_wrong_frame", "invalid_request_error"),
         ("binary_response_create", "invalid_request_error"),
     ],
@@ -13003,6 +13131,10 @@ def test_direct_responses_websocket_rejects_capability_carrier_on_unsupported_fr
                     }
                 )
                 websocket.send_text(wrong_frame_text)
+            elif frame_kind == "native_wrong_frame":
+                websocket.send_text(
+                    json.dumps({"type": "session.update", "access_programs": {"cyber": "daybreak_blue"}})
+                )
             elif frame_kind == "malformed_wrong_frame":
                 wrong_frame_text = (
                     '{"type":"session.update","client_metadata":{'
@@ -13024,9 +13156,11 @@ def test_direct_responses_websocket_rejects_capability_carrier_on_unsupported_fr
     assert len(upstream.sent_text) == 1
 
 
+@pytest.mark.parametrize("native_program", [False, True])
 def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle_ordinary_socket(
     app_instance,
     monkeypatch,
+    native_program,
 ):
     api_key = _capability_test_api_key("key_ws_capability_inheritance")
 
@@ -13054,6 +13188,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
     selection_requirements: list[bool] = []
     opened_account_ids: list[str] = []
     opened_headers: list[dict[str, str]] = []
+    source_checks: list[str | None] = []
 
     class _FakeSettingsCache:
         async def get(self):
@@ -13076,6 +13211,11 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
         del self, _kwargs
         assert current_api_key == api_key
         return None
+
+    async def configured_source(source_model, current_api_key, *, raw_model=None):
+        del current_api_key, raw_model
+        source_checks.append(source_model)
+        return source_model == "external-inherited-capability-source"
 
     async def resolve_marker_owner(self, payload, _headers):
         del self
@@ -13126,6 +13266,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
         "_resolve_file_account_for_responses",
         resolve_marker_owner,
     )
+    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -13150,10 +13291,14 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
             ordinary_completed = json.loads(ordinary_websocket.receive_text())
 
             marker_request = _websocket_response_create("establish requirement")
+            marker_request["model"] = "external-inherited-capability-source"
             marker_request["client_metadata"] = {
                 "x-codex-window-id": "task-ws-capability-inheritance:2",
                 REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
             }
+            if native_program:
+                marker_request["client_metadata"].pop(REQUIRED_CAPABILITY_HEADER)
+                marker_request["access_programs"] = {"cyber": "daybreak_blue"}
             ordinary_websocket.send_text(json.dumps(marker_request))
             marker_created = json.loads(ordinary_websocket.receive_text())
             marker_completed = json.loads(ordinary_websocket.receive_text())
@@ -13169,7 +13314,9 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
                     "x-codex-window-id": "task-ws-capability-inheritance:3",
                 },
             ) as inherited_websocket:
-                inherited_websocket.send_text(json.dumps(_websocket_response_create("inherited requirement")))
+                inherited_request = _websocket_response_create("inherited requirement")
+                inherited_request["model"] = "external-inherited-capability-source"
+                inherited_websocket.send_text(json.dumps(inherited_request))
                 inherited_created = json.loads(inherited_websocket.receive_text())
                 inherited_completed = json.loads(inherited_websocket.receive_text())
 
@@ -13185,6 +13332,7 @@ def test_backend_responses_websocket_trusted_capability_inheritance_retires_idle
         "acct_ws_capability_cyber_1",
         "acct_ws_capability_cyber_2",
     ]
+    assert source_checks == ["gpt-5.4"]
     assert len(inherited_cyber_upstream.sent_text) == 1
 
 

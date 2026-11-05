@@ -607,6 +607,7 @@ async def test_collect_responses_preserves_captured_turn_state_when_stream_raise
         method="POST",
         url=SimpleNamespace(path="/backend-api/codex/responses"),
         client=None,
+        state=SimpleNamespace(),
     )
     monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", AsyncMock(return_value=None))
     monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", AsyncMock(return_value=None))

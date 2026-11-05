@@ -275,7 +275,15 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.capability_routing import required_capability_metadata_values
+from app.modules.proxy.capability_routing import (
+    CapabilityRoute,
+    RoutingCapability,
+    RoutingIntent,
+    capability_lineage_aliases,
+    parse_routing_intent,
+    reject_duplicate_native_selectors,
+    required_capability_metadata_values,
+)
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import (
@@ -1147,7 +1155,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
+    capability_transport_denial = await _required_capability_http_transport_denial(
+        request, api_key, payload=payload, context=context
+    )
     if capability_transport_denial is not None:
         return capability_transport_denial
     explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
@@ -1181,7 +1191,9 @@ async def responses(
         # Terminal compaction and file pins are structural subscription-only
         # constraints. Previous-response ownership is resolved from continuity
         # evidence below, after a viable source candidate exists.
-        source_route_excluded = responses_source_route_excluded(responses_payload)
+        source_route_excluded = _automatic_daybreak_required(request) or responses_source_route_excluded(
+            responses_payload
+        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
@@ -1357,7 +1369,9 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
+    capability_transport_denial = await _required_capability_http_transport_denial(
+        request, api_key, payload=payload, context=context
+    )
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -1387,7 +1401,7 @@ async def v1_responses(
         # terminal compaction_trigger as a source-route exclusion: /v1 has no
         # Codex compact path. Previous-response ownership is resolved from
         # continuity evidence below, after a viable source candidate exists.
-        source_route_excluded = responses_source_route_excluded(
+        source_route_excluded = _automatic_daybreak_required(request) or responses_source_route_excluded(
             responses_payload,
             exclude_compaction=False,
         )
@@ -6327,6 +6341,8 @@ async def _stream_responses(
     # signed effective tier: an owner with an older/staler model snapshot must
     # not re-add a tier that the origin authoritatively removed.
     forwarded_effective_service_tier = payload.service_tier if forwarded_request else None
+    if _automatic_daybreak_required(request):
+        prefer_http_bridge = False
     service_tier_was_enforced = False
     if not api_key_policy_already_applied:
         service_tier_was_enforced = apply_api_key_enforcement(
@@ -6359,6 +6375,7 @@ async def _stream_responses(
                         "store",
                         "service_tier",
                         "prompt_cache_key",
+                        "access_programs",
                     },
                     exclude_none=True,
                 )
@@ -6458,7 +6475,9 @@ async def _stream_responses(
                     client_ip=client_ip,
                     forwarded_request=forwarded_request,
                     forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                    require_trusted_cyber=_automatic_daybreak_required(request),
                 )
+                await _remember_http_daybreak_response_id(request, context, api_key, compact_result.id)
             except NotImplementedError:
                 error = OpenAIErrorEnvelopeModel(
                     error=OpenAIError(
@@ -6578,9 +6597,12 @@ async def _stream_responses(
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            require_trusted_cyber=_automatic_daybreak_required(request),
         )
 
     stream = build_response_stream()
+    if _automatic_daybreak_required(request):
+        stream = _track_http_daybreak_responses(stream, request, context, api_key)
     startup_handoff_tasks: list[asyncio.Task[str]] = []
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
@@ -6789,6 +6811,8 @@ async def _collect_responses(
     preserve_upstream_stream_mode: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
+    if _automatic_daybreak_required(request):
+        prefer_http_bridge = False
     service_tier_was_enforced = False
     if not api_key_policy_already_applied:
         # The replaced effort is discarded: this path uses subscription
@@ -6871,7 +6895,10 @@ async def _collect_responses(
             api_key_reservation=reservation,
             suppress_text_done_events=suppress_text_done_events,
             client_ip=client_ip,
+            require_trusted_cyber=_automatic_daybreak_required(request),
         )
+    if _automatic_daybreak_required(request):
+        stream = _track_http_daybreak_responses(stream, request, context, api_key)
     captured_turn_state_headers: dict[str, str] = {}
     responses_owner_forward_dispatched_token = _bind_propagated_responses_owner_forward_dispatched(
         responses_owner_forward_dispatched_event
@@ -6949,6 +6976,7 @@ async def _collect_responses(
     )
 
 
+@router.post("/responses/compact/", include_in_schema=False)
 @router.post(
     "/responses/compact",
     response_model=CompactResponseResult,
@@ -6960,7 +6988,9 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
+    capability_transport_denial = await _required_capability_http_transport_denial(
+        request, api_key, payload=payload, context=context
+    )
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -6977,6 +7007,7 @@ async def responses_compact(
     )
 
 
+@v1_router.post("/responses/compact/", include_in_schema=False)
 @v1_router.post(
     "/responses/compact",
     response_model=CompactResponseResult,
@@ -6987,7 +7018,9 @@ async def v1_responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
+    capability_transport_denial = await _required_capability_http_transport_denial(
+        request, api_key, payload=payload, context=context
+    )
     if capability_transport_denial is not None:
         return capability_transport_denial
     try:
@@ -7076,7 +7109,9 @@ async def _compact_responses(
             api_key=api_key,
             api_key_reservation=reservation,
             client_ip=resolve_request_client_host(request),
+            require_trusted_cyber=_automatic_daybreak_required(request),
         )
+        await _remember_http_daybreak_response_id(request, context, api_key, result.id)
     except NotImplementedError:
         error = OpenAIErrorEnvelopeModel(
             error=OpenAIError(
@@ -8491,23 +8526,84 @@ def _required_capability_metadata_values(
     return required_capability_metadata_values(client_metadata)
 
 
+def _automatic_daybreak_required(request: Request) -> bool:
+    route = getattr(request.state, "automatic_daybreak_route", None)
+    return isinstance(route, CapabilityRoute) and route.require_security_work_authorized
+
+
+async def _remember_http_daybreak_response_id(
+    request: Request, context: ProxyContext, api_key: ApiKeyData | None, response_id: str | None
+) -> None:
+    if not _automatic_daybreak_required(request) or api_key is None or not response_id:
+        return
+    await context.service._capability_router.route(
+        RoutingIntent.requiring(RoutingCapability.TRUSTED_CYBER),
+        api_key_id=api_key.id,
+        aliases=capability_lineage_aliases({}, previous_response_ids=(response_id,)),
+    )
+
+
+async def _track_http_daybreak_responses(
+    stream: AsyncIterator[str], request: Request, context: ProxyContext, api_key: ApiKeyData | None
+) -> AsyncIterator[str]:
+    remembered: set[str] = set()
+    try:
+        async for block in stream:
+            event = parse_sse_data_json(block)
+            response = event.get("response") if event is not None else None
+            response_id = response.get("id") if is_json_mapping(response) else None
+            if isinstance(response_id, str) and response_id not in remembered:
+                await _remember_http_daybreak_response_id(request, context, api_key, response_id)
+                remembered.add(response_id)
+            yield block
+    finally:
+        await _shared_await_cleanup_deferring_cancellation(
+            _aclose_stream(stream), scheduler=scheduler_for(context.service)
+        )
+
+
 async def _required_capability_http_transport_denial(
     request: Request,
     api_key: ApiKeyData | None,
     *,
     payload: Mapping[str, JsonValue] | BaseModel | None = None,
+    context: ProxyContext | None = None,
 ) -> JSONResponse | None:
-    """Authenticate capability intent and reject unsupported HTTP routing.
+    """Prepare opted-in native Responses routing; reject unsupported custom carriers.
 
-    ``client_metadata`` is inspected as well as the header. The websocket path
-    resolves a capability from either and fails closed to
-    security-work-authorized accounts; nothing on the HTTP path applies that
-    constraint, so a metadata-only signal arriving here — in particular on a
-    turn that a transport downgrade moved off the websocket — would otherwise
-    enter ordinary account selection with no authorization requirement.
+    Native routing uses mandatory subscription eligibility on public Responses
+    and compact endpoints. Custom carriers retain their WebSocket-only contract.
+    Native required intent on internal bridge forwarding remains unsupported.
     """
 
-    if not _required_capability_values(request.headers) and not _required_capability_metadata_values(payload):
+    native_payload = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+    custom_intent = _required_capability_values(request.headers) or _required_capability_metadata_values(payload)
+    effective_model = _effective_optional_model_for_api_key(api_key, None) if context is not None else None
+    try:
+        intent = parse_routing_intent(
+            {}, api_key=api_key, request_payload=native_payload, effective_model=effective_model
+        )
+        if api_key is not None and api_key.automatic_daybreak_routing and native_payload is not None:
+            reject_duplicate_native_selectors(await request.body())
+            if context is not None and not custom_intent:
+                previous_response_id = native_payload.get("previous_response_id")
+                request.state.automatic_daybreak_route = await context.service._capability_router.route(
+                    intent,
+                    api_key_id=api_key.id,
+                    aliases=capability_lineage_aliases(
+                        request.headers,
+                        session_id=proxy_affinity_module._sticky_key_from_session_header(request.headers),
+                        turn_state=proxy_affinity_module._sticky_key_from_turn_state_header(request.headers),
+                        previous_response_ids=(
+                            previous_response_id if isinstance(previous_response_id, str) else None,
+                        ),
+                        client_metadata=native_payload.get("client_metadata"),
+                    ),
+                )
+                return None
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    if not custom_intent and not intent.required_capabilities:
         return None
     if api_key is None:
         await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))

@@ -100,6 +100,7 @@ type ApiKeyEditDraft = {
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
+  automaticDaybreakRouting: boolean;
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
@@ -118,6 +119,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
+    automaticDaybreakRouting: apiKey.automaticDaybreakRouting,
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
@@ -168,6 +170,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
+      automaticDaybreakRouting: draft.automaticDaybreakRouting,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
@@ -234,6 +237,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               />
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="edit-api-key-automatic-daybreak-routing"
+                checked={draft.automaticDaybreakRouting}
+                onCheckedChange={(checked) => updateDraft({ automaticDaybreakRouting: checked === true })}
+              />
+              <label htmlFor="edit-api-key-automatic-daybreak-routing" className="cursor-pointer">
+                {t("apiKeys.form.automaticDaybreakRouting")}
               </label>
             </div>
 

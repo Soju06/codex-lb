@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import cast
@@ -24,6 +25,7 @@ from app.modules.proxy.capability_routing import (
     RoutingIntent,
     capability_lineage_aliases,
     parse_routing_intent,
+    reject_capability_signal_outside_response_create,
     strip_capability_metadata,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -35,6 +37,7 @@ def _api_key() -> ApiKeyData:
     return ApiKeyData(
         id="api-key-a",
         name="test",
+        automatic_daybreak_routing=True,
         key_prefix="sk-test",
         allowed_models=None,
         enforced_model=None,
@@ -200,3 +203,89 @@ async def test_capability_router_restores_inherited_requirement_and_fails_closed
 
     assert exc_info.value.status_code == 503
     assert _error_code(exc_info.value) == CAPABILITY_LINEAGE_UNAVAILABLE_CODE
+
+
+@pytest.mark.parametrize("program", [None, {}, {"cyber": "standard"}])
+def test_native_non_daybreak_program_keeps_ordinary_intent(program: JsonValue) -> None:
+    payload = {} if program is None else {"access_programs": program}
+    assert parse_routing_intent({}, api_key=_api_key(), request_payload=payload) == RoutingIntent.empty()
+
+
+def test_native_blue_needs_no_custom_carrier_and_preserves_payload() -> None:
+    payload = {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}
+    intent = parse_routing_intent({}, api_key=_api_key(), request_payload=payload)
+    assert intent.requires_trusted_cyber
+    assert payload == {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}
+    assert (
+        parse_routing_intent({REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}, api_key=_api_key(), request_payload=payload)
+        == intent
+    )
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        None,
+        True,
+        [],
+        "daybreak_blue",
+        {"other": True},
+        {"cyber": None},
+        {"cyber": True},
+        {"cyber": []},
+        {"cyber": "DAYBREAK_BLUE"},
+        {"cyber": "daybreak_red"},
+        {"cyber": "unknown"},
+    ],
+)
+def test_native_malformed_or_unsupported_program_fails_closed(program: JsonValue) -> None:
+    with pytest.raises(ProxyResponseError) as exc:
+        parse_routing_intent({}, api_key=_api_key(), request_payload={"access_programs": program})
+    assert exc.value.status_code == 400
+    assert _error_code(exc.value) == "unsupported_access_program"
+
+
+def test_native_program_without_a_key_has_no_per_key_opt_in() -> None:
+    assert (
+        parse_routing_intent({}, api_key=None, request_payload={"access_programs": {"cyber": "daybreak_blue"}})
+        == RoutingIntent.empty()
+    )
+
+
+def test_explicit_standard_conflicts_with_custom_required_intent() -> None:
+    with pytest.raises(ProxyResponseError) as exc:
+        parse_routing_intent(
+            {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+            api_key=_api_key(),
+            request_payload={"access_programs": {"cyber": "standard"}},
+        )
+    assert _error_code(exc.value) == "unsupported_access_program"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"model": "gpt-daybreak-blue-latest"},
+        {"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}},
+    ],
+)
+def test_automatic_daybreak_routing_is_per_key(payload: dict[str, JsonValue]) -> None:
+    assert parse_routing_intent({}, api_key=_api_key(), request_payload=payload).requires_trusted_cyber
+    disabled = replace(_api_key(), automatic_daybreak_routing=False)
+    assert parse_routing_intent({}, api_key=disabled, request_payload=payload) == RoutingIntent.empty()
+
+
+def test_disabled_automatic_routing_preserves_existing_custom_carrier() -> None:
+    disabled = replace(_api_key(), automatic_daybreak_routing=False)
+    assert parse_routing_intent(
+        {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+        api_key=disabled,
+        request_payload={"access_programs": {"cyber": "standard"}},
+    ).requires_trusted_cyber
+
+
+def test_enforced_model_does_not_create_control_frame_intent() -> None:
+    key = replace(_api_key(), enforced_model="gpt-daybreak-blue-latest")
+    reject_capability_signal_outside_response_create(
+        api_key=key, client_metadata=None, request_payload={"type": "session.update"}
+    )

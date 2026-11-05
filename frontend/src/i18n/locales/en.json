@@ -223,6 +223,7 @@
   "apiKeys.form.allowedModels": "Allowed models",
   "apiKeys.form.allowedReasoningEfforts": "Allowed efforts",
   "apiKeys.form.applyToCodexModel": "Apply to codex /model",
+  "apiKeys.form.automaticDaybreakRouting": "Automatic Daybreak routing",
   "apiKeys.form.assignedAccounts": "Assigned accounts",
   "apiKeys.form.assignedModelSources": "Assigned model sources",
   "apiKeys.form.currentUsage": "Current usage",

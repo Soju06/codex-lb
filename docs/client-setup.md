@@ -70,6 +70,16 @@ These keys are Codex-CLI-only. The OpenCode / OpenClaw / SDK examples below
 stay at 272000 because `/v1/models` reports the default input budget, not the
 ceiling.
 
+### Automatic Daybreak routing
+
+Enable **Automatic Daybreak routing** when creating or editing an API key. Mark eligible accounts with the existing **Trusted Cyber** toggle and keep the key's account scope as intended. The same key can serve ordinary and Daybreak requests.
+
+Responses WebSocket, HTTP Responses (streaming or collected), and compact routes recognize `gpt-daybreak-blue-latest` and native `access_programs.cyber = "daybreak_blue"`, preserve native fields upstream, and select only eligible accounts. Generic model requests without a Daybreak selector keep ordinary routing. Explicit `standard` selects ordinary intent; a conflict with a legacy/custom required marker is rejected. If no eligible account remains, the request fails without ordinary fallback. Required HTTP requests use the existing direct subscription path, bypassing external model sources and HTTP bridge socket reuse. Ownership constraints and eligible-pool restrictions remain in force on retries. Daybreak Red is not inferred from the Blue account flag.
+
+The toggle defaults off, preserving existing key behavior and the custom profile below. Codex dropping the native flag on custom providers is a separate client issue ([#2580](https://github.com/Soju06/codex-lb/issues/2580)). This feature selects eligible accounts; upstream still checks the requested model and access program.
+
+See the owning [API-key](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/api-keys), [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) and [Responses](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) specifications.
+
 ### Daybreak Blue profile (Trusted Access)
 
 Use a separate provider for authorized defensive cybersecurity work. The

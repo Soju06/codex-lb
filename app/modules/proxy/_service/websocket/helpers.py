@@ -342,6 +342,7 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.capability_routing import invalid_access_program_error
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -2229,9 +2230,22 @@ def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
     return payload
 
 
-def _websocket_capability_metadata_values(payload: dict[str, JsonValue]) -> tuple[JsonValue, ...] | None:
+def _websocket_capability_metadata_values(
+    payload: dict[str, JsonValue], *, validate_native_programs: bool = False
+) -> tuple[JsonValue, ...] | None:
     normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
     payload_pairs = payload.raw_pairs if isinstance(payload, _WebSocketJsonObject) else tuple(payload.items())
+    program_objects = [value for key, value in payload_pairs if key == "access_programs"]
+    if validate_native_programs and (
+        sum(key == "model" for key, _ in payload_pairs) > 1
+        or len(program_objects) > 1
+        or any(
+            isinstance(programs, _WebSocketJsonObject) and sum(key == "cyber" for key, _ in programs.raw_pairs) > 1
+            for programs in program_objects
+        )
+    ):
+        # A last-key-wins decoder must not erase a required native program.
+        raise invalid_access_program_error()
     misplaced_values = [value for key, value in payload_pairs if key.lower() == normalized_name]
     if misplaced_values:
         # The reserved per-frame carrier is valid only inside

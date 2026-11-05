@@ -345,6 +345,7 @@ class _StreamingRetryMixin:
         upstream_stream_transport_override: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        require_trusted_cyber: bool = False,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         scheduler = scheduler_for(proxy)
@@ -537,7 +538,7 @@ class _StreamingRetryMixin:
         ] = []
         deferred_account_error_backoffs: dict[str, Account] = {}
         post_refresh_transient_replacement_selected = False
-        require_security_work_authorized = False
+        require_security_work_authorized = require_trusted_cyber
         account_leases: list[AccountLease] = []
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
@@ -1485,6 +1486,7 @@ class _StreamingRetryMixin:
                     if (
                         not account
                         and require_security_work_authorized
+                        and not require_trusted_cyber
                         and selection.error_code == _facade()._NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE
                     ):
                         _facade().logger.info(

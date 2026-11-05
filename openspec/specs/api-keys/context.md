@@ -37,3 +37,6 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+
+Automatic Daybreak routing is opt-in per API key. It recognizes a legacy DBB model or the native Blue selector and reuses the existing account Trusted Cyber eligibility flag. One all-accounts key can therefore serve ordinary and Daybreak requests without custom client markers. Ordinary omission leaves upstream mode defaults unchanged. Responses WebSocket, HTTP Responses and compact use the same constrained eligible pool without ordinary fallback. See [Responses routing context](../responses-api-compat/context.md) for transport and retry details. Native-field delivery by a custom Codex provider is a separate compatibility concern (upstream #2580).

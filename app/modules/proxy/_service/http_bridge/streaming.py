@@ -3269,10 +3269,28 @@ class _HTTPBridgeStreamingMixin:
             # new conversation and silently drop the prior context, which
             # the delta-only contract forbids. Fail closed instead so the
             # client resends its full history.
-            unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            delta_fence_keys = {bridge_session_key}
+            if (
+                incoming_turn_state_header is not None
+                and incoming_turn_state_header.startswith("http_turn_")
+                and not is_http_bridge_account_neutral_replay(
+                    kind=bridge_session_key.affinity_kind, key=bridge_session_key.affinity_key
+                )
+            ):
+                _, fallback_key = _turn_keys(headers, api_key, bridge_session_key, session_header_fallback_key)
+                if fallback_key is not None and fallback_key not in delta_fence_keys:
+                    await self._ensure_http_bridge_retry_circuit_loaded_for_key(
+                        fallback_key, request_model=effective_payload.model
+                    )
+                    delta_fence_keys.add(fallback_key)
+            unanchored_delta_poisoned = any(
+                _http_bridge_session_key_poison_quarantined(self, key) for key in delta_fence_keys
+            )
             if not unanchored_delta_poisoned:
                 await self._load_http_bridge_retry_circuit(session)
-                unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+                unanchored_delta_poisoned = any(
+                    _http_bridge_session_key_poison_quarantined(self, key) for key in delta_fence_keys
+                )
             if not unanchored_delta_poisoned:
                 # A settled abandonment leaves neither a quarantine nor a
                 # poison row; the tombstone detail on the zeroed circuit row
@@ -3280,11 +3298,11 @@ class _HTTPBridgeStreamingMixin:
                 # replica reads before dispatching a delta as a brand-new
                 # conversation.
                 async with self._http_bridge_retry_circuit_lock:
-                    tombstone_state = self._http_bridge_retry_circuits.get(bridge_session_key)
-                unanchored_delta_poisoned = bool(
-                    tombstone_state is not None
-                    and tombstone_state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
-                )
+                    unanchored_delta_poisoned = any(
+                        (state := self._http_bridge_retry_circuits.get(key)) is not None
+                        and state.last_detail == _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL
+                        for key in delta_fence_keys
+                    )
             if unanchored_delta_poisoned:
                 _log_http_bridge_event(
                     "previous_response_poisoned_anchor_fail_fast",

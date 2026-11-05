@@ -10919,11 +10919,20 @@ scope MUST NOT inherit the fallback key's fence.
 #### Scenario: Split durable rows recover with full history
 
 - **GIVEN** an older turn-state row retains an anchor and its prefix metadata
+- **AND** the resend's stored prefix is trimmable and its fresh suffix retains the prior output or exactly matches the pending tool-call manifest
 - **AND** its same-account thread fallback key carries a poison quarantine or abandonment tombstone
-- **WHEN** a native client resends full history through either Responses HTTP route
+- **WHEN** a native client resends that verified-safe full history through either Responses HTTP route
 - **THEN** the request dispatches on that owner without the proxy anchor
 - **AND** its input is forwarded without prefix trimming
 - **AND** a later continuation can complete
+
+#### Scenario: Split durable rows fail closed for incomplete history
+
+- **GIVEN** an older turn-state row retains an anchor and its prefix metadata
+- **AND** the resend's stored prefix is trimmable but its fresh suffix omits the prior output and does not exactly match the pending tool-call manifest
+- **AND** its same-account thread fallback key carries a poison quarantine or abandonment tombstone
+- **WHEN** a native client resends that incomplete history through either Responses HTTP route
+- **THEN** the request fails with `bridge_previous_response_not_found` before upstream dispatch
 
 #### Scenario: A delta cannot bypass anchor poisoning
 

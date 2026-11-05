@@ -1619,3 +1619,52 @@ describe("RecentRequestsTable account cell", () => {
     expect(screen.getByText("Unassigned")).toBeInTheDocument();
   });
 });
+
+describe("RecentRequestsTable model-source attribution", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+      canWrite: true,
+    });
+  });
+
+  it("shows a model-source badge on the row and the source id and kind in details", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            accountId: null,
+            source: "model_source",
+            modelSourceId: "src_vllm",
+            modelSourceKind: "openai_compatible",
+          },
+        ]}
+      />,
+    );
+
+    const badge = screen.getByText("Model source");
+    expect(badge.closest("[title]")).toHaveAttribute("title", "src_vllm");
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("src_vllm")).toBeInTheDocument();
+    expect(within(dialog).getByText("openai_compatible")).toBeInTheDocument();
+  });
+
+  it("renders subscription rows without model-source attribution", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.queryByText("Model source")).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(within(dialog).queryByText("Model source")).not.toBeInTheDocument();
+  });
+});

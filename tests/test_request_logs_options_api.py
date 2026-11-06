@@ -933,3 +933,57 @@ async def test_request_logs_options_unfiltered_upstream_matches_distinct_path(as
     ]
     request_log_statements = [stmt for stmt in statements if "request_logs" in stmt]
     assert not any(re.search(r"SELECT\s+DISTINCT\b", stmt, re.IGNORECASE) for stmt in request_log_statements)
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_subscription_pool_probe_uses_source_index_sqlite(async_client, db_setup):
+    """With planner statistics and no NULL-source rows, the subscription-pool
+    probe must still walk idx_logs_model_source_time instead of every live row."""
+    from sqlalchemy import event, insert
+
+    from app.db.models import RequestLog
+
+    if engine.sync_engine.dialect.name != "sqlite":
+        pytest.skip("SQLite-only query plan test")
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        await session.execute(
+            insert(RequestLog),
+            [
+                {
+                    "request_id": f"req_plan_{index}",
+                    "model": "gpt-5.1",
+                    "status": "success",
+                    "requested_at": now - timedelta(seconds=index),
+                    "model_source_id": f"src_plan_{index % 3}",
+                    "model_source_kind": "openai_compatible",
+                }
+                for index in range(5000)
+            ],
+        )
+        await session.commit()
+    async with engine.begin() as conn:
+        await conn.execute(text("ANALYZE"))
+
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "model_source_id IS NULL" in statement:
+            captured.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        response = await async_client.get("/api/request-logs/options")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    assert [option["id"] for option in response.json()["upstreams"]] == ["src_plan_0", "src_plan_1", "src_plan_2"]
+    assert len(captured) == 1
+    statement, parameters = captured[0]
+    async with engine.connect() as conn:
+        plan_rows = (await conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).fetchall()
+    details = " | ".join(str(row[-1]) for row in plan_rows)
+    assert "idx_logs_model_source_time" in details, details
+    assert "idx_logs_deleted_at_requested_at_id" not in details, details

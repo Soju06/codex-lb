@@ -7,11 +7,11 @@ from typing import Any
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
+from sqlalchemy import Integer, Select, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, make_transient_to_detached
+from sqlalchemy.orm import InstrumentedAttribute, aliased, make_transient_to_detached
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import (
@@ -1652,12 +1652,27 @@ class RequestLogsRepository:
                 .order_by(RequestLog.model_source_id.asc())
             )
             source_ids = [value for (value,) in (await self._session.execute(source_stmt)).all() if value]
-        pool_probe = select(RequestLog.id).where(*filters.conditions, RequestLog.model_source_id.is_(None)).limit(1)
-        has_subscription_pool = (await self._session.execute(pool_probe)).scalar_one_or_none() is not None
+        has_subscription_pool = (
+            await self._session.execute(self._subscription_pool_probe(filters.conditions))
+        ).scalar_one_or_none() is not None
         return RequestLogUpstreamFacet(
             has_subscription_pool=has_subscription_pool,
             model_source_ids=[value for value in source_ids if value],
         )
+
+    def _subscription_pool_probe(self, conditions: list[ColumnElement[bool]]) -> Select[tuple[int]]:
+        """One visible row with no model source, or none.
+
+        Once ANALYZE has run, SQLite can plan the combined predicate as a scan
+        of the table or of the deleted_at index, reading every live row when no
+        NULL-source row exists.
+        As in `_distinct_skip_scan`, walk `idx_logs_model_source_time` first and
+        check each candidate's visibility with a primary-key probe."""
+        if self._session.get_bind().dialect.name != "sqlite":
+            return select(RequestLog.id).where(*conditions, RequestLog.model_source_id.is_(None)).limit(1)
+        candidate = aliased(RequestLog)
+        visible = select(RequestLog.id).where(*conditions, RequestLog.id == candidate.id).correlate(candidate).exists()
+        return select(candidate.id).where(candidate.model_source_id.is_(None), visible).limit(1)
 
     async def get_model_source_labels(self, source_ids: list[str]) -> dict[str, ModelSourceLabel]:
         """Current name and kind only; base URLs and credentials are never read."""

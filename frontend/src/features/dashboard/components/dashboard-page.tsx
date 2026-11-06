@@ -353,6 +353,10 @@ export function DashboardPage() {
         <Trans
           i18nKey="dashboard.conversation.summaryWithFilters"
           values={{ id: filters.conversationId, count, cost, filters: suffixParts.join(", ") }}
+          // Filter labels include operator-named sources; escape them so Trans
+          // cannot parse a name as component markup, then show them as text.
+          tOptions={{ interpolation: { escapeValue: true } }}
+          shouldUnescape
           components={[
             <code key="id" className={codeClass} />,
             <code key="count" className={codeClass} />,

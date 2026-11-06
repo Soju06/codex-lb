@@ -355,6 +355,36 @@ def test_is_account_neutral_request_rejection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_status,upstream_http_status", [(None, None), (502, None), (None, 502)])
+@pytest.mark.parametrize("account_attributable", [False, True])
+async def test_transport_drop_only_skips_health_without_http_status(
+    http_status, upstream_http_status, account_attributable
+) -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    classified = await streaming_helpers_module._handle_stream_error(
+        SimpleNamespace(_load_balancer=load_balancer),
+        cast(Account, SimpleNamespace(id="transport-account")),
+        {"message": "Upstream websocket closed before response.completed: Upstream websocket receive failed"},
+        "stream_incomplete",
+        http_status,
+        upstream_http_status=upstream_http_status,
+        account_attributable=account_attributable,
+    )
+    assert classified["failure_class"] == "retryable_transient"
+    assert load_balancer.record_error.await_count == int(
+        http_status is not None or upstream_http_status is not None or account_attributable
+    )
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_missing_tool_output_rejection_does_not_penalize_account() -> None:
     load_balancer = SimpleNamespace(
         record_error=AsyncMock(),
@@ -20618,7 +20648,7 @@ async def test_stream_responses_empty_upstream_emits_terminal_failure(monkeypatc
     assert event["response"]["error"]["code"] == "stream_incomplete"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
 
 
@@ -20660,7 +20690,7 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
     assert terminal["response"]["error"]["code"] == "stream_incomplete"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["error_code"] == "stream_incomplete"
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
 
 
@@ -21101,7 +21131,7 @@ async def test_stream_responses_first_event_raw_eof_with_response_id_surfaces_wi
     assert request_logs.calls[0]["failure_detail"] == "upstream_eof_before_terminal_event"
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["account_id"] == account_a.id
-    record_error.assert_awaited_once_with(account_a)
+    record_error.assert_not_awaited()
     record_errors.assert_not_awaited()
     record_success.assert_not_awaited()
 

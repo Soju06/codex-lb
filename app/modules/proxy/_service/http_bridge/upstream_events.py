@@ -1857,6 +1857,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 api_key=None,
                 response_create_gate=session.response_create_gate,
                 penalize_account=penalize_account,
+                account_attributable=penalize_account,
             )
             if (
                 failed_pending_count > 0
@@ -2330,14 +2331,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     response_events_seen = max(
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
-                    )
-                    # Buffered reasoning preludes are suppressed from
-                    # response_event_count on purpose, but they are still
-                    # application-layer output: a drop after one is not an
-                    # eventless drop for account-health purposes.
-                    upstream_output_observed = any(
-                        getattr(request_state, "upstream_model_output_seen", False)
-                        for request_state in session.pending_requests
                     )
                     accepted_response_pending = any(
                         request_state.response_id is not None and not request_state.awaiting_response_created

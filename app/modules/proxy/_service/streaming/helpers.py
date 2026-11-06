@@ -1157,6 +1157,7 @@ async def _handle_stream_error(
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
     upstream_http_status: int | None = None,
+    account_attributable: bool = False,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1168,7 +1169,8 @@ async def _handle_stream_error(
     ``upstream_http_status`` is evidence-only: it lets a caller that knows the
     upstream HTTP status of this failure say so WITHOUT taking any of the
     ``http_status`` side effects. It is read by the soft-overload gate below
-    and by nothing else -- never by ``classify_upstream_failure``, the
+    and the status-free transport-neutrality check -- never by
+    ``classify_upstream_failure``, the
     reasoning-replay metric, the account-neutral / model-scoped rejection
     predicates, or the HTTP 429 burst-cooldown branch. Callers that want those
     behaviours must pass the positional ``http_status`` instead.
@@ -1187,6 +1189,16 @@ async def _handle_stream_error(
     ):
         _record_upstream_reasoning_replay_rejection()
     if _facade()._is_account_neutral_error_code(code):
+        return classified
+    # An incomplete transport with no HTTP rejection says nothing about the
+    # account's health. Preserve the request failure without benching its owner.
+    # Structured bridge decisions still distinguish authored closes/protocol errors.
+    if (
+        code == "stream_incomplete"
+        and http_status is None
+        and upstream_http_status is None
+        and not account_attributable
+    ):
         return classified
     if _is_account_neutral_request_rejection(
         code=code,

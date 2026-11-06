@@ -981,3 +981,22 @@ async def test_non_sticky_cache_generation_change_reselects_and_releases_once(
 
     await balancer.release_account_lease(selection.lease)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("account_count", [1, 2])
+async def test_public_selection_retains_account_after_transient_error_burst(
+    selection_cache: AccountSelectionCache,
+    account_count: int,
+) -> None:
+    accounts = [_account(f"recoverable-{index}") for index in range(account_count)]
+    balancer, _, _, _ = _balancer(accounts, selection_cache)
+    for account in accounts:
+        await balancer.record_error_backoff(account)
+
+    selection = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selection.account is not None
+    assert selection.account.id in {account.id for account in accounts}
+    assert selection.error_message is None
+    assert selection.error_code is None

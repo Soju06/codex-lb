@@ -601,7 +601,8 @@ def select_account(
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
             backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
             if state.last_error_at and current - state.last_error_at < backoff:
-                in_error_backoff.append(state)
+                if state.status == AccountStatus.ACTIVE:
+                    in_error_backoff.append(state)
                 continue
             # Error backoff expired — reset error state so recovery is
             # not penalised by stale counts. The account has already
@@ -620,22 +621,9 @@ def select_account(
         available = opportunistic_available
 
     if not available:
-        in_error_backoff_ids = {state.account_id for state in in_error_backoff}
-        hard_blocked_exists = any(
-            (
-                state.status
-                in (
-                    AccountStatus.PAUSED,
-                    AccountStatus.DEACTIVATED,
-                    AccountStatus.RATE_LIMITED,
-                    AccountStatus.QUOTA_EXCEEDED,
-                )
-                or _known_expired_reauth(state, current)
-            )
-            and state.account_id not in in_error_backoff_ids
-            for state in all_states
-        )
-        if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
+        # Backoff is a soft preference: even a single remaining account must
+        # remain usable. Hard status and cooldown checks above still apply.
+        if allow_backoff_fallback and in_error_backoff:
 
             def _backoff_expires_at(s: AccountState) -> float:
                 backoff = min(300, 30 * (2 ** (s.error_count - ERROR_BACKOFF_THRESHOLD)))

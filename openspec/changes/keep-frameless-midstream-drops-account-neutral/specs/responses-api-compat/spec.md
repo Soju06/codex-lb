@@ -76,3 +76,15 @@ active response id, then MUST close the downstream WebSocket with code 1011.
 - **WHEN** the upstream websocket closes cleanly before response output
 - **THEN** the proxy records the clean-close retry-circuit outcome
 - **AND** the selected account is not penalized
+
+#### Scenario: created-only generate-false Codex prewarm recovers
+- **GIVEN** a direct Responses WebSocket request is classified by Codex turn
+  metadata as `request_kind = "prewarm"`
+- **AND** its normalized request body contains `generate = false`
+- **AND** only `response.created` at numeric sequence `0` has been sent
+  downstream, with no other response progress or visible output
+- **WHEN** the upstream websocket closes before the terminal event
+- **THEN** the proxy MAY perform the existing bounded one-shot replay
+- **AND** it suppresses the replayed `response.created`
+- **AND** it forwards only replay numeric sequences that advance beyond `0`
+- **AND** the recovered request is finalized and logged exactly once

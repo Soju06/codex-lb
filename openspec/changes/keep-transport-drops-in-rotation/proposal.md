@@ -10,3 +10,5 @@ Transport loss is not evidence of account failure. Transient backoff must retain
 ## Impact
 - Affected specs: responses-api-compat
 - Affected code: streaming helpers and balancer selection
+
+Malformed non-streaming HTTP responses retain error settlement. Native helpers missing only the new WebSocket close provenance capability may use the existing pre-dispatch fallback; other missing capabilities remain protocol incompatibilities.

@@ -20,8 +20,10 @@ from app.core.clients.codex import (
 from app.core.clients.headers import build_chatgpt_auth_headers
 from app.core.clients.http import _safe_json, lease_retry_client
 from app.core.clients.native_egress import (
+    NativeEgressCapabilityError,
     NativeEgressClient,
     NativeEgressError,
+    NativeEgressProtocolError,
     NativeEgressRequest,
     NativeEgressResponse,
     NativeEgressTransportError,
@@ -124,6 +126,10 @@ async def fetch_usage(
                     timeout_seconds=timeout_seconds or USAGE_FETCH_TIMEOUT_SECONDS,
                     retries=retries,
                 )
+            except NativeEgressCapabilityError as exc:
+                # An incompatible installed helper must fail before dispatch;
+                # it is not an absent executable eligible for Python fallback.
+                raise NativeEgressProtocolError(str(exc)) from exc
             except NativeEgressUnavailable:
                 pass
         async with lease_retry_client(client) as retry_client:

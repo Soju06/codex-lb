@@ -132,6 +132,10 @@ class NativeEgressUnavailable(NativeEgressError):
     """Raised when the optional native helper is not installed."""
 
 
+class NativeEgressCapabilityError(NativeEgressUnavailable):
+    """An installed helper cannot implement the required capabilities."""
+
+
 class NativeEgressProtocolError(NativeEgressError):
     """Raised when the helper violates the framed stream contract."""
 
@@ -1049,7 +1053,7 @@ class SubprocessNativeEgressClient:
             message = f"native helper is missing required capabilities: {', '.join(missing)}"
             if missing == ["websocket_close_frame_provenance_v1"]:
                 raise NativeEgressUnavailable(message)
-            raise NativeEgressProtocolError(message)
+            raise NativeEgressCapabilityError(message)
 
     async def _send_command(
         self,

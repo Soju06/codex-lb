@@ -9011,6 +9011,240 @@ def test_backend_responses_websocket_emits_terminal_failure_when_upstream_send_b
     assert log_calls[0]["status"] == "error"
 
 
+@pytest.mark.parametrize("phase", ["consumer_backpressure", "websocket_receive", "unknown-secret-phase"])
+@pytest.mark.parametrize("existing_phase", [None, "upstream"])
+def test_backend_responses_websocket_logs_native_receive_failure_phase(
+    app_instance, monkeypatch, phase, existing_phase
+):
+    from app.core.clients.native_egress import NativeEgressTransportError
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    class FailingNativeSocket:
+        def __init__(self):
+            self.sent = asyncio.Event()
+            self.received_created = False
+
+        async def send_text(self, text):
+            self.sent.set()
+
+        async def receive(self):
+            await self.sent.wait()
+            if not self.received_created:
+                self.received_created = True
+                return SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_failure_phase", "status": "in_progress"}}
+                    ),
+                    data=None,
+                    close_code=None,
+                    close_reason=None,
+                    responses_interpreted=False,
+                    event_type=None,
+                    payload=None,
+                    routing=None,
+                )
+            raise NativeEgressTransportError("private helper detail", failure_phase=phase)
+
+        async def close(self, **kwargs):
+            pass
+
+        def response_header(self, name):
+            return None
+
+    fake_upstream = NativeUpstreamWebSocket(cast(Any, FailingNativeSocket()))
+    log_calls: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        request_state.failure_phase_override = existing_phase
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        return SimpleNamespace(id="acct_ws_proxy"), fake_upstream
+
+    async def fake_write_request_log(self, **kwargs):
+        del self
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            failed_event = json.loads(websocket.receive_text())
+
+    assert failed_event["type"] == "response.failed"
+    assert failed_event["response"]["error"]["code"] == "stream_incomplete"
+    assert (
+        failed_event["response"]["error"]["message"]
+        == "Upstream websocket closed before response.completed: Upstream websocket receive failed"
+    )
+    assert len(log_calls) == 1
+    assert log_calls[0]["error_code"] == "stream_incomplete"
+    assert log_calls[0]["status"] == "error"
+    assert log_calls[0]["failure_phase"] == (existing_phase or (None if phase == "unknown-secret-phase" else phase))
+    assert "private helper detail" not in json.dumps(failed_event)
+    assert "private helper detail" not in repr(log_calls)
+
+
+@pytest.mark.parametrize("interpret", [False, True], ids=["opaque", "interpreted"])
+def test_backend_responses_websocket_native_burst_reaches_completion(app_instance, monkeypatch, interpret):
+    from unittest.mock import Mock
+
+    from app.core.clients.native_egress import NativeEgressWebSocket
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    sockets = []
+    log_calls = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def fake_connect(self, headers, **kwargs):
+        events = asyncio.Queue()
+
+        async def send_command(process, generation, command):
+            request_id = command["request_id"]
+            if command["type"] == "websocket_send_text":
+                frames = [{"type": "response.created", "response": {"id": "resp_burst", "status": "in_progress"}}]
+                frames += [
+                    {
+                        "type": "response.output_text.delta",
+                        "response_id": "resp_burst",
+                        "delta": f"{i},",
+                        "output_index": 0,
+                        "content_index": 0,
+                    }
+                    for i in range(512)
+                ]
+                frames += [{"type": "response.completed", "response": {"id": "resp_burst", "status": "completed"}}]
+                for sequence, payload in enumerate(frames):
+                    events.put_nowait(
+                        {
+                            "type": "websocket_responses_text" if interpret else "websocket_text",
+                            "request_id": request_id,
+                            "text": json.dumps(payload),
+                            **(
+                                {
+                                    "event_type": payload["type"],
+                                    "payload": payload,
+                                    "payload_response_id": "resp_burst",
+                                    "sequence_number": sequence,
+                                }
+                                if interpret
+                                else {}
+                            ),
+                        }
+                    )
+            # A real helper may flush a burst before the send acknowledgment.
+            events.put_nowait({"type": "websocket_sent", "command_id": command["command_id"]})
+            if command["type"] == "websocket_close":
+                events.put_nowait({"type": "websocket_close", "code": 1000, "reason": ""})
+
+        native = NativeEgressWebSocket(
+            client=cast(
+                Any,
+                SimpleNamespace(
+                    _send_command=send_command,
+                    _finish_request=Mock(),
+                    _abort_request=AsyncMock(),
+                    _cancel_request=AsyncMock(),
+                ),
+            ),
+            process=cast(Any, object()),
+            request_id="native-burst",
+            generation=1,
+            status=101,
+            headers=[],
+            events=events,
+        )
+        sockets.append(native)
+        return SimpleNamespace(id="acct_ws_proxy"), NativeUpstreamWebSocket(native)
+
+    async def fake_write_log(self, **kwargs):
+        log_calls.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_log)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_json(
+                {
+                    "type": "response.create",
+                    "model": "gpt-5.4",
+                    "instructions": "",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "burst"}]}],
+                }
+            )
+            assert websocket.receive_json()["type"] == "response.created"
+            for index in range(512):
+                frame = websocket.receive_json()
+                assert frame["type"] == "response.output_text.delta"
+                assert frame["delta"] == f"{index},"
+            assert websocket.receive_json()["type"] == "response.completed"
+
+    assert len(log_calls) == 1
+    assert log_calls[0]["status"] == "success"
+    assert all(socket._pump_task.done() for socket in sockets)
+
+
 def test_backend_responses_websocket_rejects_oversized_response_create_before_upstream(
     app_instance,
     monkeypatch,

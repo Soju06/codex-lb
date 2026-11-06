@@ -62,6 +62,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
+    normalize_native_websocket_failure_phase,
 )
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
@@ -1323,6 +1324,12 @@ async def _process_upstream_websocket_transport_end(
             _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
         return True
 
+    failure_phase = normalize_native_websocket_failure_phase(getattr(message, "failure_phase", None))
+    if failure_phase is not None:
+        for state in reader_owned:
+            # Continuity and bridge classifications carry stronger provenance.
+            if state.failure_phase_override is None:
+                state.failure_phase_override = failure_phase
     sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
     await proxy._fail_pending_websocket_requests(
         account=account,

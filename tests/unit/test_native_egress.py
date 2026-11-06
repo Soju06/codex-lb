@@ -617,6 +617,152 @@ for line in sys.stdin:
 """
 
 
+def _burst_websocket_helper_source() -> str:
+    return _websocket_helper_source().replace(
+        '    elif kind == "websocket_send_text":\n',
+        """    elif kind == "websocket_send_text":
+        if command["text"].startswith("burst:"):
+            count = int(command["text"].split(":")[1])
+            for index in range(count):
+                payload = {"type": "response.output_text.delta", "delta": str(index),
+                           "response_id": "r1", "sequence_number": index}
+                if index == count - 1:
+                    payload["type"] = "response.completed"
+                print(json.dumps({
+                    "type": "websocket_responses_text" if request_id in interpreted else "websocket_text",
+                    "request_id": request_id, "text": json.dumps(payload),
+                    **({"event_type": payload["type"], "payload": payload,
+                        "payload_response_id": "r1", "sequence_number": index}
+                       if request_id in interpreted else {}),
+                }), flush=True)
+            print(json.dumps({"type": "websocket_sent", "request_id": request_id,
+                              "command_id": command["command_id"]}), flush=True)
+            continue
+""",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interpret", [False, True], ids=["opaque", "interpreted"])
+async def test_native_websocket_buffered_burst_preserves_frames_and_acknowledgments(
+    tmp_path: Path, interpret: bool
+) -> None:
+    import json
+
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _burst_websocket_helper_source())
+    client = SubprocessNativeEgressClient(helper)
+    try:
+        websocket = await client.websocket(
+            NativeWebSocketRequest(
+                url="wss://example.test/codex/responses",
+                headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+                connect_timeout_seconds=2,
+                max_message_bytes=1024,
+                interpret_responses=interpret,
+            )
+        )
+        # The acknowledgment follows every frame: buffering must not deadlock
+        # command progress even before the downstream relay starts draining.
+        await asyncio.wait_for(websocket.send_text("burst:2048"), timeout=5)
+        # Close acknowledgment must also progress with the burst still queued.
+        await asyncio.wait_for(websocket.close(), timeout=2)
+        for index in range(2048):
+            message = await asyncio.wait_for(websocket.receive(), timeout=2)
+            assert message.kind == "text"
+            assert message.text is not None
+            payload = json.loads(message.text)
+            assert payload["delta"] == str(index)
+            assert payload["type"] == ("response.completed" if index == 2047 else "response.output_text.delta")
+            # Real relays yield to task ownership, locks and downstream sends.
+            for _ in range(3):
+                await asyncio.sleep(0)
+        assert (await websocket.receive()).kind == "close"
+        assert not client._streams
+        assert websocket._pump_task.done()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("byte_budget", [None, 128], ids=["message-bound", "byte-bound"])
+async def test_native_websocket_stalled_burst_fails_only_its_socket(tmp_path: Path, byte_budget: int | None) -> None:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _burst_websocket_helper_source())
+    client = SubprocessNativeEgressClient(helper)
+    request = NativeWebSocketRequest(
+        url="wss://example.test/codex/responses",
+        headers={"user-agent": "codex-cli", "sec-websocket-protocol": "openai"},
+        connect_timeout_seconds=2,
+        max_message_bytes=1024,
+    )
+    try:
+        stalled = await client.websocket(request)
+        peer = await client.websocket(request)
+        process = client._process
+        if byte_budget is not None:
+            stalled._messages._max_bytes = byte_budget
+        burst_count = 4097 if byte_budget is None else 3
+        with pytest.raises(NativeEgressTransportError, match="bounded message queue") as failure:
+            await asyncio.wait_for(stalled.send_text(f"burst:{burst_count}"), timeout=5)
+        assert failure.value.failure_phase == "consumer_backpressure"
+        await asyncio.wait_for(stalled._pump_task, timeout=3)
+        assert stalled._request_id not in client._streams
+        assert stalled._messages.queued_bytes == 0
+        assert peer._request_id in client._streams
+        await peer.send_text("healthy")
+        assert (await peer.receive()).text == "echo:healthy"
+        assert client._process is process
+        await peer.close()
+        assert not client._streams
+    finally:
+        await asyncio.wait_for(client.aclose(), timeout=3)
+
+
+@pytest.mark.parametrize(
+    "message,size",
+    [
+        (NativeWebSocketMessage(kind="text", text="é"), 2),
+        (NativeWebSocketMessage(kind="binary", data=b"\x00\xff"), 2),
+        (NativeWebSocketMessage(kind="close", close_reason="é"), 2),
+        (
+            NativeWebSocketMessage(
+                kind="text",
+                text="{}",
+                payload={},
+                responses_interpreted=True,
+                event_type="é",
+                routing=NativeWebSocketRoutingMetadata("é", 17),
+            ),
+            10,
+        ),
+    ],
+)
+def test_websocket_payload_queue_releases_bytes_and_enforces_both_bounds(
+    message: NativeWebSocketMessage, size: int
+) -> None:
+    assert native_egress_module._websocket_message_payload_size(message) == size
+    queue = native_egress_module._BoundedPayloadQueue(
+        max_events=3, max_bytes=size * 2, payload_size=native_egress_module._websocket_message_payload_size
+    )
+    queue.put_nowait(message)
+    queue.put_nowait(message)
+    assert queue.queued_bytes == size * 2
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(message)
+    failure = NativeEgressTransportError("synthetic terminal")
+    queue.put_nowait(failure)
+    with pytest.raises(asyncio.QueueFull):
+        queue.put_nowait(failure)
+    assert queue.get_nowait() == message
+    assert queue.queued_bytes == size
+    queue.put_nowait(message)
+    assert queue.get_nowait() == message
+    assert queue.get_nowait() is failure
+    assert queue.get_nowait() == message
+    assert queue.queued_bytes == 0
+
+
 @pytest.mark.asyncio
 async def test_native_websocket_routes_frames_and_send_acknowledgements(tmp_path: Path) -> None:
     helper = tmp_path / "native-helper"

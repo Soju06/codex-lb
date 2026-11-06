@@ -2400,3 +2400,66 @@ async def test_resolve_reset_evidence_keeps_warmup_evidence_out_of_recovery() ->
 
     assert account.id in evidence.warmup
     assert account.id not in evidence.recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("baseline_fraction", [0.0, 0.000001, 0.266599, 0.999999])
+@pytest.mark.parametrize("has_later_baseline", [False, True])
+async def test_reset_evidence_ignores_same_second_baselines(
+    monkeypatch: pytest.MonkeyPatch,
+    baseline_fraction: float,
+    has_later_baseline: bool,
+) -> None:
+    """Ambiguous block-second samples cannot shadow a later valid reset anchor."""
+    now = 1_700_000_000.0
+    blocked_at = int(now - 2 * 24 * 3600)
+    weekly_reset_at = int(now + 3 * 24 * 3600)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+    account = _make_account(
+        "acc_same_second_baseline",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="pro",
+        reset_at=weekly_reset_at,
+        blocked_at=blocked_at,
+    )
+    early = _make_usage(
+        account.id,
+        window="primary",
+        used_percent=100.0,
+        reset_at=weekly_reset_at,
+        recorded_at=_epoch_to_naive_utc(blocked_at + baseline_fraction),
+        window_minutes=10_080,
+    )
+    before, after = _weekly_block(account.id, now=now, weekly_reset_at=weekly_reset_at)
+    history = [early, before, after] if has_later_baseline else [early, after]
+    usage_repo = StubHistoryUsageRepository(
+        history={"primary": history},
+        primary={account.id: after},
+    )
+    accounts_repo = StubAccountsRepository([account])
+
+    evidence = await refresh_scheduler_module._resolve_reset_evidence(
+        accounts=[account],
+        usage_repo=cast(Any, usage_repo),
+        before_monthly={},
+        after_monthly={},
+    )
+    if has_later_baseline:
+        assert evidence.recovery[account.id].baseline is before
+    else:
+        assert account.id not in evidence.recovery
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=accounts_repo,
+        usage_repo=usage_repo,
+        accounts=[account],
+        reset_evidence=evidence.recovery,
+    )
+
+    assert recovered == int(has_later_baseline)
+    assert len(accounts_repo.status_updates) == int(has_later_baseline)
+    expected = (
+        (AccountStatus.ACTIVE, None, None)
+        if has_later_baseline
+        else (AccountStatus.RATE_LIMITED, weekly_reset_at, blocked_at)
+    )
+    assert (account.status, account.reset_at, account.blocked_at) == expected

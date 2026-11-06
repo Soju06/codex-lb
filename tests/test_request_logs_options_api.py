@@ -987,3 +987,42 @@ async def test_request_logs_options_subscription_pool_probe_uses_source_index_sq
     details = " | ".join(str(row[-1]) for row in plan_rows)
     assert "idx_logs_model_source_time" in details, details
     assert "idx_logs_deleted_at_requested_at_id" not in details, details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_pool_row", "expected_upstreams"),
+    [
+        (True, ["subscription_pool", "src_deleted_pool_case"]),
+        (False, ["src_deleted_pool_case"]),
+    ],
+    ids=["deleted-pool-row-before-live-one", "only-deleted-pool-rows"],
+)
+async def test_request_logs_options_subscription_pool_skips_soft_deleted_rows(
+    async_client, db_setup, live_pool_row, expected_upstreams
+):
+    """The subscription-pool probe must ignore soft-deleted NULL-source rows,
+    including one that sorts ahead of a live row in idx_logs_model_source_time."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_pool_source_row", source_id="src_deleted_pool_case", requested_at=now)
+        for index in range(2):
+            deleted = await _add_upstream_log(
+                logs_repo,
+                f"req_pool_deleted_{index}",
+                source_id=None,
+                requested_at=now - timedelta(hours=2, minutes=index),
+            )
+            deleted.deleted_at = utcnow()
+        if live_pool_row:
+            await _add_upstream_log(logs_repo, "req_pool_live", source_id=None, requested_at=now - timedelta(hours=1))
+        await session.commit()
+
+    unfiltered = await async_client.get("/api/request-logs/options")
+    filtered = await async_client.get(
+        "/api/request-logs/options", params={"since": (now - timedelta(days=1)).isoformat()}
+    )
+
+    assert [option["id"] for option in unfiltered.json()["upstreams"]] == expected_upstreams
+    assert [option["id"] for option in filtered.json()["upstreams"]] == expected_upstreams

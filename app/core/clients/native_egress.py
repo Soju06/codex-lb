@@ -1046,7 +1046,10 @@ class SubprocessNativeEgressClient:
             raise NativeEgressProtocolError("native helper capabilities have an invalid shape")
         missing = sorted(_REQUIRED_NATIVE_CAPABILITIES.difference(capabilities))
         if missing:
-            raise NativeEgressUnavailable(f"native helper is missing required capabilities: {', '.join(missing)}")
+            message = f"native helper is missing required capabilities: {', '.join(missing)}"
+            if missing == ["websocket_close_frame_provenance_v1"]:
+                raise NativeEgressUnavailable(message)
+            raise NativeEgressProtocolError(message)
 
     async def _send_command(
         self,

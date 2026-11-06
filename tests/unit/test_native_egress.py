@@ -182,23 +182,15 @@ sys.stdin.read()
 
 @pytest.mark.asyncio
 async def test_subprocess_native_egress_treats_missing_capability_as_unavailable(tmp_path: Path) -> None:
+    capabilities = sorted(native_egress_module._REQUIRED_NATIVE_CAPABILITIES - {"websocket_close_frame_provenance_v1"})
     helper = tmp_path / "native-helper"
     helper.write_text(
-        """#!/usr/bin/env python3
-import json
-import sys
-
-json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "server_hello",
-    "protocol_version": 1,
-    "capabilities": [
-        "failure_provenance_v1", "http", "http2_profile_v1",
-        "websocket", "websocket_send_ack",
-    ],
-}), flush=True)
-sys.stdin.read()
-""",
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "json.loads(sys.stdin.readline())\n"
+        "print(json.dumps({'type': 'server_hello', 'protocol_version': 1, "
+        f"'capabilities': {capabilities!r}" + "}), flush=True)\n"
+        "sys.stdin.read()\n",
         encoding="utf-8",
     )
     helper.chmod(helper.stat().st_mode | stat.S_IXUSR)

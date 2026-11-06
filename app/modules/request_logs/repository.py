@@ -7,11 +7,11 @@ from typing import Any
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
+from sqlalchemy import Integer, Select, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, make_transient_to_detached
+from sqlalchemy.orm import InstrumentedAttribute, aliased, make_transient_to_detached
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import (
@@ -33,6 +33,7 @@ from app.db.models import (
     Account,
     AccountUsageRollupState,
     ApiKey,
+    ModelSource,
     RequestDemandQuarterRollup,
     RequestKind,
     RequestLog,
@@ -91,9 +92,10 @@ def _naive_utc(value: datetime) -> datetime:
 class _DemandCountParams:
     """Listing filters that map losslessly onto demand-rollup dimensions.
 
-    Built only when the listing carries no free-text search and no
-    error-code splits — the demand grain has no error_code dimension, and
-    search reaches related tables. Everything else (time bounds, accounts,
+    Built only when the listing carries no free-text search, no
+    error-code splits and no upstream filter — the demand grain has no
+    error_code or model_source_id dimension, and search reaches related
+    tables. Everything else (time bounds, accounts,
     api keys, model/effort pairs, statuses, soft-delete exclusion) is a
     demand dimension, so the folded window can be counted from the rollup.
     """
@@ -117,6 +119,24 @@ class RequestLogsResult:
     aggregated_cost_usd: float | None = None
 
 
+# Upstream filter value for rows with no model source: the built-in
+# subscription route family, including failures recorded before an account
+# was selected (issue #1870).
+SUBSCRIPTION_POOL_UPSTREAM = "subscription_pool"
+
+
+@dataclass(frozen=True, slots=True)
+class RequestLogUpstreamFacet:
+    has_subscription_pool: bool
+    model_source_ids: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSourceLabel:
+    name: str
+    kind: str
+
+
 # The exact COUNT(*) behind the request-log listing's "X-Y of N" scans the
 # whole filtered set on PostgreSQL; the dashboard re-runs it on every 30s
 # poll and every pagination click even though the displayed total is
@@ -127,6 +147,18 @@ _COUNT_CACHE_TTL_SECONDS = 30.0
 _COUNT_CACHE_MAX_ENTRIES = 256
 _CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 _recent_count_cache: dict[tuple, tuple[int, float]] = {}
+
+
+def _upstream_condition(upstreams: list[str]) -> ColumnElement[bool]:
+    """OR of the selected upstreams: `subscription_pool` is a NULL
+    `model_source_id`; any other value is an exact source ID."""
+    source_ids = sorted({value for value in upstreams if value != SUBSCRIPTION_POOL_UPSTREAM})
+    clauses: list[ColumnElement[bool]] = []
+    if SUBSCRIPTION_POOL_UPSTREAM in upstreams:
+        clauses.append(RequestLog.model_source_id.is_(None))
+    if source_ids:
+        clauses.append(RequestLog.model_source_id.in_(source_ids))
+    return or_(*clauses)
 
 
 def _escape_like(value: str) -> str:
@@ -1268,6 +1300,7 @@ class RequestLogsRepository:
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
         *,
+        upstreams: list[str] | None = None,
         cache_mode: str = "since",
         timeframe: str | None = None,
         include_sensitive_metadata: bool = True,
@@ -1286,6 +1319,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=include_success,
             include_cancelled=include_cancelled,
             include_error_other=include_error_other,
@@ -1313,7 +1347,9 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        if search is None and not error_codes_in and not error_codes_excluding:
+        # The demand rollup has no model-source dimension, so an upstream
+        # filter must count raw rows (issue #1870).
+        if search is None and not error_codes_in and not error_codes_excluding and not upstreams:
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1346,6 +1382,7 @@ class RequestLogsRepository:
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
+            tuple(sorted(set(upstreams))) if upstreams else None,
             include_sensitive_metadata,
             include_account_identity,
             include_api_key_identity,
@@ -1489,6 +1526,7 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        upstreams: list[str] | None = None,
     ) -> tuple[list[str], list[tuple[str, str | None]], list[str], list[tuple[str, str | None]]]:
         filters = self._build_filters(
             since=since,
@@ -1498,6 +1536,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=True,
             include_cancelled=True,
             include_error_other=True,
@@ -1513,6 +1552,7 @@ class RequestLogsRepository:
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
+            upstreams=upstreams,
             include_success=True,
             include_cancelled=True,
             include_error_other=True,
@@ -1521,7 +1561,9 @@ class RequestLogsRepository:
             exclude_soft_deleted=True,
         )
 
-        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        unfiltered = not any(
+            (since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts, upstreams)
+        )
         if unfiltered:
             # PostgreSQL has no loose index scan: with no user filters each
             # DISTINCT below is a full pass over request_logs, four times per
@@ -1568,6 +1610,93 @@ class RequestLogsRepository:
         api_key_ids = [row[0] for row in api_key_rows.all() if row[0]]
         status_values = [(row[0], row[1]) for row in status_rows.all() if row[0]]
         return account_ids, model_options, api_key_ids, status_values
+
+    async def list_upstream_facet(
+        self,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
+        model_options: list[tuple[str, str | None]] | None = None,
+        models: list[str] | None = None,
+        reasoning_efforts: list[str] | None = None,
+    ) -> RequestLogUpstreamFacet:
+        """Observed upstreams for the options panel. Takes no upstream
+        selection: the facet ignores its own filter so another upstream can
+        be added without clearing the first (issue #1870)."""
+        filters = self._build_filters(
+            since=since,
+            until=until,
+            account_ids=account_ids,
+            api_key_ids=api_key_ids,
+            model_options=model_options,
+            models=models,
+            reasoning_efforts=reasoning_efforts,
+            include_success=True,
+            include_cancelled=True,
+            include_error_other=True,
+            error_codes_in=None,
+            error_codes_excluding=None,
+            exclude_soft_deleted=True,
+        )
+        unfiltered = not any((since, until, account_ids, api_key_ids, model_options, models, reasoning_efforts))
+        if unfiltered:
+            # Skip-scan idx_logs_model_source_time, same bounded contract as
+            # the other unfiltered facets.
+            source_ids = await self._distinct_skip_scan(RequestLog.model_source_id, filters.conditions)
+        else:
+            source_stmt = (
+                select(RequestLog.model_source_id)
+                .where(RequestLog.model_source_id.is_not(None), *filters.conditions)
+                .distinct()
+                .order_by(RequestLog.model_source_id.asc())
+            )
+            source_ids = [value for (value,) in (await self._session.execute(source_stmt)).all() if value]
+        has_subscription_pool = (
+            await self._session.execute(self._subscription_pool_probe(filters.conditions))
+        ).scalar_one_or_none() is not None
+        return RequestLogUpstreamFacet(
+            has_subscription_pool=has_subscription_pool,
+            model_source_ids=[value for value in source_ids if value],
+        )
+
+    def _subscription_pool_probe(self, conditions: list[ColumnElement[bool]]) -> Select[tuple[int]]:
+        """One visible row with no model source, or none.
+
+        Once ANALYZE has run, SQLite can plan the combined predicate as a scan
+        of the table or of the deleted_at index, reading every live row when no
+        NULL-source row exists.
+        As in `_distinct_skip_scan`, walk `idx_logs_model_source_time` first and
+        check each candidate's visibility with a primary-key probe."""
+        if self._session.get_bind().dialect.name != "sqlite":
+            return select(RequestLog.id).where(*conditions, RequestLog.model_source_id.is_(None)).limit(1)
+        candidate = aliased(RequestLog)
+        visible = select(RequestLog.id).where(*conditions, RequestLog.id == candidate.id).correlate(candidate).exists()
+        return select(candidate.id).where(candidate.model_source_id.is_(None), visible).limit(1)
+
+    async def get_model_source_labels(self, source_ids: list[str]) -> dict[str, ModelSourceLabel]:
+        """Current name and kind only; base URLs and credentials are never read."""
+        unique_ids = sorted({source_id for source_id in source_ids if source_id})
+        if not unique_ids:
+            return {}
+        result = await self._session.execute(
+            select(ModelSource.id, ModelSource.name, ModelSource.kind).where(ModelSource.id.in_(unique_ids))
+        )
+        return {source_id: ModelSourceLabel(name=name, kind=kind) for source_id, name, kind in result.all()}
+
+    async def get_persisted_model_source_kinds(self, source_ids: list[str]) -> dict[str, str | None]:
+        """Latest `model_source_kind` recorded on request logs for sources
+        whose `model_sources` row is gone; one indexed probe per ID."""
+        kinds: dict[str, str | None] = {}
+        for source_id in sorted({source_id for source_id in source_ids if source_id}):
+            stmt = (
+                select(RequestLog.model_source_kind)
+                .where(RequestLog.model_source_id == source_id, RequestLog.model_source_kind.is_not(None))
+                .order_by(RequestLog.requested_at.desc())
+                .limit(1)
+            )
+            kinds[source_id] = (await self._session.execute(stmt)).scalar_one_or_none()
+        return kinds
 
     async def _distinct_skip_scan(
         self,
@@ -1653,6 +1782,7 @@ class RequestLogsRepository:
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        upstreams: list[str] | None = None,
         include_success: bool = True,
         include_cancelled: bool = True,
         include_error_other: bool = True,
@@ -1693,6 +1823,8 @@ class RequestLogsRepository:
                 conditions.append(RequestLog.model.in_(models))
             if reasoning_efforts:
                 conditions.append(RequestLog.reasoning_effort.in_(reasoning_efforts))
+        if upstreams:
+            conditions.append(_upstream_condition(upstreams))
 
         status_conditions = []
         if include_success:

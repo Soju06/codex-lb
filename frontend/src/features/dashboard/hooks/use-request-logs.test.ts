@@ -599,6 +599,7 @@ describe("requestLogFiltersApplied", () => {
     timeframe: "all" as const,
     accountIds: [],
     apiKeyIds: [],
+    upstreams: [],
     modelOptions: [],
     statuses: [],
     conversationId: null,
@@ -615,5 +616,68 @@ describe("requestLogFiltersApplied", () => {
     expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
     expect(requestLogFiltersApplied({ ...defaults, statuses: ["error"] })).toBe(true);
+  });
+});
+
+describe("useRequestLogs upstream filter", () => {
+  it("reads upstream from the URL, sends it to both endpoints, and writes changes back", async () => {
+    const listUpstreams: string[][] = [];
+    const optionUpstreams: string[][] = [];
+    const locations: string[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        listUpstreams.push(new URL(request.url).searchParams.getAll("upstream"));
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+      http.get("/api/request-logs/options", ({ request }) => {
+        optionUpstreams.push(new URL(request.url).searchParams.getAll("upstream"));
+        return HttpResponse.json({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?upstream=src_a", (search) => locations.push(search));
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.optionsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.upstreams).toEqual(["src_a"]);
+    expect(listUpstreams[0]).toEqual(["src_a"]);
+    expect(optionUpstreams[0]).toEqual(["src_a"]);
+    // Older backends omit the facet; the hook still parses the response.
+    expect(result.current.optionsQuery.data?.upstreams).toEqual([]);
+
+    act(() => {
+      result.current.updateFilters({ upstreams: ["src_a", "subscription_pool"], offset: 0 });
+    });
+
+    await waitFor(() => expect(listUpstreams[listUpstreams.length - 1]).toEqual(["src_a", "subscription_pool"]));
+    expect(new URLSearchParams(locations[locations.length - 1]).getAll("upstream")).toEqual([
+      "src_a",
+      "subscription_pool",
+    ]);
+
+    act(() => {
+      result.current.updateFilters({ upstreams: [], offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.upstreams).toEqual([]));
+    expect(new URLSearchParams(locations[locations.length - 1]).has("upstream")).toBe(false);
+  });
+
+  it("counts an upstream selection as an applied filter", () => {
+    expect(
+      requestLogFiltersApplied({
+        search: "",
+        timeframe: "all",
+        accountIds: [],
+        apiKeyIds: [],
+        modelOptions: [],
+        statuses: [],
+        upstreams: ["subscription_pool"],
+        conversationId: null,
+        limit: 25,
+        offset: 0,
+      }),
+    ).toBe(true);
   });
 });

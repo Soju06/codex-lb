@@ -1619,3 +1619,70 @@ describe("RecentRequestsTable account cell", () => {
     expect(screen.getByText("Unassigned")).toBeInTheDocument();
   });
 });
+
+describe("RecentRequestsTable model-source attribution", () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      role: "admin",
+      permissions: ADMIN_PERMISSIONS,
+      canWrite: true,
+    });
+  });
+
+  it("shows a model-source badge on the row and the source id and kind in details", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            accountId: null,
+            source: "model_source",
+            modelSourceId: "src_vllm",
+            modelSourceKind: "openai_compatible",
+          },
+        ]}
+      />,
+    );
+
+    const badge = screen.getByText("Model source");
+    expect(badge.closest("[title]")).toHaveAttribute("title", "src_vllm");
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("src_vllm")).toBeInTheDocument();
+    expect(within(dialog).getByText("openai_compatible")).toBeInTheDocument();
+  });
+
+  it("labels the badge with the upstream name so two sources stay distinct", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={2}
+        accounts={[]}
+        modelSourceLabels={new Map([["src_a", "Local vLLM"], ["src_b", "Backup gateway"]])}
+        requests={[
+          { ...LAYOUT_REQUEST, requestId: "req-a", accountId: null, modelSourceId: "src_a", modelSourceKind: "openai_compatible" },
+          { ...LAYOUT_REQUEST, requestId: "req-b", accountId: null, modelSourceId: "src_b", modelSourceKind: "openai_compatible" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Local vLLM").closest("[title]")).toHaveAttribute("title", "src_a");
+    expect(screen.getByText("Backup gateway").closest("[title]")).toHaveAttribute("title", "src_b");
+  });
+
+  it("renders subscription rows without model-source attribution", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.queryByText("Model source")).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(within(dialog).queryByText("Model source")).not.toBeInTheDocument();
+  });
+});

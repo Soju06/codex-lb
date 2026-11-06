@@ -11,6 +11,7 @@ const BASE_FILTERS: FilterState = {
   timeframe: "all",
   accountIds: [],
   apiKeyIds: [],
+  upstreams: [],
   modelOptions: [],
   statuses: [],
   conversationId: null,
@@ -154,5 +155,47 @@ describe("RequestFilters conversation badge", () => {
     const span = badge.closest("span");
     expect(span).toHaveAttribute("title", longId);
     expect(span).toHaveClass("truncate");
+  });
+});
+
+describe("RequestFilters upstream filter", () => {
+  const TWO_UPSTREAMS = [
+    { value: "subscription_pool", label: "Subscription pool" },
+    { value: "src_vllm", label: "Local vLLM" },
+  ];
+
+  it("stays hidden when one upstream is observed and none is selected", () => {
+    renderFilters({}, EMPTY_OPTIONS, {
+      upstreamOptions: [{ value: "subscription_pool", label: "Subscription pool" }],
+      onUpstreamChange: vi.fn(),
+    });
+
+    expect(screen.queryByRole("button", { name: "Upstreams" })).not.toBeInTheDocument();
+  });
+
+  it("renders when more than one upstream is observed", async () => {
+    const user = userEvent.setup();
+    const onUpstreamChange = vi.fn();
+    renderFilters({}, EMPTY_OPTIONS, { upstreamOptions: TWO_UPSTREAMS, onUpstreamChange });
+
+    await user.click(screen.getByRole("button", { name: "Upstreams" }));
+    const options = await screen.findAllByRole("menuitemcheckbox");
+    const vllm = options.find((option) => option.textContent?.includes("Local vLLM"));
+    if (!vllm) {
+      throw new Error("Expected the Local vLLM upstream option");
+    }
+    await user.click(vllm);
+
+    expect(onUpstreamChange).toHaveBeenCalledWith(["src_vllm"]);
+  });
+
+  it("stays visible while an upstream filter is active, even with one option", () => {
+    renderFilters({ upstreams: ["src_vllm"] }, EMPTY_OPTIONS, {
+      upstreamOptions: [{ value: "src_vllm", label: "Local vLLM" }],
+      onUpstreamChange: vi.fn(),
+    });
+
+    // A single selection shows the selected option's label on the trigger.
+    expect(screen.getByRole("button", { name: "Local vLLM" })).toBeInTheDocument();
   });
 });

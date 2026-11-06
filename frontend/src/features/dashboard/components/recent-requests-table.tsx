@@ -96,6 +96,8 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
   accounts: AccountSummary[];
+  /** Upstream filter labels keyed by model-source ID, used for row badges. */
+  modelSourceLabels?: ReadonlyMap<string, string>;
   total: number;
   limit: number;
   offset: number;
@@ -306,6 +308,7 @@ function formatCompactElapsed(ms: number | null | undefined): string | null {
 export function RecentRequestsTable({
   requests,
   accounts,
+  modelSourceLabels,
   total,
   limit,
   offset,
@@ -437,6 +440,19 @@ export function RecentRequestsTable({
                     ) : (
                       accountLabel
                     )}
+                    {request.modelSourceId ? (
+                      <div className="mt-1">
+                        <Badge
+                          variant="outline"
+                          className="max-w-full text-[10px] font-normal"
+                          title={request.modelSourceId}
+                        >
+                          <span className="truncate">
+                            {modelSourceLabels?.get(request.modelSourceId) ?? t("dashboard.requests.modelSourceBadge")}
+                          </span>
+                        </Badge>
+                      </div>
+                    ) : null}
                   </TableCell> : null}
                   {isColumnVisible("plan") ? <TableCell className="align-top">
                     {planType ? (
@@ -616,6 +632,12 @@ export function RecentRequestsTable({
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              {selectedRequest?.modelSourceId ? (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <RequestDetailField label={t("dashboard.requestDetails.modelSource")} value={selectedRequest.modelSourceId} mono />
+                  <RequestDetailField label={t("dashboard.requestDetails.modelSourceKind")} value={selectedRequest.modelSourceKind ?? "—"} mono />
+                </div>
+              ) : null}
               {selectedRequest?.upstreamProxyRouteMode ||
               selectedRequest?.upstreamProxyPoolId ||
               selectedRequest?.upstreamProxyEndpointId ||

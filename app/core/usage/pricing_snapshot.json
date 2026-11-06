@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-01T06:31:27.216716+00:00",
+  "updated_at": "2026-11-06T06:34:06.869420+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -658,6 +658,11 @@
       "input_per_1m": 10.0,
       "output_per_1m": 50.0,
       "cached_input_per_1m": 1.0
+    },
+    "gpt-6-cyber": {
+      "input_per_1m": 20.0,
+      "output_per_1m": 100.0,
+      "cached_input_per_1m": 2.0
     },
     "gpt-6-luna": {
       "input_per_1m": 0.1,

@@ -4468,7 +4468,7 @@ def test_error_backoff_resets_error_count_when_expired():
     assert state.last_error_at is None
 
 
-def test_error_backoff_does_not_reset_when_still_active():
+def test_error_backoff_fallback_keeps_last_account_without_resetting_penalty():
     now = 1_700_000_000.0
     state = AccountState(
         "a",
@@ -4478,8 +4478,9 @@ def test_error_backoff_does_not_reset_when_still_active():
         last_error_at=now - 60,
     )
     result = select_account([state], now=now)
-    assert result.account is None
+    assert result.account is state
     assert state.error_count == 5
+    assert state.last_error_at == now - 60
 
 
 def test_error_backoff_expired_account_does_not_immediately_relock():
@@ -6547,3 +6548,28 @@ def test_background_recovery_state_from_account_follows_the_dashboard_soft_drain
     assert captured[-1]["routing_tunables"] is dashboard_tunables
     assert captured[0]["soft_drain_enabled"] is None
     assert captured[0]["routing_tunables"] is None
+
+
+@pytest.mark.parametrize(
+    "blocked_status",
+    [AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED],
+)
+def test_transient_backoff_fallback_never_revives_hard_state(blocked_status):
+    now = 1_700_000_000.0
+    state = AccountState("blocked", blocked_status, error_count=5, last_error_at=now - 1)
+    assert select_account([state], now=now).account is None
+
+
+def test_transient_backoff_fallback_ignores_rate_limit_cooldown_sibling():
+    now = 1_700_000_000.0
+    backed_off = AccountState("recovering", AccountStatus.ACTIVE, error_count=5, last_error_at=now - 1)
+    cooling = AccountState("cooling", AccountStatus.ACTIVE, cooldown_until=now + 100)
+    assert select_account([backed_off, cooling], now=now).account is backed_off
+    assert select_account([backed_off], now=now, allow_backoff_fallback=False).account is None
+
+
+def test_transient_backoff_fallback_selects_nearest_recovery():
+    now = 1_700_000_000.0
+    heavy = AccountState("heavy", AccountStatus.ACTIVE, error_count=8, last_error_at=now - 1)
+    light = AccountState("light", AccountStatus.ACTIVE, error_count=3, last_error_at=now - 1)
+    assert select_account([heavy, light], now=now).account is light

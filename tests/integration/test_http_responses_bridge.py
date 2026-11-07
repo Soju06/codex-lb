@@ -645,6 +645,7 @@ class _ReasoningThenAbruptCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
             _FakeUpstreamMessage(
                 "error",
                 error="no close frame received or sent",
+                transport_ended=True,
             )
         )
 
@@ -13270,13 +13271,22 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("upstream_type", "prime_reused_session", "expected_event_types", "expected_failure_sequence"),
+    (
+        "upstream_type",
+        "prime_reused_session",
+        "expected_event_types",
+        "expected_failure_sequence",
+        "expected_account_error_count",
+        "expected_upstream_send_count",
+    ),
     [
         (
             _CreatedThenCloseUpstreamWebSocket,
             False,
             ["response.created", "response.failed"],
             0,
+            1,
+            2,
         ),
         (
             _ReasoningThenAbruptCloseUpstreamWebSocket,
@@ -13289,6 +13299,8 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
                 "response.failed",
             ],
             4,
+            0,
+            1,
         ),
         (
             _CompleteThenReasoningAbruptCloseUpstreamWebSocket,
@@ -13301,6 +13313,8 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
                 "response.failed",
             ],
             4,
+            0,
+            2,
         ),
     ],
     ids=["created-then-close", "reasoning-then-abrupt-close", "reused-reasoning-then-abrupt-close"],
@@ -13312,6 +13326,8 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
     prime_reused_session,
     expected_event_types,
     expected_failure_sequence,
+    expected_account_error_count,
+    expected_upstream_send_count,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -13321,6 +13337,7 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
     )
     account = await _get_account(account_id)
     upstream = upstream_type()
+    account_error_ids: list[str] = []
 
     async def fake_select_account_with_budget(
         self,
@@ -13375,9 +13392,14 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
         del headers, access_token, account_id_header, base_url, session
         return upstream
 
+    async def fake_record_error(self, target_account):
+        del self
+        account_error_ids.append(target_account.id)
+
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error", fake_record_error)
 
     headers = {"x-codex-turn-state": "turn-sse-failure"} if prime_reused_session else {}
     if prime_reused_session:
@@ -13413,6 +13435,8 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
     assert events[0]["response"]["id"] == events[-1]["response"]["id"]
     assert events[-1]["sequence_number"] == expected_failure_sequence
     assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    assert len(upstream.sent_text) == expected_upstream_send_count
+    assert account_error_ids == [account.id] * expected_account_error_count
 
 
 @pytest.mark.asyncio

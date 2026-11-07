@@ -533,7 +533,9 @@ async def test_select_account_still_uses_backed_off_account_when_every_sibling_i
 
     assert result.error_code is None, result.error_message
     assert result.account is not None
-    assert result.account.id == hot.id
+    # The non-overloaded account stays eligible through transient backoff;
+    # there is no need to fall back to the overloaded sibling.
+    assert result.account.id == erroring.id
 
 
 @asynccontextmanager

@@ -623,18 +623,16 @@ def _classify_upstream_close(
 def _is_account_neutral_transport_drop(
     close_code: int | None,
     *,
-    response_events_seen: int,
+    close_frame_received: bool = False,
 ) -> bool:
     """Return whether an upstream websocket ending is account-neutral evidence.
 
-    An abrupt transport drop that carries no close frame and arrived before
-    any application-layer response event is the weakest possible evidence of
-    account ill-health: the account never spoke at the application layer for
-    this request. Charging the account lets a few infrastructure resets push
-    it into error backoff and 502 continuity-bound follow-ups while healthy
-    pool siblings idle (issue #1754). Any close frame — even a non-clean one —
-    is upstream-authored evidence and keeps the existing penalty semantics, as
-    does a drop after response events started streaming.
+    An abrupt transport drop that carries no close frame is not account-scoped
+    evidence, regardless of request progress. Valid response events before the
+    loss prove that authentication and application-layer processing worked;
+    they make replay unsafe rather than making the transport loss attributable
+    to the account. Any upstream-authored close frame keeps the existing
+    penalty semantics.
 
     Close code 1006 (abnormal closure) is reserved by RFC 6455 and can never
     appear in an actual close frame: adapters synthesize it locally when the
@@ -642,7 +640,10 @@ def _is_account_neutral_transport_drop(
     abnormal CLOSED), so it counts as frame-less here.
     """
 
-    return close_code in (None, 1006) and response_events_seen == 0
+    # aiohttp may report EOF as CLOSED with a synthesized normal code even
+    # though no close frame was received. Explicit frame provenance remains
+    # authoritative for that compatibility shape.
+    return not close_frame_received and close_code in (None, 1000, 1006)
 
 
 def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:
@@ -1156,6 +1157,7 @@ async def _handle_stream_error(
     retry_after_seconds: float | None = None,
     burst_cooldown_recorded: bool = False,
     upstream_http_status: int | None = None,
+    account_attributable: bool = False,
 ) -> ClassifiedFailure:
     """Write account health for a stream failure and return its classification.
 
@@ -1167,7 +1169,8 @@ async def _handle_stream_error(
     ``upstream_http_status`` is evidence-only: it lets a caller that knows the
     upstream HTTP status of this failure say so WITHOUT taking any of the
     ``http_status`` side effects. It is read by the soft-overload gate below
-    and by nothing else -- never by ``classify_upstream_failure``, the
+    and the status-free transport-neutrality check -- never by
+    ``classify_upstream_failure``, the
     reasoning-replay metric, the account-neutral / model-scoped rejection
     predicates, or the HTTP 429 burst-cooldown branch. Callers that want those
     behaviours must pass the positional ``http_status`` instead.
@@ -1186,6 +1189,16 @@ async def _handle_stream_error(
     ):
         _record_upstream_reasoning_replay_rejection()
     if _facade()._is_account_neutral_error_code(code):
+        return classified
+    # An incomplete transport with no HTTP rejection says nothing about the
+    # account's health. Preserve the request failure without benching its owner.
+    # Structured bridge decisions still distinguish authored closes/protocol errors.
+    if (
+        code == "stream_incomplete"
+        and http_status is None
+        and upstream_http_status is None
+        and not account_attributable
+    ):
         return classified
     if _is_account_neutral_request_rejection(
         code=code,

@@ -6883,6 +6883,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None = None,
         status: str = "error",
         penalize_account: bool = True,
+        account_attributable: bool = False,
         suppress_sequenced_downstream_errors: bool = False,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
@@ -6908,6 +6909,7 @@ class _WebSocketMixin:
                         downstream_activity=downstream_activity,
                         status=status,
                         penalize_account=penalize_account,
+                        account_attributable=account_attributable,
                         suppress_sequenced_downstream_errors=suppress_sequenced_downstream_errors,
                     ),
                     name="proxy-websocket-finalization-pending-requests",
@@ -6953,6 +6955,7 @@ class _WebSocketMixin:
         downstream_activity: _DownstreamWebSocketActivity | None,
         status: str,
         penalize_account: bool,
+        account_attributable: bool = False,
         suppress_sequenced_downstream_errors: bool,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
@@ -7191,6 +7194,7 @@ class _WebSocketMixin:
                         account,
                         {"message": penalty_message or error_message},
                         penalty_code,
+                        **({"account_attributable": True} if account_attributable else {}),
                     )
                 except Exception:
                     _facade().logger.warning(

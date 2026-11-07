@@ -38,6 +38,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "websocket",
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
+        "websocket_close_frame_provenance_v1",
         "websocket_send_ack",
     }
 )
@@ -131,6 +132,10 @@ class NativeEgressUnavailable(NativeEgressError):
     """Raised when the optional native helper is not installed."""
 
 
+class NativeEgressCapabilityError(NativeEgressUnavailable):
+    """An installed helper cannot implement the required capabilities."""
+
+
 class NativeEgressProtocolError(NativeEgressError):
     """Raised when the helper violates the framed stream contract."""
 
@@ -209,6 +214,7 @@ class NativeWebSocketMessage:
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
     routing: NativeWebSocketRoutingMetadata | None = None
+    close_frame_received: bool = False
 
 
 class NativeEgressClient(Protocol):
@@ -635,16 +641,20 @@ class NativeEgressWebSocket:
                 if event_type == "websocket_close":
                     code = item.get("code")
                     reason = item.get("reason")
+                    close_frame_received = item.get("close_frame_received")
                     if code is not None and not isinstance(code, int):
                         raise NativeEgressProtocolError("native websocket close code is invalid")
                     if reason is not None and not isinstance(reason, str):
                         raise NativeEgressProtocolError("native websocket close reason is invalid")
+                    if not isinstance(close_frame_received, bool):
+                        raise NativeEgressProtocolError("native websocket close frame provenance is invalid")
                     self._remote_closed = True
                     self._queue_message(
                         NativeWebSocketMessage(
                             kind="close",
                             close_code=code,
                             close_reason=reason,
+                            close_frame_received=close_frame_received,
                         )
                     )
                     terminal_failure = NativeEgressTransportError(
@@ -1040,7 +1050,10 @@ class SubprocessNativeEgressClient:
             raise NativeEgressProtocolError("native helper capabilities have an invalid shape")
         missing = sorted(_REQUIRED_NATIVE_CAPABILITIES.difference(capabilities))
         if missing:
-            raise NativeEgressProtocolError(f"native helper is missing required capabilities: {', '.join(missing)}")
+            message = f"native helper is missing required capabilities: {', '.join(missing)}"
+            if missing == ["websocket_close_frame_provenance_v1"]:
+                raise NativeEgressUnavailable(message)
+            raise NativeEgressCapabilityError(message)
 
     async def _send_command(
         self,
@@ -1249,7 +1262,7 @@ def _transport_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
     )
 
 
-def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTransportError:
+def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressError:
     message = event.get("message")
     failure_phase = event.get("failure_phase")
     retryable_same_contract = event.get("retryable_same_contract")
@@ -1266,6 +1279,8 @@ def _websocket_error_from_event(event: Mapping[str, object]) -> NativeEgressTran
             body = base64.b64decode(encoded_body, validate=True)
         except ValueError as exc:
             raise NativeEgressProtocolError("native websocket error body is not base64") from exc
+    if failure_phase == "protocol":
+        return NativeEgressProtocolError(message if isinstance(message, str) else "native websocket protocol failed")
     return NativeEgressTransportError(
         message if isinstance(message, str) else "native websocket failed",
         failure_phase=failure_phase if isinstance(failure_phase, str) else "websocket",

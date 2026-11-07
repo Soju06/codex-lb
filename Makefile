@@ -143,6 +143,13 @@ rust-check: rust-fmt rust-lint rust-test rust-build
 rust-audit:
 	cargo deny --all-features check
 
+# Native wire probes from the Rust CI job.
+.PHONY: test-native-egress
+test-native-egress:
+	uv sync --dev --frozen
+	cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
+	CODEX_LB_NATIVE_EGRESS_TEST_BINARY=$(CURDIR)/target/debug/codex-lb-native-egress uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py tests/integration/test_native_usage_egress.py
+
 .PHONY: test-unit test-integration-core test-integration-core-shard \
 	test-integration-core-1 test-integration-core-2 test-integration-core-3 \
 	test-integration-bridge test-e2e test-postgres

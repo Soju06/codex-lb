@@ -850,6 +850,9 @@ class _StreamingRetryMixin:
                         _stream_settlement_error_payload(current_settlement),
                         current_settlement.error_code or "upstream_error",
                         upstream_http_status=upstream_http_status,
+                        # A completed HTTP JSON exchange with an invalid response
+                        # is a contract failure, not a status-free transport drop.
+                        account_attributable=payload.stream is False,
                     )
                 elif current_settlement.record_success:
                     await proxy._load_balancer.record_success(account)
@@ -2446,6 +2449,7 @@ class _StreamingRetryMixin:
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
+                                        account_attributable=payload.stream is False,
                                         # Evidence only. ``_TransientStreamError``
                                         # carries no status, which is correct:
                                         # those are the genuinely status-less
@@ -2835,6 +2839,7 @@ class _StreamingRetryMixin:
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
+                                    account_attributable=payload.stream is False,
                                 )
                             elif settled and settlement.record_success:
                                 await proxy._load_balancer.record_success(account)
@@ -2903,6 +2908,7 @@ class _StreamingRetryMixin:
                                 account,
                                 _stream_settlement_error_payload(settlement),
                                 settlement.error_code or "upstream_error",
+                                account_attributable=payload.stream is False,
                             )
                     return
                 except ProxyResponseError as exc:
@@ -3246,6 +3252,7 @@ class _StreamingRetryMixin:
                                         account,
                                         _stream_settlement_error_payload(settlement),
                                         settlement.error_code or "upstream_error",
+                                        account_attributable=payload.stream is False,
                                         http_status=retry_exc.status_code,
                                     )
                                 return
@@ -3501,6 +3508,7 @@ class _StreamingRetryMixin:
                                     account,
                                     _stream_settlement_error_payload(settlement),
                                     settlement.error_code or "upstream_error",
+                                    account_attributable=payload.stream is False,
                                 )
                             elif health_write_allowed and settlement.record_success:
                                 await proxy._load_balancer.record_success(account)

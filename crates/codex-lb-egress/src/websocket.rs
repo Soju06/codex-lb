@@ -14,7 +14,7 @@ use tokio_tungstenite::Connector;
 use tokio_tungstenite::client_async_tls_with_config;
 use tokio_tungstenite::proxy::connect_via_proxy;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::error::TlsError;
+use tokio_tungstenite::tungstenite::error::{ProtocolError, TlsError};
 use tokio_tungstenite::tungstenite::handshake::client::Response as WebSocketResponse;
 use tokio_tungstenite::tungstenite::http::HeaderName as WebSocketHeaderName;
 use tokio_tungstenite::tungstenite::http::HeaderValue as WebSocketHeaderValue;
@@ -180,6 +180,7 @@ pub(crate) async fn execute_websocket(
                                         request_id,
                                         code: Some(code),
                                         reason: (!reason.is_empty()).then_some(reason),
+                                        close_frame_received: false,
                                     },
                                 ).await?;
                                 return Ok(());
@@ -259,7 +260,12 @@ pub(crate) async fn execute_websocket(
                             .unwrap_or((None, None));
                         emit(
                             output,
-                            &NativeEvent::WebsocketClose { request_id, code, reason },
+                            &NativeEvent::WebsocketClose {
+                                request_id,
+                                code,
+                                reason,
+                                close_frame_received: true,
+                            },
                         ).await?;
                         return Ok(());
                     }
@@ -272,6 +278,7 @@ pub(crate) async fn execute_websocket(
                                 request_id,
                                 code: None,
                                 reason: None,
+                                close_frame_received: false,
                             },
                         ).await?;
                         return Ok(());
@@ -503,7 +510,10 @@ pub(crate) async fn emit_websocket_error(
                 None,
             )
         }
-        NativeWebSocketFailure::WebSocket(WebSocketError::Io(_)) => (
+        NativeWebSocketFailure::WebSocket(WebSocketError::Io(_))
+        | NativeWebSocketFailure::WebSocket(WebSocketError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        )) => (
             "native websocket transport failed",
             "transport",
             false,

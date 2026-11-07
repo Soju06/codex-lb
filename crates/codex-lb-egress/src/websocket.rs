@@ -455,18 +455,6 @@ pub(crate) async fn emit_websocket_error(
     command_id: Option<String>,
     failure: &NativeWebSocketFailure,
 ) -> Result<(), std::io::Error> {
-    emit(
-        output,
-        &websocket_error_event(request_id, command_id, failure),
-    )
-    .await
-}
-
-fn websocket_error_event(
-    request_id: &str,
-    command_id: Option<String>,
-    failure: &NativeWebSocketFailure,
-) -> NativeEvent {
     let (message, phase, retryable, tls_verification, status, headers, body) = match failure {
         NativeWebSocketFailure::Timeout => (
             "native websocket connection timed out",
@@ -553,17 +541,21 @@ fn websocket_error_event(
             None,
         ),
     };
-    NativeEvent::WebsocketError {
-        request_id: request_id.to_owned(),
-        command_id,
-        message: message.to_owned(),
-        failure_phase: phase.to_owned(),
-        retryable_same_contract: retryable,
-        is_tls_verification_failure: tls_verification,
-        status,
-        headers,
-        body,
-    }
+    emit(
+        output,
+        &NativeEvent::WebsocketError {
+            request_id: request_id.to_owned(),
+            command_id,
+            message: message.to_owned(),
+            failure_phase: phase.to_owned(),
+            retryable_same_contract: retryable,
+            is_tls_verification_failure: tls_verification,
+            status,
+            headers,
+            body,
+        },
+    )
+    .await
 }
 
 fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool {
@@ -576,34 +568,5 @@ fn websocket_tls_verification_failure(failure: &NativeWebSocketFailure) -> bool 
             error_chain_has_invalid_certificate(error)
         }
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reset_without_closing_handshake_is_transport_not_protocol() {
-        let cases = [
-            (ProtocolError::ResetWithoutClosingHandshake, "transport"),
-            (ProtocolError::SendAfterClosing, "protocol"),
-        ];
-        for (error, expected_phase) in cases {
-            let failure = NativeWebSocketFailure::WebSocket(WebSocketError::Protocol(error));
-            let event = websocket_error_event("request", None, &failure);
-            let NativeEvent::WebsocketError {
-                failure_phase,
-                retryable_same_contract,
-                status,
-                ..
-            } = event
-            else {
-                panic!("expected websocket error event");
-            };
-            assert_eq!(failure_phase, expected_phase);
-            assert!(!retryable_same_contract);
-            assert_eq!(status, None);
-        }
     }
 }

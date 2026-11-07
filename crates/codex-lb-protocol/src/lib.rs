@@ -15,6 +15,7 @@ pub const CAPABILITIES: &[&str] = &[
     "http_sse_v1",
     "http_responses_events_v1",
     "http_responses_completion_v1",
+    "websocket_receive_credit_v1",
     "websocket",
     "websocket_responses_events_v1",
     "websocket_responses_routing_v1",
@@ -39,6 +40,9 @@ pub enum NativeCommand {
         request_id: String,
         command_id: String,
         data: String,
+    },
+    WebsocketConsumed {
+        request_id: String,
     },
     WebsocketClose {
         request_id: String,
@@ -79,6 +83,8 @@ pub struct NativeSseOptions {
 
 #[derive(Deserialize, Serialize)]
 pub struct NativeWebSocketRequest {
+    #[serde(default)]
+    pub receive_credit: bool,
     pub request_id: String,
     pub url: String,
     pub headers: Vec<(String, String)>,

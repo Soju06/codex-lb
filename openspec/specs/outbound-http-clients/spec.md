@@ -3,7 +3,9 @@
 ## Purpose
 
 Define outbound HTTP client behavior so upstream OAuth and API calls use stable headers, personas, and proxy handling.
+
 ## Requirements
+
 ### Requirement: OAuth authorize requests use a configurable originator persona
 Browser OAuth authorize requests MUST include an `originator` query parameter. The service MUST default that parameter to `codex_chatgpt_desktop` and MUST let operators override it through configuration when they need a different first-party Codex persona.
 
@@ -832,6 +834,8 @@ buffered. A burst exceeding the per-request queue capacity MUST complete without
 data loss when its consumer keeps draining. A stalled consumer MUST retain a
 bounded queue and fail independently without blocking sibling requests.
 
+Credit-controlled WebSockets MUST use the native WebSocket receive-credit contract instead of overflow-based failure. Their accepted data MUST remain buffered until consumed or explicitly closed by the caller.
+
 #### Scenario: Buffered burst with active consumer
 
 - **GIVEN** a helper emits more events than the queue capacity in one buffered burst
@@ -1074,6 +1078,8 @@ Native HTTP egress MUST preserve the caller's compression-negotiation presence a
 ### Requirement: Native helper stream events are bounded per request by a byte budget
 
 Events the native egress helper emits for one request MUST be buffered between the shared helper reader and that request's consumer in a per-request queue bounded by a queued-payload byte budget (32 MiB) together with an event-count cap (4096). Queued bytes MUST be released as the consumer drains. A burst of small framed events or a body made of large chunks that fits the byte budget MUST NOT fail a consumer that is still draining. Only when a request's queue exceeds its budget MAY the reader fail that request with `consumer_backpressure`, drop its queued events, cancel the helper-side request, and continue serving other requests.
+
+Credit-controlled WebSockets MUST use the native WebSocket receive-credit contract instead of overflow-based failure. Their accepted data MUST remain buffered until consumed or explicitly closed by the caller.
 
 #### Scenario: Burst of small framed events drains without failure
 
@@ -1383,3 +1389,23 @@ When the effective transport is unconditionally HTTP and the Python HTTP client 
 - **WHEN** an auto-transport Responses request includes an image-generation tool and uses the Python HTTP client with raw payload tracing inactive
 - **THEN** preparation MUST skip full-body serialization for the unused WebSocket size decision, including when the request is below the WebSocket byte budget
 - **AND** the real upstream MUST receive exactly the existing serialized HTTP body
+
+### Requirement: Native WebSocket consumers control upstream reads
+The adapter MUST require `websocket_receive_credit_v1` before dispatch. Each socket MUST allow only one unconsumed data message across IPC. The helper MUST pause upstream reads when its receive credit is exhausted and resume when Python consumes the message. Accepted frames MUST NOT be discarded on consumer delay. Local send, close, cancellation and sibling operations MUST remain available during the pause. Pausing MUST NOT produce a pong timeout caused by the locally paused reader.
+
+#### Scenario: Fast upstream and slow consumer
+- **WHEN** upstream sends more than 64 data messages while the consumer pauses
+- **THEN** the consumer receives every message in order after resuming
+- **AND** no consumer-backpressure terminal replaces the response
+
+#### Scenario: Paused socket does not block peers or shutdown
+- **WHEN** one socket has exhausted receive credit
+- **THEN** another socket can receive and acknowledge sends
+- **AND** the paused socket can close or cancel without draining its data
+
+### Requirement: Native WebSocket failures retain transport provenance
+Native relay errors and logs MUST retain the failure phase, supplied close code and reason, and counts of data events and UTF-8 text/binary payload bytes received from that socket. Counters MUST exclude IPC metadata and control frames. Missing close details MUST remain unknown. Consumer-backpressure and helper failures MUST remain distinguishable from remote transport errors.
+
+#### Scenario: Failure after data
+- **WHEN** native egress fails after delivering data to the relay
+- **THEN** the client-visible disconnect detail and log contain the phase, close details and socket payload counters

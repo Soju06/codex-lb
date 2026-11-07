@@ -52,6 +52,7 @@ print(json.dumps({
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
         "websocket_send_ack",
+        "websocket_receive_credit_v1",
     ],
 }), flush=True)
 """
@@ -1015,6 +1016,7 @@ async def test_native_sse_failure_releases_owned_stream(
         "http_responses_events_v1",
         "http_responses_completion_v1",
         "websocket_responses_routing_v1",
+        "websocket_receive_credit_v1",
     ],
 )
 async def test_native_sse_capability_is_required_before_dispatch(tmp_path: Path, capability: str) -> None:

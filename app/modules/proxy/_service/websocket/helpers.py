@@ -2157,7 +2157,7 @@ def _pop_terminal_websocket_request_state(
 
 
 def _upstream_websocket_disconnect_message(message: UpstreamWebSocketMessage) -> str:
-    if message.kind == "error" and message.error:
+    if message.error:
         return f"Upstream websocket closed before response.completed: {message.error}"
     if message.close_code is not None:
         return f"Upstream websocket closed before response.completed (close_code={message.close_code})"

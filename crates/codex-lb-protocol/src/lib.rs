@@ -15,11 +15,11 @@ pub const CAPABILITIES: &[&str] = &[
     "http_sse_v1",
     "http_responses_events_v1",
     "http_responses_completion_v1",
+    "websocket_receive_credit_v1",
     "websocket",
     "websocket_responses_events_v1",
     "websocket_responses_routing_v1",
     "websocket_send_ack",
-    "websocket_receive_credit_v1",
 ];
 
 #[derive(Deserialize, Serialize)]

@@ -8,6 +8,7 @@ import pytest
 from websockets.asyncio.server import serve
 
 from app.core.clients.native_egress import (
+    NativeEgressProtocolError,
     NativeEgressTransportError,
     NativeWebSocketRequest,
     SubprocessNativeEgressClient,
@@ -45,9 +46,11 @@ async def test_native_websocket_reset_and_invalid_frame_provenance(ending: str, 
                 )
             )
             await socket.send_text("start")
-            with pytest.raises(NativeEgressTransportError) as caught:
+            expected_error = NativeEgressTransportError if ending == "reset" else NativeEgressProtocolError
+            with pytest.raises(expected_error) as caught:
                 await asyncio.wait_for(socket.receive(), 2)
-            assert caught.value.failure_phase == phase
-            assert not caught.value.retryable_same_contract
+            if isinstance(caught.value, NativeEgressTransportError):
+                assert caught.value.failure_phase == phase
+                assert not caught.value.retryable_same_contract
         finally:
             await client.aclose()

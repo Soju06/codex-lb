@@ -2056,6 +2056,13 @@ class _HTTPBridgeUpstreamEventsMixin:
         receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
         wakeup_task: asyncio.Task[bool] | None = None
         reader_failure_retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None
+
+        async def receive_terminal_message() -> UpstreamWebSocketMessage:
+            try:
+                return await session.upstream.receive()
+            except UpstreamWebSocketTransportError as exc:
+                return UpstreamWebSocketMessage(kind="error", error=str(exc), error_code=exc.error_code)
+
         try:
             while True:
                 reader_failure_retry_circuit_attempt_selection = None
@@ -2088,7 +2095,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                 )
                 if receive_task is None:
-                    receive_task = scheduler.create_task(session.upstream.receive())
+                    receive_task = scheduler.create_task(receive_terminal_message())
 
                 message: UpstreamWebSocketMessage | None = None
                 timed_out = False
@@ -2343,16 +2350,19 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
-                # Account-neutral transport failures do not prove that the
-                # upstream rejected response.create. The request may still be
-                # executing, so replay could duplicate work, billing, or tool
-                # side effects. Clean closes remain eligible for the bounded
-                # pre-created retry circuit maintained by the session.
                 account_neutral = is_account_neutral_websocket_error_code(message.error_code)
-                # Only a terminal transport message (close or error) may replay
-                # an accepted turn: a protocol-invalid binary frame did not end
-                # the socket, so it keeps the pre-created retry semantics only.
-                if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
+                # Socket loss permits one fresh connection only before any
+                # response event or buffered output. Continuity and durable
+                # acknowledgement guards remain owned by the retry path.
+                if (
+                    message.kind in {"close", "error"}
+                    and archive_request_state is not None
+                    and response_events_seen == 0
+                    and not upstream_output_observed
+                    and session.liveness_settlement_owner != "send"
+                ):
+                    retried = await self._retry_http_bridge_precreated_request(session, zero_event_replay=True)
+                elif message.kind not in {"close", "error"} and not account_neutral and not accepted_response_pending:
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue

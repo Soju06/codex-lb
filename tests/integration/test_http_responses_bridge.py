@@ -25,6 +25,7 @@ import app.core.middleware.dashboard_overrides as dashboard_overrides_middleware
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
+from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
@@ -6801,8 +6802,8 @@ async def test_backend_responses_goal_restart_authority_does_not_leak_to_reused_
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
 
-    assert ordinary_response.status_code == 502
-    assert ordinary_response.json()["error"]["code"] == "upstream_unavailable"
+    assert ordinary_response.status_code == 503
+    assert ordinary_response.json()["error"]["code"] == "hard_affinity_saturated"
     assert connected_account_ids == [owner_chatgpt_account_id]
     assert len(owner_upstream.sent_text) == 2
     assert replacement_upstream.sent_text == []
@@ -17967,14 +17968,11 @@ async def test_backend_responses_http_bridge_retries_accepted_output_free_capaci
 
 
 @pytest.mark.asyncio
-async def test_backend_responses_http_bridge_retries_accepted_output_free_abrupt_close_on_another_account(
+async def test_backend_responses_http_bridge_does_not_replay_after_accepted_abrupt_close(
     async_client,
     monkeypatch,
 ):
-    """#1384 (narrowed scope): upstream accepts the turn (``response.created``
-    + ``response.in_progress``) and then the transport closes abruptly before
-    any output. Unanchored first turn only: anchored (``previous_response_id``)
-    replay without an idempotency proof is out of scope."""
+    """A transport loss after lifecycle events must fail without a new send."""
     _install_bridge_settings(monkeypatch, enabled=True)
     first_account_id = await _import_account(
         async_client,
@@ -18009,13 +18007,12 @@ async def test_backend_responses_http_bridge_retries_accepted_output_free_abrupt
         },
     )
 
-    _assert_single_response_lifecycle_completed(events)
-    assert connect_account_ids == ["acc_http_bridge_accepted_close_a", "acc_http_bridge_accepted_close_b"]
-    assert first_account.id in selection_exclusions[-1]
-    assert second_account.id not in selection_exclusions[-1]
+    assert events[-1]["type"] == "response.failed"
+    assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+    assert connect_account_ids == ["acc_http_bridge_accepted_close_a"]
+    assert selection_exclusions == [frozenset()]
     assert len(failing_upstream.sent_text) == 1
-    assert len(retry_upstream.sent_text) == 1
-    assert json.loads(retry_upstream.sent_text[0])["input"] == json.loads(failing_upstream.sent_text[0])["input"]
+    assert retry_upstream.sent_text == []
 
 
 def _install_two_account_bridge_failover_with_hard_owner(
@@ -18175,6 +18172,13 @@ async def test_backend_responses_http_bridge_re_sends_a_bare_session_accepted_fa
         },
         headers={"session_id": legacy_session_key},
     )
+
+    if isinstance(failing_upstream, _AcceptedOutputFreeAbruptCloseUpstreamWebSocket):
+        assert events[-1]["response"]["error"]["code"] == "stream_incomplete"
+        assert connect_account_ids == ["acc_http_bridge_bare_session_owner"]
+        assert owner_recovered_upstream.sent_text == []
+        assert other_account_upstream.sent_text == []
+        return
 
     _assert_single_response_lifecycle_completed(events)
     # Re-sent to the SAME owner: the replacement selection consulted the raw row
@@ -18407,6 +18411,17 @@ async def test_backend_responses_http_bridge_fails_a_self_excluded_hard_owner_re
     )
     body = response.text
     elapsed_seconds = time.monotonic() - started_at
+
+    if shape == "created_only":
+        events = [
+            json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ") and line[6:] != "[DONE]"
+        ]
+        _assert_single_response_lifecycle_completed(events)
+        assert connect_account_ids == [f"acc_self_excluded_owner_{shape}"] * 2
+        assert all(owner.id not in excluded for excluded in selection_exclusions)
+        assert len(owner_second_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        return
 
     # The bound: ONE saturated re-selection, not one per recovery sleep until
     # the request budget. 5s is two orders of magnitude below the 15s budget
@@ -18977,3 +18992,80 @@ async def test_smart_single_turn_stays_http_before_history_promotes(async_client
     assert len(upstreams) == 1
     assert "reason=smart_single_turn" in caplog.text
     assert "reason=smart_history" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["clean", "transient", "transport", "transport_exception", "second", "events", "anchor"]
+)
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_http_bridge_zero_event_replay(async_client, monkeypatch, case, path, caplog):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
+    account_id = await _import_account(async_client, "zero-event-replay", "zero-event@example.com")
+    account = await _get_account(account_id)
+    first = _PrecreatedCloseUpstreamWebSocket(close_code=1000 if case != "transient" else 1011)
+    if case == "events":
+        first = _CreatedThenCloseUpstreamWebSocket()
+    elif case == "anchor":
+        first = _CompleteThenPrecreatedCloseUpstreamWebSocket()
+    elif case in {"transport", "transport_exception"}:
+
+        class TransportDrop(_FakeBridgeUpstreamWebSocket):
+            async def send_text(self, text):
+                self.sent_text.append(text)
+                await self._messages.put(_FakeUpstreamMessage("error", error="connection reset"))
+
+        if case == "transport_exception":
+
+            class RaisedTransportDrop(TransportDrop):
+                async def receive(self):
+                    await super().receive()
+                    raise UpstreamWebSocketTransportError("connection reset", error_code="upstream_unavailable")
+
+            first = RaisedTransportDrop()
+        else:
+            first = TransportDrop()
+    second = _PrecreatedCloseUpstreamWebSocket(close_code=1000) if case == "second" else _FakeBridgeUpstreamWebSocket()
+    connects, exclusions = _install_two_account_bridge_failover(
+        monkeypatch,
+        first_account=account,
+        second_account=account,
+        upstreams=[first, second],
+    )
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return OK",
+        "input": "hello",
+        "stream": True,
+        "prompt_cache_key": f"zero-event-{account_id}",
+    }
+    if case == "anchor":
+        prime = await async_client.post(path, json=payload)
+        prime_events = [
+            json.loads(line[6:])
+            for line in prime.text.splitlines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"
+        ]
+        payload["previous_response_id"] = _assert_single_response_lifecycle_completed(prime_events)
+    with caplog.at_level("INFO", logger="app.modules.proxy.service"):
+        response = await async_client.post(path, json=payload)
+    events = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+    if case in {"clean", "transient", "transport", "transport_exception"}:
+        assert response.status_code == 200
+        _assert_single_response_lifecycle_completed(events)
+        assert len(connects) == 2
+        assert connects[0] == connects[1]
+        assert first.closed
+        assert len(first.sent_text) == len(second.sent_text) == 1
+        assert "event=zero_event_replay" in caplog.text
+        assert "detail=resent" in caplog.text
+    else:
+        assert "stream_incomplete" in response.text
+        assert len(connects) == (2 if case == "second" else 1)
+        assert len(first.sent_text) == (2 if case == "anchor" else 1)
+        assert len(second.sent_text) == (1 if case == "second" else 0)
+    assert all(account_id not in excluded for excluded in exclusions)

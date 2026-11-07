@@ -226,7 +226,6 @@ from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_fa
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
-_UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
@@ -1979,6 +1978,7 @@ class _HTTPBridgeMixin(
         restart_reader: bool = False,
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
+        prefer_same_account: bool = False,
         require_preferred_account: bool = False,
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
@@ -2044,7 +2044,7 @@ class _HTTPBridgeMixin(
                 ("requested reconnect owner", requested_preferred_account_id),
                 ("account-neutral recovery", session.account.id if account_neutral_recovery else None),
             )
-            close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
+            close_skips_account = not prefer_same_account and session.last_upstream_close_code == 1011
             hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
             skip_same_account = (
                 session.key.strength != "hard" and close_skips_account and required_preferred_account_id is None
@@ -2201,7 +2201,7 @@ class _HTTPBridgeMixin(
                     complete_failed_handoff()
                     raise ProxyResponseError(status_code, error_payload)
                 try:
-                    should_retry_selection = await _sleep_for_account_selection_recovery(
+                    should_retry_selection = not prefer_same_account and await _sleep_for_account_selection_recovery(
                         selection,
                         request_id=request_state.request_log_id or request_state.request_id,
                         kind="http_bridge",

@@ -424,30 +424,44 @@ class NativeUpstreamWebSocket:
 
     def __init__(self, websocket: NativeEgressWebSocket) -> None:
         self._websocket = websocket
+        self._received_events = 0
+        self._received_bytes = 0
 
     async def send_text(self, text: str) -> None:
         try:
             await self._websocket.send_text(text)
         except NativeEgressError as exc:
-            raise _native_websocket_transport_error(exc, operation="send") from None
+            raise self._transport_error(exc, operation="send") from None
 
     async def send_bytes(self, data: bytes) -> None:
         try:
             await self._websocket.send_bytes(data)
         except NativeEgressError as exc:
-            raise _native_websocket_transport_error(exc, operation="send") from None
+            raise self._transport_error(exc, operation="send") from None
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
             message = await self._websocket.receive()
         except NativeEgressError as exc:
-            error = _native_websocket_transport_error(exc, operation="receive")
+            error = self._transport_error(exc, operation="receive")
             return UpstreamWebSocketMessage(
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
             )
+        detail = None
+        if message.kind in {"text", "binary"}:
+            self._received_events += 1
+            self._received_bytes += (
+                len(message.text.encode("utf-8")) if message.text is not None else len(message.data or b"")
+            )
+        elif message.kind == "close":
+            detail = self._failure_detail(
+                f"phase=websocket_close close_code={message.close_code!r} close_reason={message.close_reason!r}"
+            )
+            logger.info("native websocket closed: %s", detail)
         return UpstreamWebSocketMessage(
+            error=detail,
             kind=message.kind,
             text=message.text,
             data=message.data,
@@ -458,6 +472,15 @@ class NativeUpstreamWebSocket:
             payload=message.payload,
             routing=message.routing,
         )
+
+    def _transport_error(self, exc: NativeEgressError, *, operation: str) -> UpstreamWebSocketTransportError:
+        error = _native_websocket_transport_error(exc, operation=operation)
+        detail = self._failure_detail(str(error))
+        logger.warning("native websocket failure: %s", detail)
+        return UpstreamWebSocketTransportError(detail, error_code=error.error_code)
+
+    def _failure_detail(self, detail: str) -> str:
+        return f"{detail} received_events={self._received_events} received_bytes={self._received_bytes}"
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         await self._websocket.close(code=code, reason=reason)
@@ -472,14 +495,15 @@ def _native_websocket_transport_error(
     operation: str,
 ) -> UpstreamWebSocketTransportError:
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    detail = f"Upstream websocket {operation} failed (phase={phase} close_code=None close_reason=None): {exc}"
     if phase == "liveness_timeout":
         return UpstreamWebSocketTransportError(
-            f"Upstream websocket {operation} failed",
+            detail,
             error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         )
-    account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}
+    account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown", "consumer_backpressure"}
     return UpstreamWebSocketTransportError(
-        f"Upstream websocket {operation} failed",
+        detail,
         error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
     )
 

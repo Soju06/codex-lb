@@ -4,7 +4,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use codex_lb_protocol::{CAPABILITIES, NativeCommand, NativeEvent, PROTOCOL_VERSION};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -22,6 +22,7 @@ enum ActiveRequest {
     WebSocket {
         commands: mpsc::Sender<WebSocketCommand>,
         abort: AbortHandle,
+        receive_credit: Arc<Semaphore>,
     },
 }
 
@@ -192,10 +193,12 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                         let task_output = output.clone();
                         let task_active = active.clone();
                         let task_request_id = request_id.clone();
+                        let receive_credit = Arc::new(Semaphore::new(1));
+                        let task_receive_credit = receive_credit.clone();
                         let abort = tasks.spawn(async move {
                             let _ = start_rx.await;
                             if let Err(error) =
-                                execute_websocket(request, command_rx, &task_output).await
+                                execute_websocket(request, command_rx, task_receive_credit, &task_output).await
                             {
                                 let _ = emit_websocket_error(
                                     &task_output,
@@ -211,10 +214,17 @@ pub async fn run_stdio() -> Result<(), RequestError> {
                             request_id.clone(),
                             ActiveRequest::WebSocket {
                                 commands: command_tx,
+                                receive_credit,
                                 abort,
                             },
                         );
                         let _ = start_tx.send(());
+                    }
+                    NativeCommand::WebsocketConsumed { request_id } => {
+                        if let Some(ActiveRequest::WebSocket { receive_credit, .. }) = active.lock().await.get(&request_id)
+                            && receive_credit.available_permits() == 0 {
+                            receive_credit.add_permits(1);
+                        }
                     }
                     NativeCommand::WebsocketSendText {
                         request_id,
@@ -533,6 +543,7 @@ mod tests {
         });
 
         let request = NativeWebSocketRequest {
+            receive_credit: false,
             request_id: "ws-test".to_owned(),
             url: format!("ws://{address}/v1/responses"),
             headers: vec![("sec-websocket-protocol".to_owned(), "openai".to_owned())],

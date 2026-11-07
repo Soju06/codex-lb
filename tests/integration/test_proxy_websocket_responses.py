@@ -14767,3 +14767,74 @@ def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+def test_native_receive_failure_preserves_diagnostics_at_websocket_route(app_instance, monkeypatch, path):
+    from app.core.clients.native_egress import NativeEgressTransportError, NativeWebSocketMessage
+    from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
+
+    created = json.dumps({"type": "response.created", "response": {"id": "resp_native_detail"}})
+    delta = json.dumps({"type": "response.output_text.delta", "response_id": "resp_native_detail", "delta": "hi"})
+
+    class NativeSocket:
+        def __init__(self):
+            self.frames = iter([created, delta])
+
+        async def send_text(self, text):
+            pass
+
+        async def receive(self):
+            text = next(self.frames, None)
+            if text is None:
+                raise NativeEgressTransportError("connection reset by peer", failure_phase="transport")
+            return NativeWebSocketMessage(kind="text", text=text)
+
+        def response_header(self, name):
+            return None
+
+        async def close(self, code=1000, reason=""):
+            pass
+
+    upstream = NativeUpstreamWebSocket(cast(Any, NativeSocket()))
+    logs = []
+
+    class SettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(websocket):
+        return None
+
+    async def allow_key(authorization, *, request=None):
+        return None
+
+    async def connect(self, headers, **kwargs):
+        return SimpleNamespace(id="acct_ws_proxy"), upstream
+
+    async def write_log(self, **kwargs):
+        logs.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: SettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", write_log)
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(path) as websocket:
+            websocket.send_json({"type": "response.create", "model": "gpt-5.4", "input": "hi"})
+            assert websocket.receive_json()["type"] == "response.created"
+            assert websocket.receive_json()["type"] == "response.output_text.delta"
+            failure = websocket.receive_json()
+    assert failure["type"] == "response.failed"
+    detail = failure["response"]["error"]["message"]
+    for expected in (
+        "phase=transport",
+        "connection reset by peer",
+        "close_code=None",
+        "close_reason=None",
+        "received_events=2",
+        f"received_bytes={len(created.encode()) + len(delta.encode())}",
+    ):
+        assert expected in detail
+        assert expected in logs[0]["error_message"]

@@ -188,3 +188,11 @@ The selected payload string is needed for native request bytes or enabled raw pa
 For example, an explicit Python HTTP request with a large tool result and tracing disabled reaches the real upstream with the same body while avoiding two full preparation encodes. The local-origin regression checks the exact body hash and observes the owning encodes. A separate enabled-trace case retains the required string, an auto-mode case retains the size decision, and an auto image-generation case below the byte budget skips the unused estimate. If a WebSocket handshake falls back to HTTP, active tracing regenerates its string from the rewritten HTTP payload so WebSocket-only metadata cannot remain in the trace.
 
 The controlled 1 MB and 8 MB workload confirms preparation CPU savings and exact body identity. Those savings apply to this local preparation work; they do not establish native latency parity or explain historical minute-scale waits. Retained clients with small incremental tool results have much less serialization work to remove.
+
+## Native WebSocket receive credits
+
+The prior 64-message adapter queue erased all buffered messages on overflow. Waiting in that pump alone would move overflow to the shared helper reader. A one-message receive-credit window applies pressure at the upstream socket and bounds both message count and payload memory without blocking other helper requests. For example, a 100-delta burst remains in socket/TCP buffers until its consumer drains. This adds one local IPC credit per data message; no timers or operator settings are needed. Ping deadlines are suspended while local reads are paused.
+
+Existing incident logs erase phases, so reproducing this mechanism does not prove that every historical disconnect was queue overflow. Diagnostics preserve the distinction for subsequent observations.
+
+The bundled helper and Python adapter negotiate `websocket_receive_credit_v1` together. Older clients retain the prior uncredited protocol; a new adapter rejects a helper lacking this capability before dispatch. Received byte/event counters are socket-lifetime data-payload totals, excluding IPC metadata and control frames. A missing remote close code remains unknown.

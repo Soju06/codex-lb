@@ -223,6 +223,7 @@
   "apiKeys.form.allowedModels": "허용 Model",
   "apiKeys.form.allowedReasoningEfforts": "허용된 추론 강도",
   "apiKeys.form.applyToCodexModel": "codex /model에 적용",
+  "apiKeys.form.automaticDaybreakRouting": "Daybreak 자동 라우팅",
   "apiKeys.form.assignedAccounts": "할당 Account",
   "apiKeys.form.assignedModelSources": "할당 Model source",
   "apiKeys.form.currentUsage": "현재 사용량",

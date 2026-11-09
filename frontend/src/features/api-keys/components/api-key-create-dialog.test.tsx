@@ -10,6 +10,11 @@ import { renderWithProviders } from "@/test/utils";
 
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
+const CHECKBOXES = [
+  ["codex /model", "Apply to codex /model", "applyToCodexModel"],
+  ["automatic Daybreak routing", "Automatic Daybreak routing", "automaticDaybreakRouting"],
+] as const;
+
 describe("ApiKeyCreateDialog", () => {
   it("labels the reasoning effort trigger with its field and state", () => {
     renderWithProviders(
@@ -19,7 +24,7 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("button", { name: "Allowed efforts: All efforts" })).toBeInTheDocument();
   });
 
-  it("shows the codex /model checkbox unchecked by default", () => {
+  it.each(CHECKBOXES)("shows the %s checkbox unchecked by default", (_name, label) => {
     renderWithProviders(
       <ApiKeyCreateDialog
         open
@@ -29,10 +34,10 @@ describe("ApiKeyCreateDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: label })).not.toBeChecked();
   });
 
-  it("submits the codex /model checkbox value", async () => {
+  it.each(CHECKBOXES)("submits the %s checkbox value", async (_name, label, field) => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -46,14 +51,14 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Codex key");
-    await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
+    await user.click(screen.getByRole("checkbox", { name: label }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
 
-    expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+    expect(onSubmit.mock.calls[0][0][field]).toBe(true);
   });
 
   it("submits opportunistic traffic class", async () => {
@@ -133,7 +138,7 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
   });
 
-  it("resets the codex /model checkbox when the dialog is dismissed", async () => {
+  it.each(CHECKBOXES)("resets the %s checkbox when the dialog is dismissed", async (_name, label) => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -147,7 +152,7 @@ describe("ApiKeyCreateDialog", () => {
       />,
     );
 
-    const checkbox = screen.getByRole("checkbox", { name: "Apply to codex /model" });
+    const checkbox = screen.getByRole("checkbox", { name: label });
     await user.click(checkbox);
     expect(checkbox).toBeChecked();
 
@@ -169,7 +174,7 @@ describe("ApiKeyCreateDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: label })).not.toBeChecked();
   });
 
   it("omits assigned accounts when left at all accounts", async () => {

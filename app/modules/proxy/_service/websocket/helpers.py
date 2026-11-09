@@ -342,6 +342,8 @@ from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.capability_lineage import CapabilityLineageAlias
+from app.modules.proxy.capability_routing import invalid_access_program_error
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -702,6 +704,7 @@ def _prepare_websocket_request_state_for_account_switch(
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
     """Drop the completed-response anchor and the state that only exists for it."""
     continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_conversation_alias = None
     continuity_state.last_completed_input_count = 0
     continuity_state.last_completed_input_prefix_fingerprint = None
     continuity_state.last_pending_function_call_ids = []
@@ -714,9 +717,12 @@ def _websocket_continuity_anchor_for_payload(
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
     api_key_id: str | None = None,
+    conversation_alias: CapabilityLineageAlias | None = None,
 ) -> _WebSocketContinuityAnchor | None:
     """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
+        return None
+    if continuity_state.last_completed_conversation_alias != conversation_alias:
         return None
     if responses_payload.previous_response_id is not None:
         return None
@@ -823,6 +829,7 @@ def _record_websocket_continuity_completion(
     # is cleared rather than left stale when the completed turn cannot
     # provide one.
     continuity_state.last_completed_response_id = response_id
+    continuity_state.last_completed_conversation_alias = request_state.conversation_alias
     if request_state.input_item_count > 0 and request_state.input_full_fingerprint is not None:
         continuity_state.last_completed_input_count = request_state.input_item_count
         continuity_state.last_completed_input_prefix_fingerprint = request_state.input_full_fingerprint
@@ -2229,9 +2236,22 @@ def _parse_websocket_payload(text: str) -> dict[str, JsonValue] | None:
     return payload
 
 
-def _websocket_capability_metadata_values(payload: dict[str, JsonValue]) -> tuple[JsonValue, ...] | None:
+def _websocket_capability_metadata_values(
+    payload: dict[str, JsonValue], *, validate_native_programs: bool = False
+) -> tuple[JsonValue, ...] | None:
     normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
     payload_pairs = payload.raw_pairs if isinstance(payload, _WebSocketJsonObject) else tuple(payload.items())
+    program_objects = [value for key, value in payload_pairs if key == "access_programs"]
+    if validate_native_programs and (
+        sum(key == "model" for key, _ in payload_pairs) > 1
+        or len(program_objects) > 1
+        or any(
+            isinstance(programs, _WebSocketJsonObject) and sum(key == "cyber" for key, _ in programs.raw_pairs) > 1
+            for programs in program_objects
+        )
+    ):
+        # A last-key-wins decoder must not erase a required native program.
+        raise invalid_access_program_error()
     misplaced_values = [value for key, value in payload_pairs if key.lower() == normalized_name]
     if misplaced_values:
         # The reserved per-frame carrier is valid only inside

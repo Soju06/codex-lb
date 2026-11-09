@@ -90,6 +90,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
+        automatic_daybreak_routing: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         allowed_reasoning_efforts: str | None | _Unset = ...,
@@ -282,6 +283,7 @@ class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
+    automatic_daybreak_routing: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     allowed_reasoning_efforts: list[str] | None = None
@@ -303,7 +305,9 @@ class ApiKeyUpdateData:
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
     apply_to_codex_model: bool | None = None
+    automatic_daybreak_routing: bool | None = None
     apply_to_codex_model_set: bool = False
+    automatic_daybreak_routing_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -348,6 +352,7 @@ class ApiKeyData:
     last_used_at: datetime | None
     allowed_reasoning_efforts: list[str] | None = None
     apply_to_codex_model: bool = False
+    automatic_daybreak_routing: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
@@ -509,6 +514,7 @@ class ApiKeysService:
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
+            automatic_daybreak_routing=bool(payload.automatic_daybreak_routing),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
@@ -725,6 +731,11 @@ class ApiKeysService:
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
+                automatic_daybreak_routing=(
+                    payload.automatic_daybreak_routing
+                    if payload.automatic_daybreak_routing_set and payload.automatic_daybreak_routing is not None
+                    else _UNSET
+                ),
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -787,6 +798,7 @@ class ApiKeysService:
             or payload.name_set
             or payload.allowed_models_set
             or payload.apply_to_codex_model_set
+            or payload.automatic_daybreak_routing_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.allowed_reasoning_efforts_set
@@ -1868,6 +1880,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
+        automatic_daybreak_routing=data.automatic_daybreak_routing,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         allowed_reasoning_efforts=data.allowed_reasoning_efforts,
@@ -1905,6 +1918,7 @@ def _to_api_key_data(
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
+        automatic_daybreak_routing=bool(row.automatic_daybreak_routing),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         allowed_reasoning_efforts=_deserialize_allowed_reasoning_efforts(

@@ -5892,6 +5892,13 @@ current capability grant through the canonical selector.
 - **THEN** the frame receives a typed capability-routing-unavailable error
 - **AND** its reservation is settled without forwarding the frame upstream
 
+Required-to-ordinary transitions MUST obey the same idle-retirement and pending-work rules. Both directions MUST preserve explicit ownership and opaque replay constraints. Inferred response anchors MUST match the incoming conversation; matching input alone MUST NOT establish continuity.
+
+#### Scenario: A separate ordinary conversation follows DBB work
+- **WHEN** a separate ordinary frame follows a DBB frame, even with a matching list input prefix
+- **THEN** an idle upstream is retired before normal selection, without transferring synthesized turn state or an inferred DBB response anchor
+- **AND** pending work instead causes the new frame to fail without changing the active socket
+
 ### Requirement: Proof-gated recovery attempts are durably fenced
 
 When an HTTP bridge request has a verified, account-neutral, unanchored full
@@ -10896,3 +10903,21 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Automatic Daybreak request recognition
+Enabled keys MUST recognize legacy/enforced `gpt-daybreak-blue-latest` and native `access_programs.cyber = "daybreak_blue"` across Responses WebSocket, HTTP Responses and compact, including aliases/slashes. Requests/retries MUST preserve native fields, scope, ownership and lineage. Required HTTP traffic MUST use direct subscriptions without external-source/bridge fallback. Disabled keys and unrelated WebSocket control frames MUST keep existing behavior.
+
+#### Scenario: One key serves ordinary and Daybreak work
+- **WHEN** an enabled key sends a legacy, enforced-model or native Blue request
+- **THEN** selection and retries require Trusted Cyber eligibility and forward native fields unchanged
+- **AND** ordinary requests without an inherited restriction retain normal routing
+
+#### Scenario: Invalid selectors fail before dispatch
+- **WHEN** an enabled key sends malformed, duplicate, conflicting or unsupported selectors
+- **THEN** the proxy rejects the request before dispatch
+- **AND** explicit standard conflicts with legacy or custom required intent; Red does not imply Blue
+
+#### Scenario: Safe replay remains constrained
+- **WHEN** a request contains a supported selector and otherwise account-neutral data
+- **THEN** it can retry another eligible account
+- **AND** account-owned continuation data still prevents cross-account replay

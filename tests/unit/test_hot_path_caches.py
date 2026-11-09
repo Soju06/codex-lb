@@ -343,6 +343,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         is_active=True,
         created_at=now,
         last_used_at=None,
+        automatic_daybreak_routing=False,
         limits=[],
     )
     new_plain = "sk-clb-new-key-regen"
@@ -359,6 +360,7 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         is_active=True,
         created_at=now,
         last_used_at=None,
+        automatic_daybreak_routing=False,
         limits=[],
     )
 
@@ -414,6 +416,7 @@ async def test_deactivated_key_rejected_immediately() -> None:
         is_active=False,
         created_at=now,
         last_used_at=None,
+        automatic_daybreak_routing=False,
         limits=[],
     )
 

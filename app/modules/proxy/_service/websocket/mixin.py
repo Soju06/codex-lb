@@ -477,6 +477,7 @@ from app.modules.proxy.capability_routing import (
     RoutingCapability,
     RoutingIntent,
     _capability_lineage_unavailable_error,
+    capability_conversation_alias,
     capability_lineage_aliases,
     parse_routing_intent,
     reject_capability_signal_outside_response_create,
@@ -2053,7 +2054,11 @@ class _WebSocketMixin:
                                 reject_capability_signal_outside_response_create(
                                     api_key=api_key,
                                     client_metadata=payload.get("client_metadata"),
-                                    client_metadata_values=_websocket_capability_metadata_values(payload),
+                                    client_metadata_values=_websocket_capability_metadata_values(
+                                        payload,
+                                        validate_native_programs=bool(api_key and api_key.automatic_daybreak_routing),
+                                    ),
+                                    request_payload=payload,
                                 )
                             except ProxyResponseError as exc:
                                 async with client_send_lock:
@@ -2255,10 +2260,10 @@ class _WebSocketMixin:
                     request_state is not None
                     and upstream is not None
                     and account is not None
-                    and request_state.require_security_work_authorized
+                    and (request_state.require_security_work_authorized or upstream_requires_security_work_authorized)
                 ):
                     capability_account_reusable = False
-                    if upstream_requires_security_work_authorized:
+                    if request_state.require_security_work_authorized and upstream_requires_security_work_authorized:
                         try:
                             (
                                 revalidated_account,
@@ -2596,7 +2601,7 @@ class _WebSocketMixin:
                         routing_strategy=routing_strategy,
                         model=request_state.model,
                         request_state=request_state,
-                        api_key=api_key,
+                        api_key=request_state.api_key or api_key,
                         client_send_lock=client_send_lock,
                         websocket=websocket,
                     )
@@ -3164,7 +3169,12 @@ class _WebSocketMixin:
             api_key=refreshed_api_key,
             client_metadata=raw_client_metadata,
             header_values=capability_header_values,
-            client_metadata_values=_websocket_capability_metadata_values(payload),
+            client_metadata_values=_websocket_capability_metadata_values(
+                payload,
+                validate_native_programs=bool(refreshed_api_key and refreshed_api_key.automatic_daybreak_routing),
+            ),
+            request_payload=payload,
+            effective_model=effective_model_for_api_key(refreshed_api_key, None),
         )
         validate_top_level_compaction_trigger_input_shape(payload)
         responses_payload = normalize_responses_request_payload(
@@ -3228,6 +3238,7 @@ class _WebSocketMixin:
         )
         if client_metadata is not None or "client_metadata" in normalized_payload:
             responses_payload = responses_payload.model_copy(update={"client_metadata": client_metadata})
+        conversation_alias = capability_conversation_alias(headers, client_metadata=client_metadata)
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
         client_full_resend_payload: ResponsesRequest | None = None
@@ -3289,6 +3300,7 @@ class _WebSocketMixin:
                 responses_payload=responses_payload,
                 codex_session_affinity=codex_session_affinity,
                 api_key_id=refreshed_api_key.id if refreshed_api_key is not None else None,
+                conversation_alias=conversation_alias,
             )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)
@@ -3343,6 +3355,7 @@ class _WebSocketMixin:
                 client_metadata=client_metadata,
             ),
         )
+        source_route_excluded = source_route_excluded or capability_route.require_security_work_authorized
         reservation = await proxy._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -3376,6 +3389,7 @@ class _WebSocketMixin:
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
         request_state.durable_capability_lineage_required = capability_route.require_security_work_authorized
+        request_state.conversation_alias = conversation_alias
         original_full_resend_input: JsonValue | None = None
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
@@ -3465,6 +3479,7 @@ class _WebSocketMixin:
             sticky_threads_enabled=sticky_threads_enabled,
             api_key=api_key,
             synthesized_turn_state=synthesized_turn_state,
+            require_trusted_cyber=capability_route.require_security_work_authorized,
         )
         affinity_observation = AffinityObservation.from_policy(
             affinity_policy,

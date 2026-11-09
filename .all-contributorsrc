@@ -1562,6 +1562,15 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "omry",
+      "name": "Omry Yadan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/376455?v=4",
+      "profile": "https://github.com/omry",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import re
+import json
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -17,15 +17,12 @@ from app.modules.proxy.capability_lineage import (
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 
 REQUIRED_CAPABILITY_HEADER = CODEX_LB_REQUIRED_CAPABILITY_HEADER
-CODEX_PARENT_THREAD_ID_HEADER = "x-codex-parent-thread-id"
 CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 CAPABILITY_SIGNAL_UNTRUSTED_CODE = "capability_signal_untrusted"
 UNSUPPORTED_REQUIRED_CAPABILITY_CODE = "unsupported_required_capability"
 CAPABILITY_LINEAGE_UNAVAILABLE_CODE = "capability_lineage_unavailable"
 CAPABILITY_ROUTING_UNAVAILABLE_CODE = "capability_routing_unavailable"
 CAPABILITY_ROUTING_UNAVAILABLE_MESSAGE = "Required capability routing is unavailable; retry later."
-
-_TERMINAL_WINDOW_SLOT_RE = re.compile(r":\d+$")
 
 
 class RoutingCapability(StrEnum):
@@ -104,6 +101,22 @@ class CapabilityRouter:
         )
 
 
+def capability_conversation_alias(
+    headers: Mapping[str, str], *, client_metadata: JsonValue | None = None
+) -> CapabilityLineageAlias | None:
+    # Frame metadata overrides compatibility headers, matching response.create
+    # projection. A thread is more specific than a shared process identity.
+    for kind, values in (
+        ("codex_window", _metadata_string_values(client_metadata, CODEX_WINDOW_ID_HEADER)),
+        ("codex_window", _header_values(headers, CODEX_WINDOW_ID_HEADER)),
+        ("codex_thread", _header_values(headers, "thread-id")),
+    ):
+        for value in values:
+            if value.strip():
+                return CapabilityLineageAlias(kind=kind, value=value.strip())
+    return None
+
+
 def capability_lineage_aliases(
     headers: Mapping[str, str],
     *,
@@ -113,27 +126,56 @@ def capability_lineage_aliases(
     client_metadata: JsonValue | None = None,
 ) -> tuple[CapabilityLineageAlias, ...]:
     aliases: list[CapabilityLineageAlias] = []
-    _append_alias(aliases, "session_header", session_id)
-    _append_alias(aliases, "turn_state", turn_state)
+    # Shared task/process aliases must not merge separate conversations.
+    conversation = capability_conversation_alias(headers, client_metadata=client_metadata)
+    if conversation is None:
+        _append_alias(aliases, "session_header", session_id)
+        _append_alias(aliases, "turn_state", turn_state)
     for previous_response_id in previous_response_ids:
         _append_alias(aliases, "previous_response", previous_response_id)
-
-    parent_thread_ids = (
-        *_header_values(headers, CODEX_PARENT_THREAD_ID_HEADER),
-        *_metadata_string_values(client_metadata, CODEX_PARENT_THREAD_ID_HEADER),
-    )
-    for parent_thread_id in parent_thread_ids:
-        _append_alias(aliases, "codex_task", parent_thread_id)
-
-    window_ids = (
-        *_header_values(headers, CODEX_WINDOW_ID_HEADER),
-        *_metadata_string_values(client_metadata, CODEX_WINDOW_ID_HEADER),
-    )
-    for window_id in window_ids:
-        _append_alias(aliases, "codex_window", window_id)
-        stable_task_id = _TERMINAL_WINDOW_SLOT_RE.sub("", window_id.strip())
-        _append_alias(aliases, "codex_task", stable_task_id)
+    if conversation is not None:
+        aliases.append(conversation)
     return normalize_capability_lineage_aliases(aliases)
+
+
+type _JsonPairsValue = str | int | float | bool | None | list[_JsonPairsValue] | tuple[tuple[str, _JsonPairsValue], ...]
+
+
+def reject_duplicate_native_selectors(body: bytes) -> None:
+    """Inspect only top-level selectors and their native cyber member."""
+    pairs: _JsonPairsValue = json.loads(body, object_pairs_hook=tuple)
+    if not isinstance(pairs, tuple):
+        return
+    programs = [value for name, value in pairs if name == "access_programs"]
+    if sum(name == "model" for name, _ in pairs) > 1 or len(programs) > 1:
+        raise invalid_access_program_error()
+    if programs and isinstance(programs[0], tuple) and sum(name == "cyber" for name, _ in programs[0]) > 1:
+        raise invalid_access_program_error()
+
+
+def request_cyber_access_program(
+    payload: Mapping[str, JsonValue] | None,
+    *,
+    api_key: ApiKeyData | None,
+    effective_model: str | None = None,
+) -> str | None:
+    """Recognize legacy Blue models and validate the native cyber selector."""
+    if payload is None or api_key is None or not api_key.automatic_daybreak_routing:
+        return None
+    legacy_blue = "gpt-daybreak-blue-latest" in (payload.get("model"), effective_model)
+    if "access_programs" not in payload:
+        return "daybreak_blue" if legacy_blue else None
+    programs = payload["access_programs"]
+    if not is_json_mapping(programs) or any(key != "cyber" for key in programs):
+        raise invalid_access_program_error()
+    if "cyber" not in programs:
+        return "daybreak_blue" if legacy_blue else None
+    cyber = programs["cyber"]
+    if not isinstance(cyber, str) or cyber not in {"standard", "daybreak_blue"}:
+        raise invalid_access_program_error()
+    if legacy_blue and cyber == "standard":
+        raise invalid_access_program_error()
+    return cyber
 
 
 def parse_routing_intent(
@@ -143,6 +185,8 @@ def parse_routing_intent(
     client_metadata: JsonValue | None = None,
     header_values: Collection[str] | None = None,
     client_metadata_values: Collection[JsonValue] | None = None,
+    request_payload: Mapping[str, JsonValue] | None = None,
+    effective_model: str | None = None,
 ) -> RoutingIntent:
     values: tuple[JsonValue, ...] = (
         *(tuple(header_values) if header_values is not None else _header_values(headers, REQUIRED_CAPABILITY_HEADER)),
@@ -152,6 +196,11 @@ def parse_routing_intent(
             else _metadata_values(client_metadata, REQUIRED_CAPABILITY_HEADER)
         ),
     )
+    program = request_cyber_access_program(request_payload, api_key=api_key, effective_model=effective_model)
+    if program == "standard" and values:
+        raise invalid_access_program_error()
+    if not values and program == "daybreak_blue":
+        values = (RoutingCapability.TRUSTED_CYBER.value,)
     if not values:
         return RoutingIntent.empty()
     if api_key is None:
@@ -186,14 +235,21 @@ def reject_capability_signal_outside_response_create(
     api_key: ApiKeyData | None,
     client_metadata: JsonValue | None,
     client_metadata_values: Collection[JsonValue] | None = None,
+    request_payload: Mapping[str, JsonValue] | None = None,
 ) -> None:
     intent = parse_routing_intent(
         {},
         api_key=api_key,
         client_metadata=client_metadata,
         client_metadata_values=client_metadata_values,
+        request_payload=request_payload,
     )
-    if intent.required_capabilities:
+    if intent.required_capabilities or (
+        api_key is not None
+        and api_key.automatic_daybreak_routing
+        and request_payload is not None
+        and "access_programs" in request_payload
+    ):
         raise _unsupported_capability_error()
 
 
@@ -249,5 +305,16 @@ def _capability_lineage_unavailable_error() -> ProxyResponseError:
             CAPABILITY_LINEAGE_UNAVAILABLE_CODE,
             "Required capability lineage is unavailable; retry later.",
             error_type="server_error",
+        ),
+    )
+
+
+def invalid_access_program_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        400,
+        openai_error(
+            "unsupported_access_program",
+            "Supported cyber programs are standard and daybreak_blue; native and custom routing intent must agree.",
+            error_type="invalid_request_error",
         ),
     )

@@ -289,6 +289,7 @@ from app.modules.proxy._service.streaming.protocol import _StreamingServiceProto
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
@@ -427,9 +428,6 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
-_REQUEST_TRANSPORT_HTTP = "http"
-
-
 class _StreamingMixin(_StreamingRetryMixin):
     _handle_stream_error = _handle_stream_error_helper
     _resolve_upstream_route_for_account = _resolve_upstream_route_for_account_helper
@@ -449,6 +447,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         request_transport: str = _REQUEST_TRANSPORT_HTTP,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
+        require_trusted_cyber: bool = False,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
         _maybe_log_proxy_request_payload("stream", payload, headers)
@@ -465,6 +464,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             request_transport=request_transport,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            **({"require_trusted_cyber": True} if require_trusted_cyber else {}),
         )
 
     async def _stream_once(

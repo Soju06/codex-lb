@@ -77,6 +77,7 @@ type ApiKeyCreateDraft = {
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
+  automaticDaybreakRouting: boolean;
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -93,6 +94,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
+  automaticDaybreakRouting: false,
 };
 
 function apiKeyCreateDraftReducer(
@@ -120,6 +122,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
+      automaticDaybreakRouting: draft.automaticDaybreakRouting,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
       ...(draft.selectedSourceIds.length > 0 ? { assignedSourceIds: draft.selectedSourceIds } : {}),
       usageSections: draft.usageSections,
@@ -185,6 +188,17 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
               />
               <label htmlFor="create-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
+              </label>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
+              <Checkbox
+                id="create-api-key-automatic-daybreak-routing"
+                checked={draft.automaticDaybreakRouting}
+                onCheckedChange={(checked) => updateDraft({ automaticDaybreakRouting: checked === true })}
+              />
+              <label htmlFor="create-api-key-automatic-daybreak-routing" className="cursor-pointer">
+                {t("apiKeys.form.automaticDaybreakRouting")}
               </label>
             </div>
 

@@ -178,3 +178,5 @@ short windows, or evaluated for a quota the plan does not have.
 Settlement is discarded if newer replica-local runtime activity arrives while
 that snapshot is loading, preventing an older probe success from clearing a
 later failure.
+
+See [automatic Daybreak routing](../responses-api-compat/context.md#automatic-daybreak-routing) for the shared eligibility, conversation-isolation and ownership rationale.

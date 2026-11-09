@@ -328,3 +328,13 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Automatic Daybreak routing
+
+The per-key toggle defaults off and reuses account Trusted Cyber eligibility; it does not grant upstream entitlement. Legacy Blue models and the native Blue selector use the same constrained pool on WebSocket, HTTP Responses and compact. Required HTTP requests bypass external sources and the session bridge. Native-field delivery by custom Codex providers remains a separate client concern (#2580).
+
+A DBB child previously constrained ordinary parents and siblings through shared task aliases, process affinity and inferred response anchors. Restrictions now follow the exact conversation and direct response continuations. For example, `task:2` stays restricted while `task:1` and `task:3` retain normal routing, including burn_first. Per-frame window metadata takes precedence over window headers, then thread identity; clients without either retain the legacy session/turn fallback.
+
+DBB selection reuses thread affinity without reading or updating ordinary process preferences. Inferred WebSocket anchors also require the same conversation identity. Ordinary selection, key scope, disabled-affinity controls, retries and reservation settlement remain unchanged. A mid-session switch can move account-neutral work; incompatible account-owned history fails closed.
+
+Existing opaque markers are retained. Fresh identified conversations ignore broad legacy markers, while previously restricted conversations remain restricted. If the eligible pool is empty, DBB work fails without ordinary fallback.

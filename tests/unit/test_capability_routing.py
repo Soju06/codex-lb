@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import cast
@@ -24,6 +26,7 @@ from app.modules.proxy.capability_routing import (
     RoutingIntent,
     capability_lineage_aliases,
     parse_routing_intent,
+    reject_capability_signal_outside_response_create,
     strip_capability_metadata,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -35,6 +38,7 @@ def _api_key() -> ApiKeyData:
     return ApiKeyData(
         id="api-key-a",
         name="test",
+        automatic_daybreak_routing=True,
         key_prefix="sk-test",
         allowed_models=None,
         enforced_model=None,
@@ -136,30 +140,35 @@ def test_strip_capability_metadata_removes_only_internal_key() -> None:
     assert metadata["X-Codex-LB-Required-Capability"] == "trusted_cyber"
 
 
-def test_capability_lineage_aliases_preserve_domains_and_stable_task_root() -> None:
-    aliases = capability_lineage_aliases(
-        {
-            "x-codex-parent-thread-id": "task-parent",
-            "x-codex-window-id": "task-root:2",
-        },
-        session_id="same-visible-id",
-        turn_state="same-visible-id",
-        previous_response_ids=("resp-1",),
-        client_metadata={
-            "x-codex-parent-thread-id": "task-root",
-            "x-codex-window-id": "task-metadata:3",
-        },
+def test_capability_lineage_aliases_use_authoritative_conversation():
+    assert capability_lineage_aliases(
+        {"x-codex-parent-thread-id": "task", "x-codex-window-id": "task:1", "thread-id": "thread"},
+        session_id="shared-process",
+        turn_state="shared-turn",
+        previous_response_ids=("response",),
+        client_metadata={"x-codex-window-id": "task:2"},
+    ) == (
+        CapabilityLineageAlias(kind="previous_response", value="response"),
+        CapabilityLineageAlias(kind="codex_window", value="task:2"),
     )
 
-    assert aliases == (
-        CapabilityLineageAlias(kind="session_header", value="same-visible-id"),
-        CapabilityLineageAlias(kind="turn_state", value="same-visible-id"),
-        CapabilityLineageAlias(kind="previous_response", value="resp-1"),
-        CapabilityLineageAlias(kind="codex_task", value="task-parent"),
-        CapabilityLineageAlias(kind="codex_task", value="task-root"),
-        CapabilityLineageAlias(kind="codex_window", value="task-root:2"),
-        CapabilityLineageAlias(kind="codex_window", value="task-metadata:3"),
-        CapabilityLineageAlias(kind="codex_task", value="task-metadata"),
+
+def test_capability_lineage_aliases_use_thread_before_shared_process():
+    assert capability_lineage_aliases(
+        {"thread-id": "thread", "x-codex-parent-thread-id": "parent"}, session_id="process", turn_state="turn"
+    ) == (CapabilityLineageAlias(kind="codex_thread", value="thread"),)
+
+
+def test_capability_lineage_aliases_preserve_fallback_without_conversation():
+    assert capability_lineage_aliases(
+        {"x-codex-parent-thread-id": "parent"},
+        session_id="process",
+        turn_state="turn",
+        previous_response_ids=("response",),
+    ) == (
+        CapabilityLineageAlias(kind="session_header", value="process"),
+        CapabilityLineageAlias(kind="turn_state", value="turn"),
+        CapabilityLineageAlias(kind="previous_response", value="response"),
     )
 
 
@@ -200,3 +209,152 @@ async def test_capability_router_restores_inherited_requirement_and_fails_closed
 
     assert exc_info.value.status_code == 503
     assert _error_code(exc_info.value) == CAPABILITY_LINEAGE_UNAVAILABLE_CODE
+
+
+@pytest.mark.parametrize(
+    "payload,required",
+    [
+        ({}, False),
+        ({"access_programs": {}}, False),
+        ({"access_programs": {"cyber": "standard"}}, False),
+        ({"model": "gpt-daybreak-blue-latest"}, True),
+        ({"model": "gpt-6-sol", "access_programs": {"cyber": "daybreak_blue"}}, True),
+    ],
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_automatic_daybreak_routing_is_per_key(payload: dict[str, JsonValue], required: bool, enabled: bool) -> None:
+    original = deepcopy(payload)
+    key = replace(_api_key(), automatic_daybreak_routing=enabled)
+    assert parse_routing_intent({}, api_key=key, request_payload=payload).requires_trusted_cyber == (
+        enabled and required
+    )
+    assert payload == original
+    # Matching native/custom intent agrees, even when automatic recognition is off.
+    if required:
+        assert parse_routing_intent(
+            {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}, api_key=key, request_payload=payload
+        ).requires_trusted_cyber
+
+
+@pytest.mark.parametrize(
+    "program",
+    [
+        None,
+        True,
+        [],
+        "daybreak_blue",
+        {"other": True},
+        {"cyber": None},
+        {"cyber": True},
+        {"cyber": []},
+        {"cyber": "DAYBREAK_BLUE"},
+        {"cyber": "daybreak_red"},
+        {"cyber": "unknown"},
+    ],
+)
+def test_native_malformed_or_unsupported_program_fails_closed(program: JsonValue) -> None:
+    with pytest.raises(ProxyResponseError) as exc:
+        parse_routing_intent({}, api_key=_api_key(), request_payload={"access_programs": program})
+    assert exc.value.status_code == 400
+    assert _error_code(exc.value) == "unsupported_access_program"
+
+
+def test_native_program_without_a_key_has_no_per_key_opt_in() -> None:
+    assert (
+        parse_routing_intent({}, api_key=None, request_payload={"access_programs": {"cyber": "daybreak_blue"}})
+        == RoutingIntent.empty()
+    )
+
+
+def test_explicit_standard_conflicts_with_custom_required_intent() -> None:
+    with pytest.raises(ProxyResponseError) as exc:
+        parse_routing_intent(
+            {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+            api_key=_api_key(),
+            request_payload={"access_programs": {"cyber": "standard"}},
+        )
+    assert _error_code(exc.value) == "unsupported_access_program"
+
+
+def test_disabled_automatic_routing_preserves_existing_custom_carrier() -> None:
+    disabled = replace(_api_key(), automatic_daybreak_routing=False)
+    assert parse_routing_intent(
+        {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+        api_key=disabled,
+        request_payload={"access_programs": {"cyber": "standard"}},
+    ).requires_trusted_cyber
+
+
+def test_enforced_model_does_not_create_control_frame_intent() -> None:
+    key = replace(_api_key(), enforced_model="gpt-daybreak-blue-latest")
+    reject_capability_signal_outside_response_create(
+        api_key=key, client_metadata=None, request_payload={"type": "session.update"}
+    )
+
+
+def test_websocket_inferred_prefix_anchor_stays_with_its_conversation():
+    from app.core.openai.requests import ResponsesRequest
+    from app.modules.proxy import service as proxy_service
+
+    conversation = CapabilityLineageAlias(kind="codex_window", value="task:2")
+    prefix = [{"role": "user", "content": "shared prefix"}]
+    completed = proxy_service._WebSocketRequestState(
+        request_id="completed",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        input_item_count=1,
+        input_full_fingerprint=proxy_service._fingerprint_input_items(prefix),
+        conversation_alias=conversation,
+    )
+    continuity = proxy_service._WebSocketContinuityState()
+    proxy_service._record_websocket_continuity_completion(
+        continuity, request_state=completed, response_id="resp_completed"
+    )
+    payload = ResponsesRequest(model="gpt-5.1", instructions="", input=[*prefix, {"role": "user", "content": "next"}])
+    same = proxy_service._websocket_continuity_anchor_for_payload(
+        continuity, responses_payload=payload, codex_session_affinity=True, conversation_alias=conversation
+    )
+    assert same is not None and same.previous_response_id == "resp_completed"
+    assert (
+        proxy_service._websocket_continuity_anchor_for_payload(
+            continuity,
+            responses_payload=payload,
+            codex_session_affinity=True,
+            conversation_alias=CapabilityLineageAlias(kind="codex_window", value="task:1"),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_required_routing_keeps_disabled_stickiness_disabled(compact):
+    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+    from app.modules.proxy._service.compact import _sticky_key_for_compact_request
+    from app.modules.proxy.affinity import _sticky_key_for_responses_request
+
+    headers = {"x-codex-window-id": "task:2", "session_id": "shared-process"}
+    if compact:
+        policy = _sticky_key_for_compact_request(
+            ResponsesCompactRequest(model="gpt-5.1", instructions="", input="fresh", prompt_cache_key="shared-cache"),
+            headers,
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=1800,
+            sticky_threads_enabled=False,
+            require_trusted_cyber=True,
+        )
+    else:
+        policy = _sticky_key_for_responses_request(
+            ResponsesRequest(model="gpt-5.1", instructions="", input="fresh", prompt_cache_key="shared-cache"),
+            headers,
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            openai_cache_affinity_max_age_seconds=1800,
+            sticky_threads_enabled=False,
+            require_trusted_cyber=True,
+        )
+    assert policy.key is None
+    assert policy.kind is None

@@ -969,10 +969,10 @@ On startup, the system MUST remove ordinary persisted HTTP bridge session rows o
 ### Requirement: Trusted capability requirements are monotonic across lineage
 
 Before dispatch, the proxy MUST persist an authenticated `trusted_cyber`
-requirement as API-key-scoped, domain-separated opaque hashes for every known
-session, accepted or synthesized turn-state, previous-response, and Codex task
-lineage alias. Marker writes MUST be monotonic and MUST NOT store raw lineage
-or account identifiers.
+requirement as API-key-scoped, domain-separated opaque conversation hashes.
+Marker writes MUST be monotonic and MUST NOT store raw lineage or account identifiers.
+
+Restrictions MUST persist within a conversation and its direct response continuations. Conversation identity MUST prefer per-frame `client_metadata["x-codex-window-id"]`, then the window header, then `thread-id`. A specific conversation MUST NOT inherit shared task, process or turn-state restrictions. Without a specific identity, existing session/turn-state fallback MUST remain supported. Response aliases MUST remain API-key-scoped.
 
 A later authenticated request MUST restore REQUIRED before account selection
 when any presented alias matches under the same API-key scope. It MUST persist
@@ -1017,6 +1017,12 @@ or penalize the upstream account.
 #### Scenario: Persistence uncertainty cannot downgrade
 - **WHEN** required lineage cannot be read or established durably
 - **THEN** the request fails before ordinary account selection or dispatch
+
+#### Scenario: DBB child does not constrain its parent or siblings
+- **WHEN** a DBB child shares task/process identifiers with separate ordinary conversations
+- **THEN** only its own conversation and direct continuations stay restricted, including later generic-model or standard turns
+- **AND** separate conversations retain normal routing, even when legacy broad markers exist
+- **AND** frame window metadata overrides a conflicting compatibility header
 
 ### Requirement: Compact previous_response_id anchors are account-scoped
 

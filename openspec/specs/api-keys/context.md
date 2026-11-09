@@ -37,3 +37,5 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+See [automatic Daybreak routing](../responses-api-compat/context.md#automatic-daybreak-routing) for the shared eligibility, conversation-isolation and ownership rationale.

@@ -74,3 +74,5 @@ Source-qualified markers leave the legacy timestamp NULL, so an older binary
 safely restores conservative hard ownership during rollback. Dropping the scope
 column loses only restart-recovery state; it does not make the retained owner
 mobile.
+
+See [automatic Daybreak routing](../responses-api-compat/context.md#automatic-daybreak-routing) for the shared eligibility, conversation-isolation and ownership rationale.

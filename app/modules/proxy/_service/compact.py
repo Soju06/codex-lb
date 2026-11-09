@@ -65,6 +65,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+from app.modules.proxy.capability_routing import capability_conversation_alias
 from app.modules.proxy.continuity import (
     resolve_required_account_id,
     without_http_bridge_session_affinity_headers,
@@ -447,6 +448,7 @@ def _sticky_key_for_compact_request(
     openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
     api_key: ApiKeyData | None = None,
+    require_trusted_cyber: bool = False,
 ) -> _AffinityPolicy:
     # A compact body is already trimmed, so it rarely extends the ordinary
     # turns' transcript and will usually mint a new anchor. That is the same
@@ -460,6 +462,11 @@ def _sticky_key_for_compact_request(
     )
     cache_key = resolution.sticky_key
     cache_key_source = resolution.source
+    capability_conversation = (
+        capability_conversation_alias(headers, client_metadata=(payload.model_extra or {}).get("client_metadata"))
+        if require_trusted_cyber
+        else None
+    )
     turn_state_key = _sticky_key_from_turn_state_header(headers)
     if turn_state_key:
         policy = _AffinityPolicy(
@@ -470,8 +477,15 @@ def _sticky_key_for_compact_request(
     elif (
         thread_affinity := _thread_codex_session_affinity(
             headers,
-            enabled=codex_session_affinity,
+            enabled=codex_session_affinity
+            or (
+                capability_conversation is not None
+                and cache_key is not None
+                and (openai_cache_affinity or sticky_threads_enabled)
+            ),
             max_age_seconds=openai_cache_affinity_max_age_seconds,
+            thread_id=capability_conversation.value if capability_conversation is not None else None,
+            seed_process_preference=not require_trusted_cyber,
         )
     ) is not None:
         policy = thread_affinity
@@ -780,6 +794,7 @@ class _CompactMixin:
         client_ip: str | None = None,
         forwarded_request: bool = False,
         forwarded_file_owner_account_id: str | None = None,
+        require_trusted_cyber: bool = False,
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
@@ -886,6 +901,7 @@ class _CompactMixin:
             openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
             sticky_threads_enabled=settings.sticky_threads_enabled,
             api_key=api_key,
+            require_trusted_cyber=require_trusted_cyber,
         )
         affinity_observation = AffinityObservation.from_policy(affinity)
         _maybe_log_proxy_request_shape(
@@ -1292,7 +1308,7 @@ class _CompactMixin:
             # owner-bound handling instead of moving the history to another
             # account.
             owner_quota_failover_eligible = False
-            require_security_work_authorized = False
+            require_security_work_authorized = require_trusted_cyber
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
@@ -1319,6 +1335,7 @@ class _CompactMixin:
                 if not account:
                     if (
                         require_security_work_authorized
+                        and not require_trusted_cyber
                         and selection.error_code == _no_security_work_authorized_accounts_code()
                         and last_exc is not None
                     ):

@@ -12108,6 +12108,8 @@ def _stub_capability_websocket_policy(monkeypatch, api_key, authorization):
         "enforced_legacy_disabled",
         "native_disabled",
         "ordinary",
+        "refreshed_native_scope",
+        "refreshed_legacy_scope",
     ],
 )
 def test_backend_responses_websocket_trusted_capability_routes_before_first_account_attempt(
@@ -12120,7 +12122,22 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         api_key = dataclasses.replace(api_key, enforced_model="gpt-daybreak-blue-latest")
     if capability_carrier in {"native_disabled", "enforced_legacy_disabled"}:
         api_key = dataclasses.replace(api_key, automatic_daybreak_routing=False)
+    refreshed_scope = capability_carrier in {"refreshed_native_scope", "refreshed_legacy_scope"}
+    if refreshed_scope:
+        api_key = dataclasses.replace(
+            api_key,
+            automatic_daybreak_routing=False,
+            account_assignment_scope_enabled=True,
+            assigned_account_ids=["acct_ws_capability_revoked", "acct_ws_capability_cyber"],
+        )
     _stub_capability_websocket_policy(monkeypatch, api_key, "Bearer capability-upfront")
+    if refreshed_scope:
+        current_key = dataclasses.replace(
+            api_key, automatic_daybreak_routing=True, assigned_account_ids=["acct_ws_capability_cyber"]
+        )
+        monkeypatch.setattr(
+            proxy_module.ProxyService, "_refresh_websocket_api_key_policy", AsyncMock(return_value=current_key)
+        )
     cyber_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
@@ -12144,6 +12161,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         deadline,
         *,
         request_state,
+        api_key,
         require_security_work_authorized,
         **_kwargs,
     ):
@@ -12151,7 +12169,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
         selection_requirements.append(require_security_work_authorized)
         account_kind = "cyber" if require_security_work_authorized else "ordinary"
         return SimpleNamespace(
-            id=f"acct_ws_capability_{account_kind}",
+            id=api_key.assigned_account_ids[0] if refreshed_scope else f"acct_ws_capability_{account_kind}",
             security_work_authorized=require_security_work_authorized,
         )
 
@@ -12189,11 +12207,11 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
             "x-codex-window-id": "task-ws-capability-upfront:1",
             REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
         }
-    elif capability_carrier in {"native_program", "native_disabled"}:
+    elif capability_carrier in {"native_program", "native_disabled", "refreshed_native_scope"}:
         response_create["access_programs"] = {"cyber": "daybreak_blue"}
     elif capability_carrier == "native_standard":
         response_create["access_programs"] = {"cyber": "standard"}
-    elif capability_carrier == "legacy_model":
+    elif capability_carrier in {"legacy_model", "refreshed_legacy_scope"}:
         response_create["model"] = "gpt-daybreak-blue-latest"
 
     with TestClient(app_instance) as client:

@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anyio
 import pytest
+from starlette.requests import Request
 
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.models import CompactResponsePayload
@@ -19,6 +21,26 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+@pytest.mark.parametrize("routing_enabled", [None, False], ids=["no-key", "opted-out"])
+async def test_http_capability_check_does_not_serialize_payload_without_native_routing(
+    monkeypatch: pytest.MonkeyPatch, routing_enabled: bool | None
+) -> None:
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "gpt-6-sol", "input": "ordinary work", "instructions": "Be concise."}
+    )
+
+    def reject_serialization(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("Native routing must not serialize payloads for absent or opted-out keys")
+
+    monkeypatch.setattr(type(payload), "model_dump", reject_serialization)
+    api_key = None if routing_enabled is None else SimpleNamespace(automatic_daybreak_routing=routing_enabled)
+    result = await proxy_api_module._required_capability_http_transport_denial(
+        Request({"type": "http", "headers": []}), cast(Any, api_key), payload=payload
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,10 @@ Automatic Daybreak routing MUST pass the existing security-work-authorized requi
 - **WHEN** no permitted account satisfies Trusted Cyber eligibility and existing routing constraints
 - **THEN** the request fails before ordinary-account dispatch
 
+#### Scenario: An open WebSocket observes a narrower API-key scope
+- **WHEN** the key's refreshed policy enables Daybreak routing and narrows its permitted accounts before a create frame
+- **THEN** a new upstream connection selects only from the refreshed permitted scope
+
 ### Requirement: DBB affinity does not rewrite ordinary process locality
 Required routing MUST use conversation affinity without reading or seeding the ordinary process preference. It MUST preserve ordinary selection, key scope, ownership, retry and settlement rules, and MUST NOT enable disabled affinity controls.
 

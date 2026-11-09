@@ -19,3 +19,8 @@ Deployment and fork-PR publication are tracked separately in the operator workfl
 ## Simplification
 - [x] Consolidate duplicated contract/context and test setup without changing routing behavior or removing regression cases.
 - [x] Re-run affected tests, typing, lint and OpenSpec validation; record the required CI hook outcome.
+
+## Upstream review follow-up
+- [x] Regress and fix new WebSocket connections using the handshake key's stale account scope.
+- [x] Avoid serializing typed payloads for native routing when the key is absent or opted out.
+- [x] Validate focused tests and document the contributor-attribution and compact-alias scope dispositions.

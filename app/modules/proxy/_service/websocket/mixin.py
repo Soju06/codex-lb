@@ -2601,7 +2601,7 @@ class _WebSocketMixin:
                         routing_strategy=routing_strategy,
                         model=request_state.model,
                         request_state=request_state,
-                        api_key=api_key,
+                        api_key=request_state.api_key or api_key,
                         client_send_lock=client_send_lock,
                         websocket=websocket,
                     )

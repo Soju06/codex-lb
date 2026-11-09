@@ -8576,7 +8576,11 @@ async def _required_capability_http_transport_denial(
     Native required intent on internal bridge forwarding remains unsupported.
     """
 
-    native_payload = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+    native_enabled = api_key is not None and api_key.automatic_daybreak_routing
+    if isinstance(payload, BaseModel):
+        native_payload = payload.model_dump(mode="json") if native_enabled else None
+    else:
+        native_payload = payload
     custom_intent = _required_capability_values(request.headers) or _required_capability_metadata_values(payload)
     effective_model = _effective_optional_model_for_api_key(api_key, None) if context is not None else None
     try:

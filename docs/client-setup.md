@@ -196,6 +196,27 @@ export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 codex
 ```
 
+### Desktop app: restoring Dot (optional)
+
+Some Codex desktop builds hide the Dot sidebar entry when `model_provider` is set to a custom provider ID such as `codex-lb`. In [issue #2669](https://github.com/Soju06/codex-lb/issues/2669), a user reported that keeping the built-in `openai` provider ID and pointing it at codex-lb brought Dot back while coding requests still routed through codex-lb.
+
+Use this only for a trusted, loopback-only proxy with API key auth disabled, with Codex signed in to ChatGPT. It does not carry over an API key or custom headers from the inactive provider block, so if you use [API key auth](api-keys.md), keep your existing configuration and do not disable authentication to apply this.
+
+1. Back up `~/.codex/config.toml`.
+2. Set these top-level keys, above any `[table]` header:
+
+   ```toml
+   model_provider = "openai"
+   openai_base_url = "http://127.0.0.1:2455/backend-api/codex"
+   ```
+
+3. Keep your existing `[model_providers.codex-lb]` block so you can roll back.
+4. Let active work finish, then fully quit and reopen the desktop app.
+
+To roll back, restore your previous `model_provider` and `openai_base_url` values and restart the app. Changing the provider ID can affect provider-filtered history lists; see [session retagging](#migrating-from-direct-openai-session-retagging).
+
+Reported on the macOS desktop app (build 26.1021.31345) with codex-lb 1.24.0. Not verified on other platforms or builds, and native voice was not tested.
+
 ### Verify WebSocket transport
 
 Use a one-off debug run:

@@ -16,6 +16,11 @@ Run the [WebSocket verification steps](client-setup.md#verify-websocket-transpor
 Fast Mode, Ultrafast, and service-tier behavior is documented in the
 [Responses API compatibility context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/context.md#fast-mode-and-service-tiers).
 
+## Dot missing from the Codex desktop sidebar
+
+**Dot disappeared from the Codex desktop sidebar after I set `model_provider = "codex-lb"`.**
+Some desktop builds only show Dot for the built-in `openai` provider ID. The [desktop recipe](client-setup.md#desktop-app-restoring-dot-optional) shows an optional configuration that keeps that ID while routing through codex-lb. It applies only to a trusted, loopback-only proxy with API key auth disabled.
+
 ## Old Codex sessions missing after migrating
 
 `codex resume` filters by `model_provider` — re-tag old sessions with the built-in retag command. See

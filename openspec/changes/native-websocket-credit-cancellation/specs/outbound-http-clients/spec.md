@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Credit return survives cancellation
-The adapter MUST serialize receive calls and preserve receive credit across failed dispatch. If cancellation occurs while a credit return is being dispatched, the adapter MUST finish dispatch before propagating cancellation and MUST NOT dispatch that credit twice.
+The adapter MUST serialize receive calls. If cancellation occurs while a credit return is being dispatched, the adapter MUST finish dispatch before propagating cancellation and MUST NOT dispatch that credit twice.
 If the native helper cannot acquire a receive-credit permit for an accepted frame, it MUST report a socket failure and MUST NOT panic.
 
 #### Scenario: Cancellation during credit dispatch
@@ -10,7 +10,7 @@ If the native helper cannot acquire a receive-credit permit for an accepted fram
 
 #### Scenario: Credit dispatch fails
 - **WHEN** credit dispatch fails
-- **THEN** the adapter retains the credit for the next receive
+- **THEN** the adapter terminates the affected socket without replaying credit, because dispatch may have partially succeeded
 
 #### Scenario: Native permit unexpectedly unavailable
 - **WHEN** native code cannot acquire the permit for an accepted frame

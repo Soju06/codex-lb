@@ -150,9 +150,9 @@ async def test_credit_return_recovers_without_duplicate_dispatch(
             nonlocal credit_calls
             if command.get("type") == "websocket_consumed":
                 credit_calls += 1
-                if credit_calls == 1 and interruption == "failure":
-                    raise RuntimeError("injected dispatch failure")
                 await original(process, generation, command)
+                if credit_calls == 1 and interruption == "failure":
+                    raise RuntimeError("injected post-write drain failure")
                 if credit_calls == 1 and interruption == "cancel":
                     sent.set()
                     await release.wait()
@@ -163,8 +163,18 @@ async def test_credit_return_recovers_without_duplicate_dispatch(
             assert (await asyncio.wait_for(socket.receive(), 2)).text == "one"
             monkeypatch.setattr(client, "_send_command", interrupted)
             if interruption == "failure":
-                with pytest.raises(RuntimeError, match="injected dispatch failure"):
+                with pytest.raises(Exception, match="receive credit dispatch failed"):
                     await socket.receive()
+                with pytest.raises(Exception, match="receive credit dispatch failed"):
+                    await socket.receive()
+                assert credit_calls == 1
+                peer = await client.websocket(
+                    NativeWebSocketRequest(
+                        url=f"ws://127.0.0.1:{port}", headers={}, connect_timeout_seconds=2, max_message_bytes=1024
+                    )
+                )
+                assert (await asyncio.wait_for(peer.receive(), 2)).text == "one"
+                await peer.close()
             else:
                 receiving = asyncio.create_task(socket.receive())
                 await asyncio.wait_for(sent.wait(), 2)
@@ -172,8 +182,8 @@ async def test_credit_return_recovers_without_duplicate_dispatch(
                 release.set()
                 with pytest.raises(asyncio.CancelledError):
                     await receiving
-            assert (await asyncio.wait_for(socket.receive(), 2)).text == "two"
-            assert credit_calls == (2 if interruption == "failure" else 1)
-            assert (await asyncio.wait_for(socket.receive(), 2)).text == "three"
+                assert (await asyncio.wait_for(socket.receive(), 2)).text == "two"
+                assert credit_calls == 1
+                assert (await asyncio.wait_for(socket.receive(), 2)).text == "three"
         finally:
             await client.aclose()

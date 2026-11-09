@@ -457,6 +457,7 @@ class NativeEgressWebSocket:
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._return_receive_credit = False
         self._receive_lock = asyncio.Lock()
+        self._credit_dispatch_failure: NativeEgressTransportError | None = None
         self._command_sequence = 0
         self._completed = False
         self._closing = False
@@ -481,19 +482,43 @@ class NativeEgressWebSocket:
             return await self._receive_one()
 
     async def _receive_one(self) -> NativeWebSocketMessage:
+        if self._credit_dispatch_failure is not None:
+            raise self._credit_dispatch_failure
         if self._completed and self._messages.empty():
             raise self._terminal_failure or NativeEgressTransportError(
                 "native websocket is closed",
                 failure_phase="websocket_receive",
             )
         if self._return_receive_credit and not self._completed:
-            cancellation = await _await_cleanup_deferring_cancellation(
-                self._client._send_command(
-                    self._process,
-                    self._generation,
-                    {"type": "websocket_consumed", "request_id": self._request_id},
+            try:
+                cancellation = await _await_cleanup_deferring_cancellation(
+                    self._client._send_command(
+                        self._process,
+                        self._generation,
+                        {"type": "websocket_consumed", "request_id": self._request_id},
+                    )
                 )
-            )
+            except Exception as exc:
+                # The helper may already have received the command even if
+                # drain failed. Replaying credit could admit two frames.
+                failure = NativeEgressTransportError(
+                    "native websocket receive credit dispatch failed",
+                    failure_phase="websocket_receive",
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._client._abort_request(self._request_id, self._generation, self._events),
+                        timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, NativeEgressError):
+                    pass
+                finally:
+                    self._pump_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._pump_task
+                    self._credit_dispatch_failure = failure
+                    self._finish()
+                raise failure from exc
             self._return_receive_credit = False
             if cancellation is not None:
                 raise cancellation

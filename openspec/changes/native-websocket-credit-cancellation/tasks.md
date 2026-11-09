@@ -1,0 +1,3 @@
+- [x] Preserve credit across failed dispatch and cancellation.
+- [x] Return a native socket error for an unavailable permit.
+- [x] Test cancellation, dispatch failure, and native flow control.

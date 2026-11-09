@@ -55,6 +55,7 @@ pub(crate) enum NativeWebSocketFailure {
     WebSocket(WebSocketError),
     Timeout,
     LivenessTimeout,
+    ReceiveCreditUnavailable,
     Output(std::io::Error),
 }
 
@@ -65,6 +66,9 @@ impl std::fmt::Display for NativeWebSocketFailure {
             Self::WebSocket(error) => write!(formatter, "{error}"),
             Self::Timeout => formatter.write_str("websocket connect timed out"),
             Self::LivenessTimeout => formatter.write_str("websocket pong timed out"),
+            Self::ReceiveCreditUnavailable => {
+                formatter.write_str("websocket receive credit unavailable")
+            }
             Self::Output(error) => write!(formatter, "{error}"),
         }
     }
@@ -81,6 +85,31 @@ impl From<WebSocketError> for NativeWebSocketFailure {
 impl From<std::io::Error> for NativeWebSocketFailure {
     fn from(error: std::io::Error) -> Self {
         Self::Output(error)
+    }
+}
+
+fn consume_receive_credit(credit: &Semaphore) -> Result<(), NativeWebSocketFailure> {
+    credit
+        .try_acquire()
+        .map_err(|_| NativeWebSocketFailure::ReceiveCreditUnavailable)?
+        .forget();
+    Ok(())
+}
+
+#[cfg(test)]
+mod credit_tests {
+    use super::*;
+
+    #[test]
+    fn missing_credit_is_an_error_instead_of_a_panic() {
+        let credit = Semaphore::new(1);
+        assert!(consume_receive_credit(&credit).is_ok());
+        assert!(matches!(
+            consume_receive_credit(&credit),
+            Err(NativeWebSocketFailure::ReceiveCreditUnavailable)
+        ));
+        credit.add_permits(1);
+        assert!(consume_receive_credit(&credit).is_ok());
     }
 }
 
@@ -211,7 +240,7 @@ pub(crate) async fn execute_websocket(
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         if request.receive_credit {
-                            receive_credit.try_acquire().expect("receive credit").forget();
+                            consume_receive_credit(&receive_credit)?;
                         }
                         let text = text.to_string();
                         let event = request
@@ -244,7 +273,7 @@ pub(crate) async fn execute_websocket(
                     }
                     Some(Ok(Message::Binary(data))) => {
                         if request.receive_credit {
-                            receive_credit.try_acquire().expect("receive credit").forget();
+                            consume_receive_credit(&receive_credit)?;
                         }
                         emit(
                             output,
@@ -477,6 +506,15 @@ pub(crate) async fn emit_websocket_error(
         NativeWebSocketFailure::LivenessTimeout => (
             "native websocket pong timed out",
             "liveness_timeout",
+            false,
+            false,
+            None,
+            Vec::new(),
+            None,
+        ),
+        NativeWebSocketFailure::ReceiveCreditUnavailable => (
+            "native websocket receive credit unavailable",
+            "protocol",
             false,
             false,
             None,

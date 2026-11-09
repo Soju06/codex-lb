@@ -114,3 +114,66 @@ async def test_native_close_reason_reaches_client() -> None:
     assert "close_code=1012" in detail
     assert "server restart" in detail
     assert "received_events=0 received_bytes=0" in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["failure", "cancel"])
+async def test_credit_return_recovers_without_duplicate_dispatch(
+    interruption: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = os.environ.get("CODEX_LB_TEST_NATIVE_HELPER")
+    if not helper:
+        pytest.skip("set CODEX_LB_TEST_NATIVE_HELPER to the candidate-built worker")
+
+    async def upstream(socket):
+        for text in ("one", "two", "three"):
+            await socket.send(text)
+        await socket.wait_closed()
+
+    async with serve(upstream, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = SubprocessNativeEgressClient(Path(helper))
+        socket = await client.websocket(
+            NativeWebSocketRequest(
+                url=f"ws://127.0.0.1:{port}",
+                headers={},
+                connect_timeout_seconds=2,
+                max_message_bytes=1024,
+            )
+        )
+        original = client._send_command
+        sent = asyncio.Event()
+        release = asyncio.Event()
+        credit_calls = 0
+
+        async def interrupted(process, generation, command):
+            nonlocal credit_calls
+            if command.get("type") == "websocket_consumed":
+                credit_calls += 1
+                if credit_calls == 1 and interruption == "failure":
+                    raise RuntimeError("injected dispatch failure")
+                await original(process, generation, command)
+                if credit_calls == 1 and interruption == "cancel":
+                    sent.set()
+                    await release.wait()
+                return
+            await original(process, generation, command)
+
+        try:
+            assert (await asyncio.wait_for(socket.receive(), 2)).text == "one"
+            monkeypatch.setattr(client, "_send_command", interrupted)
+            if interruption == "failure":
+                with pytest.raises(RuntimeError, match="injected dispatch failure"):
+                    await socket.receive()
+            else:
+                receiving = asyncio.create_task(socket.receive())
+                await asyncio.wait_for(sent.wait(), 2)
+                receiving.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await receiving
+            assert (await asyncio.wait_for(socket.receive(), 2)).text == "two"
+            assert credit_calls == (2 if interruption == "failure" else 1)
+            assert (await asyncio.wait_for(socket.receive(), 2)).text == "three"
+        finally:
+            await client.aclose()

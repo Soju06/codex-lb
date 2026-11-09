@@ -456,6 +456,7 @@ class NativeEgressWebSocket:
         )
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._return_receive_credit = False
+        self._receive_lock = asyncio.Lock()
         self._command_sequence = 0
         self._completed = False
         self._closing = False
@@ -476,18 +477,26 @@ class NativeEgressWebSocket:
         )
 
     async def receive(self) -> NativeWebSocketMessage:
+        async with self._receive_lock:
+            return await self._receive_one()
+
+    async def _receive_one(self) -> NativeWebSocketMessage:
         if self._completed and self._messages.empty():
             raise self._terminal_failure or NativeEgressTransportError(
                 "native websocket is closed",
                 failure_phase="websocket_receive",
             )
         if self._return_receive_credit and not self._completed:
-            self._return_receive_credit = False
-            await self._client._send_command(
-                self._process,
-                self._generation,
-                {"type": "websocket_consumed", "request_id": self._request_id},
+            cancellation = await _await_cleanup_deferring_cancellation(
+                self._client._send_command(
+                    self._process,
+                    self._generation,
+                    {"type": "websocket_consumed", "request_id": self._request_id},
+                )
             )
+            self._return_receive_credit = False
+            if cancellation is not None:
+                raise cancellation
         item = await self._messages.get()
         if isinstance(item, BaseException):
             raise item

@@ -1,0 +1,3 @@
+The prior 64-message adapter queue erased all buffered messages on overflow. Waiting in that pump alone would move overflow to the shared helper reader. A one-message receive-credit window applies pressure at the upstream socket and bounds both message count and payload memory without blocking other helper requests. For example, a 100-delta burst remains in socket/TCP buffers until its consumer drains. This adds one local IPC credit per data message; no timers or operator settings are needed. Ping deadlines are suspended while local reads are paused.
+
+Existing incident logs erase phases, so reproducing this mechanism does not prove that every historical disconnect was queue overflow. Diagnostics preserve the distinction for subsequent observations.

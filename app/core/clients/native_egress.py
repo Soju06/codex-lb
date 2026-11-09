@@ -39,6 +39,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
         "websocket_responses_events_v1",
         "websocket_responses_routing_v1",
         "websocket_send_ack",
+        "websocket_receive_credit_v1",
     }
 )
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
@@ -454,6 +455,9 @@ class NativeEgressWebSocket:
             maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
         )
         self._pending: dict[str, asyncio.Future[None]] = {}
+        self._return_receive_credit = False
+        self._receive_lock = asyncio.Lock()
+        self._credit_dispatch_failure: NativeEgressTransportError | None = None
         self._command_sequence = 0
         self._completed = False
         self._closing = False
@@ -474,14 +478,54 @@ class NativeEgressWebSocket:
         )
 
     async def receive(self) -> NativeWebSocketMessage:
+        async with self._receive_lock:
+            return await self._receive_one()
+
+    async def _receive_one(self) -> NativeWebSocketMessage:
+        if self._credit_dispatch_failure is not None:
+            raise self._credit_dispatch_failure
         if self._completed and self._messages.empty():
             raise self._terminal_failure or NativeEgressTransportError(
                 "native websocket is closed",
                 failure_phase="websocket_receive",
             )
+        if self._return_receive_credit and not self._completed:
+            try:
+                cancellation = await _await_cleanup_deferring_cancellation(
+                    self._client._send_command(
+                        self._process,
+                        self._generation,
+                        {"type": "websocket_consumed", "request_id": self._request_id},
+                    )
+                )
+            except Exception as exc:
+                # The helper may already have received the command even if
+                # drain failed. Replaying credit could admit two frames.
+                failure = NativeEgressTransportError(
+                    "native websocket receive credit dispatch failed",
+                    failure_phase="websocket_receive",
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._client._abort_request(self._request_id, self._generation, self._events),
+                        timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS,
+                    )
+                except (TimeoutError, NativeEgressError):
+                    pass
+                finally:
+                    self._pump_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._pump_task
+                    self._credit_dispatch_failure = failure
+                    self._finish()
+                raise failure from exc
+            self._return_receive_credit = False
+            if cancellation is not None:
+                raise cancellation
         item = await self._messages.get()
         if isinstance(item, BaseException):
             raise item
+        self._return_receive_credit = item.kind in {"text", "binary"}
         return item
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -690,9 +734,6 @@ class NativeEgressWebSocket:
         try:
             self._messages.put_nowait(message)
         except asyncio.QueueFull as exc:
-            while not self._messages.empty():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    self._messages.get_nowait()
             raise NativeEgressTransportError(
                 "native websocket consumer exceeded the bounded message queue",
                 failure_phase="consumer_backpressure",
@@ -907,6 +948,7 @@ class SubprocessNativeEgressClient:
                     ),
                     "proxy_url": request.proxy_url,
                     "interpret_responses": request.interpret_responses,
+                    "receive_credit": True,
                 },
             )
             item = await asyncio.wait_for(events.get(), timeout=request.connect_timeout_seconds)
@@ -1197,9 +1239,12 @@ class SubprocessNativeEgressClient:
         ]
         for request_id, events in failed:
             self._streams.pop(request_id, None)
-            while not events.empty():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    events.get_nowait()
+            # Credit-controlled WebSockets always have room for the terminal;
+            # retain their accepted data even when the helper exits.
+            if events.full():
+                while not events.empty():
+                    with contextlib.suppress(asyncio.QueueEmpty):
+                        events.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
                 events.put_nowait(failure)
 

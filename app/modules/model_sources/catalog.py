@@ -225,6 +225,9 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     tool types are dropped unless the model opts in via
     ``"supports_search_tool": true`` (web search) or lists the tool type in
     ``"experimental_supported_tools"`` in ``raw_metadata_json``.
+    A declared ``"multi_agent_version"`` also implies support for the
+    ``"namespace"`` collaboration tool.
+
     """
     entry = next(
         (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
@@ -239,6 +242,10 @@ def source_model_supported_tool_types(source: ModelSource, model: str) -> frozen
     experimental = raw.get("experimental_supported_tools")
     if is_json_list(experimental):
         supported.update(item for item in experimental if isinstance(item, str))
+    multi_agent_version = raw.get("multi_agent_version")
+    if isinstance(multi_agent_version, str) and multi_agent_version.strip():
+        supported.add("namespace")
+
     return frozenset(supported)
 
 

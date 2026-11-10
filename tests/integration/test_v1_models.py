@@ -732,6 +732,7 @@ async def test_codex_catalog_sanitizes_invalid_source_tool_metadata(
 
 @pytest.mark.asyncio
 async def test_codex_catalog_preserves_source_multi_agent_metadata(async_client):
+    """Source multi-agent metadata is preserved in the Codex catalog."""
     model = "external-multi-agent-model"
 
     metadata = {

@@ -1577,6 +1577,7 @@ async def test_backend_codex_responses_filters_unsupported_model_source_tools(as
 )
 @pytest.mark.asyncio
 async def test_responses_preserves_collaboration_namespace_for_multi_agent_source(async_client, monkeypatch, path):
+    """The collaboration namespace survives Responses forwarding for multi-agent sources."""
     model = "external-multi-agent-responses"
 
     await _create_model_source(

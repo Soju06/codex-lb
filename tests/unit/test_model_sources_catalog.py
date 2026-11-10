@@ -215,6 +215,7 @@ def test_source_model_supported_tool_types_includes_experimental_tools() -> None
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 def test_source_model_supported_tool_types_includes_namespace_for_multi_agent_models(version: str) -> None:
+    """A declared multi-agent version implies namespace support."""
     source = _overrides_source({"multi_agent_version": version})
 
     assert "namespace" in source_model_supported_tool_types(source, "llama3.1:8b")
@@ -222,6 +223,7 @@ def test_source_model_supported_tool_types_includes_namespace_for_multi_agent_mo
 
 @pytest.mark.parametrize("version", [None, "", "  ", False, 2, ["v2"]])
 def test_source_model_supported_tool_types_ignores_invalid_multi_agent_versions(version: object) -> None:
+    """Missing, blank, or malformed multi-agent versions imply no namespace support."""
     source = _overrides_source({"multi_agent_version": version})
 
     assert "namespace" not in source_model_supported_tool_types(source, "llama3.1:8b")

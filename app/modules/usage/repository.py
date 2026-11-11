@@ -840,6 +840,7 @@ class UsageRepository:
         chatgpt_account_id: str | None,
         windows: Collection[UsageWindowWrite],
         should_skip: Callable[[str], bool],
+        recorded_at: datetime | None = None,
     ) -> str | None:
         """Resolve a live snapshot owner and atomically persist its windows."""
         if not windows:
@@ -882,7 +883,7 @@ class UsageRepository:
                     await self._session.rollback()
                     return None
 
-                entries = _account_snapshot_entries(resolved_account_id, windows)
+                entries = _account_snapshot_entries(resolved_account_id, windows, recorded_at=recorded_at)
                 # Telemetry write: this transaction only locks the owner and
                 # appends usage-history rows, so it may skip synchronous WAL
                 # flush just like add_account_snapshot().

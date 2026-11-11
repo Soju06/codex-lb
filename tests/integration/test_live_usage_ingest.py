@@ -887,3 +887,52 @@ async def test_nested_lifespan_stop_does_not_orphan_or_kill_the_outer_ingestor(d
     assert live_ingest._ingestor is None
     assert live_hub._publisher is None
     assert _pending_consumers() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample_after_refresh", [False, True])
+async def test_queued_live_sample_retains_capture_order_after_reset_refresh(
+    monkeypatch: pytest.MonkeyPatch, db_setup, sample_after_refresh: bool
+) -> None:
+    from datetime import datetime, timedelta
+
+    from app.modules.usage.repository import UsageWindowWrite
+
+    del db_setup
+    account_id = "acc_live_ordering"
+    base = datetime(2026, 11, 11, 12, 0, 0)
+    sampled_at = base + timedelta(seconds=20 if sample_after_refresh else 0)
+    refreshed_at = base + timedelta(seconds=10)
+    written_at = base + timedelta(seconds=30)
+    monkeypatch.setattr(live_ingest, "utcnow", lambda: sampled_at, raising=False)
+    monkeypatch.setattr(usage_repository_module, "utcnow", lambda: written_at)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account(account_id, "order@example.com"))
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    exhausted = LiveRateLimitSnapshot(
+        primary=LiveUsageWindow(100.0, 300, int(base.timestamp()) + 3600),
+        secondary=None,
+        credits_has=None,
+        credits_unlimited=None,
+        credits_balance=None,
+    )
+    # Queue without a consumer: settlement happens only after the refresh.
+    ingestor.publish(exhausted, account_id=account_id)
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_account_snapshot(
+            account_id,
+            [UsageWindowWrite(window="primary", used_percent=0.0, window_minutes=300)],
+            recorded_at=refreshed_at,
+        )
+    try:
+        await ingestor._ingest(ingestor._queue.get_nowait())
+    finally:
+        await ingestor.stop()
+    async with SessionLocal() as session:
+        latest = await UsageRepository(session).latest_entry_for_account(account_id, window="primary")
+    assert latest is not None
+    assert latest.used_percent == (100.0 if sample_after_refresh else 0.0)
+    assert latest.recorded_at == (sampled_at if sample_after_refresh else refreshed_at)
+    rows = await _usage_rows_for(account_id)
+    exhausted_row = next(row for row in rows if row.used_percent == 100.0)
+    assert exhausted_row.recorded_at == sampled_at

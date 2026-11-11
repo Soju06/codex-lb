@@ -16,3 +16,5 @@ completion-time timestamps does not provide the fetch-start provenance required
 by this evidence gate. The intended current deployment is a single live backend
 with the updated writer and router installed together. Do not claim rolling
 mixed-version recovery safety. No production credit is spent in verification.
+
+Post-deployment review followup: reproduced synthetic relative-deadline processing-delay false recovery; require upstream absolute deadline for reset proof (relative values remain available for ordinary usage reporting). Queued live snapshots retain observation ordering rather than persistence time. Optional duration/stale sibling cases covered in runtime recovery tests. No real reset credits spent during regression runs.

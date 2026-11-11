@@ -813,7 +813,13 @@ class UsageUpdater:
         reset_credit_cleared_block = reset_credit_redemption is not None and _reset_credit_cleared_block(
             account,
             redemption=reset_credit_redemption,
-            fresh_reset_at={write.window: write.reset_at for write in snapshot_windows},
+            # Relative deadlines include fetch/processing uncertainty and cannot
+            # prove that the specifically blocked window was reset.
+            fresh_reset_at={
+                slot: window.reset_at
+                for slot, window in (("primary", primary), ("secondary", secondary), ("monthly", monthly))
+                if window is not None
+            },
         )
         entries = await self._usage_repo.add_account_snapshot(
             account.id,

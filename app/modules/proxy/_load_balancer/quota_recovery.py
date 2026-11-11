@@ -24,7 +24,20 @@ def _runtime_quota_recovered(
         runtime.last_error_at or 0,
     )
     measured = [entry for entry in entries if entry is not None]
-    return bool(measured) and all(
+    if not measured or any(entry.recorded_at is None for entry in measured):
+        return False
+    # Omitted windows retain historical rows. Only siblings of the newest
+    # fetch describe the snapshot that authorized persisted recovery. Keep the
+    # canonical sibling tolerance used by reset-baseline capture: historical
+    # rows can differ slightly in timing/precision. This conservatively retains
+    # nearby exhausted siblings rather than silently discarding them.
+    newest = max(entry.recorded_at for entry in measured)
+    measured = [
+        entry
+        for entry in measured
+        if (newest - entry.recorded_at).total_seconds() <= usage_core.SIBLING_FETCH_MARGIN_SECONDS
+    ]
+    return all(
         entry.used_percent is not None
         and 0 <= entry.used_percent < 100
         and entry.reset_at is not None
@@ -46,7 +59,9 @@ def recovered_runtime_holds(
     now: float,
 ) -> tuple[float | None, float | None, float | None]:
     """Retire proven old quota holds without replacing leases or non-quota errors."""
-    if primary_window_minutes is None or usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0:
+    # A missing duration is not an absent primary window. The caller already
+    # remaps weekly-primary rows into secondary; do not count that row twice.
+    if primary is secondary or usage_core.capacity_for_plan(account.plan_type, "primary") == 0.0:
         primary = None
     if not _runtime_quota_recovered(account, runtime, (primary, secondary), now=now):
         return runtime.reset_at, runtime.blocked_at, runtime.cooldown_until

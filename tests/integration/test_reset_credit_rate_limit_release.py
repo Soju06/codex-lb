@@ -50,7 +50,7 @@ async def _blocked_account(
     """
     upstream_id = f"weekly-{name}"
     email = f"{name}@example.com"
-    payload = {
+    payload: dict[str, object] = {
         "email": email,
         "chatgpt_account_id": upstream_id,
         "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
@@ -672,3 +672,36 @@ async def test_failed_reset_credit_preserves_original_quota_block(async_client, 
         account = await session.get(Account, account_id)
         assert account is not None
         assert (account.status, account.reset_at, account.blocked_at, account.deactivation_reason) == before
+
+
+@pytest.mark.asyncio
+async def test_relative_deadline_processing_delay_does_not_release_unrelated_429(async_client, monkeypatch) -> None:
+    from app.modules.usage import updater
+
+    account_id = await _blocked_account(async_client, "relative-deadline-delay")
+    now = updater._now_epoch()
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None and account.reset_at is not None
+        remaining = account.reset_at - now
+
+    async def fetch_relative(**_kwargs):
+        return UsagePayload(
+            plan_type="pro",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=0,
+                    reset_after_seconds=remaining,
+                    limit_window_seconds=604_800,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(updater, "fetch_usage", fetch_relative)
+    # Only the derived deadline moves: simulate processing after network receipt.
+    monkeypatch.setattr(updater, "_now_epoch", lambda: now + 60)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_rate_limited(account_id)

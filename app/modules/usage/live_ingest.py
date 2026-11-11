@@ -5,10 +5,12 @@ import logging
 import time
 import weakref
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.core import usage as usage_core
 from app.core.usage.live_hub import register_live_usage_publisher
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
+from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
@@ -73,6 +75,7 @@ class _QueuedSnapshot:
     account_id: str | None
     chatgpt_account_id: str | None
     snapshot: LiveRateLimitSnapshot
+    recorded_at: datetime
 
 
 def _fingerprint(snapshot: LiveRateLimitSnapshot) -> tuple[object, ...]:
@@ -119,7 +122,10 @@ class LiveUsageIngestor:
         account_id: str | None = None,
         chatgpt_account_id: str | None = None,
     ) -> None:
-        item = _QueuedSnapshot(account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot)
+        # Capture before queueing: delayed settlement must not supersede a newer poll.
+        item = _QueuedSnapshot(
+            account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot, recorded_at=utcnow()
+        )
         if account_id is not None and self._should_skip(account_id, snapshot):
             return
         try:
@@ -243,6 +249,7 @@ class LiveUsageIngestor:
                 account_id=item.account_id,
                 chatgpt_account_id=item.chatgpt_account_id,
                 windows=windows,
+                recorded_at=item.recorded_at,
                 should_skip=lambda resolved: self._should_skip(resolved, snapshot),
             )
         if account_id is None:

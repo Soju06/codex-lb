@@ -15,6 +15,8 @@ class RuntimeState:
     last_error_at: float | None = None
     last_selected_at: float | None = None
     error_count: int = 0
+    quota_error_count: int = 0
+    last_non_quota_error_at: float | None = None
     version: int = 0
     health_version: int = 0
     blocked_at: float | None = None

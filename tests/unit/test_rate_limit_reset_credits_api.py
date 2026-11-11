@@ -44,6 +44,7 @@ from app.modules.rate_limit_reset_credits.api import (
     serialize_reset_credit_redeem,
 )
 from app.modules.rate_limit_reset_credits.store import RateLimitResetCreditsStore
+from app.modules.usage.updater import ResetCreditRedemption
 
 pytestmark = pytest.mark.unit
 _ADMIN_PRINCIPAL = admin_principal(auth_mode=DashboardAuthMode.STANDARD, auth_method="local_bootstrap")
@@ -833,8 +834,9 @@ async def test_redeem_selects_soonest_calls_upstream_and_invalidates_cache() -> 
             }
         )
 
-    async def refresh_usage(account: Account) -> None:
+    async def refresh_usage(account: Account, reset_credit_redemption: ResetCreditRedemption | None) -> None:
         refreshed.append(account.id)
+        assert reset_credit_redemption is not None
 
     result = await _redeem_soonest_reset_credit(
         account=_account(),
@@ -898,7 +900,8 @@ async def test_redeem_restores_snapshot_when_usage_refresh_fails() -> None:
             }
         )
 
-    async def refresh_usage(account: Account) -> None:
+    async def refresh_usage(account: Account, reset_credit_redemption: ResetCreditRedemption | None) -> None:
+        assert reset_credit_redemption is not None
         raise RuntimeError("usage refresh failed")
 
     await _redeem_soonest_reset_credit(
@@ -946,8 +949,11 @@ async def test_redeem_restores_snapshot_when_force_refresh_returns_false(
         )
 
     class _UsageUpdater:
-        async def force_refresh(self, account: Account) -> bool:
+        async def force_refresh(
+            self, account: Account, *, reset_credit_redemption: ResetCreditRedemption | None = None
+        ) -> bool:
             assert account.id == "acc_1"
+            assert reset_credit_redemption is not None
             return False
 
     class _SelectionCache:

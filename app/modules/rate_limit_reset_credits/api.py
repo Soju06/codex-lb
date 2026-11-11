@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -62,7 +63,12 @@ from app.modules.rate_limit_reset_credits.store import (
     get_rate_limit_reset_credits_store,
 )
 from app.modules.shared.schemas import DashboardModel
-from app.modules.usage.updater import _resolve_upstream_route_for_account
+from app.modules.usage.background_repository import BackgroundUsageRepository
+from app.modules.usage.updater import (
+    ResetCreditRedemption,
+    _resolve_upstream_route_for_account,
+    capture_reset_credit_baseline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +80,7 @@ router = APIRouter(
 
 FetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
-RefreshUsageFn = Callable[[Account], Awaitable[None]]
+RefreshUsageFn = Callable[[Account, ResetCreditRedemption | None], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 
 _NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
@@ -396,6 +402,11 @@ async def _redeem_soonest_reset_credit_locked(
         # leaves a durable pin any replica can reuse.
         credit_id = await pin_redeem_request(account.id, redeem_request_id, credit.id)
 
+    # Captured before the consume request: a 429 recorded after this point may
+    # postdate the reset, and a refresh recorded after it may already carry the
+    # post-reset deadline, so neither can count as evidence.
+    redeem_started_at = time.time()
+    reset_credit_baseline = await capture_reset_credit_baseline(BackgroundUsageRepository(), redeem_account.id)
     try:
         result = await effective_consume_fn(
             access_token,
@@ -415,7 +426,14 @@ async def _redeem_soonest_reset_credit_locked(
 
     if refresh_usage is not None:
         try:
-            await refresh_usage(redeem_account)
+            await refresh_usage(
+                redeem_account,
+                (
+                    ResetCreditRedemption(started_at=redeem_started_at, baseline_reset_at=reset_credit_baseline)
+                    if result.code == "reset" and result.windows_reset > 0
+                    else None
+                ),
+            )
         except Exception:
             logger.warning(
                 "Reset credit consume succeeded but usage refresh failed account_id=%s",
@@ -460,8 +478,11 @@ def _build_refresh_usage_callback(context: AccountsContext) -> RefreshUsageFn | 
     if usage_updater is None:
         return None
 
-    async def refresh_usage(account: Account) -> None:
-        refreshed = await usage_updater.force_refresh(account)
+    async def refresh_usage(account: Account, reset_credit_redemption: ResetCreditRedemption | None) -> None:
+        refreshed = await usage_updater.force_refresh(
+            account,
+            reset_credit_redemption=reset_credit_redemption,
+        )
         if not refreshed:
             raise RuntimeError(f"Forced usage refresh returned no update for account {account.id}")
         get_account_selection_cache().invalidate()

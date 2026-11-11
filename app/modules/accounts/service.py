@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import timedelta
 from typing import cast
 from uuid import uuid4
@@ -75,8 +76,14 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.background_repository import BackgroundUsageRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
-from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
+from app.modules.usage.updater import (
+    AdditionalUsageRepositoryPort,
+    ResetCreditRedemption,
+    UsageUpdater,
+    capture_reset_credit_baseline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +349,15 @@ class AccountsService:
 
         primary_before, secondary_before = await self._latest_usage_percents(account_id)
         status_before = account.status.value
+        # Captured before the consume request: a 429 recorded after this point
+        # may postdate the reset, and a refresh recorded after it may already
+        # carry the post-reset deadline, so neither can count as evidence.
+        redeem_started_at = time.time()
+        reset_credit_baseline = (
+            # Own session: a failed read must not abort the request transaction
+            # (PostgreSQL), which the consume and the later reads still use.
+            await capture_reset_credit_baseline(BackgroundUsageRepository(), account_id) if self._usage_repo else {}
+        )
         upstream_response, account = await self._consume_usage_reset_credit(
             account, redeem_request_id=redeem_request_id
         )
@@ -350,7 +366,14 @@ class AccountsService:
 
         usage_written = False
         if upstream_response.code in ("reset", "already_redeemed") and self._usage_repo and self._usage_updater:
-            usage_written = await self._usage_updater.force_refresh(account)
+            usage_written = await self._usage_updater.force_refresh(
+                account,
+                reset_credit_redemption=(
+                    ResetCreditRedemption(started_at=redeem_started_at, baseline_reset_at=reset_credit_baseline)
+                    if upstream_response.code == "reset" and upstream_response.windows_reset > 0
+                    else None
+                ),
+            )
             get_account_selection_cache().invalidate()
 
         refreshed = await self._repo.get_by_id(account_id) or account

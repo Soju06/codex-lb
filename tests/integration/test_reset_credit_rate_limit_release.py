@@ -551,3 +551,124 @@ async def test_confirmed_reset_credit_releases_account_with_reported_raw_plan_ty
     response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
     assert response.status_code == 200, response.text
     await _assert_active(account_id)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reset_credit_restores_same_live_balancer(async_client, monkeypatch) -> None:
+    """A successful dashboard reset must recover the existing router, not only its DB row."""
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from app.modules.accounts.repository import AccountsRepository
+    from app.modules.api_keys.repository import ApiKeysRepository
+    from app.modules.proxy.load_balancer import LoadBalancer
+    from app.modules.proxy.repo_bundle import ProxyRepositories
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+    from app.modules.request_logs.repository import RequestLogsRepository
+    from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+        async with SessionLocal() as session:
+            yield ProxyRepositories(
+                accounts=AccountsRepository(session),
+                usage=UsageRepository(session),
+                request_logs=RequestLogsRepository(session),
+                sticky_sessions=StickySessionsRepository(session),
+                api_keys=ApiKeysRepository(session),
+                additional_usage=AdditionalUsageRepository(session),
+            )
+
+    account_id = await _blocked_account(async_client, "same-live-balancer")
+    balancer = LoadBalancer(repo_factory)
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        old_deadline = account.reset_at
+    assert old_deadline is not None
+
+    # Exercise the real 429 path so the same router retains its local cooldown.
+    # Backdate only the event clock, avoiding sleeps while satisfying the
+    # redemption fence that deliberately rejects a block in the consume second.
+    event_time = time.time() - 10
+    with monkeypatch.context() as clock:
+        clock.setattr("time.time", lambda: event_time)
+        await balancer.mark_rate_limit(
+            account, {"message": "Rate limit exceeded. Try again in 20m.", "resets_at": old_deadline}
+        )
+    blocked = await balancer.select_account(account_ids={account_id})
+    assert blocked.account is None
+
+    await _patch_usage_fetch(monkeypatch)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    await _assert_active(account_id)
+
+    recovered = await balancer.select_account(account_ids={account_id})
+    assert recovered.account is not None, recovered.error_message
+    assert recovered.account.id == account_id
+    await _assert_active(account_id)
+
+
+@pytest.mark.parametrize(
+    "protected_status", [AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED]
+)
+@pytest.mark.asyncio
+async def test_confirmed_reset_credit_preserves_concurrent_hard_block(
+    async_client, monkeypatch, protected_status: AccountStatus
+) -> None:
+    account_id = await _blocked_account(async_client, f"protected-{protected_status.value}")
+    await _patch_usage_fetch(monkeypatch)
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+
+    async def consume_with_concurrent_block(*_args, **_kwargs):
+        async with SessionLocal() as session:
+            await session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(status=protected_status, deactivation_reason="protected concurrent transition")
+            )
+            await session.commit()
+        return ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "credit-weekly", "status": "redeemed"}}
+        )
+
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", consume_with_concurrent_block)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code == 200, response.text
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.status == protected_status
+        assert account.deactivation_reason == "protected concurrent transition"
+
+
+@pytest.mark.asyncio
+async def test_failed_reset_credit_preserves_original_quota_block(async_client, monkeypatch) -> None:
+    from app.core.clients.rate_limit_reset_credits import ConsumeResetCreditError
+
+    account_id = await _blocked_account(async_client, "consume-failure")
+    await _patch_dashboard_redeem(monkeypatch, code="reset", windows_reset=1)
+    await _prime_dashboard_credit(account_id)
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        before = (account.status, account.reset_at, account.blocked_at, account.deactivation_reason)
+
+    async def fail_consume(*_args, **_kwargs):
+        raise ConsumeResetCreditError(503, "Synthetic upstream consume failure")
+
+    async def unexpected_refresh(**_kwargs):
+        pytest.fail("Failed consume must not fetch a recovery snapshot")
+
+    monkeypatch.setattr(reset_credits_api, "consume_reset_credit", fail_consume)
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", unexpected_refresh)
+    response = await async_client.post(f"/api/accounts/{account_id}/rate-limit-reset-credits/consume")
+    assert response.status_code >= 400, response.text
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert (account.status, account.reset_at, account.blocked_at, account.deactivation_reason) == before

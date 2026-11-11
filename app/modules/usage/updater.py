@@ -616,6 +616,7 @@ class UsageUpdater:
     ) -> AccountRefreshResult:
         access_token = access_token_override or self._encryptor.decrypt(account.access_token_encrypted)
         payload: UsagePayload | None = None
+        fetch_started_at = utcnow()
         try:
             route = await _resolve_upstream_route_for_account(account, operation="usage_refresh")
             payload = await fetch_usage(
@@ -817,6 +818,7 @@ class UsageUpdater:
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
+            recorded_at=fetch_started_at,
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(

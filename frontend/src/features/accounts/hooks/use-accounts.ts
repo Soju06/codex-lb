@@ -79,6 +79,9 @@ export function useAccountMutations() {
     accountId: string;
     redeemRequestId: string;
   } | null>(null);
+  // Per-account request IDs for redeem-all, kept until that account's redeem
+  // succeeds so a retry after a lost response cannot consume a second credit.
+  const redeemAllRequestIdsRef = useRef<Map<string, string>>(new Map());
 
   const importMutation = useMutation({
     mutationFn: importAccount,
@@ -251,9 +254,20 @@ export function useAccountMutations() {
       const results: RedeemAllResult[] = [];
       for (const accountId of accountIds) {
         try {
-          await consumeRateLimitResetCredit(accountId, {
-            redeemRequestId: createRedeemRequestId(),
-          });
+          const redeemRequestId = redeemAllRequestIdsRef.current.get(accountId) ?? createRedeemRequestId();
+          redeemAllRequestIdsRef.current.set(accountId, redeemRequestId);
+          const response = await consumeRateLimitResetCredit(accountId, { redeemRequestId });
+          // The request either consumed a credit or was answered definitively, so
+          // the pinned ID is no longer needed.
+          redeemAllRequestIdsRef.current.delete(accountId);
+          if (response.code === "no_credit") {
+            results.push({ accountId, ok: false, error: t("accounts.toasts.noUsageResetCredits") });
+            continue;
+          }
+          if (response.code === "nothing_to_reset") {
+            results.push({ accountId, ok: false, error: t("accounts.toasts.nothingToReset") });
+            continue;
+          }
           results.push({ accountId, ok: true });
         } catch (error) {
           results.push({

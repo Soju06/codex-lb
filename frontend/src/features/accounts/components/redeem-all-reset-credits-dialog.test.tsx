@@ -98,4 +98,24 @@ describe("RedeemAllResetCreditsDialog", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
+
+  it("reports an account as failed when the response says no credit was consumed", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post(consumeUrl("acc_a"), () =>
+        HttpResponse.json({ code: "no_credit", windowsReset: 0, redeemedAt: null }),
+      ),
+      http.post(consumeUrl("acc_b"), () =>
+        HttpResponse.json({ code: "reset", windowsReset: 1, redeemedAt: "2026-01-01T12:00:00.000Z" }),
+      ),
+    );
+    const onOpenChange = renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Redeem on 2 accounts" }));
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Redeemed")).toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(toastWarning).toHaveBeenCalledWith("Redeemed on 1 of 2 accounts; 1 failed");
+  });
 });

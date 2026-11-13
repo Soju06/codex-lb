@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Plus, Search } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, RotateCcw, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -33,6 +33,9 @@ export type AccountListProps = {
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
+  /** Number of accounts that can redeem a reset credit; the action is hidden at zero. */
+  redeemAllAccountCount?: number;
+  onRedeemAllResetCredits?: () => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
   showResetCreditBadges?: boolean;
@@ -45,6 +48,8 @@ export function AccountList({
   onSelect,
   onOpenImport,
   onOpenOauth,
+  redeemAllAccountCount = 0,
+  onRedeemAllResetCredits,
   sortMode,
   onSortModeChange,
   showResetCreditBadges = true,
@@ -150,6 +155,19 @@ export function AccountList({
           {t("accounts.list.addAccount")}
         </Button>
       </div>
+
+      {!readOnly && onRedeemAllResetCredits && redeemAllAccountCount > 0 ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="w-full gap-1.5"
+          onClick={onRedeemAllResetCredits}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+          {t("accounts.list.redeemAll", { count: redeemAllAccountCount })}
+        </Button>
+      ) : null}
 
       {helpOpen && !readOnly ? <WindowsOauthHelp /> : null}
 

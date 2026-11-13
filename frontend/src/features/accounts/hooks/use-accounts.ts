@@ -25,6 +25,7 @@ import type {
   AccountRoutingPolicy,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
+import type { RedeemAllResult } from "@/features/accounts/redeem-all";
 
 async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   const invalidations = [
@@ -78,6 +79,9 @@ export function useAccountMutations() {
     accountId: string;
     redeemRequestId: string;
   } | null>(null);
+  // Per-account request IDs for redeem-all, kept until that account's redeem
+  // succeeds so a retry after a lost response cannot consume a second credit.
+  const redeemAllRequestIdsRef = useRef<Map<string, string>>(new Map());
 
   const importMutation = useMutation({
     mutationFn: importAccount,
@@ -242,6 +246,59 @@ export function useAccountMutations() {
     },
   });
 
+  // Redeems each account's own soonest-expiring credit through the same
+  // per-account endpoint as the single-account action, one account at a time, so
+  // one failing account never hides the accounts that did redeem.
+  const redeemAllResetCreditsMutation = useMutation({
+    mutationFn: async (accountIds: string[]): Promise<RedeemAllResult[]> => {
+      const results: RedeemAllResult[] = [];
+      for (const accountId of accountIds) {
+        try {
+          const redeemRequestId = redeemAllRequestIdsRef.current.get(accountId) ?? createRedeemRequestId();
+          redeemAllRequestIdsRef.current.set(accountId, redeemRequestId);
+          const response = await consumeRateLimitResetCredit(accountId, { redeemRequestId });
+          // The request either consumed a credit or was answered definitively, so
+          // the pinned ID is no longer needed.
+          redeemAllRequestIdsRef.current.delete(accountId);
+          if (response.code === "no_credit") {
+            results.push({ accountId, ok: false, error: t("accounts.toasts.noUsageResetCredits") });
+            continue;
+          }
+          if (response.code === "nothing_to_reset") {
+            results.push({ accountId, ok: false, error: t("accounts.toasts.nothingToReset") });
+            continue;
+          }
+          results.push({ accountId, ok: true });
+        } catch (error) {
+          results.push({
+            accountId,
+            ok: false,
+            error: error instanceof Error && error.message ? error.message : t("accounts.toasts.resetCreditRedeemFailed"),
+          });
+        }
+      }
+      return results;
+    },
+    onSuccess: (results) => {
+      const succeeded = results.filter((result) => result.ok).length;
+      const failed = results.length - succeeded;
+      if (failed === 0) {
+        toast.success(t("accounts.toasts.redeemAllSucceeded", { count: succeeded }));
+      } else if (succeeded === 0) {
+        toast.error(t("accounts.toasts.redeemAllFailed", { count: failed }));
+      } else {
+        toast.warning(t("accounts.toasts.redeemAllPartial", { succeeded, failed, total: results.length }));
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["accounts", "reset-credits"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -255,6 +312,7 @@ export function useAccountMutations() {
     routingPolicyMutation,
     updateMutation,
     resetCreditConsumeMutation,
+    redeemAllResetCreditsMutation,
   };
 }
 

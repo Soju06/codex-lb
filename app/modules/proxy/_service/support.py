@@ -1064,6 +1064,17 @@ class _WebSocketRequestState:
     source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
+    # Whole-frame response.create budget override for admitted inline-image
+    # bridge requests (allow-bounded-inline-images-on-bridge): the 64 MiB
+    # complete-frame cap. When set, every response.create size guard this
+    # request passes through — prepare, installation-id stamping, URL
+    # inlining, and the exact final send after operation/cache-identity
+    # stamping — measures the complete serialized frame against this bound
+    # instead of the global cap, and historical slimming must not run:
+    # oversize fails with the explicit 400 ``payload_too_large`` anti-retry
+    # error before upstream dispatch. ``None`` (default) keeps the stock
+    # global budget and slimming behavior everywhere.
+    response_create_max_bytes_override: int | None = None
     replay_count: int = 0
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
@@ -1081,6 +1092,8 @@ class _WebSocketRequestState:
     # replacement connection is established so an empty replacement pool does
     # not turn the upstream 400 into a proxy-generated 5xx/no-accounts error.
     precreated_replay_reason: str | None = None
+    # Explicit capacity rejection proves non-execution only for this send attempt.
+    capacity_rejected_response_create_attempt: int | None = None
     precreated_replay_account_id: str | None = None
     skip_request_log: bool = False
     previous_response_id: str | None = None

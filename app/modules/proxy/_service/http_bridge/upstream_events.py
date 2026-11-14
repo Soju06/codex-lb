@@ -72,11 +72,14 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _forget_http_bridge_denied_anchor_fence,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_ambiguous_image_warning,
     _http_bridge_denied_anchor_fence_current_map,
     _http_bridge_denied_anchor_fence_entry,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_event_proves_upstream_liveness,
     _http_bridge_eventless_precreated_deadline,
+    _http_bridge_eventless_timeout_message,
+    _http_bridge_image_send_is_ambiguous,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _http_bridge_request_state_holds_safe_replay,
@@ -128,6 +131,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_get_settings,
     _service_tier_from_event_payload,
     _upstream_websocket_disconnect_message,
+    _upstream_websocket_payload_too_large_message,
     _websocket_auth_request_can_switch_account,
     _websocket_downstream_response_id,
     _websocket_event_error_code,
@@ -1183,12 +1187,19 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
             )
             is not None
         ]
+        ambiguous_image_send = any(
+            _http_bridge_image_send_is_ambiguous(request_state) for request_state in session.pending_requests
+        )
     if not deadlines:
         return receive_timeout
     eventless_timeout = _WebSocketReceiveTimeout(
         timeout_seconds=max(0.0, min(deadlines) - now),
         error_code=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
-        error_message="Upstream did not acknowledge response.create before the client-safe deadline",
+        error_message=(
+            _http_bridge_eventless_timeout_message(0, ambiguous_image_send=True)
+            if ambiguous_image_send
+            else "Upstream did not acknowledge response.create before the client-safe deadline"
+        ),
         fail_all_pending=True,
     )
     if receive_timeout is None or eventless_timeout.timeout_seconds <= receive_timeout.timeout_seconds:
@@ -2330,6 +2341,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                         getattr(request_state, "upstream_model_output_seen", False)
                         for request_state in session.pending_requests
                     )
+                    ambiguous_image_send = any(
+                        _http_bridge_image_send_is_ambiguous(request_state)
+                        for request_state in session.pending_requests
+                    )
                     accepted_response_pending = any(
                         request_state.response_id is not None and not request_state.awaiting_response_created
                         for request_state in session.pending_requests
@@ -2343,6 +2358,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
+                # Close code 1009 (message too big) is terminal payload
+                # evidence, not transport evidence: the frame this request
+                # produced exceeded a websocket message-size limit, so an
+                # identical re-dispatch on another socket or account can
+                # only repeat it. Classify it as the non-retryable client
+                # error ``payload_too_large`` (HTTP 400 / SSE error
+                # envelope), with no account penalty, exclusion or rotation
+                # (allow-bounded-inline-images-on-bridge).
+                payload_too_large_close = message.kind in ("close", "error") and (
+                    _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
+                    == "payload_too_large"
+                )
                 # Account-neutral transport failures do not prove that the
                 # upstream rejected response.create. The request may still be
                 # executing, so replay could duplicate work, billing, or tool
@@ -2352,7 +2379,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # Only a terminal transport message (close or error) may replay
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.
-                if not account_neutral and (message.kind in {"close", "error"} or not accepted_response_pending):
+                if (
+                    not account_neutral
+                    and not payload_too_large_close
+                    and (message.kind in {"close", "error"} or not accepted_response_pending)
+                ):
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -2389,8 +2420,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                         break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
-                        error_code=message.error_code or "stream_incomplete",
-                        error_message=_upstream_websocket_disconnect_message(message),
+                        error_code=(
+                            "payload_too_large"
+                            if payload_too_large_close
+                            else message.error_code or "stream_incomplete"
+                        ),
+                        error_message=(
+                            _upstream_websocket_payload_too_large_message()
+                            if payload_too_large_close
+                            else _http_bridge_ambiguous_image_warning(_upstream_websocket_disconnect_message(message))
+                            if ambiguous_image_send
+                            else _upstream_websocket_disconnect_message(message)
+                        ),
                         upstream_close_code=message.close_code,
                         response_events_seen=response_events_seen,
                         transport_classification=(
@@ -2400,7 +2441,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         retry_circuit_attempt_selection=reader_failure_retry_circuit_attempt_selection,
                         penalize_account=(
-                            not account_neutral
+                            not payload_too_large_close
+                            and not account_neutral
                             and not account_neutral_transport_drop
                             and not (message.kind == "close" and close_classification == "clean")
                         ),

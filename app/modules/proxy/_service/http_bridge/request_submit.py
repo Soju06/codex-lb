@@ -96,9 +96,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _bind_http_bridge_proxy_injected_anchor,
     _build_http_bridge_prewarm_text,
     _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_ambiguous_image_warning,
     _http_bridge_client_full_history_recovery_error,
     _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lease_ttl_seconds,
+    _http_bridge_image_send_is_ambiguous,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
     _http_bridge_payload_looks_like_full_resend,
@@ -703,6 +705,7 @@ class _HTTPBridgeRequestSubmitMixin:
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         preserve_responses_lite_client_metadata: bool = False,
+        response_create_max_bytes: int | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         # One dump feeds client-metadata derivation, the frame and the usage
         # budget; ``to_payload`` is deterministic so sharing it is exact.
@@ -724,6 +727,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_log_id=request_id or get_request_id() or ensure_request_id(None),
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             upstream_payload_base=base_payload,
+            response_create_max_bytes=response_create_max_bytes,
         )
         (
             request_state.useragent,
@@ -749,6 +753,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_log_id: str | None = None,
         enforce_openai_sdk_contract: bool = True,
         upstream_payload_base: JsonObject | None = None,
+        response_create_max_bytes: int | None = None,
     ) -> tuple[_WebSocketRequestState, str]:
         deduped_replayed_input_count: int | None = None
         deduped_replayed_input_fingerprint: str | None = None
@@ -841,6 +846,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_kind=request_kind,
             connection_request_kind=connection_request_kind,
             generate_false_prewarm=generate_false_prewarm,
+            response_create_max_bytes_override=response_create_max_bytes,
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count
@@ -857,30 +863,38 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
         payload_size = len(text_data.encode("utf-8"))
-        max_bytes = _upstream_response_create_max_bytes()
-        if payload_size > max_bytes:
-            slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
-                upstream_payload,
-                max_bytes=max_bytes,
-                protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
-            )
-            if slim_summary is not None:
-                upstream_payload = slimmed_payload
-                text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
-                logger.warning(
-                    (
-                        "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
-                        "original_bytes=%s slimmed_bytes=%s "
-                        "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
-                    ),
-                    request_state.request_id,
-                    request_state.request_log_id,
-                    transport,
-                    payload_size,
-                    len(text_data.encode("utf-8")),
-                    slim_summary["historical_tool_outputs_slimmed"],
-                    slim_summary["historical_images_slimmed"],
+        # Inline-image bridge requests carry the whole-frame budget on the
+        # request state (the 64 MiB complete-frame cap of the default-on
+        # inline-image contract), and historical slimming MUST NOT run for
+        # them — an over-budget frame fails below with the explicit 400
+        # payload_too_large anti-retry error instead of silently losing
+        # history. Every other request keeps the stock global cap and the
+        # slimming recovery exactly as before.
+        if response_create_max_bytes is None:
+            max_bytes = _upstream_response_create_max_bytes()
+            if payload_size > max_bytes:
+                slimmed_payload, slim_summary = _slim_response_create_payload_for_upstream(
+                    upstream_payload,
+                    max_bytes=max_bytes,
+                    protected_agent_control_output_occurrences=protected_agent_control_output_occurrences,
                 )
+                if slim_summary is not None:
+                    upstream_payload = slimmed_payload
+                    text_data = json.dumps(upstream_payload, ensure_ascii=True, separators=(",", ":"))
+                    logger.warning(
+                        (
+                            "Slimmed response.create request_id=%s request_log_id=%s transport=%s "
+                            "original_bytes=%s slimmed_bytes=%s "
+                            "historical_tool_outputs_slimmed=%s historical_images_slimmed=%s"
+                        ),
+                        request_state.request_id,
+                        request_state.request_log_id,
+                        transport,
+                        payload_size,
+                        len(text_data.encode("utf-8")),
+                        slim_summary["historical_tool_outputs_slimmed"],
+                        slim_summary["historical_images_slimmed"],
+                    )
         request_state.request_text = text_data
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
@@ -2308,10 +2322,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # only failures proven to precede dispatch may be replayed.
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
             failure_error_message = str(exc) or "Upstream websocket closed before response.completed"
+            if error_code != "payload_too_large" and _http_bridge_image_send_is_ambiguous(request_state):
+                failure_error_message = _http_bridge_ambiguous_image_warning(failure_error_message)
             # Liveness expiry and local network loss are transport failures,
             # not evidence against the selected account. Keep this in sync
             # with the reader path's shared provenance classification.
-            account_neutral = is_account_neutral_websocket_error_code(error_code)
+            account_neutral = error_code == "payload_too_large" or is_account_neutral_websocket_error_code(error_code)
             if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
                 # The sender claimed ownership beside the failing send while
                 # holding lifecycle_lock. It therefore owns the entire session
@@ -2398,7 +2414,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     await session.upstream.close()
                 except Exception:
                     logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
-            # Always raise 502 so the client can retry with
+            if error_code == "payload_too_large":
+                raise ProxyResponseError(
+                    400,
+                    openai_error(error_code, failure_error_message, "invalid_request_error"),
+                ) from exc
+            # For ambiguous failures, raise 502 so the client can retry with
             # previous_response_id intact.  Returning 400
             # previous_response_not_found causes the client to drop
             # previous_response_id and resend the full conversation
@@ -3762,6 +3783,12 @@ class _HTTPBridgeRequestSubmitMixin:
         )
 
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
+            # Inline-image bridge requests carry the dedicated frame budget.
+            # Once send was attempted, no created event is not proof of non-
+            # execution. Only explicit upstream rejection evidence may permit
+            # the existing proof-gated recovery; transport silence may not.
+            if _http_bridge_image_send_is_ambiguous(request_state):
+                return False
             transport_only_unanchored_replay = bool(
                 request_state.precreated_replay_reason is None
                 and (

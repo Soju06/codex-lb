@@ -490,12 +490,13 @@ async def test_http_bridge_bypassed_while_transport_failure_marker_armed(
 @pytest.mark.asyncio
 async def test_http_bridge_falls_back_to_http_on_pre_submit_transient_failure(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     service = _bridge_service(monkeypatch, dashboard_transport="default")
     retry_calls: list[dict[str, Any]] = []
 
     async def failing_bridge(*_args: object, **_kwargs: object):
-        raise _pre_submit_error()
+        raise _pre_submit_error() from ConnectionResetError(10054, "SECRET_TOKEN_IMAGE")
         yield ""
 
     async def record_stream_with_retry(*_args: object, **kwargs: object):
@@ -510,6 +511,12 @@ async def test_http_bridge_falls_back_to_http_on_pre_submit_transient_failure(
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert len(retry_calls) == 1
     assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+
+    assert "http_bridge_connect_fallback" in caplog.text
+    assert "ConnectionResetError" in caplog.text
+    assert "10054" in caplog.text
+    assert "SECRET_TOKEN_IMAGE" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 @pytest.mark.asyncio

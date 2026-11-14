@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_reader_handoff_reconnect_failed,
+    _open_http_bridge_upstream_with_budget,
     _persist_http_bridge_replacement_account,
     _persistent_http_bridge_affinity,
     _plan_http_bridge_lru_capacity_closes,
@@ -140,7 +141,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
-    _call_with_supported_optional_kwargs,
     _estimated_lease_tokens_from_request_usage_budget,
     _prefer_earlier_reset_window,
     _proxy_admission_wait_timeout_seconds,
@@ -1783,11 +1783,11 @@ class _HTTPBridgeMixin(
                 connect_headers = _websocket_safe_headers_with_turn_state(
                     headers, _sticky_key_from_turn_state_header(headers)
                 )
-                upstream = await _call_with_supported_optional_kwargs(
-                    self._open_upstream_websocket_with_budget,
+                upstream = await _open_http_bridge_upstream_with_budget(
+                    self,
                     account,
                     connect_headers,
-                    optional_kwargs={"request_state": request_state},
+                    request_state=request_state,
                     timeout_seconds=self._remaining_budget_seconds(deadline),
                 )
                 _record_same_account_takeover(
@@ -1820,7 +1820,8 @@ class _HTTPBridgeMixin(
                     connect_headers = _websocket_safe_headers_with_turn_state(
                         headers, _sticky_key_from_turn_state_header(headers)
                     )
-                    upstream = await self._open_upstream_websocket_with_budget(
+                    upstream = await _open_http_bridge_upstream_with_budget(
+                        self,
                         account,
                         connect_headers,
                         timeout_seconds=self._remaining_budget_seconds(deadline),
@@ -2025,12 +2026,10 @@ class _HTTPBridgeMixin(
             now=clock_for(self).monotonic(),
         )
         try:
-            # Callers that reconnect while holding a lock resolve this row
-            # before taking it and pass it in. The prewarm timeout recovery is
-            # one: it reconnects under ``prewarm_lock``, and a refresh behind
-            # this read runs a DB query under a process-global lock, so
-            # awaiting it there would suspend the critical section (issues
-            # #1971/#1972).
+            # Lock-holding callers resolve this row first: prewarm recovery
+            # reconnects under prewarm_lock, while a refresh here would await
+            # a DB query under a process-global lock and suspend the critical
+            # section (#1971/#1972).
             settings = (
                 dashboard_settings if dashboard_settings is not None else await _service_get_settings_cache().get()
             )
@@ -2115,7 +2114,8 @@ class _HTTPBridgeMixin(
 
         async def open_replacement_upstream(selected_account: Any, selected_headers: dict[str, str]) -> Any:
             try:
-                return await self._open_upstream_websocket_with_budget(
+                return await _open_http_bridge_upstream_with_budget(
+                    self,
                     selected_account,
                     selected_headers,
                     timeout_seconds=self._remaining_budget_seconds(deadline),

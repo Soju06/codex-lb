@@ -1315,7 +1315,7 @@ async def test_http_bridge_reader_timeout_rechecks_receive_completed_during_time
     assert scheduler._tasks == set()
 
 
-def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_safe_cap() -> None:
+def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_100_second_cap() -> None:
     request_state = _make_eventless_http_bridge_owner()
 
     assert (
@@ -1323,7 +1323,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 160.0
+        == 200.0
     )
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
@@ -1340,7 +1340,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
             request_state,
             stuck_gate_retire_after_seconds=300.0,
         )
-        == 160.0
+        == 200.0
     )
 
 

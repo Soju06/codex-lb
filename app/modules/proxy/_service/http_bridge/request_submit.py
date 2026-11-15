@@ -2322,7 +2322,13 @@ class _HTTPBridgeRequestSubmitMixin:
             # only failures proven to precede dispatch may be replayed.
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
             failure_error_message = str(exc) or "Upstream websocket closed before response.completed"
-            if error_code != "payload_too_large" and _http_bridge_image_send_is_ambiguous(request_state):
+            # An image-bearing send that may already be executing upstream
+            # must never be auto-retried; the caller needs the duplicate risk
+            # stated in the error it receives.
+            ambiguous_image_send = error_code != "payload_too_large" and _http_bridge_image_send_is_ambiguous(
+                request_state
+            )
+            if ambiguous_image_send:
                 failure_error_message = _http_bridge_ambiguous_image_warning(failure_error_message)
             # Liveness expiry and local network loss are transport failures,
             # not evidence against the selected account. Keep this in sync
@@ -2354,8 +2360,15 @@ class _HTTPBridgeRequestSubmitMixin:
                 # acknowledgement. Persist UNKNOWN under the owner fence
                 # before cleanup can retire the closed session and release
                 # that fence.
+                # A deterministic peer rejection is excluded: the upstream
+                # closed 1009 (message too big) before parsing the frame, so
+                # the operation was never accepted and there is nothing
+                # ambiguous to reconcile. Marking it UNKNOWN would rewrite
+                # the terminal 400 into a retryable 502 and invite a
+                # pointless resend. Settlement below still runs unchanged.
                 if (
-                    request_state.operation_dispatched
+                    error_code != "payload_too_large"
+                    and request_state.operation_dispatched
                     and request_state.operation_registered
                     and request_state.operation_id is not None
                     and session.durable_session_id is not None
@@ -2383,6 +2396,13 @@ class _HTTPBridgeRequestSubmitMixin:
                         failure_error_message = (
                             "Ambiguous response operation could not be persisted; retry the request."
                         )
+                        if ambiguous_image_send:
+                            # A persistence failure must not silently drop the
+                            # duplicate-execution warning: the caller still
+                            # cannot safely auto-retry this request.
+                            failure_error_message = _http_bridge_ambiguous_image_warning(
+                                failure_error_message
+                            )
                         _record_continuity_fail_closed(
                             surface="http_bridge",
                             reason="ambiguous_operation_unknown_persistence_failed",
@@ -2415,9 +2435,18 @@ class _HTTPBridgeRequestSubmitMixin:
                 except Exception:
                     logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
             if error_code == "payload_too_large":
+                # Deterministic peer rejection (websocket close 1009). This is
+                # a client payload error, so the envelope carries param the way
+                # every other invalid_request_error 400 does; clients read
+                # error.param to locate the offending request field.
                 raise ProxyResponseError(
                     400,
-                    openai_error(error_code, failure_error_message, "invalid_request_error"),
+                    openai_error(
+                        error_code,
+                        failure_error_message,
+                        "invalid_request_error",
+                        param="input",
+                    ),
                 ) from exc
             # For ambiguous failures, raise 502 so the client can retry with
             # previous_response_id intact.  Returning 400

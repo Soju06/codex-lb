@@ -2015,6 +2015,7 @@ async def test_http_bridge_request_cleanup_releases_pre_submit_handoff(
     service._http_bridge_sessions[session.key] = session
     runtime_config = SimpleNamespace(
         enabled=True,
+        inline_images_enabled=True,
         idle_ttl_seconds=120.0,
         codex_idle_ttl_seconds=1800.0,
         max_sessions=8,
@@ -2078,6 +2079,7 @@ async def test_http_response_finalization_shares_detached_lock_deadline(
     sessions[2].unanchored_reservation_id = "other-request"
     runtime_config = SimpleNamespace(
         enabled=True,
+        inline_images_enabled=True,
         idle_ttl_seconds=120.0,
         codex_idle_ttl_seconds=1800.0,
         max_sessions=8,
@@ -2186,6 +2188,7 @@ async def test_http_bridge_owned_terminal_lifecycle_skips_outer_startup_release(
     account = cast(Any, SimpleNamespace(id="acc-bridge-owned"))
     runtime_config = SimpleNamespace(
         enabled=True,
+        inline_images_enabled=True,
         idle_ttl_seconds=120.0,
         codex_idle_ttl_seconds=1800.0,
         max_sessions=8,
@@ -2262,6 +2265,7 @@ async def test_http_bridge_startup_fallback_releases_current_lifecycle_before_ba
     account = cast(Any, SimpleNamespace(id="acc-bridge-startup"))
     runtime_config = SimpleNamespace(
         enabled=True,
+        inline_images_enabled=True,
         idle_ttl_seconds=120.0,
         codex_idle_ttl_seconds=1800.0,
         max_sessions=8,

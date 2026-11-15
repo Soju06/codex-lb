@@ -35,3 +35,11 @@ Based on upstream PR #2534 head 5071c18d71c770df508153f814fb30eba9d9f202, ported
 - [x] Add WebP strict-base64 prefix without changing budget/ambiguity/rollback policy; GIF remains unsupported control.
 - [x] Final image/admission/capacity/1009 suite89 passed; key lint/type/architecture and strictOpenSpec valid; independent review no new blocker.
 - [x] Bounded live transparentWebP trial:3 completed responses,1 connection; cached3072/3294 then3200/3309. No production switch or Native activation.
+## Review-driven fixes (2026-11-15 second pass, this branch)
+- [x] peer1009 direct HTTP400 carries param=input (openai_error gained the optional param detail; the admission-time rejection already set it).
+- [x] Durable UNKNOWN-marking failure no longer rewrites a proven payload_too_large 400 into a retryable 502; settlement still runs unchanged, and an ambiguous image send keeps its duplicate-execution warning. Two unit regressions: test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_marking_fails (RED without the gate) and test_submit_http_bridge_ambiguous_image_keeps_duplicate_warning_when_marking_fails.
+- [x] Admission evaluates image-ness before the inline-image config fields, so a runtime config predating the feature still serves text traffic; stock fixtures synced with inline_images_enabled.
+- [x] docs/routing.md rewritten for the default-on bounded-image and terminal-oversize contract.
+- [x] Ported the trial core tests: tests/integration/test_http_bridge_inline_images.py, tests/unit/test_http_bridge_inline_image_admission.py, tests/unit/test_ws_close_1009_classification.py. Adapted where they encoded pre-contract behavior (no-blind-replay on silence; WebP admitted; native chunking capability excluded with the Rust port). The native egress capability-pair test is omitted, not deleted silently: the capability ships with the trial crates changes this Python-only consolidation does not port.
+- [x] connect_diagnostics known-shape metadata converted to a frozen dataclass per project conventions.
+- [x] Provenance headers recorded in consolidation.md and in the sibling change folders.

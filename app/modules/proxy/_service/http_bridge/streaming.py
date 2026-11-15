@@ -1038,12 +1038,15 @@ class _HTTPBridgeStreamingMixin:
         # over-budget image flows to the explicit payload_too_large gate
         # below (after the pin and transport-health gates) instead of
         # silently rerouting to raw HTTP.
+        # Image-ness gates first: a text request must never read the
+        # inline-image config fields, so a runtime config that predates the
+        # feature still serves text traffic unchanged.
         inline_image_admission = (
             _inline_input_image_request_admission(payload)
-            if runtime_config.enabled
-            and runtime_config.inline_images_enabled
-            and image_request
+            if image_request
             and not image_generation_request
+            and runtime_config.enabled
+            and runtime_config.inline_images_enabled
             else _HTTPBridgeInlineImageAdmission(_HTTP_BRIDGE_INLINE_IMAGE_UNSUPPORTED, 0)
         )
         inline_image_request_admitted = inline_image_admission.verdict == _HTTP_BRIDGE_INLINE_IMAGE_ADMITTED
@@ -1489,6 +1492,16 @@ class _HTTPBridgeStreamingMixin:
             *,
             reservation: ApiKeyUsageReservationData | None = api_key_reservation,
         ) -> tuple[_WebSocketRequestState, str]:
+            # The complete-frame budget applies to image-bearing requests
+            # only. A text request keeps the stock global cap, so the optional
+            # kwarg is omitted entirely instead of being passed as None:
+            # prepare-time doubles and older overrides that model the
+            # pre-image contract keep working unchanged.
+            frame_budget_kwargs: dict[str, int] = (
+                {}
+                if bridge_response_create_max_bytes is None
+                else {"response_create_max_bytes": bridge_response_create_max_bytes}
+            )
             if bridge_uses_responses_lite:
                 request_state, text_data = self._prepare_http_bridge_request(
                     request_payload,
@@ -1498,7 +1511,7 @@ class _HTTPBridgeStreamingMixin:
                     request_id=request_id,
                     client_ip=client_ip,
                     preserve_responses_lite_client_metadata=True,
-                    response_create_max_bytes=bridge_response_create_max_bytes,
+                    **frame_budget_kwargs,
                 )
             else:
                 request_state, text_data = self._prepare_http_bridge_request(
@@ -1508,7 +1521,7 @@ class _HTTPBridgeStreamingMixin:
                     api_key_reservation=reservation,
                     request_id=request_id,
                     client_ip=client_ip,
-                    response_create_max_bytes=bridge_response_create_max_bytes,
+                    **frame_budget_kwargs,
                 )
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event

@@ -1,5 +1,10 @@
 # Fix peer 1009 send classification
 
+## Provenance
+Ported from trial PR2534 head 5071c18d (peer1009 classification in
+proxy_websocket.py) by the fix/python-image-bridge-consolidation branch;
+see allow-bounded-inline-images-on-bridge/consolidation.md.
+
 ## Why
 Received peer close 1009 during send incorrectly becomes 502 upstream_unavailable.
 

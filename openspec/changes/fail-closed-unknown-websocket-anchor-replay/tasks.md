@@ -8,6 +8,9 @@
       the input to restate its stored prefix before a client-supplied anchor is
       treated as a replay-safe full resend.
 - [x] 1.3 Keep a known-anchor self-contained full resend replay-safe.
+- [x] 1.4 Record whether a completed request's input covered its whole context,
+      and require it before a stored prefix proves a full resend, so a
+      restated delta of a client-anchored completion is not replayed.
 
 ## 2. Align existing tests with the rule
 
@@ -18,6 +21,11 @@
       user-only delta after an accepted prewarm, and the Lite body anchored on
       an unknown response, are not replayed anchorless; the marker and
       reasoning-context assertions on the upstream payload stay.
+- [x] 2.3 `test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previous_response_miss`
+      replayed a restated delta of a client-anchored completion without the
+      first turn's tool bundle. Renamed to
+      `test_backend_responses_websocket_lite_restated_delta_is_not_replayed_after_previous_response_miss`;
+      it now expects `previous_response_not_found` and no anchorless upstream body.
 
 ## 3. Verify
 

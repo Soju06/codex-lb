@@ -3076,7 +3076,7 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
     assert sent_payloads[4]["previous_response_id"] == "resp_ws_lite_2"
 
 
-def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previous_response_miss(
+def test_backend_responses_websocket_lite_restated_delta_is_not_replayed_after_previous_response_miss(
     app_instance,
     monkeypatch,
 ):
@@ -3212,9 +3212,10 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
             "client_metadata": {marker: "true"},
             "stream": True,
         },
-        # Trusted marker-only incremental with a multi-item self-contained
-        # input: a fresh full-resend replay is prepared for it, and the
-        # upstream previous_response_not_found miss triggers that replay.
+        # Restates the previous delta plus new items. The anchor's stored
+        # prefix came from a client-anchored delta, so this input does not
+        # restate the tool bundle and "hi" from the first turn: it must not be
+        # replayed without the anchor after previous_response_not_found.
         {
             "type": "response.create",
             "model": "gpt-5.6-sol",
@@ -3248,33 +3249,24 @@ def test_backend_responses_websocket_lite_fresh_replay_drops_marker_after_previo
                 "openai-beta": "responses_websockets=2026-02-06",
             },
         ) as websocket:
-            for request in requests:
+            for request in requests[:2]:
                 websocket.send_text(json.dumps(request))
                 events = [json.loads(websocket.receive_text()) for _ in range(2)]
                 assert [event["type"] for event in events] == ["response.created", "response.completed"]
                 all_events.append(events)
+            websocket.send_text(json.dumps(requests[2]))
+            error_event = json.loads(websocket.receive_text())
 
-    assert all_events[2][0]["response"]["id"] == "resp_ws_lite_replay"
-    assert "previous_response_not_found" not in json.dumps(all_events)
-    assert connect_count == 2
+    assert error_event["type"] == "response.failed"
+    _assert_previous_response_not_found_error(error_event["response"]["error"])
+    assert connect_count == 1
 
     first_payloads = [json.loads(text) for text in first_upstream.sent_text]
     assert len(first_payloads) == 3
-    assert cast(dict[str, object], first_payloads[2]["client_metadata"])[marker] == "true"
-    assert first_payloads[2]["reasoning"] == {"context": "all_turns"}
     assert first_payloads[2]["previous_response_id"] == "resp_ws_lite_a2"
-
-    recovered_payloads = [json.loads(text) for text in recovered_upstream.sent_text]
-    assert len(recovered_payloads) == 2
-    replay_payload = recovered_payloads[0]
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == [user_continue, assistant_ok, user_more]
-    assert marker not in cast(dict[str, object], replay_payload.get("client_metadata", {}))
-    assert "reasoning" not in replay_payload
-    after_replay_payload = recovered_payloads[1]
-    assert after_replay_payload["previous_response_id"] == "resp_ws_lite_replay"
-    assert marker not in cast(dict[str, object], after_replay_payload.get("client_metadata", {}))
-    assert "reasoning" not in after_replay_payload
+    assert first_payloads[2]["input"] == [user_continue, assistant_ok, user_more]
+    assert all("previous_response_id" in payload for payload in first_payloads[1:])
+    assert recovered_upstream.sent_text == []
 
 
 def test_backend_responses_websocket_body_lite_fresh_replay_keeps_marker_and_continuity(

@@ -32,9 +32,17 @@ in the downstream stream shows that the thread's earlier context was missing.
 ## What Changes
 
 - A client-supplied `previous_response_id` is replay-safe without its anchor
-  only when this connection completed that response and the request's input
-  restates the stored context prefix (the existing fingerprint check). Every
-  other client-supplied anchor fails closed: no anchorless fresh body is kept.
+  only when this connection completed that response, that response's request
+  input covered its whole context, and the request's input restates the stored
+  context prefix (the existing fingerprint check). Every other client-supplied
+  anchor fails closed: no anchorless fresh body is kept.
+- The request state and the connection's continuity record whether the
+  completed request's input covered its whole context: it had no anchor, the
+  proxy injected the anchor (the original full body is kept), or it was a
+  proven full resend. A completion recorded from a client-anchored delta stores
+  only that delta, so a later input that restates the delta cannot pass the
+  prefix check as a full resend. The stored count and fingerprint, which also
+  drive session-anchor trimming, are unchanged.
 - With no fresh body, a pre-output `previous_response_not_found` reaches the
   client as `previous_response_not_found`, and Codex retries the turn with its
   complete history. A pre-output upstream close replays the anchored request,
@@ -52,7 +60,11 @@ retry.
 ## Impact
 
 - `app/modules/proxy/_service/websocket/helpers.py`
-  (`_websocket_client_previous_response_full_resend_is_retry_safe`).
+  (`_websocket_client_previous_response_full_resend_is_retry_safe`,
+  `_record_websocket_continuity_completion`,
+  `_retire_websocket_continuity_anchor`),
+  `app/modules/proxy/_service/websocket/mixin.py` (request preparation) and
+  `app/modules/proxy/_service/support.py` (state fields).
 - Tests: `tests/unit/test_proxy_utils.py`,
   `tests/integration/test_proxy_websocket_responses.py`.
 - No settings, schema or API changes.

@@ -5149,3 +5149,110 @@ async def test_claim_does_not_retry_takeover_against_a_live_foreign_owner(
     # Exactly one claim: the live foreign owner ends the retry instead of
     # issuing a second, permission-restoring claim.
     assert claims == [True]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_forwards_mark_operation_rejected_to_the_repository(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """The proxy service holds the coordinator, not the repository.
+
+    A repository-only ``mark_operation_rejected`` is invisible to
+    ``request_submit``: its ``getattr(..., None)`` guard would silently skip
+    the terminal write, so the deterministic peer-1009 rejection would keep
+    its submitted fence and the next identical attempt would be answered with
+    a 503. This regression pins the forwarding itself.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository, instance_id="inst-coordinator-rejected", session_key_value="sid-coordinator-rejected"
+        )
+        fingerprint = durable_bridge_hash("coordinator-rejected-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        created = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-coordinator-rejected",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-coordinator-rejected",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert created is not None
+    finally:
+        await session.close()
+
+    # The real production shape: the coordinator the service constructs.
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    assert await coordinator.mark_operation_rejected(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-coordinator-rejected",
+        owner_epoch=claim.owner_epoch,
+    )
+
+    observed = await coordinator.get_operation(operation_id=operation_id)
+    assert observed is not None
+    assert observed.state == "failed"
+    rebound = await coordinator.record_operation(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-coordinator-rejected",
+        owner_epoch=claim.owner_epoch,
+        request_fingerprint=fingerprint,
+        account_id="account-coordinator-rejected",
+        model="gpt-5.6",
+        parent_response_id="resp-parent",
+        request_text='{"model":"gpt-5.6","input":"turn"}',
+    )
+    assert rebound is not None
+    assert rebound.rebound is True
+    assert rebound.state == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_rejected_ignores_a_stale_owner_epoch_on_submitted_row(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Owner-fence sensitivity on the state the feature actually writes.
+
+    The stronger-state test proves acknowledged rows are never downgraded,
+    but that path is insensitive to the epoch (the state check fires first).
+    This one runs the fence against a clean submitted row so the epoch check
+    itself is exercised.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-stale-epoch", session_key_value="sid-stale-epoch")
+        fingerprint = durable_bridge_hash("stale-epoch-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        created = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-epoch",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-stale-epoch",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert created is not None
+        assert created.state == "submitted"
+
+        assert not await repository.mark_operation_rejected(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-epoch",
+            owner_epoch=claim.owner_epoch + 7,
+        )
+        stale_row = await session.get(HttpBridgeOperationRecord, operation_id)
+        assert stale_row is not None
+        assert stale_row.state == "submitted", "a stale owner epoch must not write the terminal"
+    finally:
+        await session.close()

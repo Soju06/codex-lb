@@ -948,6 +948,26 @@ class DurableBridgeSessionCoordinator:
                 max_recovery_dispatches=max_recovery_dispatches,
             )
 
+    async def mark_operation_rejected(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        # The coordinator is the durable object the proxy service actually
+        # holds (service.py constructs DurableBridgeSessionCoordinator), so a
+        # repository-only method is invisible to the caller: its
+        # getattr(..., None) guard would silently skip the terminal write.
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).mark_operation_rejected(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+            )
+
     async def mark_operation_unknown(
         self,
         *,

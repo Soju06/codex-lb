@@ -5513,14 +5513,24 @@ async def test_http_bridge_image_capacity_evidence_does_not_authorize_a_later_am
 ) -> None:
     """Image sends: capacity evidence belongs to the attempt that produced it.
 
-    The request is an admitted image (frame-budget override present) whose
-    CURRENT attempt was explicitly rejected for capacity, so the proof-gated
-    recovery stays eligible. A LATER ambiguous send on the same request must
-    not inherit that evidence: the ambiguity gate has to answer "ambiguous"
-    and the request must fail closed instead of being replayed a third time.
-    (allow-bounded-inline-images-on-bridge delta, "Explicit capacity
-    rejection": evidence from that attempt cannot authorize replay after a
-    later ambiguous send.)
+    Judgement-level coverage. The request is an admitted image (frame-budget
+    override present) whose CURRENT attempt was explicitly rejected for
+    capacity, so the proof-gated recovery stays eligible. A LATER ambiguous
+    send on the same request must not inherit that evidence: the ambiguity
+    gate has to answer "ambiguous", which is the branch that suppresses the
+    blind replay. (allow-bounded-inline-images-on-bridge delta, "Explicit
+    capacity rejection": evidence from that attempt cannot authorize replay
+    after a later ambiguous send.)
+
+    Scope note: this drives the attempt counter and the ambiguity gate
+    directly rather than dispatching a real second silent send on an upstream
+    socket. A full product-path version (capacity rejection -> reconnect ->
+    silent second dispatch -> terminal 502) exists in the integration suite
+    but is not reliable there: after the silent attempt the product path
+    recovers the stream, so the request completes 200 instead of surfacing
+    the ambiguity. The integration coverage that IS reliable is the silent
+    single-send contract (test_silent_image_send_terminates_without_using_
+    the_replacement) plus the admission-time capacity proof helper test.
     """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=False)

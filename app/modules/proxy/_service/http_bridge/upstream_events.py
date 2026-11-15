@@ -134,6 +134,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_message,
     _websocket_event_error_param,
     _websocket_event_error_type,
+    _websocket_event_health_error,
     _websocket_owner_pinned_quota_error_code,
     _websocket_precreated_auth_error_code,
     _websocket_precreated_retry_error_code,
@@ -3477,7 +3478,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                {"message": retry_error_message or "Upstream error"},
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=clock.time(),
+                ),
                 retry_error_code,
             )
             retry_consumer_attached = (
@@ -3545,7 +3551,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                {"message": retry_error_message or "Upstream error"},
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=clock.time(),
+                ),
                 owner_pinned_quota_error,
             )
             if (
@@ -3670,7 +3681,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                {"message": retry_error_message or "Upstream error"},
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=clock.time(),
+                ),
                 retry_error_code,
             )
             # Pre-created anchored requests belong to the owner-pinned branch

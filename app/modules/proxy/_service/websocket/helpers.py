@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import anyio
 
+from app.core.balancer.logic import freeze_reset_deadline
 from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -970,6 +971,31 @@ def _websocket_event_error_message(event_type: str | None, payload: dict[str, Js
         return None
     stripped = message_value.strip()
     return stripped or None
+
+
+def _websocket_event_health_error(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    message: str | None,
+    now: float,
+) -> UpstreamError:
+    # Normalize an upstream error frame into an account-health penalty payload
+    # anchored at the observation time now. The deferred keyed-health path
+    # applies the penalty only after reservation settlement, so the payload must
+    # carry an absolute deadline: a relative resets_in_seconds would be
+    # re-anchored at application time and stretch the hold by the whole
+    # settlement delay, and a stale relative hint could resurrect an elapsed
+    # hold. freeze_reset_deadline owns the metadata rules (strict raw absolute,
+    # relative frozen and clamped into the horizon); invalid metadata leaves
+    # the message-only payload, which falls back to the balancer
+    # no-metadata cooldown.
+    error: UpstreamError = {"message": message or "Upstream error"}
+    details = _websocket_event_error_payload(event_type, payload)
+    if isinstance(details, dict):
+        deadline = freeze_reset_deadline(cast(UpstreamError, details), now=now)
+        if deadline is not None:
+            error["resets_at"] = deadline
+    return error
 
 
 def _websocket_precreated_retry_error_code(

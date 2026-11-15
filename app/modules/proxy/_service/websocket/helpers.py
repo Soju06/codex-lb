@@ -789,20 +789,28 @@ def _websocket_client_previous_response_full_resend_is_retry_safe(
         return False
     if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
         return False
+    # Only a client input proven to restate the stored context of the anchor
+    # this connection completed may be replayed without the anchor. Codex sends
+    # ``previous_response_id`` with only the incremental delta, so an anchor the
+    # proxy does not know (after an interrupted response, a prewarm or a new
+    # downstream connection) leaves a delta indistinguishable from a full
+    # history; replaying it anchorless would silently drop earlier context.
+    # Failing closed surfaces ``previous_response_not_found`` to the client,
+    # which retries with its complete history.
     if (
-        continuity_state is not None
-        and continuity_state.last_completed_response_id == previous_response_id
-        and (
-            continuity_state.last_completed_input_count > 0
-            or continuity_state.last_completed_input_prefix_fingerprint is not None
+        continuity_state is None
+        or continuity_state.last_completed_response_id != previous_response_id
+        or (
+            continuity_state.last_completed_input_count <= 0
+            and continuity_state.last_completed_input_prefix_fingerprint is None
         )
     ):
-        return _facade()._input_prefix_matches_stored_context(
-            input_value,
-            stored_count=continuity_state.last_completed_input_count,
-            stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
-        )
-    return True
+        return False
+    return _facade()._input_prefix_matches_stored_context(
+        input_value,
+        stored_count=continuity_state.last_completed_input_count,
+        stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
+    )
 
 
 def _record_websocket_continuity_completion(

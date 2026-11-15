@@ -11534,8 +11534,10 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
             headers,
         )
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
-        assert request_state.fresh_upstream_request_is_retry_safe is True
-        assert request_state.fresh_upstream_request_text is not None
+        # This connection never completed the client's anchor, so the
+        # input cannot be proven to restate its context and is not replayed anchorless.
+        assert request_state.fresh_upstream_request_is_retry_safe is False
+        assert request_state.fresh_upstream_request_text is None
         request_state.previous_response_owner_lookup_source = "request_logs"
         request_state.previous_response_owner_lookup_outcome = "hit"
         request_state.previous_response_owner_requested_at = owner_requested_at
@@ -11630,7 +11632,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     assert isinstance(failure_detail, str)
     assert failure_detail.startswith("previous_response_not_found ")
     assert "previous_response_source=client_supplied" in failure_detail
-    assert "fresh_replay_available=true" in failure_detail
+    assert "fresh_replay_available=false" in failure_detail
     assert "owner_lookup_source=request_logs" in failure_detail
     assert "owner_lookup_outcome=hit" in failure_detail
     assert "previous_response_age_seconds=" in failure_detail
@@ -11638,7 +11640,7 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     assert "resp_ws_prev_anchor_client" not in failure_detail
     assert "continuity_fail_closed surface=websocket_connect reason=previous_response_not_found" in caplog.text
     assert "previous_response_source=client_supplied" in caplog.text
-    assert "fresh_replay_available=true" in caplog.text
+    assert "fresh_replay_available=false" in caplog.text
     assert "owner_lookup_source=request_logs" in caplog.text
     assert "owner_lookup_outcome=hit" in caplog.text
     assert "previous_response_age_seconds=" in caplog.text

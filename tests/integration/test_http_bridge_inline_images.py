@@ -67,6 +67,10 @@ _UNDER_BUDGET_IMAGE_URL = "data:image/jpeg;base64," + base64.b64encode(b"J" * 4_
 # One decoded byte over the inclusive per-image budget.
 _OVER_BUDGET_IMAGE_URL = "data:image/jpeg;base64," + base64.b64encode(b"J" * 5_000_001).decode("ascii")
 _SMALL_LEGAL_IMAGE_URL = "data:image/png;base64," + base64.b64encode(b"P" * 2048).decode("ascii")
+# WebP is admitted by this consolidation alongside JPEG and PNG. Admission
+# checks the data-URL prefix, strict base64 and the decoded byte budget (it
+# does not parse RIFF structure), so a synthetic payload is enough here.
+_VALID_WEBP_DATA_URL = "data:image/webp;base64," + base64.b64encode(b"W" * 2048).decode("ascii")
 _THREAD_KEY = "inline-bounded-thread"
 
 
@@ -777,3 +781,66 @@ async def test_client_cancellation_while_image_pending_settles(app_instance, asy
     _assert_created_text_delta_completed(follow_up)
     assert connects == 2
     assert len(recovered.sent_text) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_metadata_crossing_the_cap_fails_before_send(async_client, inline_bridge_transport, monkeypatch):
+    # A request whose ESTIMATE fits the image-frame budget but whose FINAL
+    # frame - after the account installation stamp - crosses it must fail
+    # with the terminal 400 before any send, and release the bridge slot so
+    # the next request proceeds. (allow-bounded-inline-images-on-bridge
+    # delta, "Metadata crosses the frame limit".)
+    state = inline_bridge_transport
+    # A non-empty installation id makes the final stamp change the frame.
+    state.account.codex_installation_id = "installation-stamp-0123456789abcdef"
+
+    # Control run under the production budget: capture the final frame.
+    control = await _collect_sse_events(
+        async_client, "/v1/responses", json_body=_body(_image_turn(_SMALL_LEGAL_IMAGE_URL))
+    )
+    _assert_created_text_delta_completed(control)
+    final_frame = state.upstreams[0].sent_text[0]
+    final_len = len(final_frame.encode("utf-8"))
+    sent_before = [len(upstream.sent_text) for upstream in state.upstreams]
+
+    # Pin the cap one byte below the final frame: the pre-stamp estimate
+    # still fits, so admission passes and the stamped frame is what crosses.
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_IMAGE_REQUEST_MAX_FRAME_BYTES", final_len - 1)
+    response = await async_client.post(
+        "/v1/responses", json=_body(_image_turn(_SMALL_LEGAL_IMAGE_URL))
+    )
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "payload_too_large"
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "input"
+    # The rejection reports the FINAL (stamped) size, which proves the
+    # estimate passed admission and the metadata-inclusive frame crossed.
+    assert f"{final_len} bytes >" in error["message"]
+    # Nothing was dispatched on any connection.
+    assert [len(upstream.sent_text) for upstream in state.upstreams] == sent_before
+
+    # Settlement: the next request on the same thread proceeds normally.
+    follow_up = await _collect_sse_events(async_client, "/v1/responses", json_body=_body(_text_turn("after cap")))
+    _assert_created_text_delta_completed(follow_up)
+
+
+@pytest.mark.asyncio
+async def test_webp_image_rides_the_bridge_verbatim(async_client, inline_bridge_transport):
+    # The consolidation admits WebP alongside JPEG and PNG (the trial PR
+    # admitted only JPEG/PNG), so a WebP turn is served by the bridge and
+    # its bytes arrive upstream verbatim. (allow-bounded-inline-images-on-
+    # bridge delta: "all-inline JPEG/PNG/WebP input images ... SHALL use
+    # the HTTP responses bridge".)
+    state = inline_bridge_transport
+    upstream = state.upstreams[0]
+
+    events = await _collect_sse_events(
+        async_client, "/v1/responses", json_body=_body(_image_turn(_VALID_WEBP_DATA_URL))
+    )
+    _assert_created_text_delta_completed(events)
+    # No raw connection was opened and no second bridge socket either.
+    assert state.connects == 1
+    assert len(upstream.sent_text) == 1
+    assert _collect_input_image_urls(upstream.sent_text[0]) == [_VALID_WEBP_DATA_URL]
+    assert upstream.closed is False

@@ -89,10 +89,13 @@ bytes and prompt-cache identity. Bypassing the bridge does not force upstream
 HTTP: an `input_image` request keeps upstream HTTP only when its payload exceeds
 the WebSocket frame budget or still carries an external image URL, and otherwise
 follows the ordinary transport precedence. Oversize is not a bypass but a
-terminal failure: a shape-valid image over the decoded budget fails before the
-send with HTTP400 `payload_too_large` (`param=input`), and an upstream close
+terminal failure: a shape-valid image over the decoded budget (5,000,000 bytes
+inclusive; 5,000,001 is rejected, as is an encoded segment longer than
+6,666,668 characters) fails before the send with HTTP400 `payload_too_large`
+(`param=input`), and an upstream close
 1009 on a dispatched frame ends the request the same way instead of rotating
-accounts. Setting
+accounts. The complete serialized frame, installation metadata included, is
+measured against 67,108,864 bytes (64 MiB). Setting
 `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_INLINE_IMAGES_ENABLED=false` restores
 the previous blanket image bypass. Source-routed Chat requests keep their
 source.

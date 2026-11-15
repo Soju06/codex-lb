@@ -5508,6 +5508,58 @@ async def test_http_bridge_accepted_capacity_error_waits_then_stages_single_life
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_image_capacity_evidence_does_not_authorize_a_later_ambiguous_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Image sends: capacity evidence belongs to the attempt that produced it.
+
+    The request is an admitted image (frame-budget override present) whose
+    CURRENT attempt was explicitly rejected for capacity, so the proof-gated
+    recovery stays eligible. A LATER ambiguous send on the same request must
+    not inherit that evidence: the ambiguity gate has to answer "ambiguous"
+    and the request must fail closed instead of being replayed a third time.
+    (allow-bounded-inline-images-on-bridge delta, "Explicit capacity
+    rejection": evidence from that attempt cannot authorize replay after a
+    later ambiguous send.)
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=False)
+    request_state = _accepted_bridge_request_state(
+        request_id="req-image-capacity-then-ambiguous",
+        response_create_max_bytes_override=64 * 1024 * 1024,
+        response_create_attempt_count=1,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-image-capacity-then-ambiguous",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    # Attempt 1: explicit capacity rejection -> current-attempt evidence.
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(code="model_at_capacity", message=_CAPACITY_MESSAGE),
+    )
+    assert request_state.capacity_rejected_response_create_attempt == 1
+    assert retry_precreated.await_count == 1
+
+    # Attempt 2 on the same request: the send goes silent (no response.created),
+    # which is ambiguous. The attempt counter has moved past the evidence, so
+    # the ambiguity gate must answer "ambiguous" - the failure path that
+    # suppresses the blind replay.
+    request_state.response_create_attempt_count = 2
+    request_state.replay_downstream_response_id = None
+    request_state.precreated_replay_reason = None
+    request_state.response_id = None
+    assert http_bridge_helpers_module._http_bridge_image_send_is_ambiguous(request_state) is True
+    # While the evidence is still the CURRENT attempt, recovery stays eligible.
+    request_state.response_create_attempt_count = 1
+    assert http_bridge_helpers_module._http_bridge_image_send_is_ambiguous(request_state) is False
+    # The capacity replay itself happened exactly once.
+    assert retry_precreated.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_accepted_propagated_error_stream_capacity_replay_does_not_resignal_the_startup_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

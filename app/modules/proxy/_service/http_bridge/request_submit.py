@@ -2360,56 +2360,75 @@ class _HTTPBridgeRequestSubmitMixin:
                 # acknowledgement. Persist UNKNOWN under the owner fence
                 # before cleanup can retire the closed session and release
                 # that fence.
-                # A deterministic peer rejection is excluded: the upstream
-                # closed 1009 (message too big) before parsing the frame, so
-                # the operation was never accepted and there is nothing
-                # ambiguous to reconcile. Marking it UNKNOWN would rewrite
-                # the terminal 400 into a retryable 502 and invite a
-                # pointless resend. Settlement below still runs unchanged.
+                #
+                # A deterministic peer rejection (close 1009 before the frame
+                # was parsed) is excluded: nothing was accepted, so there is
+                # no ambiguity to reconcile and the terminal 400 must not be
+                # rewritten into a retryable 502. The row still needs its
+                # explicit-failure terminal, otherwise it would linger as
+                # submitted and fence the next identical attempt behind a
+                # 503 upstream_operation_status_unknown; ``record_operation``
+                # rebinds a later attempt off a failed row.
                 if (
-                    error_code != "payload_too_large"
-                    and request_state.operation_dispatched
+                    request_state.operation_dispatched
                     and request_state.operation_registered
                     and request_state.operation_id is not None
                     and session.durable_session_id is not None
                     and session.durable_owner_epoch is not None
                 ):
-                    mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
-                    marked_unknown = False
-                    if callable(mark_operation_unknown):
-                        try:
-                            marked_unknown = await mark_operation_unknown(
-                                operation_id=request_state.operation_id,
-                                session_id=session.durable_session_id,
-                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                                owner_epoch=session.durable_owner_epoch,
+                    if error_code == "payload_too_large":
+                        mark_operation_rejected = getattr(self._durable_bridge, "mark_operation_rejected", None)
+                        if callable(mark_operation_rejected):
+                            try:
+                                await mark_operation_rejected(
+                                    operation_id=request_state.operation_id,
+                                    session_id=session.durable_session_id,
+                                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                    owner_epoch=session.durable_owner_epoch,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to mark rejected HTTP bridge operation operation_id=%s",
+                                    request_state.operation_id,
+                                    exc_info=True,
+                                )
+                    else:
+                        mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+                        marked_unknown = False
+                        if callable(mark_operation_unknown):
+                            try:
+                                marked_unknown = await mark_operation_unknown(
+                                    operation_id=request_state.operation_id,
+                                    session_id=session.durable_session_id,
+                                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                    owner_epoch=session.durable_owner_epoch,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to mark ambiguous HTTP bridge operation UNKNOWN operation_id=%s",
+                                    request_state.operation_id,
+                                    exc_info=True,
+                                )
+                        if not marked_unknown:
+                            request_state.operation_registered = False
+                            error_code = "bridge_continuity_persistence_failed"
+                            failure_error_message = (
+                                "Ambiguous response operation could not be persisted; retry the request."
                             )
-                        except Exception:
-                            logger.warning(
-                                "Failed to mark ambiguous HTTP bridge operation UNKNOWN operation_id=%s",
-                                request_state.operation_id,
-                                exc_info=True,
+                            if ambiguous_image_send:
+                                # A persistence failure must not silently drop the
+                                # duplicate-execution warning: the caller still
+                                # cannot safely auto-retry this request.
+                                failure_error_message = _http_bridge_ambiguous_image_warning(
+                                    failure_error_message
+                                )
+                            _record_continuity_fail_closed(
+                                surface="http_bridge",
+                                reason="ambiguous_operation_unknown_persistence_failed",
+                                previous_response_id=request_state.previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code=error_code,
                             )
-                    if not marked_unknown:
-                        request_state.operation_registered = False
-                        error_code = "bridge_continuity_persistence_failed"
-                        failure_error_message = (
-                            "Ambiguous response operation could not be persisted; retry the request."
-                        )
-                        if ambiguous_image_send:
-                            # A persistence failure must not silently drop the
-                            # duplicate-execution warning: the caller still
-                            # cannot safely auto-retry this request.
-                            failure_error_message = _http_bridge_ambiguous_image_warning(
-                                failure_error_message
-                            )
-                        _record_continuity_fail_closed(
-                            surface="http_bridge",
-                            reason="ambiguous_operation_unknown_persistence_failed",
-                            previous_response_id=request_state.previous_response_id,
-                            session_id=request_state.session_id,
-                            upstream_error_code=error_code,
-                        )
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=request_state,

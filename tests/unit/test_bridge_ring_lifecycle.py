@@ -1359,7 +1359,6 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         )
         assert cross_session_completed is not None
         assert cross_session_completed.response_id == "resp-completed"
-
         assert await repository.append_operation_event(
             operation_id=operation_id,
             session_id=claim.id,
@@ -1385,6 +1384,120 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         # A missing parent turn makes the chain ineligible rather than
         # silently constructing an incomplete conversation.
         assert await repository.get_replayable_transcript(response_id="resp-completed") is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_rejected_operation_takes_failed_terminal_and_stays_reentrant(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """A proven peer rejection must not leave a submitted fence behind.
+
+    The deterministic close-1009 path writes the explicit-failure terminal
+    under the owner fence. A later identical attempt on the same session
+    rebinds off the failed row (``record_operation`` resets it to submitted
+    and clears the attempt spool) instead of being fenced behind a 503
+    ``upstream_operation_status_unknown``.
+    """
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-rejected", session_key_value="sid-rejected")
+        fingerprint = durable_bridge_hash("rejected-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        created = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rejected",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rejected",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert created is not None
+        assert created.created is True
+        assert created.state == "submitted"
+
+        assert await repository.mark_operation_rejected(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rejected",
+            owner_epoch=claim.owner_epoch,
+        )
+        rejected_row = await session.get(HttpBridgeOperationRecord, operation_id)
+        assert rejected_row is not None
+        assert rejected_row.state == "failed"
+
+        rebound = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rejected",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rejected",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert rebound is not None
+        assert rebound.rebound is True
+        assert rebound.state == "submitted"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_rejected_never_downgrades_stronger_states(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    """An acknowledged or terminal row carries stronger evidence than the
+    transport rejection and must never be downgraded to failed."""
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-reject-guard", session_key_value="sid-reject-guard")
+        fingerprint = durable_bridge_hash("reject-guard-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-reject-guard",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-reject-guard",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-reject-guard",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+        )
+        assert not await repository.mark_operation_rejected(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-reject-guard",
+            owner_epoch=claim.owner_epoch,
+        )
+        acknowledged = await session.get(HttpBridgeOperationRecord, operation_id)
+        assert acknowledged is not None
+        assert acknowledged.state == "acknowledged"
+
+        # A fenced-out owner epoch must not be able to write the terminal.
+        assert not await repository.mark_operation_rejected(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-reject-guard",
+            owner_epoch=claim.owner_epoch + 7,
+        )
+        still_acknowledged = await session.get(HttpBridgeOperationRecord, operation_id)
+        assert still_acknowledged is not None
+        assert still_acknowledged.state == "acknowledged"
     finally:
         await session.close()
 

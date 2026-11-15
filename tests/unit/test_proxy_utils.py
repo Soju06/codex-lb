@@ -52624,8 +52624,15 @@ async def test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_ma
             raise RuntimeError("durable store unavailable")
         return False
 
+    async def mark_operation_rejected(**kwargs: object) -> bool:
+        events.append("reject")
+        rejected_calls.append(kwargs)
+        return True
+
+    rejected_calls: list[dict[str, object]] = []
     service._durable_bridge = SimpleNamespace(
         mark_operation_unknown=mark_operation_unknown,
+        mark_operation_rejected=mark_operation_rejected,
         lookup_retry_circuit=AsyncMock(return_value=None),
     )
     proxy_service._initialize_http_bridge_retry_circuit(service)
@@ -52646,6 +52653,7 @@ async def test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_ma
         "upstream websocket closed with 1009 message too big",
         error_code="payload_too_large",
     )
+    upstream_close = AsyncMock()
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-peer-1009-durable", None),
         headers={},
@@ -52654,7 +52662,7 @@ async def test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_ma
         account=_make_account("acc-peer-1009-durable"),
         upstream=cast(
             proxy_service.UpstreamWebSocket,
-            SimpleNamespace(send_text=AsyncMock(side_effect=send_error), close=AsyncMock()),
+            SimpleNamespace(send_text=AsyncMock(side_effect=send_error), close=upstream_close),
         ),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=deque(),
@@ -52687,17 +52695,28 @@ async def test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_ma
         )
 
     # The deterministic rejection is never marked UNKNOWN and never rewritten.
-    assert events == ["cleanup"]
+    assert events == ["reject", "cleanup"]
     assert exc_info.value.status_code == 400
     envelope = exc_info.value.payload["error"]
     assert envelope["code"] == "payload_too_large"
     assert envelope["type"] == "invalid_request_error"
     assert envelope["param"] == "input"
+    # The row takes the explicit-failure terminal under the owner fence, so a
+    # later identical attempt rebinds instead of being fenced as unknown.
+    assert rejected_calls == [
+        {
+            "operation_id": "operation-peer-1009-durable",
+            "session_id": "durable-peer-1009",
+            "instance_id": http_bridge_helpers_module._service_get_settings().http_responses_session_bridge_instance_id,
+            "owner_epoch": 7,
+        }
+    ]
     fail_call = fail_pending.await_args
     assert fail_call is not None
     assert fail_call.kwargs["error_code"] == "payload_too_large"
     assert fail_call.kwargs["penalize_account"] is False
     assert session.closed is True
+    upstream_close.assert_awaited_once()
 
 @pytest.mark.asyncio
 async def test_submit_http_bridge_ambiguous_image_keeps_duplicate_warning_when_marking_fails(monkeypatch):

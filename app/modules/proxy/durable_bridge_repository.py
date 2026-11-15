@@ -2317,6 +2317,58 @@ class DurableBridgeRepository:
             await self._session.commit()
         return True
 
+    async def mark_operation_rejected(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Fence a dispatched-but-proven-rejected SUBMITTED operation as FAILED.
+
+        A deterministic peer rejection (for example a websocket close 1009
+        raised before the frame was parsed) proves the operation never
+        executed upstream, so the row can take the explicit-failure terminal
+        immediately instead of lingering as submitted: ``record_operation``
+        rebinds a later identical attempt off a failed row, while a
+        submitted row would fence that attempt behind a 503
+        ``upstream_operation_status_unknown``. Lock the row before changing
+        it and leave an acknowledged or terminal operation untouched; those
+        states carry stronger evidence than the transport rejection.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "submitted",
+                    HttpBridgeOperationRecord.response_id.is_(None),
+                    HttpBridgeOperationRecord.event_bytes == 0,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            if await self._operation_has_spool_material(operation_id):
+                await self._session.rollback()
+                return False
+            operation.state = "failed"
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
     async def rollback_operation_before_dispatch(
         self,
         *,

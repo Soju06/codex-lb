@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
@@ -3483,7 +3482,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                     payload,
                     retry_error_message,
-                    now=time.time(),
+                    now=clock.time(),
                 ),
                 retry_error_code,
             )
@@ -3556,7 +3555,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                     payload,
                     retry_error_message,
-                    now=time.time(),
+                    now=clock.time(),
                 ),
                 owner_pinned_quota_error,
             )
@@ -3686,7 +3685,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type,
                     payload,
                     retry_error_message,
-                    now=time.time(),
+                    now=clock.time(),
                 ),
                 retry_error_code,
             )

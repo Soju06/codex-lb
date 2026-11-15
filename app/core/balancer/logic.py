@@ -1552,6 +1552,42 @@ def _extract_reset_at(error: UpstreamError, *, now: float) -> int | None:
     return None
 
 
+def freeze_reset_deadline(error: UpstreamError, *, now: float) -> int | float | None:
+    """Freeze the reset deadline an upstream error describes at ``now``.
+
+    Callers that carry an account penalty across an asynchronous boundary (a
+    health write deferred until API-key reservation settlement) must anchor
+    relative hints at observation time: re-anchoring ``resets_in_seconds`` at
+    application time stretches the hold by the whole delay and can resurrect an
+    elapsed hold. A valid absolute ``resets_at`` is returned verbatim after the
+    same strict check the consumer applies (no rounding slack on raw metadata);
+    otherwise a valid relative hint is frozen to a whole-second deadline clamped
+    into the horizon measured from ``now`` -- ``ceil`` can land fractionally past
+    it, and the consumer re-checks an absolute deadline without rounding slack.
+    Returns ``None`` when neither field is usable.
+    """
+
+    reset_at = error.get("resets_at")
+    if isinstance(reset_at, (int, float)) and not isinstance(reset_at, bool):
+        if plausible_rate_limit_reset_at(reset_at, now=now, allow_rounding_slack=False) is not None:
+            return reset_at
+
+    reset_in = error.get("resets_in_seconds")
+    if reset_in is None or isinstance(reset_in, bool):
+        return None
+    if not isinstance(reset_in, (int, float)):
+        return None
+    if isinstance(reset_in, float) and not math.isfinite(reset_in):
+        return None
+    if reset_in <= 0 or reset_in > RATE_LIMIT_RESET_MAX_HORIZON_SECONDS:
+        return None
+    rounded = int(math.ceil(now + float(reset_in)))
+    if plausible_rate_limit_reset_at(rounded, now=now) is None:
+        return None
+    horizon_ceiling = int(math.floor(now + RATE_LIMIT_RESET_MAX_HORIZON_SECONDS))
+    return min(rounded, horizon_ceiling)
+
+
 def evaluate_health_tier(
     state: AccountState,
     *,

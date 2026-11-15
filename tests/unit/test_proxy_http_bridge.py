@@ -5,6 +5,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import pickle
 import subprocess
 import sys
@@ -46038,6 +46039,51 @@ def test_websocket_event_health_error_freezes_relative_reset_deadline() -> None:
     )
     assert failed_frame == {"message": "m", "resets_at": now + 120}
 
+    # A relative hint at the horizon observed at a fractional instant must
+    # freeze inside the strict horizon the consumer re-checks without rounding
+    # slack: ceil can land fractionally past it, so the frozen deadline is
+    # clamped and stays a valid 366-day hold even when consumed 10ms later.
+    horizon = 366 * 86_400
+    fractional = 2_000_000_000.25
+    clamped_ceiling = int(math.floor(fractional + horizon))
+    at_horizon = health_error(
+        "error",
+        {"error": {"message": "m", "resets_in_seconds": horizon}},
+        "m",
+        now=fractional,
+    )
+    assert at_horizon == {"message": "m", "resets_at": clamped_ceiling}
+    assert _extract_reset_at(at_horizon, now=fractional + 0.01) == clamped_ceiling
+
+    near_horizon = health_error(
+        "error",
+        {"error": {"message": "m", "resets_in_seconds": horizon - 0.5}},
+        "m",
+        now=fractional,
+    )
+    assert near_horizon == {"message": "m", "resets_at": clamped_ceiling}
+
+    # A raw absolute just past the horizon is invalid metadata and must not
+    # preempt a valid relative hint: the frozen deadline is the relative one,
+    # and the consumer keeps accepting it after the settlement delay.
+    preempted = health_error(
+        "error",
+        {
+            "error": {
+                "message": "m",
+                "resets_at": fractional + horizon + 0.5,
+                "resets_in_seconds": 60,
+            }
+        },
+        "m",
+        now=fractional,
+    )
+    assert preempted == {"message": "m", "resets_at": int(math.ceil(fractional + 60))}
+    assert _extract_reset_at(preempted, now=fractional + 30) == int(math.ceil(fractional + 60))
+    # Past the observed deadline the hold is gone: an elapsed frozen deadline
+    # falls back to the no-metadata cooldown instead of resurrecting a window.
+    assert _extract_reset_at(preempted, now=fractional + 120) is None
+
 
 @pytest.mark.asyncio
 async def test_http_bridge_precreated_usage_limit_freezes_relative_reset_deadline(
@@ -46070,6 +46116,13 @@ async def test_http_bridge_precreated_usage_limit_freezes_relative_reset_deadlin
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
 
+    observed_at = 1_778_790_000.25
+    clock = SimpleNamespace(
+        time=lambda: observed_at,
+        monotonic=time.monotonic,
+        now=lambda: datetime.fromtimestamp(observed_at, tz=timezone.utc),
+    )
+
     await service._process_http_bridge_upstream_text(
         session,
         json.dumps(
@@ -46085,15 +46138,15 @@ async def test_http_bridge_precreated_usage_limit_freezes_relative_reset_deadlin
             },
             separators=(",", ":"),
         ),
+        clock=clock,
     )
 
     assert len(request_state.deferred_keyed_stream_health) == 1
     penalty = request_state.deferred_keyed_stream_health[0]
     frozen_deadline = penalty.error.get("resets_at")
-    assert frozen_deadline is not None
+    assert frozen_deadline == int(math.ceil(observed_at + 3600))
     assert "resets_in_seconds" not in penalty.error
-    observed_at = frozen_deadline - 3600
-    assert _extract_reset_at(penalty.error, now=observed_at + 120) == int(frozen_deadline)
+    assert _extract_reset_at(penalty.error, now=observed_at + 120) == frozen_deadline
 
 
 @pytest.mark.asyncio

@@ -64,3 +64,9 @@ Password login and TOTP verification: max 8 attempts per 60-second window per cl
 ## Audit Logging
 
 Events: `login_success`, `login_failed`, `totp_enabled`, `totp_disabled`, `settings_changed`. Stored in `audit_logs` table via `AuditService.log_async()`.
+
+## Trusted-header transport provenance
+
+Trusted-header identity is authorized from the launcher-captured raw socket peer in both the header sanitizer and principal resolver. The peer must belong to the existing trusted-proxy CIDRs and proxy-header trust must be enabled. Projected client addresses and schemes remain available for attribution, but cannot establish the proxy's authority. Missing capture fails closed.
+
+For example, a trusted loopback proxy forwarding a public client can still supply the configured identity field. A remote raw peer projecting `127.0.0.1` cannot make that identity trustworthy even when Uvicorn-compatible projection trust is broader than the dashboard trusted-proxy CIDRs. Identity cardinality, group parsing and password fallback retain their existing behavior.

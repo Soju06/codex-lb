@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
+from app.core.types import JsonValue
 from app.db.models import ApiKeyUsageReservation
 from app.db.session import SessionLocal
 
@@ -140,6 +141,57 @@ async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeyp
         _ = [line async for line in resp.aiter_lines() if line]
 
     assert "tools" not in seen_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+@pytest.mark.parametrize("stream", [True, False], ids=["streaming", "non-streaming"])
+@pytest.mark.parametrize(
+    ("strict_fields", "expected"),
+    [({}, False), ({"strict": None}, False), ({"strict": False}, False), ({"strict": True}, True)],
+    ids=["omitted", "null", "false", "true"],
+)
+async def test_v1_chat_completions_forwards_function_strictness(
+    async_client, monkeypatch, nested: bool, stream: bool, strict_fields: dict[str, JsonValue], expected: bool
+) -> None:
+    auth_json = _make_auth_json("acc_chat_strict_default", "chat-strict-default@example.com")
+    imported = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert imported.status_code == 200
+    seen_tools: list[JsonValue] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        tools = payload.to_payload()["tools"]
+        assert isinstance(tools, list)
+        seen_tools.extend(tools)
+        yield 'data: {"type":"response.output_text.delta","delta":"OK"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_strict_default"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    parameters: dict[str, JsonValue] = {
+        "type": "object",
+        "properties": {"record_id": {"type": "string"}, "context": {"type": ["integer", "null"]}},
+        "required": ["record_id", "context"] if expected else ["record_id"],
+        "additionalProperties": False,
+    }
+    definition: dict[str, JsonValue] = {"name": "lookup_record", "parameters": parameters, **strict_fields}
+    tool = {"type": "function", "function": definition} if nested else {"type": "function", **definition}
+    payload = {
+        "model": "gpt-6.1-sol",
+        "messages": [{"role": "user", "content": "Read a record"}],
+        "stream": stream,
+        "tools": [tool],
+    }
+
+    response = await async_client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert len(seen_tools) == 1
+    forwarded = seen_tools[0]
+    assert isinstance(forwarded, dict)
+    assert forwarded["strict"] is expected
+    assert forwarded["parameters"] == parameters
 
 
 @pytest.mark.asyncio

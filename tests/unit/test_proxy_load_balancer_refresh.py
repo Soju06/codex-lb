@@ -3099,9 +3099,12 @@ async def test_select_account_uses_bootstrap_plan_filter_during_partial_first_re
 
 
 @pytest.mark.asyncio
-async def test_select_account_treats_prolite_as_pro_for_registry_plan_filter(monkeypatch) -> None:
+@pytest.mark.parametrize("plan_type", ["prolite", "self_serve_business_prolite", "promax"])
+async def test_select_account_treats_pro_equivalent_plans_as_pro_for_registry_plan_filter(
+    monkeypatch, plan_type: str
+) -> None:
     account = _make_account("acc-prolite-plan-filtered", "prolite-plan-filtered@example.com")
-    account.plan_type = "prolite"
+    account.plan_type = plan_type
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     primary_entry = UsageHistory(
@@ -3136,6 +3139,7 @@ async def test_select_account_treats_prolite_as_pro_for_registry_plan_filter(mon
 
     assert selection.account is not None
     assert selection.account.id == account.id
+    assert selection.account.plan_type == plan_type
     assert selection.error_code is None
 
 

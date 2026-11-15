@@ -2103,7 +2103,13 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 
 
 @pytest.mark.asyncio
-async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("payload_plan_type", "expected_plan_type"),
+    [("pro", "pro"), ("self_serve_business_prolite", "prolite"), ("promax", "promax")],
+)
+async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(
+    monkeypatch, payload_plan_type: str, expected_plan_type: str
+) -> None:
     """Regression for #1086: a Plus -> Pro upgrade on a workspace-less account
     must be persisted instead of being skipped as an identity mismatch."""
 
@@ -2111,7 +2117,7 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
         del access_token, account_id
         return UsagePayload.model_validate(
             {
-                "plan_type": "pro",
+                "plan_type": payload_plan_type,
                 "rate_limit": {
                     "primary_window": {
                         "used_percent": 10.0,
@@ -2135,7 +2141,7 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
     await updater.refresh_accounts([account], latest_usage={})
 
     assert usage_repo.entries != []
-    assert account.plan_type == "pro"
+    assert account.plan_type == expected_plan_type
     assert account.workspace_id is None
 
 

@@ -23,6 +23,7 @@ from app.core.config.background_jobs import resolve_background_job_toggle
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import resolve_archive_enabled
 from app.core.openai.model_registry import get_model_registry
+from app.core.plan_types import normalize_account_plan_type
 from app.core.usage.logs import NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -455,8 +456,8 @@ class _FeatureCounts:
 
 
 def _canonical_plan(raw_plan: str | None) -> str:
-    normalized = (raw_plan or "").strip().lower()
-    if normalized in {"pro", "prolite"}:
+    normalized = normalize_account_plan_type(raw_plan) or (raw_plan or "").strip().lower()
+    if normalized in {"pro", "prolite", "promax"}:
         return "pro"
     if normalized in {"team", "business", "enterprise", "edu", "education"}:
         return "team"

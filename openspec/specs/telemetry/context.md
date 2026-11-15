@@ -207,3 +207,11 @@ An instance with accounts `alice@corp.com` (workspace W1) + 12 others, a custom 
 - `senpi` traffic appears in `clients` under `other` and inflates `clients_other_ratio`
 - the strings `alice`, `corp.com`, `W1`, `corp-internal-gpt`, `senpi` appear nowhere in the
   serialized payload (schema snapshot test enforces this)
+
+## Recognized Pro-family plans
+
+Pro Max (`promax`) and Business Pro Lite (`self_serve_business_prolite`) join the
+existing coarse Pro count bucket. The shared plan normalizer handles the alias;
+no raw plan label or additional telemetry field is collected. For example, one
+Pro Max account contributes to `accounts.plan_mix.pro`, while
+`accounts.plan_mix.free` remains empty.

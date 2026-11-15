@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.openai.chat_requests import ChatCompletionsRequest
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 
 
@@ -446,6 +447,102 @@ def test_chat_tools_are_normalized():
     assert first_tool.get("name") == "do_thing"
     assert first_tool.get("type") == "function"
     assert "function" not in first_tool
+
+
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+@pytest.mark.parametrize(
+    ("strict_fields", "expected"),
+    [({}, False), ({"strict": None}, False), ({"strict": False}, False), ({"strict": True}, True)],
+    ids=["omitted", "null", "false", "true"],
+)
+def test_chat_function_tools_preserve_non_strict_default(
+    nested: bool, strict_fields: dict[str, JsonValue], expected: bool
+) -> None:
+    parameters: dict[str, JsonValue] = {
+        "type": "object",
+        "properties": {"record_id": {"type": "string"}, "context": {"type": "integer"}},
+        "required": ["record_id"],
+        "additionalProperties": False,
+    }
+    definition: dict[str, JsonValue] = {"name": "lookup_record", "parameters": parameters, **strict_fields}
+    tool: dict[str, JsonValue] = (
+        {"type": "function", "function": definition} if nested else {"type": "function", **definition}
+    )
+    request = ChatCompletionsRequest.model_validate(
+        {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "Read a record"}], "tools": [tool]}
+    )
+
+    forwarded_tools = request.to_responses_request().to_payload()["tools"]
+    assert isinstance(forwarded_tools, list)
+    forwarded = forwarded_tools[0]
+    assert isinstance(forwarded, dict)
+
+    assert forwarded["strict"] is expected
+    assert forwarded["parameters"] == parameters
+    forwarded_parameters = forwarded["parameters"]
+    assert isinstance(forwarded_parameters, dict)
+    assert forwarded_parameters["required"] == ["record_id"]
+    assert request.tools == [tool]
+    original = definition if nested else tool
+    assert ("strict" in original) == ("strict" in strict_fields)
+    if "strict" in strict_fields:
+        assert original["strict"] is strict_fields["strict"]
+
+
+@pytest.mark.parametrize("nested", [True, False], ids=["nested", "flat"])
+@pytest.mark.parametrize("strict", ["true", 1, [], {}], ids=["string", "integer", "array", "object"])
+def test_chat_function_tools_do_not_default_invalid_strictness(nested: bool, strict: JsonValue) -> None:
+    definition: dict[str, JsonValue] = {
+        "name": "lookup_record",
+        "parameters": {"type": "object", "properties": {}},
+        "strict": strict,
+    }
+    tool: dict[str, JsonValue] = (
+        {"type": "function", "function": definition} if nested else {"type": "function", **definition}
+    )
+    request = ChatCompletionsRequest.model_validate(
+        {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "Read a record"}], "tools": [tool]}
+    )
+
+    forwarded_tools = request.to_responses_request().to_payload()["tools"]
+    assert isinstance(forwarded_tools, list)
+    forwarded = forwarded_tools[0]
+    assert isinstance(forwarded, dict)
+
+    assert forwarded["strict"] == strict
+    assert not isinstance(forwarded["strict"], bool)
+
+
+@pytest.mark.parametrize("messages", [None, []], ids=["absent-messages", "empty-messages"])
+@pytest.mark.parametrize("strict_fields", [{}, {"strict": None}], ids=["omitted", "null"])
+def test_responses_shaped_chat_tools_keep_strictness(
+    messages: list[JsonValue] | None, strict_fields: dict[str, JsonValue]
+) -> None:
+    tool: dict[str, JsonValue] = {
+        "type": "function",
+        "name": "lookup_record",
+        "parameters": {"type": "object", "properties": {}},
+        **strict_fields,
+    }
+    payload: dict[str, JsonValue] = {"model": "gpt-6.1-sol", "input": "Read a record", "tools": [tool]}
+    if messages is not None:
+        payload["messages"] = messages
+
+    forwarded = ChatCompletionsRequest.model_validate(payload).to_responses_request().to_payload()
+
+    assert forwarded["tools"] == [tool]
+    assert ("strict" in tool) == ("strict" in strict_fields)
+
+
+def test_native_responses_tools_keep_omitted_strict() -> None:
+    tool = {"type": "function", "name": "lookup_record", "parameters": {"type": "object", "properties": {}}}
+
+    forwarded = ResponsesRequest.model_validate(
+        {"model": "gpt-6.1-sol", "instructions": "", "input": "Read a record", "tools": [tool]}
+    ).to_payload()
+
+    assert forwarded["tools"] == [tool]
+    assert "strict" not in tool
 
 
 def test_chat_tool_choice_object_passes_through():

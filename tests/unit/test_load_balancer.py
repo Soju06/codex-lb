@@ -5028,7 +5028,7 @@ def test_select_account_capacity_weighted_unknown_plan_uses_conservative_fallbac
     assert counts["plus"] > counts["unknown-plan"]
 
 
-@pytest.mark.parametrize("plan_type", ["pro", "prolite", "team", "business", "enterprise"])
+@pytest.mark.parametrize("plan_type", ["pro", "prolite", "promax", "team", "business", "enterprise"])
 def test_additional_quota_applies_to_quota_enforced_and_unmapped_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is True
 
@@ -5044,6 +5044,39 @@ def test_additional_quota_applies_conservatively_when_plan_is_unknown():
 @pytest.mark.parametrize("plan_type", ["free", "plus", "edu"])
 def test_additional_quota_does_not_apply_to_known_non_additional_quota_plans(plan_type):
     assert _additional_quota_applies_to_plan(quota_key="codex_spark", plan_type=plan_type) is False
+
+
+@pytest.mark.parametrize("routing_strategy", ["capacity_weighted", "relative_availability"])
+def test_select_account_promax_uses_pro_capacity_not_unknown_plan_fallback(routing_strategy):
+    random.seed(36)
+    now = 1_800_000_000.0
+    promax = AccountState(
+        "promax",
+        AccountStatus.ACTIVE,
+        used_percent=20.0,
+        secondary_used_percent=20.0,
+        secondary_reset_at=int(now + 86400),
+        plan_type="promax",
+        capacity_credits=None,
+    )
+    pro = AccountState(
+        "pro",
+        AccountStatus.ACTIVE,
+        used_percent=20.0,
+        secondary_used_percent=20.0,
+        secondary_reset_at=int(now + 86400),
+        plan_type="pro",
+        capacity_credits=50400.0,
+    )
+    selected_promax = 0
+
+    for _ in range(2000):
+        result = select_account([promax, pro], now=now, routing_strategy=routing_strategy)
+        assert result.account is not None
+        selected_promax += result.account.account_id == "promax"
+
+    assert 0.4 <= selected_promax / 2000 <= 0.6
+    assert promax.plan_type == "promax"
 
 
 def test_select_account_capacity_weighted_education_alias_uses_edu_capacity():

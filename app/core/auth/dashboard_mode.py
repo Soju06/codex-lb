@@ -9,6 +9,8 @@ from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network, ip_add
 
 from fastapi import Request
 
+from app.core.socket_peer import raw_socket_peer_host
+
 _HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _FORBIDDEN_PROXY_AUTH_HEADERS = frozenset(
     {
@@ -131,7 +133,7 @@ def _get_trusted_header_auth(request: Request) -> DashboardRequestAuth | None:
     from app.core.config.settings import get_settings
 
     settings = get_settings()
-    client_host = request.client.host if request.client else None
+    client_host = raw_socket_peer_host(request)
     if not client_host or not settings.firewall_trust_proxy_headers:
         return None
     if not _is_trusted_proxy_source(client_host, _trusted_proxy_networks()):

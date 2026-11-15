@@ -401,6 +401,35 @@ async def test_unmeasurable_database_size_is_unknown_and_logs_original_exception
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["promax", "self_serve_business_prolite"])
+async def test_snapshot_counts_recognized_pro_family_plans_in_existing_bucket(
+    async_session: AsyncSession, plan_type: str
+) -> None:
+    encryptor = TokenEncryptor()
+    async_session.add(
+        Account(
+            id="recognized-pro-plan",
+            email="pro-plan@example.com",
+            plan_type=plan_type,
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+    )
+    await async_session.commit()
+
+    snapshot = await TelemetrySnapshotBuilder(async_session).build(
+        "00000000-0000-4000-8000-000000000004", consent="undecided"
+    )
+    plan_mix = snapshot.model_dump(mode="json")["accounts"]["plan_mix"]
+
+    assert plan_mix == {"pro": "1", "plus": "0", "team": "0", "free": "0"}
+    assert plan_type not in snapshot.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_privacy_quick_check_identifying_values_never_serialize(async_session: AsyncSession) -> None:
     encryptor = TokenEncryptor()
     account = Account(

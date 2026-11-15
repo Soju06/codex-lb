@@ -37,3 +37,9 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## Expired-limit sweep progress
+
+The hourly fallback sweep pages by increasing limit ID and advances from the last selected row even when a guarded update misses. For example, legacy SQLite text `2026-09-19 10:30:18` can parse to the same datetime as the bound `2026-09-19 10:30:18.000000` without comparing equal in SQL. Retrying that row within one sweep would busy-loop and starve later expired limits.
+
+Each selected row is attempted once per invocation; later batches remain reachable with bounded memory. Exact `reset_at` ownership guards and per-batch commits remain in place. A skipped legacy row is unchanged and may be retried by a future sweep. Timestamp normalization and lazy-reset/reservation compatibility need separate repair; this change guarantees termination rather than silently weakening concurrency guards.

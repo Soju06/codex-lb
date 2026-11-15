@@ -38,6 +38,22 @@ The call is made per account on the configured refresh tick, which defaults to
 scheduler lives in
 [`app/core/usage/refresh_scheduler.py`](../../../app/core/usage/refresh_scheduler.py).
 
+## Recognized paid plans
+
+Upstream Business Pro Lite payloads use `self_serve_business_prolite`. The shared
+plan normalizer maps this value to `prolite`, including usage identity checks,
+metadata writes, capacity lookup, model eligibility, and rate-limit projection.
+For example, a workspace-less paid account refreshed with that payload records
+usage and updates its plan to `prolite` instead of rejecting the plan change.
+
+Pro Max keeps its `promax` label while sharing Pro model eligibility and the
+existing Pro capacity estimates: 1500 primary and 50400 secondary credits.
+These constants are estimates and do not establish the account's measured
+allowance. Recognizing either plan does not bypass workspace identity, account
+status, quota, or operator-policy checks, and does not change reset recovery.
+
+See the [plan-capacity requirement](spec.md#requirement-usage-capacity-recognizes-upstream-chatgpt-plan-types).
+
 ## Status Derivation
 
 The fetched usage is fed through

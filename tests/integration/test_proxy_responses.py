@@ -403,6 +403,59 @@ async def test_responses_prohibits_enforced_fast_model_alias_priority_tier(
     assert "service_tier" not in seen_payload
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/backend-api/codex/responses", "/backend-api/codex/responses/", "/v1/responses", "/v1/responses/"],
+)
+@pytest.mark.asyncio
+async def test_responses_forwards_encrypted_output_include(async_client, monkeypatch, path):
+    auth_json = _make_auth_json("acc_encrypted_output", "encrypted-output@example.com")
+    response = await async_client.post(
+        "/api/accounts/import", files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    )
+    assert response.status_code == 200
+    seen_payload = {}
+
+    async def fake_stream(payload, *args, **kwargs):
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_encrypted_output",'
+            '"object":"response","status":"completed","output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
+    response = await async_client.post(
+        path,
+        json={"model": "gpt-5.4", "instructions": "hi", "input": "hi", "stream": True, "include": include},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert "response.completed" in response.text
+    assert seen_payload["include"] == include
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.asyncio
+async def test_responses_rejects_unknown_include_before_dispatch(async_client, monkeypatch, path):
+    async def fail_if_dispatched(*args, **kwargs):
+        raise AssertionError("Invalid include reached upstream")
+        yield
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_if_dispatched)
+    response = await async_client.post(
+        path,
+        json={
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hi",
+            "include": ["output.encrypted_content", "bad.include.value"],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "include"
+
+
 @pytest.mark.asyncio
 async def test_backend_responses_preserves_responses_lite_tools_and_outputs(async_client, monkeypatch):
     raw_account_id = "acc_responses_lite_tools"

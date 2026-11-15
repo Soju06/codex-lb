@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any, cast
 
 from fastapi import FastAPI
+from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.config.settings import get_settings
 from app.core.request_locality import is_trusted_proxy_source, parse_trusted_proxy_networks
+from app.core.socket_peer import raw_socket_peer_host
 
 
 class DashboardAuthProxyHeaderSanitizerMiddleware:
@@ -24,8 +26,7 @@ class DashboardAuthProxyHeaderSanitizerMiddleware:
             await self.app(scope, receive, send)
             return
 
-        client = cast(tuple[str, int] | None, scope.get("client"))
-        client_host = client[0] if client is not None else None
+        client_host = raw_socket_peer_host(HTTPConnection(scope))
         if (
             self._trust_proxy_headers
             and client_host

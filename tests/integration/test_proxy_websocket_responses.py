@@ -2679,7 +2679,8 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     assert latency_first_upstream_event_ms <= latency_response_created_ms <= latency_first_token_ms
 
 
-def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch):
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_instance, monkeypatch, path):
     # Regression for issue #1184: client-sent top-level tools must reach the
     # upstream ``response.create`` frame byte-identical — array order, object
     # key order, unknown keys, and array-value order all preserved. The
@@ -2797,17 +2798,19 @@ def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_in
             "description": "later",
         },
     ]
+    include = ["reasoning.encrypted_content", "output.encrypted_content"]
     request_payload = {
         "type": "response.create",
         "model": "gpt-5.6",
         "instructions": "hi",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
         "tools": client_tools,
+        "include": include,
         "stream": True,
     }
 
     with TestClient(app_instance) as client:
-        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+        with client.websocket_connect(path) as websocket:
             websocket.send_text(json.dumps(request_payload))
             first = json.loads(websocket.receive_text())
             second = json.loads(websocket.receive_text())
@@ -2818,6 +2821,7 @@ def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_in
     frame = fake_upstream.sent_text[0]
     expected_tools_bytes = '"tools":' + json.dumps(client_tools, ensure_ascii=True, separators=(",", ":"))
     assert expected_tools_bytes in frame
+    assert json.loads(frame)["include"] == include
 
 
 def test_backend_responses_websocket_strips_replayed_tool_call_namespaces(app_instance, monkeypatch):

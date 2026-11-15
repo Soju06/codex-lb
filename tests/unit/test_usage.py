@@ -47,14 +47,22 @@ def test_capacity_for_plan():
     assert capacity_for_plan("plus", "7d") is not None
     assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
     assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
+    assert capacity_for_plan("self_serve_business_prolite", "5h") == pytest.approx(1125.0)
+    assert capacity_for_plan("self_serve_business_prolite", "7d") == pytest.approx(37800.0)
+    assert capacity_for_plan("promax", "5h") == pytest.approx(1500.0)
+    assert capacity_for_plan("promax", "7d") == pytest.approx(50400.0)
     assert capacity_for_plan("unknown", "5h") is None
 
 
-def test_summarize_usage_window_includes_prolite_capacity():
+@pytest.mark.parametrize(
+    ("plan_type", "capacity"),
+    [("prolite", 1125.0), ("self_serve_business_prolite", 1125.0), ("promax", 1500.0)],
+)
+def test_summarize_usage_window_includes_pro_plan_capacity(plan_type, capacity):
     account = Account(
         id="acc_prolite",
         email="prolite@example.com",
-        plan_type="prolite",
+        plan_type=plan_type,
         access_token_encrypted=b"access",
         refresh_token_encrypted=b"refresh",
         id_token_encrypted=b"id",
@@ -71,8 +79,8 @@ def test_summarize_usage_window_includes_prolite_capacity():
 
     summary = summarize_usage_window([row], {account.id: account}, "primary")
 
-    assert summary.capacity_credits == pytest.approx(1125.0)
-    assert summary.used_credits == pytest.approx(281.25)
+    assert summary.capacity_credits == pytest.approx(capacity)
+    assert summary.used_credits == pytest.approx(capacity * 0.25)
     assert summary.used_percent == pytest.approx(25.0)
 
 

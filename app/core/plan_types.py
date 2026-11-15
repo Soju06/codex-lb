@@ -7,6 +7,7 @@ ACCOUNT_PLAN_TYPES: Final[set[str]] = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "team",
     "business",
     "enterprise",
@@ -25,6 +26,11 @@ RATE_LIMIT_PLAN_TYPES: Final[set[str]] = {
 
 ACCOUNT_PLAN_EQUIVALENTS: Final[dict[str, frozenset[str]]] = {
     "prolite": frozenset({"pro"}),
+    "promax": frozenset({"pro"}),
+}
+
+ACCOUNT_PLAN_ALIASES: Final[dict[str, str]] = {
+    "self_serve_business_prolite": "prolite",
 }
 
 
@@ -40,6 +46,7 @@ def normalize_account_plan_type(value: str | None) -> str | None:
     if not cleaned:
         return None
     normalized = cleaned.lower()
+    normalized = ACCOUNT_PLAN_ALIASES.get(normalized, normalized)
     return normalized if normalized in ACCOUNT_PLAN_TYPES else None
 
 
@@ -47,8 +54,8 @@ def canonicalize_account_plan_type(value: str | None) -> str | None:
     cleaned = _clean_plan_type(value)
     if not cleaned:
         return None
-    normalized = cleaned.lower()
-    if normalized in ACCOUNT_PLAN_TYPES:
+    normalized = normalize_account_plan_type(cleaned)
+    if normalized is not None:
         return normalized
     return cleaned
 
@@ -65,7 +72,7 @@ def normalize_rate_limit_plan_type(value: str | None) -> str | None:
     cleaned = _clean_plan_type(value)
     if not cleaned:
         return None
-    normalized = cleaned.lower()
+    normalized = normalize_account_plan_type(cleaned) or cleaned.lower()
     return normalized if normalized in RATE_LIMIT_PLAN_TYPES else None
 
 
@@ -73,7 +80,7 @@ def account_plan_matches_allowed(value: str | None, allowed_plans: AbstractSet[s
     cleaned = _clean_plan_type(value)
     if cleaned is None:
         return False
-    normalized_allowed = {plan.lower() for plan in allowed_plans}
+    normalized_allowed = {normalize_account_plan_type(plan) or plan.lower() for plan in allowed_plans}
     normalized = normalize_account_plan_type(cleaned)
     candidate = normalized or cleaned.lower()
     if candidate in normalized_allowed:

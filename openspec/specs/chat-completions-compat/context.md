@@ -14,6 +14,19 @@ See `openspec/specs/chat-completions-compat/spec.md` for normative requirements.
 - **Usage streaming:** When `stream_options.include_usage` is enabled, usage appears in the final chunk while earlier chunks include `usage: null`.
 - **Obfuscation passthrough:** `stream_options.include_obfuscation` is forwarded to upstream when present.
 
+### Function tool strictness
+
+Chat Completions defaults function tools to non-strict mode, whereas Responses
+can normalize an omitted flag into strict mode. The chat-message conversion
+therefore emits `strict: false` for omitted or null flags, preserving optional
+arguments such as `lookup_record(record_id, context?)` without rewriting schemas.
+Native Responses and Responses-shaped chat passthrough already carry Responses
+semantics, so their omitted flags remain omitted. Explicit values are retained;
+invalid non-boolean values are not silently replaced with false.
+
+See the [strictness requirement](spec.md#requirement-_normalize_chat_tools-preserves-the-function-tool-strict-flag)
+and [OpenAI's strict-mode documentation](https://developers.openai.com/api/docs/guides/function-calling#strict-mode).
+
 ## Constraints
 
 - Oversized image data URLs (>8MB) are dropped from user inputs.

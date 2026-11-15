@@ -626,14 +626,20 @@ async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage
 
 
 @pytest.mark.asyncio
-async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup):
+@pytest.mark.parametrize(
+    ("plan_type", "primary_capacity", "secondary_capacity"),
+    [("prolite", 1125.0, 37800.0), ("promax", 1500.0, 50400.0)],
+)
+async def test_dashboard_overview_counts_pro_plan_capacity(
+    async_client, db_setup, plan_type, primary_capacity, secondary_capacity
+):
     now = utcnow().replace(microsecond=0)
 
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
         usage_repo = UsageRepository(session)
 
-        await accounts_repo.upsert(_make_account("acc_prolite", "prolite@example.com", plan_type="prolite"))
+        await accounts_repo.upsert(_make_account("acc_prolite", "prolite@example.com", plan_type=plan_type))
         await usage_repo.add_entry(
             "acc_prolite",
             0.0,
@@ -654,15 +660,15 @@ async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup
     payload = response.json()
     account = payload["accounts"][0]
 
-    assert account["planType"] == "prolite"
-    assert account["capacityCreditsPrimary"] == pytest.approx(1125.0)
-    assert account["remainingCreditsPrimary"] == pytest.approx(1125.0)
-    assert account["capacityCreditsSecondary"] == pytest.approx(37800.0)
-    assert account["remainingCreditsSecondary"] == pytest.approx(37800.0)
-    assert payload["summary"]["primaryWindow"]["capacityCredits"] == pytest.approx(1125.0)
-    assert payload["summary"]["primaryWindow"]["remainingCredits"] == pytest.approx(1125.0)
-    assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(37800.0)
-    assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(37800.0)
+    assert account["planType"] == plan_type
+    assert account["capacityCreditsPrimary"] == pytest.approx(primary_capacity)
+    assert account["remainingCreditsPrimary"] == pytest.approx(primary_capacity)
+    assert account["capacityCreditsSecondary"] == pytest.approx(secondary_capacity)
+    assert account["remainingCreditsSecondary"] == pytest.approx(secondary_capacity)
+    assert payload["summary"]["primaryWindow"]["capacityCredits"] == pytest.approx(primary_capacity)
+    assert payload["summary"]["primaryWindow"]["remainingCredits"] == pytest.approx(primary_capacity)
+    assert payload["summary"]["secondaryWindow"]["capacityCredits"] == pytest.approx(secondary_capacity)
+    assert payload["summary"]["secondaryWindow"]["remainingCredits"] == pytest.approx(secondary_capacity)
 
 
 @pytest.mark.asyncio

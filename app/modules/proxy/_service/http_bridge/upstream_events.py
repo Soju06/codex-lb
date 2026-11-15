@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
@@ -3478,7 +3479,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                _websocket_event_health_error(event_type, payload, retry_error_message),
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=time.time(),
+                ),
                 retry_error_code,
             )
             retry_consumer_attached = (
@@ -3546,7 +3552,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                _websocket_event_health_error(event_type, payload, retry_error_message),
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=time.time(),
+                ),
                 owner_pinned_quota_error,
             )
             if (
@@ -3671,7 +3682,12 @@ class _HTTPBridgeUpstreamEventsMixin:
             await self._handle_or_defer_precreated_stream_health(
                 status_request_state,
                 session.account,
-                _websocket_event_health_error(event_type, payload, retry_error_message),
+                _websocket_event_health_error(
+                    event_type,
+                    payload,
+                    retry_error_message,
+                    now=time.time(),
+                ),
                 retry_error_code,
             )
             # Pre-created anchored requests belong to the owner-pinned branch

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import time
 from collections import deque
@@ -11,6 +12,10 @@ from typing import Any, cast
 
 import anyio
 
+from app.core.balancer.logic import (
+    RATE_LIMIT_RESET_MAX_HORIZON_SECONDS,
+    plausible_rate_limit_reset_at,
+)
 from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -976,23 +981,46 @@ def _websocket_event_health_error(
     event_type: str | None,
     payload: dict[str, JsonValue] | None,
     message: str | None,
+    now: float,
 ) -> UpstreamError:
-    # Normalize an upstream error frame into a health-penalty payload that
-    # keeps the upstream reset deadline: the deferred keyed-health path applies
-    # the penalty only after reservation settlement, and a message-only payload
-    # makes handle_rate_limit fall back to the 30-second floor instead of the
-    # real hold. Numeric resets_at / resets_in_seconds are validated exactly
-    # like _upstream_error_from_openai does.
+    # Normalize an upstream error frame into an account-health penalty payload
+    # anchored at the observation time now. The deferred keyed-health path
+    # applies the penalty only after reservation settlement, so the payload must
+    # carry an absolute deadline: a relative resets_in_seconds would be
+    # re-anchored at application time and stretch the hold by the whole
+    # settlement delay, and a stale relative hint could resurrect an elapsed
+    # hold. A valid absolute resets_at wins verbatim; a valid relative hint is
+    # frozen to ceil(now + duration); invalid metadata leaves the message-only
+    # payload, which falls back to the balancer no-metadata cooldown.
     error: UpstreamError = {"message": message or "Upstream error"}
     details = _websocket_event_error_payload(event_type, payload)
-    if isinstance(details, dict):
-        resets_at = details.get("resets_at")
-        if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+    if not isinstance(details, dict):
+        return error
+    resets_at = details.get("resets_at")
+    if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+        if plausible_rate_limit_reset_at(resets_at, now=now) is not None:
             error["resets_at"] = resets_at
-        resets_in_seconds = details.get("resets_in_seconds")
-        if isinstance(resets_in_seconds, (int, float)) and not isinstance(resets_in_seconds, bool):
-            error["resets_in_seconds"] = resets_in_seconds
+            return error
+    resets_in_seconds = details.get("resets_in_seconds")
+    if isinstance(resets_in_seconds, (int, float)) and not isinstance(resets_in_seconds, bool):
+        frozen = _frozen_relative_reset_at(resets_in_seconds, now=now)
+        if frozen is not None:
+            error["resets_at"] = frozen
     return error
+
+
+def _frozen_relative_reset_at(resets_in_seconds: int | float, *, now: float) -> int | None:
+    # Mirror _extract_reset_at's relative branch: reject non-finite, non-positive
+    # and beyond-horizon hints, freeze the rest against the observation time,
+    # then re-check plausibility after rounding.
+    if isinstance(resets_in_seconds, float) and not math.isfinite(resets_in_seconds):
+        return None
+    if resets_in_seconds <= 0 or resets_in_seconds > RATE_LIMIT_RESET_MAX_HORIZON_SECONDS:
+        return None
+    rounded = int(math.ceil(now + float(resets_in_seconds)))
+    if plausible_rate_limit_reset_at(rounded, now=now) is None:
+        return None
+    return rounded
 
 
 def _websocket_precreated_retry_error_code(

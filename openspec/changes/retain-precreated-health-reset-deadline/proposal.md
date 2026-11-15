@@ -18,8 +18,13 @@ reset deadline.
 ## What Changes
 
 - Normalize a pre-created upstream error event into the queued health penalty
-  with the upstream reset metadata (`resets_at` / `resets_in_seconds`, numeric
-  and non-boolean only), mirroring `_upstream_error_from_openai` validation.
+  anchored at the observation time: a valid absolute `resets_at` is kept
+  verbatim, a valid relative `resets_in_seconds` is frozen to an absolute
+  deadline against the rejection-time clock, and the relative duration is not
+  carried across the defer (re-anchoring it at settlement time would stretch
+  the hold by the whole settlement delay and could resurrect an elapsed hold).
+  Numeric, non-boolean validation mirrors `_upstream_error_from_openai` and
+  `_extract_reset_at`.
 - Keep the settlement-ordering invariant unchanged: the penalty is still queued
   while the reservation is open and still applied only after settlement or
   fallback release. Only the queued payload is enriched; classification, defer

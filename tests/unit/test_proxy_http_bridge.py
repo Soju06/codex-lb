@@ -45926,7 +45926,9 @@ async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_sett
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Keyed pre-created retry must queue the health write, not apply it while
-    the API-key reservation is still unsettled (settlement-ordering invariant)."""
+    the API-key reservation is still unsettled (settlement-ordering invariant).
+    The queued penalty must keep the upstream reset deadline so the deferred
+    write persists the real hold instead of the 30-second fallback."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-keyed-precreated-limit",
@@ -45977,6 +45979,8 @@ async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_sett
     assert penalty.account is session.account
     assert penalty.code == "usage_limit_reached"
     assert getattr(request_state, "account_health_error_handled", False) is True
+    assert penalty.error.get("resets_at") == 1_778_790_595
+    assert penalty.error.get("resets_in_seconds") == 14_555
 
 
 @pytest.mark.asyncio

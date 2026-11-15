@@ -972,6 +972,29 @@ def _websocket_event_error_message(event_type: str | None, payload: dict[str, Js
     return stripped or None
 
 
+def _websocket_event_health_error(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    message: str | None,
+) -> UpstreamError:
+    # Normalize an upstream error frame into a health-penalty payload that
+    # keeps the upstream reset deadline: the deferred keyed-health path applies
+    # the penalty only after reservation settlement, and a message-only payload
+    # makes handle_rate_limit fall back to the 30-second floor instead of the
+    # real hold. Numeric resets_at / resets_in_seconds are validated exactly
+    # like _upstream_error_from_openai does.
+    error: UpstreamError = {"message": message or "Upstream error"}
+    details = _websocket_event_error_payload(event_type, payload)
+    if isinstance(details, dict):
+        resets_at = details.get("resets_at")
+        if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+            error["resets_at"] = resets_at
+        resets_in_seconds = details.get("resets_in_seconds")
+        if isinstance(resets_in_seconds, (int, float)) and not isinstance(resets_in_seconds, bool):
+            error["resets_in_seconds"] = resets_in_seconds
+    return error
+
+
 def _websocket_precreated_retry_error_code(
     request_state: _WebSocketRequestState | None,
     *,

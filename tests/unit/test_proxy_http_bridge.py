@@ -5524,13 +5524,16 @@ async def test_http_bridge_image_capacity_evidence_does_not_authorize_a_later_am
 
     Scope note: this drives the attempt counter and the ambiguity gate
     directly rather than dispatching a real second silent send on an upstream
-    socket. A full product-path version (capacity rejection -> reconnect ->
-    silent second dispatch -> terminal 502) exists in the integration suite
-    but is not reliable there: after the silent attempt the product path
-    recovers the stream, so the request completes 200 instead of surfacing
-    the ambiguity. The integration coverage that IS reliable is the silent
-    single-send contract (test_silent_image_send_terminates_without_using_
-    the_replacement) plus the admission-time capacity proof helper test.
+    socket, so the product path "capacity rejection -> reconnect -> silent
+    second dispatch -> no third send" is NOT covered end to end here. An
+    attempted local integration harness for that path was not committed:
+    after the silent attempt the product path recovered the stream, so the
+    request completed 200 and the ambiguity never surfaced - a 200 does not
+    prove either correct recovery or duplicate suppression, and a send trace
+    would be needed to claim it. The reliable integration coverage for the
+    surrounding contracts is the silent single-send case
+    (test_silent_image_send_terminates_without_using_the_replacement) and
+    the admission-time capacity proof helper test.
     """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=False)

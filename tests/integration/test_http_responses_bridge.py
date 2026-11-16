@@ -209,7 +209,16 @@ def _make_app_settings(
     codex_prewarm_enabled: bool = False,
     instance_id: str = "instance-a",
     instance_ring: list[str] | None = None,
+    inline_images_enabled: bool | None = None,
 ) -> Settings:
+    # ``inline_images_enabled=None`` (the default) OMITS the field so the
+    # production default (True, allow-bounded-inline-images-on-bridge)
+    # applies; passing an explicit bool pins the field (False = rollback).
+    overrides: dict[str, Any] = (
+        {}
+        if inline_images_enabled is None
+        else {"http_responses_session_bridge_inline_images_enabled": inline_images_enabled}
+    )
     return Settings(
         http_responses_session_bridge_enabled=enabled,
         http_responses_session_bridge_codex_prewarm_enabled=codex_prewarm_enabled,
@@ -221,6 +230,7 @@ def _make_app_settings(
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         stream_idle_timeout_seconds=300.0,
+        **overrides,
     )
 
 

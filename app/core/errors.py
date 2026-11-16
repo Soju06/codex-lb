@@ -142,9 +142,12 @@ def openai_error(
     message: str,
     error_type: str = "server_error",
     *,
+    param: JsonValue | None = None,
     resets_at: int | float | None = None,
 ) -> OpenAIErrorEnvelope:
     detail: OpenAIErrorDetail = {"message": message, "type": error_type, "code": code}
+    if param is not None:
+        detail["param"] = param
     if resets_at is not None:
         detail["resets_at"] = int(resets_at)
     return {"error": detail}

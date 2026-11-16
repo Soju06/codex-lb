@@ -325,6 +325,8 @@ async def _stage_websocket_request_state_for_replay(
             request_state.replay_downstream_response_id,
             request_state.response_event_count,
         )
+    if trigger == "capacity_error":
+        request_state.capacity_rejected_response_create_attempt = request_state.response_create_attempt_count
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0

@@ -4831,6 +4831,10 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
             queue_limit=16,
             prompt_cache_idle_ttl_seconds=30.0,
             gateway_safe_mode=False,
+            # This stock test asserts the blanket image bypass, which is the
+            # documented explicit-false rollback of the default-on
+            # inline-image bridge contract.
+            inline_images_enabled=False,
         ),
     )
     payload = ResponsesRequest.model_validate(
@@ -5046,6 +5050,10 @@ async def test_native_image_bypass_emits_capacity_keepalive_before_upstream_star
             queue_limit=16,
             prompt_cache_idle_ttl_seconds=30.0,
             gateway_safe_mode=False,
+            # This stock test asserts the blanket image bypass, which is the
+            # documented explicit-false rollback of the default-on
+            # inline-image bridge contract.
+            inline_images_enabled=False,
         ),
     )
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
@@ -52596,6 +52604,208 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
 
     assert events == ["mark", "cleanup"]
     service._durable_bridge.mark_operation_unknown.assert_awaited_once()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mark_failure", ["returns_false", "raises"])
+async def test_submit_http_bridge_peer_1009_stays_terminal_400_when_operation_marking_fails(monkeypatch, mark_failure):
+    # A deterministic peer 1009 rejection is a client payload error. When the
+    # durable UNKNOWN marking cannot complete, the request MUST still settle
+    # as the terminal 400 payload_too_large it is: rewriting it into a
+    # retryable bridge_continuity_persistence_failed 502 would tell the
+    # client to resend an oversized frame forever.
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    events: list[str] = []
+
+    async def mark_operation_unknown(**_kwargs: object) -> bool:
+        events.append("mark")
+        if mark_failure == "raises":
+            raise RuntimeError("durable store unavailable")
+        return False
+
+    async def mark_operation_rejected(**kwargs: object) -> bool:
+        events.append("reject")
+        rejected_calls.append(kwargs)
+        return True
+
+    rejected_calls: list[dict[str, object]] = []
+    service._durable_bridge = SimpleNamespace(
+        mark_operation_unknown=mark_operation_unknown,
+        mark_operation_rejected=mark_operation_rejected,
+        lookup_retry_circuit=AsyncMock(return_value=None),
+    )
+    proxy_service._initialize_http_bridge_retry_circuit(service)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-peer-1009-durable",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5"}',
+        operation_id="operation-peer-1009-durable",
+        operation_registered=True,
+    )
+    send_error = UpstreamWebSocketTransportError(
+        "upstream websocket closed with 1009 message too big",
+        error_code="payload_too_large",
+    )
+    upstream_close = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-peer-1009-durable", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-peer-1009-durable"),
+        request_model="gpt-5.5",
+        account=_make_account("acc-peer-1009-durable"),
+        upstream=cast(
+            proxy_service.UpstreamWebSocket,
+            SimpleNamespace(send_text=AsyncMock(side_effect=send_error), close=upstream_close),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+        durable_session_id="durable-peer-1009",
+        durable_owner_epoch=7,
+    )
+
+    async def cleanup(*_args: object, **_kwargs: object) -> None:
+        events.append("cleanup")
+
+    fail_pending = AsyncMock()
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=1,
+        )
+
+    # The deterministic rejection is never marked UNKNOWN and never rewritten.
+    assert events == ["reject", "cleanup"]
+    assert exc_info.value.status_code == 400
+    envelope = exc_info.value.payload["error"]
+    assert envelope["code"] == "payload_too_large"
+    assert envelope["type"] == "invalid_request_error"
+    assert envelope["param"] == "input"
+    # The row takes the explicit-failure terminal under the owner fence, so a
+    # later identical attempt rebinds instead of being fenced as unknown.
+    assert rejected_calls == [
+        {
+            "operation_id": "operation-peer-1009-durable",
+            "session_id": "durable-peer-1009",
+            "instance_id": http_bridge_helpers_module._service_get_settings().http_responses_session_bridge_instance_id,
+            "owner_epoch": 7,
+        }
+    ]
+    fail_call = fail_pending.await_args
+    assert fail_call is not None
+    assert fail_call.kwargs["error_code"] == "payload_too_large"
+    assert fail_call.kwargs["penalize_account"] is False
+    assert session.closed is True
+    upstream_close.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_ambiguous_image_keeps_duplicate_warning_when_marking_fails(monkeypatch):
+    # A genuinely ambiguous image send that cannot be marked UNKNOWN still
+    # fails closed, but the rewritten message must keep the duplicate-
+    # execution warning: the caller cannot safely auto-retry either way.
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    events: list[str] = []
+
+    async def mark_operation_unknown(**_kwargs: object) -> bool:
+        events.append("mark")
+        return False
+
+    service._durable_bridge = SimpleNamespace(
+        mark_operation_unknown=mark_operation_unknown,
+        lookup_retry_circuit=AsyncMock(return_value=None),
+    )
+    proxy_service._initialize_http_bridge_retry_circuit(service)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-ambiguous-image-durable",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5"}',
+        operation_id="operation-ambiguous-image-durable",
+        operation_registered=True,
+        response_create_max_bytes_override=64 * 1024 * 1024,
+        response_create_attempt_count=1,
+    )
+    send_error = UpstreamWebSocketTransportError(
+        "upstream websocket closed after dispatch",
+        error_code="proxy_network_unavailable",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-ambiguous-image-durable", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-ambiguous-image-durable"),
+        request_model="gpt-5.5",
+        account=_make_account("acc-ambiguous-image-durable"),
+        upstream=cast(
+            proxy_service.UpstreamWebSocket,
+            SimpleNamespace(send_text=AsyncMock(side_effect=send_error), close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+        durable_session_id="durable-ambiguous-image",
+        durable_owner_epoch=9,
+    )
+
+    async def cleanup(*_args: object, **_kwargs: object) -> None:
+        events.append("cleanup")
+
+    fail_pending = AsyncMock()
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=1,
+        )
+
+    assert events == ["mark", "cleanup"]
+    assert exc_info.value.status_code == 502
+    detail = exc_info.value.payload["error"]
+    assert detail["code"] == "bridge_continuity_persistence_failed"
+    message = detail["message"]
+    assert "could not be persisted" in message
+    assert "may still be executing" in message
+    assert "duplicate upstream work" in message
+    fail_call = fail_pending.await_args
+    assert fail_call is not None
+    assert fail_call.kwargs["error_code"] == "bridge_continuity_persistence_failed"
+    assert fail_call.kwargs["penalize_account"] is False
 
 
 @pytest.mark.asyncio

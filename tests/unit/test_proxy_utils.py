@@ -26622,15 +26622,10 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
     trusted_payload = json.loads(trusted.text_data)
     assert trusted_payload["client_metadata"][marker] == "true"
     assert trusted_payload["reasoning"] == {"context": "all_turns", "effort": "high"}
-    assert trusted.request_state.fresh_upstream_request_is_retry_safe
-    assert trusted.request_state.fresh_upstream_request_text is not None
-    replay_payload = json.loads(trusted.request_state.fresh_upstream_request_text)
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == trusted_payload["input"]
-    assert replay_payload["client_metadata"] == {"keep": "yes"}
-    assert replay_payload["reasoning"] == {"context": "last_turn", "effort": "high"}
-    # The marker-stripped fresh body is non-Lite, so swapping to it for a
-    # transparent replay must also clear the Lite acceptance flag.
+    # The user-only delta after an accepted prewarm does not restate
+    # the prewarm's context, so it must never be replayed without its anchor.
+    assert trusted.request_state.fresh_upstream_request_is_retry_safe is False
+    assert trusted.request_state.fresh_upstream_request_text is None
     assert trusted.request_state.responses_lite_model == "gpt-5.6-sol"
     assert trusted.request_state.fresh_upstream_request_responses_lite_model is None
 
@@ -26670,16 +26665,10 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
         "summary": "auto",
         "vendor_hint": 9,
     }
-    assert body_lite.request_state.fresh_upstream_request_text is not None
-    body_lite_replay = json.loads(body_lite.request_state.fresh_upstream_request_text)
-    assert "previous_response_id" not in body_lite_replay
-    assert body_lite_replay["client_metadata"][marker] == "true"
-    assert body_lite_replay["reasoning"] == {
-        "context": "all_turns",
-        "summary": "auto",
-        "vendor_hint": 9,
-    }
-    assert body_lite.request_state.fresh_upstream_request_responses_lite_model == "gpt-5.6-sol"
+    # An anchor this connection never completed is not replayed
+    # anchorless, even when the body carries the Lite tool bundle.
+    assert body_lite.request_state.fresh_upstream_request_is_retry_safe is False
+    assert body_lite.request_state.fresh_upstream_request_text is None
 
 
 @pytest.mark.asyncio
@@ -27054,6 +27043,7 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
         last_completed_input_count=1,
         last_completed_response_id="resp_client_anchor",
         last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(full_resend_input[:1]),
+        last_completed_input_covers_context=True,
     )
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
@@ -27211,15 +27201,243 @@ def test_websocket_client_previous_response_full_resend_retry_allows_self_contai
         {"type": "function_call_output", "call_id": "call_ok", "output": "ok"},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=1,
+        last_completed_response_id="resp_client_anchor",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(self_contained_tool_history[:1]),
+        last_completed_input_covers_context=True,
+    )
 
     assert (
         proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
             previous_response_id="resp_client_anchor",
             input_value=self_contained_tool_history,
-            continuity_state=None,
+            continuity_state=continuity_state,
         )
         is True
     )
+
+
+# Codex sends ``previous_response_id`` with only the
+# incremental delta. When the proxy does not know that anchor (it follows an
+# interrupted response, a prewarm, or a new downstream connection), it cannot
+# tell a delta from a full history, so an anchorless replay of that input would
+# silently drop the thread's earlier context. Such input must not be replayed.
+@pytest.mark.parametrize("continuity_known_anchor", [None, "resp_older_completed"])
+def test_websocket_client_previous_response_full_resend_retry_rejects_unknown_anchor_delta(
+    continuity_known_anchor: str | None,
+) -> None:
+    codex_delta_after_interrupt: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "steer: do it differently"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "and keep the tests"}]},
+    ]
+    continuity_state = (
+        None
+        if continuity_known_anchor is None
+        else proxy_service._WebSocketContinuityState(
+            last_completed_input_count=3,
+            last_completed_response_id=continuity_known_anchor,
+            last_completed_input_prefix_fingerprint="fingerprint-of-earlier-history",
+        )
+    )
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_interrupted_unknown_to_proxy",
+            input_value=codex_delta_after_interrupt,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+
+
+def test_websocket_client_previous_response_full_resend_retry_rejects_prefix_recorded_from_anchored_delta() -> None:
+    # R1 holds the thread history. R2 was anchored on R1 with only a delta and
+    # completed, so the stored prefix describes that delta, not R2's context.
+    # R3 anchors on R2 and restates the delta plus a new message: the prefix
+    # matches, but an anchorless replay would still omit R1's history.
+    delta: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first steer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "second steer"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(delta),
+        last_completed_response_id="resp_r2",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(delta),
+        last_completed_input_covers_context=False,
+    )
+    restated: list[JsonValue] = [
+        *delta,
+        {"role": "user", "content": [{"type": "input_text", "text": "new message"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_r2",
+            input_value=restated,
+            continuity_state=continuity_state,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("covers_context", "expected"),
+    [(True, True), (False, False)],
+)
+def test_record_websocket_continuity_completion_keeps_input_context_coverage(
+    covers_context: bool, expected: bool
+) -> None:
+    continuity_state = proxy_service._WebSocketContinuityState()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_cover",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_state.input_item_count = 1
+    request_state.input_full_fingerprint = "fp"
+    request_state.input_covers_anchor_context = covers_context
+
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=request_state,
+        response_id="resp_cover",
+    )
+
+    assert continuity_state.last_completed_input_covers_context is expected
+    proxy_service._record_websocket_continuity_completion(
+        continuity_state,
+        request_state=request_state,
+        response_id=None,
+    )
+    assert continuity_state.last_completed_input_covers_context is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_covers_context", [False, True])
+async def test_prepare_websocket_response_create_request_injected_anchor_inherits_context_coverage(
+    monkeypatch, stored_covers_context: bool
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = ApiKeyData(
+        id="key_ws_injected_coverage",
+        name="ws-injected-coverage",
+        key_prefix="sk-ws-injected",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first steer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "second steer"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(stored_input),
+        last_completed_response_id="resp_r2",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(stored_input),
+        last_completed_input_covers_context=stored_covers_context,
+    )
+    unanchored_input: list[JsonValue] = [
+        *stored_input,
+        {"role": "user", "content": [{"type": "input_text", "text": "new message"}]},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {"type": "response.create", "model": "gpt-5.1", "input": unanchored_input},
+        ),
+        headers={"session_id": "turn_ws_injected_coverage"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert json.loads(prepared.text_data)["previous_response_id"] == "resp_r2"
+    assert prepared.request_state.input_covers_anchor_context is stored_covers_context
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_does_not_fresh_retry_unknown_anchor_delta(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_unknown_anchor_delta",
+        name="ws-unknown-anchor-delta",
+        key_prefix="sk-ws-unknown-anchor",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+
+    codex_delta: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "steer: do it differently"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "and keep the tests"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=3,
+        last_completed_response_id="resp_older_completed",
+        last_completed_input_prefix_fingerprint="fingerprint-of-earlier-history",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "previous_response_id": "resp_interrupted_unknown_to_proxy",
+                "input": codex_delta,
+            },
+        ),
+        headers={"session_id": "turn_ws_unknown_anchor_delta"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert upstream_payload["previous_response_id"] == "resp_interrupted_unknown_to_proxy"
+    assert upstream_payload["input"] == codex_delta
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is False
+    assert prepared.request_state.fresh_upstream_request_text is None
 
 
 @pytest.mark.asyncio

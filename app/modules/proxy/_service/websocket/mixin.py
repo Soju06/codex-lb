@@ -3233,6 +3233,7 @@ class _WebSocketMixin:
         client_full_resend_payload: ResponsesRequest | None = None
         client_full_resend_input_items: list[JsonValue] | None = None
         client_full_resend_retry_safe = False
+        client_previous_response_id = responses_payload.previous_response_id
         if responses_payload.previous_response_id is not None and isinstance(responses_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], responses_payload.input)
             client_full_resend_input_items = previous_response_input_items
@@ -3377,6 +3378,17 @@ class _WebSocketMixin:
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
         request_state.durable_capability_lineage_required = capability_route.require_security_work_authorized
         original_full_resend_input: JsonValue | None = None
+        if session_anchor is not None:
+            # The injected anchor's context is only as complete as the input it
+            # was recorded from; a completion recorded from a client-anchored
+            # delta must not become provable through injection.
+            request_state.input_covers_anchor_context = bool(
+                continuity_state is not None and continuity_state.last_completed_input_covers_context
+            )
+        else:
+            request_state.input_covers_anchor_context = (
+                client_previous_response_id is None or client_full_resend_retry_safe
+            )
         if session_anchor is not None:
             request_state.proxy_injected_previous_response_id = True
             request_state.input_item_count = original_input_item_count or request_state.input_item_count

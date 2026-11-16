@@ -1089,6 +1089,12 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # Whether this request's input restates the whole context its response
+    # builds on: no anchor, a proxy-injected anchor (the original full body is
+    # retained), or a client full resend proven against stored context. A
+    # client-anchored delta does not, so its completion must not later prove an
+    # anchorless replay.
+    input_covers_anchor_context: bool = False
     # The durable lookup carried an anchor, but its owner was already stale,
     # ownerless, or lease-expired when this request arrived.  Such a request
     # must not be presented to the client as a retryable upstream timeout.
@@ -1554,6 +1560,10 @@ class _WebSocketContinuityState:
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
+    # The stored count/fingerprint describe the completed response's full
+    # context only when its request input covered it (see
+    # ``_WebSocketRequestState.input_covers_anchor_context``).
+    last_completed_input_covers_context: bool = False
     last_pending_function_call_ids: list[str] = field(default_factory=list)
     last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     responses_lite_model: str | None = None

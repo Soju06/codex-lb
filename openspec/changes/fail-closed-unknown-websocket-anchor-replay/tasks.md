@@ -11,6 +11,9 @@
 - [x] 1.4 Record whether a completed request's input covered its whole context,
       and require it before a stored prefix proves a full resend, so a
       restated delta of a client-anchored completion is not replayed.
+- [x] 1.5 When the proxy injects a session anchor, inherit that completion's
+      coverage instead of assuming it, so a completion recorded from a
+      client-anchored delta cannot become provable through injection.
 
 ## 2. Align existing tests with the rule
 

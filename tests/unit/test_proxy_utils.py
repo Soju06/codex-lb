@@ -27317,6 +27317,68 @@ def test_record_websocket_continuity_completion_keeps_input_context_coverage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stored_covers_context", [False, True])
+async def test_prepare_websocket_response_create_request_injected_anchor_inherits_context_coverage(
+    monkeypatch, stored_covers_context: bool
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    api_key = ApiKeyData(
+        id="key_ws_injected_coverage",
+        name="ws-injected-coverage",
+        key_prefix="sk-ws-injected",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first steer"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "second steer"}]},
+    ]
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(stored_input),
+        last_completed_response_id="resp_r2",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(stored_input),
+        last_completed_input_covers_context=stored_covers_context,
+    )
+    unanchored_input: list[JsonValue] = [
+        *stored_input,
+        {"role": "user", "content": [{"type": "input_text", "text": "new message"}]},
+    ]
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {"type": "response.create", "model": "gpt-5.1", "input": unanchored_input},
+        ),
+        headers={"session_id": "turn_ws_injected_coverage"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    assert prepared.request_state.proxy_injected_previous_response_id is True
+    assert json.loads(prepared.text_data)["previous_response_id"] == "resp_r2"
+    assert prepared.request_state.input_covers_anchor_context is stored_covers_context
+
+
+@pytest.mark.asyncio
 async def test_prepare_websocket_response_create_request_does_not_fresh_retry_unknown_anchor_delta(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

@@ -11,6 +11,36 @@ Codex client setup is part of this compatibility boundary. A working server
 route is insufficient when a custom-provider gateway hides the image tool
 before it makes an HTTP request.
 
+## Model discovery and direct API example
+
+`GET /v1/models` and `GET /backend-api/codex/models` expose catalog models;
+they do not enumerate every model accepted by the Images compatibility
+adapter. An absent `gpt-image-2` entry therefore does not, by itself, mean
+that image generation is unavailable. The public Images model defaults to
+`gpt-image-2`; the internal Responses host model is selected separately.
+
+For a deployment exposing the Images routes, this direct request generates
+one image and saves the JSON response (including `data[0].b64_json`):
+
+```bash
+curl --fail-with-body http://127.0.0.1:2455/v1/images/generations \
+  -H "Authorization: Bearer ${CODEX_LB_API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-image-2","prompt":"A blue ceramic mug on a wooden table","n":1,"size":"1024x1024","quality":"medium"}' \
+  -o image-response.json
+```
+
+Use a key issued by your deployment when API-key authentication is enabled;
+omit the Authorization header when authentication is disabled. Successful
+requests consume upstream quota. A catalog entry is not proof of account
+entitlement, and a key's model allowlist still applies to Images requests.
+
+When diagnosing failures, distinguish an unavailable route in an older
+deployment from authentication/model-policy errors and upstream host or account
+errors. If the direct API works but Codex does not expose `$imagegen`, check
+the provider eligibility and session initialization notes below instead of
+adding a catalog model or hardcoding the internal host.
+
 ## Codex provider eligibility
 
 Codex has two distinct provider-authentication paths that can make built-in

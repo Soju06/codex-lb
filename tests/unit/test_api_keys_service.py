@@ -2236,16 +2236,19 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model", "expected_reserved_microdollars", "expected_final_microdollars"),
+    ("model", "budget_tokens", "expected_reserved_microdollars", "expected_final_microdollars"),
     [
-        ("gpt-5.6", 286_720, 31_000_000),
-        ("gpt-5.6-sol-snapshot", 286_720, 31_000_000),
-        ("gpt-5.6-terra-snapshot", 114_688, 12_400_000),
-        ("gpt-5.6-luna-snapshot", 11_468, 1_240_000),
+        ("gpt-5.6", 8_192, 286_720, 31_000_000),
+        ("gpt-5.6-sol-snapshot", 8_192, 286_720, 31_000_000),
+        ("gpt-5.6-terra-snapshot", 8_192, 114_688, 12_400_000),
+        ("gpt-5.6-luna-snapshot", 8_192, 11_468, 1_240_000),
+        ("gpt-6.2-astra-snapshot", 5_000, 240_000, 41_600_000),
+        ("gpt-6.2-sol-2026-11-21", 5_000, 60_000, 10_400_000),
     ],
 )
-async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
+async def test_usage_reservation_uses_personality_pricing(
     model: str,
+    budget_tokens: int,
     expected_reserved_microdollars: int,
     expected_final_microdollars: int,
     monkeypatch: pytest.MonkeyPatch,
@@ -2268,7 +2271,7 @@ async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
     reservation = await service.enforce_limits_for_request(
         created.id,
         request_model=model,
-        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8_192, output_tokens=8_192),
+        request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=budget_tokens, output_tokens=budget_tokens),
     )
     assert reservation is not None
 

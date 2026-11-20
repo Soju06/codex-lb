@@ -95,6 +95,36 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    "gpt-6.2-astra": ModelPrice(
+        input_per_1m=8.0,
+        cached_input_per_1m=0.4,
+        output_per_1m=40.0,
+        priority_input_per_1m=16.0,
+        priority_cached_input_per_1m=0.8,
+        priority_output_per_1m=80.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=16.0,
+        long_context_cached_input_per_1m=0.8,
+        long_context_output_per_1m=60.0,
+        priority_long_context_input_per_1m=32.0,
+        priority_long_context_cached_input_per_1m=1.6,
+        priority_long_context_output_per_1m=120.0,
+    ),
+    "gpt-6.2-sol": ModelPrice(
+        input_per_1m=2.0,
+        cached_input_per_1m=0.1,
+        output_per_1m=10.0,
+        priority_input_per_1m=4.0,
+        priority_cached_input_per_1m=0.2,
+        priority_output_per_1m=20.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=4.0,
+        long_context_cached_input_per_1m=0.2,
+        long_context_output_per_1m=15.0,
+        priority_long_context_input_per_1m=8.0,
+        priority_long_context_cached_input_per_1m=0.4,
+        priority_long_context_output_per_1m=30.0,
+    ),
     "gpt-5.6-sol": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=0.5,
@@ -330,6 +360,8 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
 }
 
 DEFAULT_MODEL_ALIASES: dict[str, str] = {
+    "gpt-6.2-astra*": "gpt-6.2-astra",
+    "gpt-6.2-sol*": "gpt-6.2-sol",
     "gpt-5.6": "gpt-5.6-sol",
     "gpt-5.6-sol*": "gpt-5.6-sol",
     "gpt-5.6-terra*": "gpt-5.6-terra",

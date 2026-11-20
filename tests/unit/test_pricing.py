@@ -82,6 +82,12 @@ def test_get_pricing_for_model_gpt_5_6_aliases(requested_model: str, canonical_m
     assert result == (canonical_model, DEFAULT_PRICING_MODELS[canonical_model])
 
 
+@pytest.mark.parametrize("model", ["gpt-6.2-astra", "gpt-6.2-sol"])
+@pytest.mark.parametrize("suffix", ["2026-11-21", "snapshot"])
+def test_get_pricing_for_model_gpt_6_2_aliases(model: str, suffix: str) -> None:
+    assert get_pricing_for_model(f"{model}-{suffix}", DEFAULT_PRICING_MODELS) == (model, DEFAULT_PRICING_MODELS[model])
+
+
 def test_get_pricing_for_model_gpt_5_4_mini_alias():
     result = get_pricing_for_model("gpt-5.4-mini-2026-03-17", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
     assert result is not None
@@ -225,6 +231,33 @@ def test_calculate_cost_from_usage_flex_service_tier():
     cost = calculate_cost_from_usage(usage, price, service_tier="flex")
 
     assert cost == pytest.approx(2.625)
+
+
+@pytest.mark.parametrize(
+    ("model", "input_tokens", "service_tier", "expected_cost"),
+    [
+        ("gpt-6.2-astra", 272_000, None, 5.416),
+        ("gpt-6.2-astra", 272_001, None, 8.832016),
+        ("gpt-6.2-astra", 272_000, "priority", 10.832),
+        ("gpt-6.2-astra", 272_001, "priority", 17.664032),
+        ("gpt-6.2-astra", 272_000, "fast", 10.832),
+        ("gpt-6.2-astra", 272_001, "fast", 17.664032),
+        ("gpt-6.2-sol", 272_000, None, 1.354),
+        ("gpt-6.2-sol", 272_001, None, 2.208004),
+        ("gpt-6.2-sol", 272_000, "priority", 2.708),
+        ("gpt-6.2-sol", 272_001, "priority", 4.416008),
+        ("gpt-6.2-sol", 272_000, "fast", 2.708),
+        ("gpt-6.2-sol", 272_001, "fast", 4.416008),
+        ("gpt-6.2-sol", 272_000, "flex", 1.354),
+        ("gpt-6.2-sol", 272_001, "flex", 2.208004),
+    ],
+)
+def test_gpt_6_2_pricing(model: str, input_tokens: int, service_tier: str | None, expected_cost: float) -> None:
+    usage = UsageTokens(input_tokens=input_tokens, output_tokens=100_000, cached_input_tokens=100_000)
+
+    cost = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS[model], service_tier=service_tier)
+
+    assert cost == pytest.approx(expected_cost)
 
 
 @pytest.mark.parametrize(

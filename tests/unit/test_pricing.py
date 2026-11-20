@@ -252,9 +252,7 @@ def test_calculate_cost_from_usage_flex_service_tier():
         ("gpt-6.2-sol", 272_001, "flex", 2.208004),
     ],
 )
-def test_calculate_cost_from_usage_gpt_6_2(
-    model: str, input_tokens: int, service_tier: str | None, expected_cost: float
-) -> None:
+def test_gpt_6_2_pricing(model: str, input_tokens: int, service_tier: str | None, expected_cost: float) -> None:
     usage = UsageTokens(input_tokens=input_tokens, output_tokens=100_000, cached_input_tokens=100_000)
 
     cost = calculate_cost_from_usage(usage, DEFAULT_PRICING_MODELS[model], service_tier=service_tier)

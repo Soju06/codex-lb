@@ -2242,8 +2242,8 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
         ("gpt-5.6-sol-snapshot", 8_192, 286_720, 31_000_000),
         ("gpt-5.6-terra-snapshot", 8_192, 114_688, 12_400_000),
         ("gpt-5.6-luna-snapshot", 8_192, 11_468, 1_240_000),
-        ("gpt-6.2-astra-snapshot", 15_625, 750_000, 41_600_000),
-        ("gpt-6.2-sol-2026-11-21", 15_625, 187_500, 10_400_000),
+        ("gpt-6.2-astra-snapshot", 5_000, 240_000, 41_600_000),
+        ("gpt-6.2-sol-2026-11-21", 5_000, 60_000, 10_400_000),
     ],
 )
 async def test_usage_reservation_uses_personality_pricing(

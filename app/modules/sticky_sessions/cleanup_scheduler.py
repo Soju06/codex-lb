@@ -414,6 +414,11 @@ class StickySessionCleanupScheduler:
                         deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
                         if deleted_count > 0:
                             logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
+                        # Subagent-lineage markers share the prompt-cache TTL;
+                        # one bounded batch per pass keeps the sweep cheap.
+                        lineage_deleted_count = await sticky_repo.purge_subagent_lineage_markers_before(cutoff)
+                        if lineage_deleted_count > 0:
+                            logger.info("Purged stale subagent-lineage markers deleted_count=%s", lineage_deleted_count)
                         cleanup_now = utcnow()
                         stale_hard_codex_session_cutoff = cleanup_now - timedelta(
                             seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS

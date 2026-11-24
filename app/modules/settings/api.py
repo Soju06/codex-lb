@@ -249,6 +249,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         auto_redeem_reset_credits_before_expiry=settings.auto_redeem_reset_credits_before_expiry,
         show_reset_credit_expiry_badge=settings.show_reset_credit_expiry_badge,
         routing_strategy=settings.routing_strategy,
+        subagent_account_preference=settings.subagent_account_preference,
         relative_availability_power=settings.relative_availability_power,
         relative_availability_top_k=settings.relative_availability_top_k,
         single_account_id=settings.single_account_id,
@@ -1252,6 +1253,9 @@ async def update_settings(
                     else current.show_reset_credit_expiry_badge
                 ),
                 routing_strategy=payload.routing_strategy or current.routing_strategy,
+                subagent_account_preference=(
+                    payload.subagent_account_preference or current.subagent_account_preference
+                ),
                 relative_availability_power=(
                     payload.relative_availability_power
                     if payload.relative_availability_power is not None
@@ -1537,6 +1541,7 @@ async def update_settings(
             "auto_redeem_reset_credits_before_expiry",
             "show_reset_credit_expiry_badge",
             "routing_strategy",
+            "subagent_account_preference",
             "relative_availability_power",
             "relative_availability_top_k",
             "single_account_id",

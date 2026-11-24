@@ -565,7 +565,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,  # noqa: F401
-    _call_with_supported_optional_kwargs,
+    _call_with_supported_optional_kwargs,  # noqa: F401
     _clear_websocket_request_error_overrides,  # noqa: F401
     _DownstreamWebSocketActivity,  # noqa: F401
     _event_type_from_payload,  # noqa: F401
@@ -771,6 +771,7 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
+from app.modules.proxy.subagent_preference import select_account_with_subagent_preference
 from app.modules.proxy.work_admission import (
     ADMISSION_WAIT_TIMEOUT_SECONDS,
     COMPACT_RESPONSE_CREATE_LIMIT,
@@ -1446,16 +1447,10 @@ class ProxyService(
         if isinstance(affinity_policy, _AffinityPolicy):
             # Expand once at the compatibility edge so transport callers cannot drift.
             kwargs.update(affinity_policy.selection_kwargs())
-        required_capability_kwargs = {}
-        if kwargs.get("require_security_work_authorized") is True:
-            required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
-                "require_security_work_authorized"
-            )
-        return await _call_with_supported_optional_kwargs(
-            self._select_account_with_budget,
-            deadline,
-            optional_kwargs=kwargs,
-            **required_capability_kwargs,
+        else:
+            affinity_policy = None
+        return await select_account_with_subagent_preference(
+            self._select_account_with_budget, deadline, self._repo_factory, affinity_policy, kwargs
         )
 
     @asynccontextmanager

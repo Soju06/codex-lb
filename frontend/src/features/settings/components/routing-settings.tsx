@@ -650,6 +650,32 @@ export function RoutingSettings({
             <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.safetyNote")}</p>
           </div>
 
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="max-w-2xl">
+              <p className="text-sm font-medium">{t("settings.routing.subagents.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.routing.subagents.description")}</p>
+            </div>
+            <Select
+              value={settings.subagentAccountPreference}
+              onValueChange={(value) =>
+                save({
+                  subagentAccountPreference: value as DashboardSettings["subagentAccountPreference"],
+                })
+              }
+            >
+              <SelectTrigger className="h-8 w-full text-xs sm:w-72" disabled={busy} aria-label={t("settings.routing.subagents.label")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {(["off", "parent_bound_only", "always"] as const).map((value) => (
+                  <SelectItem key={value} value={value}>
+                    {t(`settings.routing.subagents.options.${value}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
           <div className="space-y-3 p-3">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.additionalQuota.title")}</p>

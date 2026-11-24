@@ -538,9 +538,11 @@ async def test_scheduler_restart_uses_anchored_persisted_evidence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("same_second_baseline", [False, True])
 async def test_scheduler_recovers_rate_limited_pro_after_early_weekly_reset(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
+    same_second_baseline: bool,
 ) -> None:
     """A paid account benched on its 7d window recovers when upstream rolls that window early.
 
@@ -569,6 +571,15 @@ async def test_scheduler_recovers_rate_limited_pro_after_early_weekly_reset(
 
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
+        if same_second_baseline:
+            await UsageRepository(session).add_entry(
+                account.id,
+                100.0,
+                window="primary",
+                recorded_at=datetime.fromtimestamp(blocked_at + 0.266599, timezone.utc).replace(tzinfo=None),
+                reset_at=weekly_reset_at,
+                window_minutes=10_080,
+            )
         # The exhausted 7d window that produced the 429, still carrying the
         # deadline persisted on the account.
         await UsageRepository(session).add_entry(

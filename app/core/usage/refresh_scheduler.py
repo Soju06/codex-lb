@@ -607,7 +607,9 @@ async def _resolve_reset_evidence(
             history = [
                 entry
                 for entry in await usage_repo.history_since(account.id, window, since)
-                if entry.recorded_at > since
+                # Match the guarded recovery check's whole-second precision;
+                # an ambiguous block-second row must not shadow a later anchor.
+                if naive_utc_to_epoch(entry.recorded_at) > account.blocked_at
             ]
             baseline = _matching_baseline(
                 history,

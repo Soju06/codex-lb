@@ -15645,6 +15645,102 @@ async def test_stream_responses_preserves_usage_limit_reset_hint(monkeypatch):
     assert request_logs.calls[0]["error_code"] == "usage_limit_reached"
 
 
+def test_response_failed_event_from_upstream_error_preserves_reset_metadata():
+    event = streaming_retry_module._response_failed_event_from_upstream_error(
+        "rate_limit_exceeded",
+        {"message": "quota exhausted", "resets_at": 1_700_003_600, "resets_in_seconds": 3600},
+        response_id="resp-rate-limit",
+    )
+
+    assert event["response"]["error"] == {
+        "message": "quota exhausted",
+        "type": "server_error",
+        "code": "rate_limit_exceeded",
+        "resets_at": 1_700_003_600,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_post_refresh_transient_terminal_preserves_reset_metadata(monkeypatch):
+    """The post-refresh transient terminal must keep the upstream reset timestamp.
+
+    The last-account branch of ``_stream_post_refresh_with_capacity_recovery``
+    surfaces the exhausted retryable error directly, so it has to build that
+    ``response.failed`` through the reset-preserving helper. A wrapper that
+    carries ``resets_at`` but loses it here leaves the client guessing when the
+    quota window reopens.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_post_refresh_reset_metadata")
+    stream_once_calls = 0
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    # The single outer attempt makes ``can_try_other_account`` False, which is
+    # the only path that renders the terminal instead of re-raising 502.
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+
+    async def fake_stream_once(*_args: object, **_kwargs: object):
+        nonlocal stream_once_calls
+        stream_once_calls += 1
+        if stream_once_calls == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                proxy_module.openai_error("invalid_api_key", "expired", error_type="invalid_request_error"),
+            )
+        raise proxy_service._TransientStreamError(
+            "usage_limit_reached",
+            cast(
+                UpstreamError,
+                {
+                    "message": "The usage limit has been reached",
+                    "resets_at": 1_700_003_600,
+                    "resets_in_seconds": 3600,
+                },
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-post-refresh-reset-metadata"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert stream_once_calls == 2
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["code"] == "usage_limit_reached"
+    assert terminal["response"]["error"]["resets_at"] == 1_700_003_600
+
+
 @pytest.mark.asyncio
 async def test_stream_with_retry_keeps_sse_alive_while_account_capacity_recovers(monkeypatch):
     settings = _make_proxy_settings()

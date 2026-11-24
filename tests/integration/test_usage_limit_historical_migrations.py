@@ -319,6 +319,36 @@ def test_relative_historical_repair_retries_after_checkpoint(
         )
 
 
+@pytest.mark.parametrize("previous_request", ["head", "+2"], ids=["checkpoint-only", "different-relative-request"])
+def test_relative_upgrade_from_retained_checkpoint_retries_at_applied_target(
+    migration_url: str, monkeypatch: pytest.MonkeyPatch, previous_request: str
+) -> None:
+    _install_history(migration_url, _PARENTS[0], _OVERRIDE)
+    upgrade = command.upgrade
+
+    def stop_at_scalar(config, revision):
+        upgrade(config, _SCALAR)
+        raise RuntimeError("interrupted at scalar during repair")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(command, "upgrade", stop_at_scalar)
+        with pytest.raises(RuntimeError, match="interrupted at scalar during repair"):
+            migrate.run_upgrade(migration_url, previous_request, bootstrap_legacy=False)
+    assert migrate.inspect_migration_state(migration_url).current_revision == _SCALAR
+
+    def stop_after_target(config, revision):
+        upgrade(config, revision)
+        raise RuntimeError("interrupted after applying target")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(command, "upgrade", stop_after_target)
+        with pytest.raises(RuntimeError, match="interrupted after applying target"):
+            migrate.run_upgrade(migration_url, "+1", bootstrap_legacy=False)
+    assert migrate.inspect_migration_state(migration_url).current_revision == _OVERRIDE
+
+    assert migrate.run_upgrade(migration_url, "+1", bootstrap_legacy=False).current_revision == _OVERRIDE
+
+
 def test_successful_non_head_repair_can_downgrade_and_upgrade(migration_url: str) -> None:
     _install_history(migration_url, _PARENTS[0], _SCALAR)
     engine = create_engine(to_sync_database_url(migration_url))

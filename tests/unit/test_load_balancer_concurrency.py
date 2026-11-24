@@ -378,12 +378,14 @@ class _StubStickySessionsRepository:
                 account_id=self.account_ids_by_key.get(key),
                 continuity_abandoned=False,
                 refresh_skip_deadline=self.refresh_skip_deadlines_by_key.get(key),
+                observed_updated_at=self.updated_at_by_key.get(key),
             )
         del kwargs
         return StickyOwnerLookup(
             account_id=self.account_id,
             continuity_abandoned=False,
             refresh_skip_deadline=self.refresh_skip_deadlines_by_key.get(key),
+            observed_updated_at=self.updated_at_by_key.get(key),
         )
 
     async def upsert(self, *args: Any, **kwargs: Any) -> Any:
@@ -436,14 +438,25 @@ class _StubStickySessionsRepository:
         self.updated_at_by_key.pop(sticky_key, None)
         return True
 
+    async def write_probe_affinity(
+        self, key: str, account_id: str, *, kind: StickySessionKind, observed: StickyOwnerLookup, updated_at: datetime
+    ) -> bool:
+        current_account_id = (
+            self.account_ids_by_key.get(key) if self.account_ids_by_key is not None else self.account_id
+        )
+        if current_account_id != observed.account_id or self.updated_at_by_key.get(key) != observed.observed_updated_at:
+            return False
+        await self.upsert(key, account_id, kind=kind, updated_at=updated_at)
+        return True
+
     async def restore_if_current(
         self,
         key: str,
         *,
         kind: StickySessionKind,
-        expected_account_id: str | None,
-        expected_updated_at: datetime | None,
-        restore_account_id: str | None,
+        expected_account_id: str,
+        expected_updated_at: datetime,
+        observed: StickyOwnerLookup,
     ) -> bool:
         current_account_id = (
             self.account_ids_by_key.get(key) if self.account_ids_by_key is not None else self.account_id
@@ -451,6 +464,7 @@ class _StubStickySessionsRepository:
         if current_account_id != expected_account_id or self.updated_at_by_key.get(key) != expected_updated_at:
             return False
         self.updated_at_by_key.pop(key, None)
+        restore_account_id = observed.account_id
         if restore_account_id is None:
             self.deleted.append((key, kind))
             if self.account_ids_by_key is not None:
@@ -460,6 +474,8 @@ class _StubStickySessionsRepository:
         self.upserts.append((key, restore_account_id, kind))
         if self.account_ids_by_key is not None:
             self.account_ids_by_key[key] = restore_account_id
+        if observed.observed_updated_at is not None:
+            self.updated_at_by_key[key] = observed.observed_updated_at
         self.account_id = restore_account_id
         return True
 
@@ -467,35 +483,25 @@ class _StubStickySessionsRepository:
 class _ConcurrentUnboundStickySessionsRepository(_StubStickySessionsRepository):
     def __init__(self, expected_lookups: int) -> None:
         super().__init__()
+        self.account_ids_by_key = {}
         self._expected_lookups = expected_lookups
         self._lookup_count = 0
         self._all_lookups_started = asyncio.Event()
 
     async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
-        del args, kwargs
+        lookup = await super().get_account_id_and_abandonment(*args, **kwargs)
         self._lookup_count += 1
         if self._lookup_count >= self._expected_lookups:
             self._all_lookups_started.set()
         await self._all_lookups_started.wait()
-        return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
+        return lookup
 
 
-class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
-    def __init__(self, *, account_id: str, expected_lookups: int) -> None:
-        super().__init__()
-        self.account_id = account_id
-        self._initial_account_id = account_id
-        self._expected_lookups = expected_lookups
-        self._lookup_count = 0
-        self._all_lookups_started = asyncio.Event()
-
-    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
-        del args, kwargs
-        self._lookup_count += 1
-        if self._lookup_count >= self._expected_lookups:
-            self._all_lookups_started.set()
-        await self._all_lookups_started.wait()
-        return StickyOwnerLookup(account_id=self._initial_account_id, continuity_abandoned=False)
+class _ConcurrentBoundStickySessionsRepository(_ConcurrentUnboundStickySessionsRepository):
+    def __init__(self, *, account_id: str, keys: Collection[str], expected_lookups: int) -> None:
+        super().__init__(expected_lookups)
+        self.account_ids_by_key = dict.fromkeys(keys, account_id)
+        self.updated_at_by_key = dict.fromkeys(keys, datetime(2026, 1, 1))
 
 
 class _FailingUpsertStickySessionsRepository(_StubStickySessionsRepository):
@@ -2156,6 +2162,7 @@ async def test_concurrent_sticky_fallbacks_reserve_one_due_probe() -> None:
     )
     sticky_repo = _ConcurrentBoundStickySessionsRepository(
         account_id=unavailable_owner.id,
+        keys=("concurrent-fallback-a", "concurrent-fallback-b"),
         expected_lookups=2,
     )
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
@@ -5428,6 +5435,7 @@ async def test_api_key_fair_share_sticky_commit_recheck_denies_when_share_fills_
 async def test_api_key_fair_share_concurrent_sticky_selections_cannot_overshoot_share() -> None:
     sticky_repo = _ConcurrentBoundStickySessionsRepository(
         account_id="acc-fair-share-race-0",
+        keys=("fair-share-race-session",),
         expected_lookups=2,
     )
     balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-race", sticky_repo=sticky_repo)

@@ -969,13 +969,37 @@ def _usage_limit_schema_checkpoint(connection: Connection) -> str:
     )
 
 
+def _prepare_usage_limit_repair_target(
+    config: Config,
+    connection: Connection,
+    current: tuple[str, ...],
+    revision: str,
+    relative_request: str | None,
+) -> str:
+    steps = ScriptDirectory.from_config(config)._upgrade_revs(revision, cast("Any", current))
+    target = steps[-1].revision.revision if steps else current[0]
+    if relative_request is not None:
+        connection.execute(
+            text(
+                f"INSERT INTO {_RUNTIME_SENTINELS_TABLE} (name, value) VALUES (:name, :value) "
+                "ON CONFLICT (name) DO UPDATE SET value = excluded.value"
+            ),
+            [
+                {"name": _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL, "value": relative_request},
+                {"name": _USAGE_LIMIT_REPAIR_TARGET_SENTINEL, "value": target},
+            ],
+        )
+    return target
+
+
 def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
     """Recover only the observed reused stamps, before ancestry can hide missing DDL.
 
     Keep the policy columns in place and replay from the proven upstream parent.
     The existing scalar/override migrations preserve those values. A durable
     marker and the ledger move commit together, along with the original target
-    for relative requests whose resolution could change after that move.
+    for relative requests whose resolution could change after that move. Each
+    new relative request during repair saves its target before Alembic runs.
     """
     with _sync_transaction(_required_sqlalchemy_url(config)) as connection:
         tables = _read_table_names(connection)
@@ -990,14 +1014,14 @@ def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
                 config, current, pending
             ):
                 raise MigrationBootstrapError("Unrecognized historical usage-limit repair ledger")
-            if relative_request is not None and relative_request == _read_runtime_sentinel(
-                connection, _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL
-            ):
+            if relative_request is None:
+                return revision
+            if relative_request == _read_runtime_sentinel(connection, _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL):
                 target = _read_runtime_sentinel(connection, _USAGE_LIMIT_REPAIR_TARGET_SENTINEL)
                 if target is None:
                     raise MigrationBootstrapError("Missing historical usage-limit repair target")
                 return target
-            return revision
+            return _prepare_usage_limit_repair_target(config, connection, current, revision, relative_request)
         if len(current) != 1:
             raise MigrationBootstrapError("Unrecognized historical usage-limit stamp combination")
         if not {"accounts", "dashboard_settings", _RUNTIME_SENTINELS_TABLE} <= tables:
@@ -1023,20 +1047,11 @@ def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
             raise MigrationBootstrapError("Unrecognized historical usage-limit merge schema")
 
         # Resolve relative targets against the original ledger before moving it.
-        steps = ScriptDirectory.from_config(config)._upgrade_revs(revision, cast("Any", current))
-        target = steps[-1].revision.revision if steps else current[0]
+        target = _prepare_usage_limit_repair_target(config, connection, current, revision, relative_request)
         _ensure_alembic_version_table_capacity_for_connection(connection, required_length=len(checkpoint))
-        sentinels = [{"name": _USAGE_LIMIT_REPAIR_SENTINEL, "value": checkpoint}]
-        if relative_request is not None:
-            sentinels.extend(
-                [
-                    {"name": _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL, "value": relative_request},
-                    {"name": _USAGE_LIMIT_REPAIR_TARGET_SENTINEL, "value": target},
-                ]
-            )
         connection.execute(
             text(f"INSERT INTO {_RUNTIME_SENTINELS_TABLE} (name, value) VALUES (:name, :value)"),
-            sentinels,
+            {"name": _USAGE_LIMIT_REPAIR_SENTINEL, "value": checkpoint},
         )
         connection.execute(
             text(f"UPDATE {_ALEMBIC_VERSION_TABLE} SET {_ALEMBIC_VERSION_COLUMN} = :revision"),

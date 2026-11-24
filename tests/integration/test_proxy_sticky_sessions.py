@@ -2225,30 +2225,88 @@ async def test_probe_affinity_restore_only_reverts_the_provisional_write(async_c
         for key, restore_owner in [("probe-insert", None), ("probe-rebind", previous)]:
             if restore_owner is not None:
                 await repo.upsert(key, restore_owner, kind=kind)
-            provisional = await repo.upsert(key, owner, kind=kind, updated_at=provisional_time)
-            assert provisional.updated_at == provisional_time
+            observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+            await repo.release_read_snapshot()
+            assert observed.account_id == restore_owner
+            assert await repo.write_probe_affinity(
+                key, owner, kind=kind, observed=observed, updated_at=provisional_time
+            )
+            assert await repo.restore_if_current(
+                key,
+                kind=kind,
+                expected_account_id=owner,
+                expected_updated_at=provisional_time,
+                observed=observed,
+            )
+            restored = await writer.get_account_id_and_abandonment(key, kind=kind)
+            await writer.release_read_snapshot()
+            assert restored == observed
 
+            assert await repo.write_probe_affinity(
+                key, owner, kind=kind, observed=observed, updated_at=provisional_time
+            )
             await writer.upsert(key, owner, kind=kind)
             assert not await repo.restore_if_current(
                 key,
                 kind=kind,
                 expected_account_id=owner,
                 expected_updated_at=provisional_time,
-                restore_account_id=restore_owner,
+                observed=observed,
             )
             assert await writer.get_account_id(key, kind=kind) == owner
             await writer.release_read_snapshot()
 
-            await repo.upsert(key, owner, kind=kind, updated_at=provisional_time)
-            assert await repo.restore_if_current(
-                key,
-                kind=kind,
-                expected_account_id=owner,
-                expected_updated_at=provisional_time,
-                restore_account_id=restore_owner,
-            )
-            assert await writer.get_account_id(key, kind=kind) == restore_owner
-            await writer.release_read_snapshot()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("had_owner", [False, True])
+async def test_probe_affinity_write_preserves_binding_committed_after_lookup(async_client, db_setup, had_owner):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    old_owner = await _import_account(async_client, "old-probe-owner", "old-probe-owner@example.com")
+    new_owner = await _import_account(async_client, "new-probe-owner", "new-probe-owner@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    key = "concurrent-probe-affinity"
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = StickySessionsRepository(session)
+        writer = StickySessionsRepository(writer_session)
+        if had_owner:
+            await writer.upsert(key, old_owner, kind=kind)
+        observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+        await repo.release_read_snapshot()
+        assert observed.account_id == (old_owner if had_owner else None)
+
+        await writer.upsert(key, new_owner, kind=kind)
+        assert not await repo.write_probe_affinity(key, old_owner, kind=kind, observed=observed, updated_at=utcnow())
+        assert await writer.get_account_id(key, kind=kind) == new_owner
+
+
+@pytest.mark.asyncio
+async def test_same_tick_affinity_refresh_invalidates_probe_observation(async_client, db_setup, monkeypatch):
+    from app.modules.proxy import sticky_repository
+
+    owner = await _import_account(async_client, "current-probe-owner", "current-probe-owner@example.com")
+    probe = await _import_account(async_client, "stale-probe-sibling", "stale-probe-sibling@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    key = "same-tick-probe-affinity"
+    frozen_time = utcnow().replace(microsecond=123456)
+    monkeypatch.setattr(sticky_repository, "utcnow", lambda: frozen_time)
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = sticky_repository.StickySessionsRepository(session)
+        writer = sticky_repository.StickySessionsRepository(writer_session)
+        await writer.upsert(key, owner, kind=kind)
+        observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+        await repo.release_read_snapshot()
+        assert observed.observed_updated_at == frozen_time
+
+        first_refresh = (await writer.upsert(key, owner, kind=kind)).updated_at
+        second_refresh = (await writer.upsert(key, owner, kind=kind)).updated_at
+        assert frozen_time < first_refresh < second_refresh
+        assert not await repo.write_probe_affinity(
+            key, probe, kind=kind, observed=observed, updated_at=frozen_time + timedelta(seconds=1)
+        )
+        assert await writer.get_account_id(key, kind=kind) == owner
 
 
 @pytest.mark.asyncio

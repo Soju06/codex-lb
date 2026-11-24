@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Generic, Literal, Protocol, TypeVar, assert_never
 
 from app.core.balancer import (
@@ -339,6 +339,7 @@ async def _release_selection_resources(
     probe: ProbeReservation | None,
     *,
     restore_affinity: Callable[[], Awaitable[None]] | None = None,
+    original_cancellation: asyncio.CancelledError | None = None,
 ) -> None:
     """Finish provisional admission cleanup even if cancellation is repeated."""
 
@@ -358,6 +359,7 @@ async def _release_selection_resources(
         return None
 
     error, cancellation = await _await_result_deferring_cancellation(release(), scheduler=scheduler_for(owner))
+    cancellation = original_cancellation or cancellation
     if cancellation is not None:
         if error is not None:
             logger.warning("Selection cleanup failed during cancellation", exc_info=error)
@@ -624,6 +626,7 @@ async def run_sticky_selection_path(
     # resets ``attempt``, so sharing it could retry forever under churn.
     post_persist_generation_retries = 0
     pending_initial_owner_lookup = request.initial_sticky_owner_lookup
+    sticky_owner_lookup: StickyOwnerLookup | None = None
     while True:
         attempt += 1
         sticky_existing_is_legacy = isinstance(legacy_existing_account_id, str)
@@ -1362,45 +1365,73 @@ async def run_sticky_selection_path(
         )
         if selected_snapshot is not None and reserved_probe_admitted:
             reservation_committed = False
+            affinity_matches = True
             restore_affinity: Callable[[], Awaitable[None]] | None = None
             try:
                 if should_persist_sticky_mutation:
                     probe_sticky_kind, probe_mutation = sticky_kind, sticky_outcome.mutation
                     assert probe_sticky_kind is not None and probe_mutation is not None
-                    probe_write_time = utcnow() if probe_mutation.account_id is not None else None
-
-                    async def restore_probe_affinity(
-                        kind: StickySessionKind = probe_sticky_kind,
-                        expected_account_id: str | None = probe_mutation.account_id,
-                        expected_updated_at: datetime | None = probe_write_time,
-                    ) -> None:
-                        async with owner._repo_factory() as repos:
-                            await _restore_sticky_mutation(
-                                sticky_repo=repos.sticky_sessions,
-                                sticky_key=sticky_key,
-                                sticky_kind=kind,
-                                expected_account_id=expected_account_id,
-                                expected_updated_at=expected_updated_at,
-                                sticky_existing_account_id=sticky_existing_account_id,
+                    assert sticky_owner_lookup is not None
+                    probe_account_id = probe_mutation.account_id
+                    if probe_account_id is None:
+                        # A provisional deletion leaves no row to identify during rollback.
+                        affinity_matches = False
+                    elif not _sticky_refresh_write_skippable(probe_mutation, initialize_seed_key=None):
+                        probe_write_time = utcnow()
+                        if sticky_owner_lookup.observed_updated_at is not None:
+                            probe_write_time = max(
+                                probe_write_time, sticky_owner_lookup.observed_updated_at + timedelta(microseconds=1)
                             )
 
-                    # The probe can publish a reversible thread row before its
-                    # runtime CAS, but cannot initialize an immutable seed.
-                    if not _sticky_refresh_write_skippable(probe_mutation, initialize_seed_key=None):
-                        async with owner._repo_factory() as repos:
-                            # Cancellation can reach the caller after the write commits.
-                            restore_affinity = restore_probe_affinity
-                            await _persist_sticky_mutation(
-                                sticky_repo=repos.sticky_sessions,
-                                sticky_key=sticky_key,
-                                sticky_kind=probe_sticky_kind,
-                                mutation=probe_mutation,
-                                updated_at=probe_write_time,
-                            )
+                        async def restore_probe_affinity(
+                            kind: StickySessionKind = probe_sticky_kind,
+                            account_id: str = probe_account_id,
+                            written_at: datetime = probe_write_time,
+                            observed: StickyOwnerLookup = sticky_owner_lookup,
+                        ) -> None:
+                            async with owner._repo_factory() as repos:
+                                await repos.sticky_sessions.restore_if_current(
+                                    sticky_key,
+                                    kind=kind,
+                                    expected_account_id=account_id,
+                                    expected_updated_at=written_at,
+                                    observed=observed,
+                                )
+
+                        async def write_probe_affinity(
+                            kind: StickySessionKind = probe_sticky_kind,
+                            account_id: str = probe_account_id,
+                            written_at: datetime = probe_write_time,
+                            observed: StickyOwnerLookup = sticky_owner_lookup,
+                        ) -> Exception | None:
+                            nonlocal affinity_matches, restore_affinity
+                            try:
+                                async with owner._repo_factory() as repos:
+                                    affinity_matches = await repos.sticky_sessions.write_probe_affinity(
+                                        sticky_key, account_id, kind=kind, observed=observed, updated_at=written_at
+                                    )
+                                    if affinity_matches:
+                                        restore_affinity = restore_probe_affinity
+                            except Exception as error:
+                                return error
+                            return None
+
+                        # Wait for the write outcome before treating any row as
+                        # ours to roll back, even when the caller is cancelled.
+                        write_error, cancellation = await _await_result_deferring_cancellation(
+                            write_probe_affinity(), scheduler=scheduler_for(owner)
+                        )
+                        if cancellation is not None:
+                            if write_error is not None:
+                                logger.warning("Probe affinity write failed during cancellation", exc_info=write_error)
+                            raise cancellation
+                        if write_error is not None:
+                            raise write_error
                 async with owner._runtime_lock:
                     assert probe_reservation is not None
                     reservation_committed = (
-                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        affinity_matches
+                        and owner._selection_inputs_cache.generation == selection_inputs_generation
                         and owner._commit_due_probe_reservation_locked(probe_reservation)
                     )
                     if reservation_committed:
@@ -1409,9 +1440,13 @@ async def run_sticky_selection_path(
                             selected_account_map,
                             selected_states,
                         )
-            except BaseException:
+            except BaseException as exc:
                 await _release_selection_resources(
-                    owner, selected_lease, probe_reservation, restore_affinity=restore_affinity
+                    owner,
+                    selected_lease,
+                    probe_reservation,
+                    restore_affinity=restore_affinity,
+                    original_cancellation=exc if isinstance(exc, asyncio.CancelledError) else None,
                 )
                 selected_lease = None
                 raise
@@ -2181,7 +2216,6 @@ async def _persist_sticky_mutation(
     mutation: _StickyMutation,
     initialize_seed_key: str | None = None,
     initialize_seed_kind: StickySessionKind | None = None,
-    updated_at: datetime | None = None,
 ) -> None:
     if mutation.account_id is None:
         await sticky_repo.delete(sticky_key, kind=sticky_kind)
@@ -2205,30 +2239,7 @@ async def _persist_sticky_mutation(
             seed_kind=initialize_seed_kind,
         )
         return
-    if updated_at is None:
-        await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind)
-    else:
-        await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind, updated_at=updated_at)
-
-
-async def _restore_sticky_mutation(
-    *,
-    sticky_repo: StickySessionsRepository,
-    sticky_key: str,
-    sticky_kind: StickySessionKind,
-    expected_account_id: str | None,
-    expected_updated_at: datetime | None,
-    sticky_existing_account_id: str | None | object,
-) -> None:
-    if sticky_existing_account_id is _STICKY_EXISTING_UNSET:
-        return
-    await sticky_repo.restore_if_current(
-        sticky_key,
-        kind=sticky_kind,
-        expected_account_id=expected_account_id,
-        expected_updated_at=expected_updated_at,
-        restore_account_id=sticky_existing_account_id if isinstance(sticky_existing_account_id, str) else None,
-    )
+    await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind)
 
 
 def _filter_states_for_account_caps(

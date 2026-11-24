@@ -125,9 +125,6 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _probing_result_requires_recovery_reservation as _probing_result_requires_recovery_reservation,
 )
 from app.modules.proxy._load_balancer.sticky_selection import (
-    _restore_sticky_mutation as _restore_sticky_mutation,
-)
-from app.modules.proxy._load_balancer.sticky_selection import (
     _select_account_preferring_budget_safe as _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.sticky_selection import _select_with_stickiness as _run_select_with_stickiness
@@ -1679,7 +1676,6 @@ class LoadBalancer:
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
-    _restore_sticky_mutation = staticmethod(_restore_sticky_mutation)
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
         lock = await self._get_account_lock(account.id)

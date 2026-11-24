@@ -20,6 +20,7 @@ from app.core.balancer import (
     evaluate_routing_pool,
     select_account,
 )
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -185,7 +186,9 @@ class _StickySessionsRepository:
     async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         del args, kwargs
         self.get_calls += 1
-        return StickyOwnerLookup(account_id=self.account_id, continuity_abandoned=False)
+        return StickyOwnerLookup(
+            account_id=self.account_id, continuity_abandoned=False, observed_updated_at=self.updated_at
+        )
 
     async def upsert(
         self,
@@ -193,10 +196,9 @@ class _StickySessionsRepository:
         account_id: str,
         *,
         kind: StickySessionKind,
-        updated_at: datetime | None = None,
     ) -> StickySession:
         self.account_id = account_id
-        self.updated_at = updated_at
+        self.updated_at = utcnow()
         return StickySession(key=key, account_id=account_id, kind=kind)
 
     async def delete(self, *args: Any, **kwargs: Any) -> bool:
@@ -205,20 +207,35 @@ class _StickySessionsRepository:
         self.updated_at = None
         return True
 
+    async def write_probe_affinity(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        observed: StickyOwnerLookup,
+        updated_at: datetime,
+    ) -> bool:
+        if (self.account_id, self.updated_at) != (observed.account_id, observed.observed_updated_at):
+            return False
+        await self.upsert(key, account_id, kind=kind)
+        self.updated_at = updated_at
+        return True
+
     async def restore_if_current(
         self,
         key: str,
         *,
         kind: StickySessionKind,
-        expected_account_id: str | None,
-        expected_updated_at: datetime | None,
-        restore_account_id: str | None,
+        expected_account_id: str,
+        expected_updated_at: datetime,
+        observed: StickyOwnerLookup,
     ) -> bool:
         del kind
         if not key or self.account_id != expected_account_id or self.updated_at != expected_updated_at:
             return False
-        self.account_id = restore_account_id
-        self.updated_at = None
+        self.account_id = observed.account_id
+        self.updated_at = observed.observed_updated_at
         return True
 
 
@@ -1940,7 +1957,10 @@ async def test_cancelled_probe_cleanup_releases_lease_and_restores_current_affin
     balancer._runtime[probing.id] = runtime
     cleanup_started, release_lease = asyncio.Event(), asyncio.Event()
     affinity_write_waiting = asyncio.Event()
-    original_release, original_upsert = balancer.release_account_lease, sticky.upsert
+    resume_affinity_write = asyncio.Event()
+    pending_write_time: datetime | None = None
+    original_release = balancer.release_account_lease
+    original_write = sticky.write_probe_affinity
 
     def reject_commit(_reservation):
         assert sticky.account_id == (original_owner or probing.id)
@@ -1948,11 +1968,16 @@ async def test_cancelled_probe_cleanup_releases_lease_and_restores_current_affin
             raise RuntimeError("probe commit failed")
         return False
 
-    async def interrupt_upsert(*args, **kwargs):
+    async def interrupt_probe_write(*args, **kwargs):
+        nonlocal pending_write_time
+        pending_write_time = kwargs["updated_at"]
         if boundary == "affinity-write":
-            await original_upsert(*args, **kwargs)
+            assert await original_write(*args, **kwargs)
         affinity_write_waiting.set()
-        await asyncio.Future()
+        await resume_affinity_write.wait()
+        if boundary == "before-affinity-write":
+            return await original_write(*args, **kwargs)
+        return True
 
     async def block_release(lease):
         cleanup_started.set()
@@ -1962,19 +1987,24 @@ async def test_cancelled_probe_cleanup_releases_lease_and_restores_current_affin
     monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", reject_commit)
     monkeypatch.setattr(balancer, "release_account_lease", block_release)
     if boundary in ("before-affinity-write", "affinity-write"):
-        monkeypatch.setattr(sticky, "upsert", interrupt_upsert)
+        monkeypatch.setattr(sticky, "write_probe_affinity", interrupt_probe_write)
     task = asyncio.create_task(_select_with_lease(balancer, sticky=True))
     try:
+        expected_owner = original_owner
         if boundary in ("before-affinity-write", "affinity-write"):
             await asyncio.wait_for(affinity_write_waiting.wait(), timeout=2)
-            task.cancel()
+            if boundary == "before-affinity-write" and owner_replaced:
+                await sticky.upsert("contract-session", probing.id, kind=StickySessionKind.PROMPT_CACHE)
+                assert pending_write_time is not None
+                sticky.updated_at = pending_write_time
+                expected_owner = probing.id
+            task.cancel("during-affinity-write")
+            resume_affinity_write.set()
         await asyncio.wait_for(cleanup_started.wait(), timeout=2)
-        expected_during_cleanup = None if boundary == "before-affinity-write" else original_owner or probing.id
-        assert sticky.account_id == expected_during_cleanup
-        expected_owner = original_owner
-        if owner_replaced:
-            expected_owner = probing.id if boundary in ("before-affinity-write", "affinity-write") else healthy.id
-            await original_upsert("contract-session", expected_owner, kind=StickySessionKind.PROMPT_CACHE)
+        assert sticky.account_id == (original_owner or probing.id)
+        if owner_replaced and boundary != "before-affinity-write":
+            expected_owner = probing.id if boundary == "affinity-write" else healthy.id
+            await sticky.upsert("contract-session", expected_owner, kind=StickySessionKind.PROMPT_CACHE)
         task.cancel()
         await asyncio.sleep(0)
         task.cancel()
@@ -1987,10 +2017,79 @@ async def test_cancelled_probe_cleanup_releases_lease_and_restores_current_affin
         assert runtime.last_selected_at == 0.0
         assert await balancer.account_pressure_snapshot(probing.id) == (0, 0, 0.0)
     finally:
+        resume_affinity_write.set()
         release_lease.set()
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_probe_retries_when_affinity_changes_before_its_write(
+    selection_cache: AccountSelectionCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    winner, probing = _account("concurrent-sticky-owner"), _account("recovery-probe")
+    balancer, _, _, sticky = _balancer([winner, probing], selection_cache)
+    runtime = load_balancer_module.RuntimeState(health_tier=HEALTH_TIER_PROBING, last_selected_at=0.0)
+    balancer._runtime[probing.id] = runtime
+    write = sticky.write_probe_affinity
+    wrote_concurrent_binding = False
+
+    async def race_affinity_write(key, account_id, *, kind, **kwargs):
+        nonlocal wrote_concurrent_binding
+        assert not wrote_concurrent_binding
+        assert account_id == probing.id
+        await sticky.upsert(key, winner.id, kind=kind)
+        wrote_concurrent_binding = True
+        return await write(key, account_id, kind=kind, **kwargs)
+
+    monkeypatch.setattr(sticky, "write_probe_affinity", race_affinity_write)
+    selection = await _select_with_lease(balancer, sticky=True)
+    try:
+        assert wrote_concurrent_binding
+        assert selection.account is not None and selection.account.id == winner.id
+        assert sticky.account_id == winner.id
+        assert runtime.last_selected_at == 0.0
+        assert await balancer.account_pressure_snapshot(probing.id) == (0, 0, 0.0)
+    finally:
+        await balancer.release_account_lease(selection.lease)
+
+
+@pytest.mark.asyncio
+async def test_probe_preserves_original_cancellation_when_restore_fails(
+    selection_cache: AccountSelectionCache, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    peer, probing = _account("available-peer"), _account("cancelled-probe")
+    balancer, _, _, sticky = _balancer([peer, probing], selection_cache)
+    runtime = load_balancer_module.RuntimeState(health_tier=HEALTH_TIER_PROBING, last_selected_at=0.0)
+    balancer._runtime[probing.id] = runtime
+    write = sticky.write_probe_affinity
+    affinity_written, resume = asyncio.Event(), asyncio.Event()
+
+    async def cancel_after_write(*args, **kwargs):
+        assert await write(*args, **kwargs)
+        affinity_written.set()
+        await resume.wait()
+        return True
+
+    monkeypatch.setattr(sticky, "write_probe_affinity", cancel_after_write)
+    monkeypatch.setattr(sticky, "restore_if_current", AsyncMock(side_effect=RuntimeError("rollback failed")))
+
+    task = asyncio.create_task(_select_with_lease(balancer, sticky=True))
+    try:
+        await asyncio.wait_for(affinity_written.wait(), timeout=2)
+        task.cancel("cancelled after affinity write")
+        resume.set()
+        with pytest.raises(asyncio.CancelledError, match="cancelled after affinity write"):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        resume.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert "Selection cleanup failed during cancellation" in caplog.messages
+    assert runtime.last_selected_at == 0.0
+    assert await balancer.account_pressure_snapshot(probing.id) == (0, 0, 0.0)
 
 
 @pytest.mark.asyncio

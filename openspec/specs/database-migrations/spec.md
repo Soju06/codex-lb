@@ -585,3 +585,13 @@ A retry of a relative upgrade interrupted by historical usage-limit ledger repai
 - **WHEN** a relative upgrade is interrupted after committing the historical repair checkpoint and before running Alembic
 - **AND** the same upgrade is retried
 - **THEN** it reaches the revision resolved against the original ledger
+
+### Requirement: Relative retry from a retained repair checkpoint
+
+Upgrade tooling MUST preserve the resolved target of a relative request started while a historical usage-limit repair checkpoint remains.
+
+#### Scenario: A pending relative upgrade applies before interruption
+
+- **GIVEN** a historical repair checkpoint remains after an earlier upgrade
+- **WHEN** a relative upgrade reaches its target but stops before clearing the repair state
+- **THEN** retrying the same relative request stays at that target

@@ -180,8 +180,11 @@ first token (multiplier 0.5), its sol weight would be 0.5, not 0.3.
   timestamp; attempting to decrement the shared runtime version would make
   concurrent health settlement ambiguous.
 - A recovery probe can write provisional affinity before its reservation
-  commits. Cleanup restores the prior owner only while the account, write
-  timestamp, and live continuity state still match the provisional row.
+  commits. It compares the observed owner and timestamp at the write. A refresh
+  advances the timestamp even when both writes share a clock tick. Cancellation
+  waits for the write result before cleanup considers restoring the prior row.
+  Restoration also checks that the provisional owner and timestamp are current
+  and that the row still represents live continuity.
 - A failed real request can drain the account again through the ordinary error
   path. Recovery never permits replay after downstream output is visible.
 - Restarting a replica clears advisory health as before; persisted account

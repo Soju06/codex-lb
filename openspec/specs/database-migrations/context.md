@@ -87,7 +87,9 @@ A temporary `usage_limit_upstream_repair` row in the existing runtime sentinel
 table commits with the ledger move. Interrupted repair resumes through the
 ordinary Alembic cursor. A relative request such as `+1` also records its
 resolved target so retrying the same request after a rewind reaches that
-revision. Unknown historical marker combinations stop before mutation.
+revision. If an earlier command leaves the repair checkpoint active, a new
+relative request records its target before applying any further migrations.
+Unknown historical marker combinations stop before mutation.
 Credential retirement is preserved. Canonical installations retain
 ordinary index-drift handling. This is bounded compatibility for observed
 PR-branch histories, not a general damaged-schema repair facility. See the

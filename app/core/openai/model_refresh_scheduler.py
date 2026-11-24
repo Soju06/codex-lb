@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass, field
 
@@ -23,6 +22,7 @@ from app.core.openai.model_registry_store import (
     reconcile_model_registry_from_store,
 )
 from app.core.scheduling.leader_election_handle import get_leader_election as _get_leader_election
+from app.core.scheduling.task_shutdown import stop_task_after_grace
 from app.core.upstream_proxy import ResolvedUpstreamRoute, resolve_upstream_route
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
@@ -88,9 +88,7 @@ class ModelRefreshScheduler:
         if not self._task:
             return
         self._stop.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        await stop_task_after_grace(self._task)
         self._task = None
 
     async def _run_loop(self) -> None:

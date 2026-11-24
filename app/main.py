@@ -71,6 +71,7 @@ from app.core.resilience.memory_monitor import configure as configure_memory_mon
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.runtime_logging import install_redacting_loop_exception_handler
 from app.core.scheduling.leader_election import get_leader_election
+from app.core.scheduling.task_shutdown import undrained_tasks as undrained_background_tasks
 from app.core.shutdown import close_control_plane_task_admission
 from app.core.timeout_invariants import validate_runtime_timeout_invariants, validate_timeout_invariants
 from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
@@ -972,7 +973,9 @@ async def lifespan(app: FastAPI):
                 mark_process_dead()
                 try:
                     await _close_db_and_record_clean_shutdown(
-                        database_tasks_drained=database_tasks_drained,
+                        # A background task still running after its bounded
+                        # cancel wait may be inside DB work: not a clean stop.
+                        database_tasks_drained=database_tasks_drained and not undrained_background_tasks(),
                         leader_lease_release_completed=leader_lease_release_completed,
                     )
                 finally:

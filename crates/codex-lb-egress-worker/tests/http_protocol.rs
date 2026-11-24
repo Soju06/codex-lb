@@ -554,3 +554,59 @@ async fn http_error_with_sse_options_preserves_raw_body_chunks() {
     server.await.expect("origin task");
     stop_helper(helper, stdin, lines).await;
 }
+
+#[tokio::test]
+async fn stream_remains_active_across_quiet_pause_and_connection_reuses() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+    let address = listener.local_addr().expect("origin address");
+    let body = b"data: keepalive-payload\n\n";
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept native helper");
+        for _ in 0..2 {
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write response head");
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stream.write_all(body).await.expect("write SSE body");
+        }
+        stream.shutdown().await.expect("shutdown stream");
+    });
+
+    let (helper, mut stdin, mut lines) = start_helper().await;
+
+    for i in 0..2 {
+        let req_id = format!("quiet-stream-{i}");
+        write_command(
+            &mut stdin,
+            &sse_request(&req_id, format!("http://{address}/pause"), 2_000, 1024),
+        )
+        .await;
+
+        let mut received = Vec::new();
+        loop {
+            match read_event(&mut lines, "SSE pause event timeout").await {
+                NativeEvent::Head { status, .. } => assert_eq!(status, 200),
+                NativeEvent::Sse { text, .. } => received.push(text),
+                NativeEvent::End { .. } => break,
+                NativeEvent::Error { message, .. } => {
+                    panic!("native helper request failed during quiet stream: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(received, vec!["data: keepalive-payload\n\n"]);
+    }
+
+    server.await.expect("origin task");
+    stop_helper(helper, stdin, lines).await;
+}

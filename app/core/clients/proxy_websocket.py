@@ -197,10 +197,37 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    failure_phase: str | None = None
     responses_interpreted: bool = False
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
     routing: NativeWebSocketRoutingMetadata | None = None
+
+
+# Helper phases are untrusted strings. Only stable transport classifications
+# may reach request logs; raw errors can contain credentials or peer payloads.
+_NATIVE_WEBSOCKET_FAILURE_PHASES = frozenset(
+    {
+        "cancelled",
+        "connect",
+        "consumer_backpressure",
+        "helper_exit",
+        "helper_read",
+        "helper_write",
+        "liveness_timeout",
+        "protocol",
+        "request",
+        "shutdown",
+        "timeout",
+        "websocket",
+        "websocket_receive",
+        "websocket_send",
+    }
+)
+
+
+def normalize_native_websocket_failure_phase(phase: object) -> str | None:
+    return phase if isinstance(phase, str) and phase in _NATIVE_WEBSOCKET_FAILURE_PHASES else None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -446,6 +473,9 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                failure_phase=normalize_native_websocket_failure_phase(
+                    exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+                ),
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,

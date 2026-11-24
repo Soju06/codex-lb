@@ -44,13 +44,15 @@ from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
     classify_event_type,
     parse_sse_event_payload,
+    parse_websocket_event_payload,
+    websocket_event_payload_has_finite_numbers,
 )
 from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.shared_future import wait_on_shared_future
-from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
+from app.core.utils.sse import format_sse_event, format_sse_event_from_text
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -2494,27 +2496,23 @@ class _HTTPBridgeUpstreamEventsMixin:
             scheduler = scheduler_for(self)
         if clock is None:
             clock = clock_for(self)
-        # One JSON document per websocket text frame: parse it directly instead
-        # of framing it as SSE and running the line parser over it. The
-        # data-only block is what unmatched events relay.
-        event_block = f"data: {text}\n\n"
-        if (
-            message is not None
-            and message.responses_interpreted
-            and message.payload is not None
-            and text.startswith("{")
-            and "\n" not in text
-            and "\r" not in text
-        ):
-            # Only this shape uses the direct JSON path in the legacy bridge.
-            # Preserve its SSE-field semantics for whitespace/multiline text.
-            payload = message.payload
+        # A websocket text frame is one JSON document, including pretty JSON.
+        # SSE data-line extraction would discard its unprefixed continuation lines.
+        if message is not None and message.responses_interpreted and message.payload is not None:
+            payload = message.payload if websocket_event_payload_has_finite_numbers(message.payload) else None
             event_type = message.event_type
             routing = message.routing
         else:
-            payload = parse_sse_data_json_text(text)
+            payload = parse_websocket_event_payload(text)
             event_type = classify_event_type(payload)
             routing = None
+        if payload is None:
+            # Rejected JSON is diagnostic data, never a raw downstream SSE event.
+            async with session.pending_lock:
+                archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                _archive_http_bridge_upstream_text(session, text, archive_request_state)
+            return
+        event_block = format_sse_event_from_text(payload, text)
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []

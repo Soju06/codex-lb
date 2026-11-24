@@ -9159,7 +9159,9 @@ def test_backend_responses_websocket_native_burst_reaches_completion(app_instanc
         async def send_command(process, generation, command):
             request_id = command["request_id"]
             if command["type"] == "websocket_send_text":
-                frames = [{"type": "response.created", "response": {"id": "resp_burst", "status": "in_progress"}}]
+                frames: list[dict[str, Any]] = [
+                    {"type": "response.created", "response": {"id": "resp_burst", "status": "in_progress"}}
+                ]
                 frames += [
                     {
                         "type": "response.output_text.delta",
@@ -9208,7 +9210,7 @@ def test_backend_responses_websocket_native_burst_reaches_completion(app_instanc
             request_id="native-burst",
             generation=1,
             status=101,
-            headers=[],
+            headers=(),
             events=events,
         )
         sockets.append(native)

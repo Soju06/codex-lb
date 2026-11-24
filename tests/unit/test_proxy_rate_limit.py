@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import TypeVar, cast
@@ -180,7 +180,7 @@ def _service_and_guard(*, session: _FakeSession | None = None) -> tuple[_TestRat
     }
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async def repo_factory() -> AsyncGenerator[ProxyRepositories]:
         yield ProxyRepositories(
             accounts=cast(
                 AccountsRepository,

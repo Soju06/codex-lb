@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -3630,7 +3630,7 @@ async def test_durable_event_progress_fences_abandonment_cas(
     try:
 
         @asynccontextmanager
-        async def no_writer_lock() -> AsyncIterator[None]:
+        async def no_writer_lock() -> AsyncGenerator[None]:
             yield
 
         monkeypatch.setattr(durable_bridge_repository_module, "sqlite_writer_section", no_writer_lock)

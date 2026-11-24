@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator, Collection
+from collections.abc import AsyncGenerator, Collection
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
@@ -193,7 +193,7 @@ async def bounded_multipart_form(
     policy: MultipartPolicy,
     *,
     typed_upload_fields: Collection[str] = (),
-) -> AsyncIterator[FormData]:
+) -> AsyncGenerator[FormData]:
     if not _is_multipart_form_data(request.headers):
         empty_form = FormData()
         try:

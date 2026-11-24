@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import pytest
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
-from fastapi.routing import APIRoute
+from fastapi.routing import RouteContext
 from httpx import AsyncClient
 
 import app.core.auth.dependencies as auth_dependencies
@@ -28,6 +28,7 @@ from app.core.auth.dashboard_access import STEP_UP_PERMISSIONS, Permission, Scop
 from app.core.auth.dependencies import DashboardPermissionDependency, PermissionRequirement
 from app.core.middleware.dashboard_csrf import CROSS_SITE_REQUEST_REJECTED_CODE
 from app.modules.scim.dependencies import validate_scim_token
+from tests.integration.route_inventory import iter_api_routes, route_path
 
 pytestmark = pytest.mark.integration
 
@@ -201,7 +202,7 @@ def _walk(dependant: Dependant) -> Iterator[Callable[..., object]]:
         yield from _walk(sub)
 
 
-def _route_auth(route: APIRoute) -> RouteAuth:
+def _route_auth(route: RouteContext) -> RouteAuth:
     session_validated = False
     write_alias_gate = False
     requirements: list[PermissionRequirement] = []
@@ -217,12 +218,13 @@ def _route_auth(route: APIRoute) -> RouteAuth:
     return RouteAuth(session_validated, write_alias_gate, tuple(requirements))
 
 
-def _dashboard_routes(app: FastAPI) -> Iterator[tuple[str, str, APIRoute]]:
-    for route in app.routes:
-        if not isinstance(route, APIRoute) or not route.path.startswith(DASHBOARD_PREFIX):
+def _dashboard_routes(app: FastAPI) -> Iterator[tuple[str, str, RouteContext]]:
+    for route in iter_api_routes(app):
+        path = route_path(route)
+        if not path.startswith(DASHBOARD_PREFIX):
             continue
         for method in sorted(route.methods or ()):
-            yield method, route.path, route
+            yield method, path, route
 
 
 def _is_session_exempt(method: str, path: str) -> bool:
@@ -294,8 +296,8 @@ def test_every_scim_route_carries_the_bearer_and_no_dashboard_authority(app_inst
 
     scim_routes = [
         (method, route)
-        for route in app_instance.routes
-        if isinstance(route, APIRoute) and route.path.startswith("/scim/")
+        for route in iter_api_routes(app_instance)
+        if route_path(route).startswith("/scim/")
         for method in sorted(route.methods or ())
     ]
     assert scim_routes, "the SCIM router is not registered"

@@ -8,7 +8,7 @@ and a trusted-header principal without an account row get
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 
 from fastapi import APIRouter, Body, Depends, Request, Response
@@ -91,7 +91,7 @@ _ERROR_MAP: dict[type[Exception], tuple[type[AppError], str]] = {
 
 
 @contextmanager
-def mapped_user_errors() -> Iterator[None]:
+def mapped_user_errors() -> Generator[None]:
     """Translate service-level refusals into the dashboard error envelope."""
 
     try:

@@ -346,7 +346,7 @@ async def _pending_state(session: AsyncSession, account_id: str) -> tuple[bool, 
 # the ORDER BY exists purely to pin the plan.
 
 
-def _usage_history_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+def _usage_history_batch(account_id: str, batch_size: int) -> Select[int]:
     return (
         select(UsageHistory.id)
         .where(UsageHistory.account_id >= account_id, UsageHistory.account_id <= account_id)
@@ -355,7 +355,7 @@ def _usage_history_batch(account_id: str, batch_size: int) -> Select[tuple[int]]
     )
 
 
-def _additional_usage_history_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+def _additional_usage_history_batch(account_id: str, batch_size: int) -> Select[int]:
     return (
         select(AdditionalUsageHistory.id)
         .where(
@@ -372,7 +372,7 @@ def _additional_usage_history_batch(account_id: str, batch_size: int) -> Select[
     )
 
 
-def _request_logs_batch(account_id: str, batch_size: int) -> Select[tuple[int]]:
+def _request_logs_batch(account_id: str, batch_size: int) -> Select[int]:
     return (
         select(RequestLog.id)
         .where(RequestLog.account_id >= account_id, RequestLog.account_id <= account_id)

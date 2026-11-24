@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -1165,7 +1165,7 @@ class DurableBridgeSessionCoordinator:
             )
 
     @asynccontextmanager
-    async def _session(self) -> AsyncIterator[AsyncSession]:
+    async def _session(self) -> AsyncGenerator[AsyncSession]:
         session = self._session_factory()
         try:
             yield session

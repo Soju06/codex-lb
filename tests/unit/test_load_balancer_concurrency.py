@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncGenerator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -551,7 +551,7 @@ async def _repo_factory(
     accounts_repo: _StubAccountsRepository,
     usage_repo: _StubUsageRepository,
     sticky_repo: _StubStickySessionsRepository | None = None,
-) -> AsyncIterator[ProxyRepositories]:
+) -> AsyncGenerator[ProxyRepositories]:
     sticky_repo = sticky_repo or _StubStickySessionsRepository()
     yield ProxyRepositories(
         accounts=cast(Any, accounts_repo),
@@ -5546,7 +5546,7 @@ async def test_shared_owner_lookup_session_reads_each_owner_key_exactly_once() -
     opened_context_count = 0
 
     @asynccontextmanager
-    async def context_stamping_repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async def context_stamping_repo_factory() -> AsyncGenerator[ProxyRepositories]:
         # Stamp every bundle open with a distinct identifier so the events
         # recorded by the sticky repo prove which context issued each read;
         # the old per-lookup-session flow would record three distinct ids.

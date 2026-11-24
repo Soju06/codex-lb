@@ -5,7 +5,7 @@ import logging
 import os
 import signal
 import socket
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from types import FrameType
 from typing import NoReturn
@@ -45,7 +45,7 @@ class SignalNeutralServer(uvicorn.Server):
     """Embedded server that leaves process signal ownership to its parent."""
 
     @contextmanager
-    def capture_signals(self) -> Iterator[None]:
+    def capture_signals(self) -> Generator[None]:
         yield
 
 

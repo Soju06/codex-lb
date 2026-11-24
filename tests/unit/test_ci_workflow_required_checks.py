@@ -89,7 +89,7 @@ def test_openspec_validation_is_required_for_spec_only_changes() -> None:
     assert "paths-ignore:" not in trigger_block
     assert "\n    needs:" not in openspec_job
     assert "\n    if:" not in openspec_job
-    assert "npx --yes @fission-ai/openspec@1.11.0 validate --specs" in openspec_job
+    assert "npx --yes @fission-ai/openspec@1.16.0 validate --specs" in openspec_job
     assert "fetch-depth: 0" in openspec_job
     assert "python3 .github/scripts/validate_changed_openspec.py" in openspec_job
     assert "- openspec" in required_job
@@ -105,7 +105,7 @@ def test_rust_job_runs_native_routed_wire_probe_with_built_helper() -> None:
     assert build in rust_job
     assert probe in rust_job
     assert rust_job.index(build) < rust_job.index(probe)
-    assert "uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884" in rust_job
+    assert "uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2" in rust_job
     assert "uv sync --dev --frozen" in rust_job
     assert (
         "CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress"

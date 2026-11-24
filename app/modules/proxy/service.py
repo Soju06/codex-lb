@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
+from typing import Any, Literal, Mapping, NoReturn, TypeVar, cast
 
 import aiohttp
 import anyio
@@ -1459,7 +1459,7 @@ class ProxyService(
         )
 
     @asynccontextmanager
-    async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
+    async def _accounts_refresh_scope(self) -> AsyncGenerator[AccountsRepositoryPort]:
         # A self-contained repo prevents request cancellation from closing the
         # session under AuthManager's shielded refresh and stranding a connection.
         async with self._repo_factory() as repos:

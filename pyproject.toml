@@ -42,9 +42,9 @@ dependencies = [
     "asyncpg>=0.30.0",
     "bcrypt>=4.3.0",
     "brotli>=1.2.0",
-    "certifi>=2026.4.22",
+    "certifi>=2026.10.19",
     "cryptography>=46.0.6",
-    "fastapi[standard]>=0.128.0",
+    "fastapi[standard]>=0.162.0",
     "greenlet>=3.3.0",
     "mako>=1.3.12",
     "pydantic>=2.12.5",
@@ -56,13 +56,13 @@ dependencies = [
     # -secret key confusion (both < 2.13.0). The ID token is the only thing this
     # product verifies with it, so the floor has to exclude them.
     "pyjwt[crypto]>=2.13.0",
-    "python-socks[asyncio]>=2.7.2",
+    "python-socks[asyncio]>=3.2.1",
     "pyotp>=2.9.0",
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.27",
     "psycopg[binary]>=3.2.12",
     "segno>=1.6.6",
-    "sqlalchemy>=2.0.45",
+    "sqlalchemy>=2.1",
     "urllib3>=2.8.0",
     "uvicorn>=0.47.0",
     "websockets>=16.0",
@@ -90,7 +90,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    "ty==0.0.78",
+    "ty==0.0.95",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
@@ -137,7 +137,7 @@ codex-lb = "app.cli:main"
 codex-lb-db = "app.db.migrate:main"
 
 [build-system]
-requires = ["hatchling==1.32.0"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]

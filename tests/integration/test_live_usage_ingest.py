@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -476,7 +476,7 @@ async def test_postgresql_live_ingest_serializes_identity_membership_through_sna
     monkeypatch.setattr(writer_session, "execute", _writer_execute)
 
     @asynccontextmanager
-    async def _settlement_session() -> AsyncIterator[AsyncSession]:
+    async def _settlement_session() -> AsyncGenerator[AsyncSession]:
         yield settlement_session
 
     monkeypatch.setattr(live_ingest, "get_background_session", _settlement_session)
@@ -677,7 +677,7 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
     monkeypatch.setattr(reconciliation_session, "commit", _reconciliation_commit)
 
     @asynccontextmanager
-    async def _settlement_session() -> AsyncIterator[AsyncSession]:
+    async def _settlement_session() -> AsyncGenerator[AsyncSession]:
         yield settlement_session
 
     monkeypatch.setattr(live_ingest, "get_background_session", _settlement_session)

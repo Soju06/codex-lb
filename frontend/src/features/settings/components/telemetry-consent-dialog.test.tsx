@@ -4,7 +4,10 @@ import { HttpResponse, http } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
+import {
+  CONSENT_DIALOG_DISMISSED_STORAGE_KEY as DISMISSED_STORAGE_KEY,
+  TelemetryConsentDialog,
+} from "@/features/settings/components/telemetry-consent-dialog";
 import i18n from "@/i18n";
 import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
@@ -17,14 +20,32 @@ function undecidedConsent() {
 describe("TelemetryConsentDialog", () => {
   beforeEach(() => {
     useAuthStore.setState({ canWrite: true });
+    // Dismissal is remembered per browser, so every case starts from a browser
+    // that has not been asked yet.
+    window.localStorage.removeItem(DISMISSED_STORAGE_KEY);
   });
 
-  it("shows the exact transmitted envelope with both decision actions while undecided", async () => {
+  it("summarizes without dumping the envelope, and reveals it on request", async () => {
+    const user = userEvent.setup();
     server.use(http.get("/api/settings/telemetry", () => HttpResponse.json(undecidedConsent())));
 
     renderWithProviders(<TelemetryConsentDialog />);
 
     const dialog = await screen.findByRole("dialog", { name: "Anonymous telemetry" });
+    expect(
+      within(dialog).getByText(i18n.t("settings.telemetry.consentDialog.description")),
+    ).toBeInTheDocument();
+    // The wall of JSON is what made this dialog read as a data grab; it stays
+    // exact but collapsed until the operator asks for it.
+    expect(within(dialog).queryByText(/"schema_version": 1/)).not.toBeInTheDocument();
+    // The opt-out notification paragraph belongs on the settings card, where
+    // the toggle that triggers it lives.
+    expect(
+      within(dialog).queryByText(i18n.t("settings.telemetry.optOutNotice")),
+    ).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "View what is sent" }));
+
     // The full envelope is the exact transmitted body: top-level instance_id
     // and timestamp plus the snapshot under metrics.
     expect(
@@ -35,13 +56,21 @@ describe("TelemetryConsentDialog", () => {
     expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
     expect(
-      within(dialog).getByText(i18n.t("settings.telemetry.optOutNotice")),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Keep enabled" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Disable telemetry" })).toBeInTheDocument();
-    expect(
       within(dialog).getByRole("link", { name: "Learn what is collected and why" }),
     ).toBeInTheDocument();
+  });
+
+  it("presents both decision actions with equal prominence", async () => {
+    server.use(http.get("/api/settings/telemetry", () => HttpResponse.json(undecidedConsent())));
+
+    renderWithProviders(<TelemetryConsentDialog />);
+
+    const dialog = await screen.findByRole("dialog", { name: "Anonymous telemetry" });
+    const keep = within(dialog).getByRole("button", { name: "Keep enabled" });
+    const disable = within(dialog).getByRole("button", { name: "Disable telemetry" });
+    // Neither action may be styled as the favoured one: opting out must not
+    // cost more attention than staying enabled.
+    expect(disable.className).toBe(keep.className);
   });
 
   it("persists enabled=true when the operator keeps telemetry enabled", async () => {
@@ -86,7 +115,7 @@ describe("TelemetryConsentDialog", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
-  it("closes without persisting a decision when dismissed with Escape", async () => {
+  it("remembers an Escape dismissal without persisting a decision", async () => {
     const user = userEvent.setup();
     let putCalled = false;
     server.use(
@@ -97,13 +126,25 @@ describe("TelemetryConsentDialog", () => {
       }),
     );
 
-    renderWithProviders(<TelemetryConsentDialog />);
+    const { unmount } = renderWithProviders(<TelemetryConsentDialog />);
 
     await screen.findByRole("dialog");
     await user.keyboard("{Escape}");
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Dismissal is not a decision: consent stays undecided on the backend.
     expect(putCalled).toBe(false);
+    expect(window.localStorage.getItem(DISMISSED_STORAGE_KEY)).toBe("1");
+
+    unmount();
+    const { queryClient } = renderWithProviders(<TelemetryConsentDialog />);
+
+    // Re-entering the dashboard must not ask again, and must not pay for the
+    // snapshot aggregation to find that out.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["settings", "telemetry"])?.fetchStatus).toBe("idle"),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("stays hidden once a decision has been persisted", async () => {

@@ -66,6 +66,16 @@ Each signal needs at least eight samples on at least three accounts (per model, 
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+## Direct model-source compaction
+
+For an external model served by a Responses-compatible source, explicit requests to
+`/v1/responses/compact` and `/backend-api/codex/responses/compact` forward to that
+source's `/responses/compact` endpoint. No subscription account is required. Native
+continuation and uploaded-file ownership still take precedence. The source must
+support compaction; its errors are returned without switching models or falling
+back to subscription accounts. This does not enable terminal `compaction_trigger`
+requests. Owning spec:
+[responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat).
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

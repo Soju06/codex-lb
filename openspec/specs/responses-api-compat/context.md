@@ -328,3 +328,22 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+## Direct external compact forwarding
+
+Explicit compact requests use the configured Responses source when native
+continuity or an uploaded file does not pin the request to subscription accounts.
+For example, `/v1/responses/compact` for an external model can succeed with no
+subscription accounts when the source implements `/responses/compact`.
+
+The source receives retained history and tool definitions. Its exact outgoing
+payload determines reservation admission, so definitions removed only by native
+compact serialization cannot escape the source's usage budget. The existing
+source dispatcher owns concurrency, disconnect handling, settlement and redaction.
+Native compact ownership and serialization stay in the native service.
+
+Responses capability does not guarantee provider compact support. An unsupported
+endpoint returns its source error without fallback. This feature covers explicit
+compact endpoints; terminal-trigger and overflow-pinned compaction retain their
+existing behavior. It supplies no provider history store or tool translator.
+See issue [#2318](https://github.com/Soju06/codex-lb/issues/2318) and the requirements
+in [spec.md](spec.md).

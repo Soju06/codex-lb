@@ -387,13 +387,40 @@ async def forward_responses(
     encryptor: TokenEncryptor | None = None,
     recode_credential_failures: bool = True,
 ) -> SourceResponsesCompletion:
+    return await _forward_responses_json(
+        source,
+        payload,
+        path="/responses",
+        encryptor=encryptor,
+        recode_credential_failures=recode_credential_failures,
+    )
+
+
+async def forward_compact_responses(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None = None,
+) -> SourceResponsesCompletion:
+    """Compact at the selected source using the shared authenticated JSON transport."""
+    return await _forward_responses_json(source, payload, path="/responses/compact", encryptor=encryptor)
+
+
+async def _forward_responses_json(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    path: Literal["/responses", "/responses/compact"],
+    encryptor: TokenEncryptor | None = None,
+    recode_credential_failures: bool = True,
+) -> SourceResponsesCompletion:
     try:
         async with lease_model_source_session() as session:
             # Non-stream generations legitimately spend minutes before the
             # first byte, so only connect establishment and the source's total
             # budget are bounded here (no header/first-frame deadline).
             async with session.post(
-                _source_url(source, "/responses"),
+                _source_url(source, path),
                 headers=_source_headers(source, encryptor=encryptor),
                 json=payload,
                 timeout=_source_client_timeout(source),

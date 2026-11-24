@@ -1,0 +1,3 @@
+Both public routes reproduced requestedServiceTier null instead of priority on the original candidate. After moving the fallback, 60 compact and budget cases pass. Native compact tier tests and make lint typecheck pass. Both hosted-failure tests pass after correcting their test-double signatures. The original independent review found only the reproduced fallback ordering defect; final candidate review and hosted verification are recorded separately by the PR owner.
+
+No design.md was required for moving one existing call. No new policy, setting, transport restriction or module boundary is introduced.

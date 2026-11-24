@@ -2,6 +2,12 @@
 
 See `openspec/specs/api-keys/spec.md` for normative requirements.
 
+## Background reset sweep progress
+
+The sweep pages by increasing limit ID and advances from the last selected row even when a guarded update misses. This keeps batches bounded without accumulating skipped IDs or weakening the exact `reset_at` ownership guard.
+
+For example, SQLite text `2026-09-19 10:30:18` parses to the same datetime as `2026-09-19 10:30:18.000000`, but does not equal SQLAlchemy's bound representation. That row remains expired and unchanged; it no longer keeps the sweep in a busy loop or blocks later rows. Timestamp normalization and compatibility in lazy-reset/reservation paths are outside this fix. A row already passed by the cursor is reconsidered on the next scheduled sweep.
+
 ## Request-aware reservation estimate
 
 The admission budget for token and `cost_usd` limits (Requirement

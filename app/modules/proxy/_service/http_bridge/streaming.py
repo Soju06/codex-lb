@@ -270,6 +270,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.replay_safety import (
     AccountNeutralReplayProjection,
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_has_response_owned_prefix_settling_output_ids,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -453,6 +454,13 @@ class _VerifiedDurableFullResend:
         ):
             return None
         input_items = cast(list[JsonValue], payload.input)
+        pending_tool_calls = durable_lookup.latest_pending_tool_calls
+        if pending_tool_calls is not None and responses_input_suffix_has_response_owned_prefix_settling_output_ids(
+            input_items,
+            stored_count=stored_count,
+            pending_tool_calls=pending_tool_calls,
+        ):
+            return None
         replay_projection = project_responses_input_for_account_neutral_fresh_replay(
             input_items,
             stored_count=stored_count,
@@ -461,7 +469,6 @@ class _VerifiedDurableFullResend:
             # the exact-manifest check rejects response-owned messages.
             preserve_developer_message_ids=True,
         )
-        pending_tool_calls = durable_lookup.latest_pending_tool_calls
         if replay_projection is None:
             return None
         safe_fresh_context = responses_input_suffix_retains_prior_output(
@@ -1619,8 +1626,16 @@ class _HTTPBridgeStreamingMixin:
             stored_count = lookup.latest_input_item_count
             if anchor_rejection is not None or stored_count is None or not isinstance(payload.input, list):
                 return None, None, False, anchor_rejection or "anchor_metadata_missing"
+            raw_input_items = cast(list[JsonValue], payload.input)
+            pending_tool_calls = lookup.latest_pending_tool_calls
+            if pending_tool_calls is not None and responses_input_suffix_has_response_owned_prefix_settling_output_ids(
+                raw_input_items,
+                stored_count=stored_count,
+                pending_tool_calls=pending_tool_calls,
+            ):
+                return stored_count, lookup.latest_input_full_fingerprint, False, None
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
-                cast(list[JsonValue], payload.input),
+                raw_input_items,
                 stored_count=stored_count,
                 # Classification only: inline Responses-Lite developer IDs
                 # must remain visible until the exact-manifest check rejects

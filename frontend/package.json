@@ -20,7 +20,7 @@
     "test:browser-smoke": "playwright test --config browser-smoke/playwright.config.ts"
   },
   "dependencies": {
-    "@hookform/resolvers": "^7.0.2",
+    "@hookform/resolvers": "^7.0.8",
     "@tailwindcss/vite": "^4.3.4",
     "@tanstack/react-query": "^5.105.3",
     "class-variance-authority": "^0.7.1",

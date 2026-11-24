@@ -112,6 +112,7 @@ from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
+from app.modules.proxy.stateless_replay import movable_affinity, quota_replay, quota_replay_block_reason
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -516,6 +517,7 @@ class _StreamingRetryMixin:
         excluded_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
+        stateless_selection_fallback_attempted = False
         # Owner-bound burst 429 same-account retries; reset when the counter's
         # account differs from the one being retried (see the closures below).
         burst_same_account_retries = 0
@@ -952,6 +954,38 @@ class _StreamingRetryMixin:
             )
             return True
 
+        def _move_verified_stateless_quota_replay(account: Account, code: str | None) -> bool:
+            nonlocal affinity, payload, payload_replay_required_account_id, max_attempts
+            if (
+                code not in {"usage_limit_reached", "quota_exceeded", "insufficient_quota", "rate_limit_exceeded"}
+                or not resilience.deterministic_failover_enabled
+                or settlement.downstream_visible
+                or require_preferred_account
+                or file_preferred_account_id is not None
+                or turn_state is not None
+                or turn_state_owner_account_id is not None
+                or routing_strategy == "single_account"
+                or payload_replay_required_account_id not in (None, account.id)
+            ):
+                return False
+            reason = quota_replay_block_reason(payload)
+            if reason is not None:
+                logger.info("quota_replay_blocked request_id=%s reason=%s", request_id, reason)
+                return False
+            attempted = len(excluded_account_ids | {account.id})
+            max_attempts = min(64, max(max_attempts, attempted + 2))
+            affinity = movable_affinity(affinity)
+            if payload_replay_required_account_id is None:
+                return True
+            replacement = quota_replay(payload)
+            if replacement is None:
+                return False
+            payload = replacement
+            payload_replay_required_account_id = None
+            excluded_account_ids.add(account.id)
+            logger.info("previsible_quota_stateless_replay request_id=%s account_id=%s", request_id, account.id)
+            return True
+
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
             *,
@@ -1378,7 +1412,9 @@ class _StreamingRetryMixin:
             )
             require_preferred_account = require_preferred_account or turn_state_owner_account_id is not None
             file_required_preferred_account = rewritten_file_account_id is not None
-            for attempt in range(max_attempts):
+            for attempt in range(64):
+                if attempt >= max_attempts:
+                    break
                 remaining_budget = proxy._remaining_budget_seconds(deadline)
                 if remaining_budget <= 0:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -1501,6 +1537,23 @@ class _StreamingRetryMixin:
                             )
                         )
                         require_security_work_authorized = False
+                        continue
+                    if (
+                        not account
+                        and selection.error_code == "hard_affinity_saturated"
+                        and not stateless_selection_fallback_attempted
+                        and resilience.deterministic_failover_enabled
+                        and not settlement.downstream_visible
+                        and effective_preferred_account_id is None
+                        and not effective_require_preferred_account
+                        and not file_required_preferred_account
+                        and turn_state is None
+                        and routing_strategy != "single_account"
+                        and quota_replay_block_reason(payload) is None
+                    ):
+                        stateless_selection_fallback_attempted = True
+                        affinity = movable_affinity(affinity)
+                        logger.info("stateless_affinity_fallback request_id=%s", request_id)
                         continue
                     if not account and deferred_capacity_account is not None:
                         deferred_error = _parse_openai_error(last_transient_exc.payload) if last_transient_exc else None
@@ -2624,6 +2677,7 @@ class _StreamingRetryMixin:
                                     http_status=tex.status_code,
                                     phase="first_event",
                                 )
+                                _move_verified_stateless_quota_replay(account, code)
                                 burst = is_upstream_burst_rejection(
                                     failure_class=classified["failure_class"],
                                     http_status=tex.status_code,
@@ -2884,6 +2938,7 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
+                    _move_verified_stateless_quota_replay(account, exc.code)
                     _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
@@ -3357,6 +3412,7 @@ class _StreamingRetryMixin:
                                 http_status=retry_exc.status_code,
                                 phase="first_event",
                             )
+                            _move_verified_stateless_quota_replay(account, current_error_code)
                             candidates_remaining = max_attempts - attempt - 1
                             burst = is_upstream_burst_rejection(
                                 failure_class=classified["failure_class"],

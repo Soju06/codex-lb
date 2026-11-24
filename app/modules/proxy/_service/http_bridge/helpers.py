@@ -3595,23 +3595,60 @@ def _http_bridge_should_rollover_after_context_overflow(
     return True
 
 
+def _http_bridge_error_code(exc: ProxyResponseError) -> object:
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return None
+    return error.get("code")
+
+
 def _http_bridge_should_attempt_local_bootstrap_rebind(
     exc: ProxyResponseError,
     *,
     key: _HTTPBridgeSessionKey,
     headers: Mapping[str, str],
+    payload: ResponsesRequest,
     previous_response_id: str | None,
+    durable_lookup: DurableBridgeLookup | None,
+    owner_pre_dispatch: bool = False,
 ) -> bool:
-    if key.affinity_kind not in {"session_header", "thread_header"}:
+    if key.affinity_kind not in {"session_header", "thread_header", "turn_state_header"}:
         return False
     if previous_response_id is not None:
         return False
-    if _sticky_key_from_turn_state_header(headers) is not None:
+    turn_state_key = _sticky_key_from_turn_state_header(headers)
+    if owner_pre_dispatch and _http_bridge_error_code(exc) == "bridge_drain_active":
+        # Explicit draining-owner rejection before dispatch: the old owner never
+        # accepted this request upstream. A turn-state-only key has no safe
+        # local creator fallback, so preserve the owner's retryable rejection
+        # instead of turning it into a misleading local 409. That holds for
+        # every turn-state value: WebSocket-minted ``turn_*``, origin-minted
+        # ``http_turn_*`` and client-chosen alike, because provenance lives on
+        # the recorded alias, not in the text.
+        if key.affinity_kind == "turn_state_header":
+            if (
+                _codex_backend_identity(headers).thread_selection_key is None
+                and _sticky_key_from_session_header(headers) is None
+            ):
+                return False
+            # Fail closed for delta-only turns: rebinding one to a fresh local
+            # session would drop the conversation context the client never
+            # resent. Rebind only when the client sent a full-context resend or
+            # the durable anchor the local drain gate already requires exists.
+            return _http_bridge_payload_looks_like_full_resend(payload) or _http_bridge_has_durable_recovery_anchor(
+                previous_response_id=previous_response_id,
+                durable_lookup=durable_lookup,
+            )
+        return True
+    if turn_state_key is not None:
         return False
-    payload = exc.payload
-    if not isinstance(payload, dict):
+    error_payload = exc.payload
+    if not isinstance(error_payload, dict):
         return False
-    error = payload.get("error")
+    error = error_payload.get("error")
     if not isinstance(error, dict):
         return False
     code = error.get("code")

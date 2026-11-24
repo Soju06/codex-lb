@@ -175,10 +175,13 @@ first token (multiplier 0.5), its sol weight would be 0.5, not 0.3.
   releases the provisional timestamp. After selection successfully returns a
   probe, a later caller cancellation may still postpone the next attempt by one
   quiet interval; that conservative bound cannot starve the account permanently.
-- A planned sticky mutation runs after admission commits. If that database write
+- An ordinary sticky mutation runs after admission commits. If that database write
   fails, the request releases its local lease but retains the committed selection
   timestamp; attempting to decrement the shared runtime version would make
   concurrent health settlement ambiguous.
+- A recovery probe can write provisional affinity before its reservation
+  commits. Cleanup restores the prior owner only while the account, write
+  timestamp, and live continuity state still match the provisional row.
 - A failed real request can drain the account again through the ordinary error
   path. Recovery never permits replay after downstream output is visible.
 - Restarting a replica clears advisory health as before; persisted account

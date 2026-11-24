@@ -310,13 +310,15 @@ class StickySessionsRepository:
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self, key: str, account_id: str, *, kind: StickySessionKind, updated_at: datetime | None = None
+    ) -> StickySession:
         # RETURNING collapses the previous upsert + re-select + refresh
         # (4 round trips) into one statement; this runs inline before the
         # first upstream byte on sticky requests, so round trips are TTFT.
         # populate_existing forces the returned row to overwrite any stale
         # identity-map instance the session may already hold for this key.
-        statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        statement = self._build_upsert_statement(key, account_id, kind, updated_at=updated_at).returning(StickySession)
         async with sqlite_writer_section():
             result = await self._session.execute(statement, execution_options={"populate_existing": True})
             row = result.scalar_one_or_none()
@@ -461,9 +463,10 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind,
         expected_account_id: str | None,
+        expected_updated_at: datetime | None,
         restore_account_id: str | None,
     ) -> bool:
-        """Restore a sticky owner only if the provisional owner is still current."""
+        """Restore a sticky owner only while the provisional write is current."""
 
         if not key:
             return False
@@ -473,32 +476,24 @@ class StickySessionsRepository:
             statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
                 StickySession.key
             )
-        elif restore_account_id is None:
-            statement = (
-                delete(StickySession)
-                .where(
-                    StickySession.key == key,
-                    StickySession.kind == kind,
-                    StickySession.account_id == expected_account_id,
-                )
-                .returning(StickySession.key)
-            )
         else:
-            statement = (
-                update(StickySession)
-                .where(
-                    StickySession.key == key,
-                    StickySession.kind == kind,
-                    StickySession.account_id == expected_account_id,
-                )
-                .values(
-                    account_id=restore_account_id,
-                    updated_at=func.now(),
-                    continuity_abandoned_at=None,
-                    continuity_abandonment_scope=None,
-                )
-                .returning(StickySession.key)
+            current_write = (
+                StickySession.key == key,
+                StickySession.kind == kind,
+                StickySession.account_id == expected_account_id,
+                StickySession.updated_at == expected_updated_at,
+                StickySession.continuity_abandoned_at.is_(None),
+                StickySession.continuity_abandonment_scope.is_(None),
             )
+            if restore_account_id is None:
+                statement = delete(StickySession).where(*current_write).returning(StickySession.key)
+            else:
+                statement = (
+                    update(StickySession)
+                    .where(*current_write)
+                    .values(account_id=restore_account_id, updated_at=func.now())
+                    .returning(StickySession.key)
+                )
 
         async with sqlite_writer_section():
             result = await self._session.execute(statement)
@@ -738,7 +733,9 @@ class StickySessionsRepository:
             await self._session.commit()
         return tombstoned + deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    def _build_upsert_statement(
+        self, key: str, account_id: str, kind: StickySessionKind, *, updated_at: datetime | None = None
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert
@@ -747,11 +744,13 @@ class StickySessionsRepository:
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
         statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        if updated_at is not None:
+            statement = statement.values(updated_at=updated_at)
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
-                "updated_at": func.now(),
+                "updated_at": updated_at if updated_at is not None else func.now(),
                 # A fresh pin fully re-establishes ownership, so any earlier
                 # purge tombstone (see purge_stale_hard_codex_session_mappings)
                 # no longer applies — otherwise this row would keep reporting

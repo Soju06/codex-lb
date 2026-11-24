@@ -562,6 +562,7 @@ def _bulk_history_since_capped_sqlite(
         from usage_history
         where account_id = ?
           and {window_clause}
+          and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
           and recorded_at >= ?
         order by recorded_at desc, id desc
         limit ?
@@ -574,6 +575,7 @@ def _bulk_history_since_capped_sqlite(
             from usage_history
             where account_id = ?
               and {window_clause}
+              and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
               and recorded_at >= ?
               and recorded_at < ?
             order by recorded_at desc, id desc
@@ -584,6 +586,7 @@ def _bulk_history_since_capped_sqlite(
         from usage_history
         where account_id = ?
           and {window_clause}
+          and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
           and recorded_at >= ?
     """
 
@@ -592,6 +595,7 @@ def _bulk_history_since_capped_sqlite(
         from usage_history
         where account_id = ?
           and {window_clause}
+          and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
           and recorded_at >= ?
         order by recorded_at asc, id asc
     """

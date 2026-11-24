@@ -37,7 +37,8 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id
-from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -775,6 +776,74 @@ def test_backend_responses_websocket_preserves_recorded_previous_response_accoun
     assert owner_lookups
     assert json.loads(upstream.sent_text[0])["previous_response_id"] == previous_response_id
     assert not any("model_source_requires_http_transport" in event for event in upstream.sent_text)
+
+
+@pytest.mark.parametrize(
+    ("owner_status", "expected_status", "expected_code", "expected_type"),
+    [
+        (AccountStatus.ACTIVE, 429, "account_usage_limit_reached", "rate_limit_error"),
+        (AccountStatus.PAUSED, 502, "previous_response_owner_unavailable", "server_error"),
+    ],
+)
+def test_backend_responses_websocket_required_owner_connect_denial(
+    app_instance, monkeypatch, owner_status, expected_status, expected_code, expected_type
+):
+    owner_id = "acct_ws_required_owner"
+    response_id = "resp_ws_required_owner"
+
+    async def seed_accounts() -> None:
+        async with SessionLocal() as session:
+            for account_id, status in [(owner_id, owner_status), ("acct_ws_healthy_sibling", AccountStatus.ACTIVE)]:
+                session.add(
+                    Account(
+                        id=account_id,
+                        email=f"{account_id}@example.test",
+                        plan_type="plus",
+                        access_token_encrypted=b"test",
+                        refresh_token_encrypted=b"test",
+                        id_token_encrypted=b"test",
+                        last_refresh=utcnow(),
+                        status=status,
+                        usage_limit_enabled=account_id == owner_id,
+                        usage_limit_percent=10.0 if account_id == owner_id else None,
+                    )
+                )
+            session.add_all(
+                [
+                    UsageHistory(
+                        account_id=owner_id,
+                        window=window,
+                        used_percent=10.0,
+                        window_minutes=minutes,
+                        recorded_at=utcnow(),
+                    )
+                    for window, minutes in [("primary", 300), ("secondary", 10080)]
+                ]
+            )
+            await session.commit()
+
+    async def recorded_owner(self, *, previous_response_id, **_kwargs):
+        assert previous_response_id == response_id
+        return owner_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", recorded_owner)
+    open_upstream = AsyncMock(side_effect=AssertionError("a required-owner denial must not open an upstream"))
+    monkeypatch.setattr(proxy_module.ProxyService, "_try_open_websocket_connect_attempt", open_upstream)
+    request = _websocket_response_create("continue the previous response")
+    request["previous_response_id"] = response_id
+
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        assert client.portal is not None
+        client.portal.call(seed_accounts)
+        with client.websocket_connect("ws://localhost/backend-api/codex/responses") as websocket:
+            websocket.send_json(request)
+            event = websocket.receive_json()
+
+    assert event["type"] == "error"
+    assert event["status"] == expected_status
+    assert event["error"]["code"] == expected_code
+    assert event["error"]["type"] == expected_type
+    open_upstream.assert_not_awaited()
 
 
 def test_backend_responses_websocket_canonical_source_previous_response_requires_http(

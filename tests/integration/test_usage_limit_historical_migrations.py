@@ -286,6 +286,39 @@ def test_interrupted_historical_repair_resumes_from_ordinary_ledger(migration_ur
         engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("retry", "expected"),
+    [
+        ("+1", _OVERRIDE),
+        (_SCALAR, _SCALAR),
+        ("+2", "20260826_000000_add_http_bridge_event_chunks"),
+        ("head", None),
+    ],
+)
+def test_relative_historical_repair_retries_after_checkpoint(
+    migration_url: str, monkeypatch: pytest.MonkeyPatch, retry: str, expected: str | None
+) -> None:
+    _install_history(migration_url, _PARENTS[0], _SCALAR)
+
+    def interrupt(config, revision):
+        assert revision == _OVERRIDE
+        raise RuntimeError("interrupted after checkpoint")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(command, "upgrade", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted after checkpoint"):
+            migrate.run_upgrade(migration_url, "+1", bootstrap_legacy=False)
+    state = migrate.inspect_migration_state(migration_url)
+    assert state.current_revision == _PARENTS[0]
+
+    result = migrate.run_upgrade(migration_url, retry, bootstrap_legacy=False)
+    assert result.current_revision == (state.head_revision if expected is None else expected)
+    if retry == "+2":
+        assert migrate.run_upgrade(migration_url, "+1", bootstrap_legacy=False).current_revision == (
+            "20260828_000000_add_accounts_chatgpt_identity_index"
+        )
+
+
 def test_successful_non_head_repair_can_downgrade_and_upgrade(migration_url: str) -> None:
     _install_history(migration_url, _PARENTS[0], _SCALAR)
     engine = create_engine(to_sync_database_url(migration_url))

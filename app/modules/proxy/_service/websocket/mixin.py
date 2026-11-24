@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -27,6 +27,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -4249,7 +4250,7 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if _facade()._is_local_account_cap_code(error_code):
+            if error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE or _facade()._is_local_account_cap_code(error_code):
                 status_code, error_payload = selection_failure_response(selection)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
@@ -6495,26 +6496,17 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         now = clock_for(proxy).monotonic()
-        async with pending_lock:
-            expired_requests = [
-                request_state
-                for request_state in list(pending_requests)
-                if now >= request_state.started_at + request_budget_seconds
-            ]
-            for request_state in expired_requests:
-                pending_requests.remove(request_state)
-        if not expired_requests:
-            return
         await proxy._fail_pending_websocket_requests(
             account_id_value=account_id_value,
-            pending_requests=deque(expired_requests),
-            pending_lock=anyio.Lock(),
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
             error_code=error_code,
             error_message=error_message,
             api_key=api_key,
             websocket=websocket,
             client_send_lock=client_send_lock,
             response_create_gate=response_create_gate,
+            claim_pending_request=lambda state: now >= state.started_at + request_budget_seconds,
         )
 
     async def _finalize_websocket_request_state(
@@ -7034,14 +7026,20 @@ class _WebSocketMixin:
         status: str = "error",
         penalize_account: bool = True,
         suppress_sequenced_downstream_errors: bool = False,
+        claim_pending_request: Callable[[_WebSocketRequestState], bool] | None = None,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         finalization_task: asyncio.Task[bool] | None = None
         await pending_lock.acquire()
         try:
-            remaining = list(pending_requests)
-            pending_requests.clear()
+            if claim_pending_request is None:
+                remaining = list(pending_requests)
+                pending_requests.clear()
+            else:
+                remaining = [state for state in pending_requests if claim_pending_request(state)]
+                for state in remaining:
+                    pending_requests.remove(state)
             if remaining:
                 scheduler = scheduler_for(proxy)
                 finalization_task = scheduler.create_task(
@@ -7064,9 +7062,8 @@ class _WebSocketMixin:
                 )
                 _track_websocket_owned_task(proxy, finalization_task)
         finally:
-            # anyio.Lock.release() is synchronous: once the shared deque is
-            # emptied, the registered child is published before another
-            # cancellation point can strand the claimed request states.
+            # The registered child owns the removed frames before the next
+            # cancellation point. anyio.Lock.release() is synchronous.
             pending_lock.release()
 
         if finalization_task is None:

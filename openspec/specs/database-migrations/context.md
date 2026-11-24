@@ -85,8 +85,10 @@ tables and override columns while keeping its saved policies and account tokens.
 
 A temporary `usage_limit_upstream_repair` row in the existing runtime sentinel
 table commits with the ledger move. Interrupted repair resumes through the
-ordinary Alembic cursor; unknown historical marker combinations stop before
-mutation. Credential retirement is preserved. Canonical installations retain
+ordinary Alembic cursor. A relative request such as `+1` also records its
+resolved target so retrying the same request after a rewind reaches that
+revision. Unknown historical marker combinations stop before mutation.
+Credential retirement is preserved. Canonical installations retain
 ordinary index-drift handling. This is bounded compatibility for observed
 PR-branch histories, not a general damaged-schema repair facility. See the
 [repair context](../../changes/archive/2026-10-23-repair-usage-limit-review-gaps/context.md)

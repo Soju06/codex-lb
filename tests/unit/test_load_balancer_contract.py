@@ -174,6 +174,7 @@ class _UsageRepository:
 class _StickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
+        self.updated_at: datetime | None = None
         self.get_calls = 0
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
@@ -192,13 +193,16 @@ class _StickySessionsRepository:
         account_id: str,
         *,
         kind: StickySessionKind,
+        updated_at: datetime | None = None,
     ) -> StickySession:
         self.account_id = account_id
+        self.updated_at = updated_at
         return StickySession(key=key, account_id=account_id, kind=kind)
 
     async def delete(self, *args: Any, **kwargs: Any) -> bool:
         del args, kwargs
         self.account_id = None
+        self.updated_at = None
         return True
 
     async def restore_if_current(
@@ -207,12 +211,14 @@ class _StickySessionsRepository:
         *,
         kind: StickySessionKind,
         expected_account_id: str | None,
+        expected_updated_at: datetime | None,
         restore_account_id: str | None,
     ) -> bool:
         del kind
-        if not key or self.account_id != expected_account_id:
+        if not key or self.account_id != expected_account_id or self.updated_at != expected_updated_at:
             return False
         self.account_id = restore_account_id
+        self.updated_at = None
         return True
 
 
@@ -305,6 +311,34 @@ async def test_public_selection_surfaces_fair_share_denial_shape(
     assert selection.error_code == "api_key_stream_fair_share"
     assert selection.error_message is not None
     assert "fair share" in selection.error_message
+
+
+@pytest.mark.asyncio
+async def test_soft_sticky_spills_over_when_capped_owner_cooldown_expires_during_draw(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.modules.proxy._load_balancer import sticky_selection
+
+    owner, sibling = _account("capped-soft-owner"), _account("available-sibling")
+    balancer, _, _, sticky = _balancer([owner, sibling], selection_cache)
+    sticky.account_id = owner.id
+    cooldown_end = time.time() + 30
+    balancer._runtime[owner.id] = load_balancer_module.RuntimeState(inflight_streams=1, cooldown_until=cooldown_end)
+
+    def draw_after_cooldown(states, *args, **kwargs):
+        kwargs["now"] = cooldown_end + 1
+        return select_account(states, *args, **kwargs)
+
+    monkeypatch.setattr(sticky_selection, "select_account", draw_after_cooldown)
+
+    selection = await _select_with_lease(balancer, sticky=True)
+    try:
+        assert selection.account is not None
+        assert selection.account.id == sibling.id
+        assert sticky.account_id == owner.id
+    finally:
+        await balancer.release_account_lease(selection.lease)
 
 
 @pytest.mark.asyncio
@@ -571,7 +605,7 @@ async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+@pytest.mark.parametrize("sticky_kind", [None, StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION])
 @pytest.mark.parametrize(
     "upstream_status",
     [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED],
@@ -579,25 +613,27 @@ async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts
 )
 async def test_public_exhaustion_envelope_wins_when_account_also_reaches_local_cap(
     selection_cache: AccountSelectionCache,
-    sticky: bool,
+    sticky_kind: StickySessionKind | None,
     upstream_status: AccountStatus,
 ) -> None:
-    exhausted = _account(f"contract-upstream-and-local-{upstream_status}-{sticky}")
+    exhausted = _account(f"contract-upstream-and-local-{upstream_status}-{sticky_kind}")
     exhausted.status = upstream_status
     exhausted.usage_limit_enabled = True
     exhausted.usage_limit_percent = 100.0
     usage = _usage_row(50, exhausted.id, window="primary", used_percent=100.0)
     exhausted.reset_at = usage.reset_at
-    balancer, _, _, _ = _balancer(
+    balancer, _, _, sticky_repo = _balancer(
         [exhausted],
         selection_cache,
         primary={exhausted.id: usage},
     )
+    if sticky_kind is StickySessionKind.CODEX_SESSION:
+        sticky_repo.account_id = exhausted.id
 
     selection = await balancer.select_account(
-        "contract-upstream-local-sticky" if sticky else None,
-        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
-        sticky_max_age_seconds=600 if sticky else None,
+        "contract-upstream-local-sticky" if sticky_kind is not None else None,
+        sticky_kind=sticky_kind,
+        sticky_max_age_seconds=600 if sticky_kind is StickySessionKind.PROMPT_CACHE else None,
         routing_strategy="usage_weighted",
     )
     status_code, payload = selection_failure_response(selection)
@@ -1662,7 +1698,9 @@ async def test_final_authorization_database_failure_is_local_and_releases_pressu
 
 
 @pytest.mark.parametrize("traffic_class", ["foreground", "opportunistic"])
-@pytest.mark.parametrize("peer_status", [AccountStatus.PAUSED, AccountStatus.QUOTA_EXCEEDED])
+@pytest.mark.parametrize(
+    "peer_status", [AccountStatus.PAUSED, AccountStatus.QUOTA_EXCEEDED, AccountStatus.REAUTH_REQUIRED]
+)
 def test_disabled_usage_policy_projection_preserves_canonical_fallback_context(traffic_class, peer_status):
     from app.modules.proxy._load_balancer.sticky_selection import _filter_states_for_usage_limit_and_account_caps
 
@@ -1677,7 +1715,15 @@ def test_disabled_usage_policy_projection_preserves_canonical_fallback_context(t
             error_count=ERROR_BACKOFF_THRESHOLD,
             last_error_at=now,
         ),
-        AccountState(account_id="peer", status=peer_status, used_percent=5, reset_at=now + 3600),
+        AccountState(
+            account_id="peer",
+            status=peer_status,
+            used_percent=5,
+            reset_at=now + 3600,
+            cooldown_until=now + 3600,
+            inflight_streams=1,
+            access_token_expires_at=now - 1,
+        ),
     ]
     expected = select_account([replace(state) for state in states], now=now, traffic_class=traffic_class)
     pool = evaluate_routing_pool(states, now=now, traffic_class=traffic_class)
@@ -1689,6 +1735,7 @@ def test_disabled_usage_policy_projection_preserves_canonical_fallback_context(t
         caps=_CONCURRENCY_CAPS,
         traffic_class=traffic_class,
         pool=pool,
+        now=now,
     )
     actual = select_account(filtered, now=now, traffic_class=traffic_class)
     assert not exhausted
@@ -1868,6 +1915,82 @@ async def test_late_sticky_invalidation_repeated_cancellation_releases_admission
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await original_release(released_lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary", ["rejected", "commit-error", "before-affinity-write", "affinity-write", "affinity-preserved"]
+)
+@pytest.mark.parametrize("owner_replaced", [False, True], ids=["still-current", "replaced"])
+async def test_cancelled_probe_cleanup_releases_lease_and_restores_current_affinity(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    owner_replaced: bool,
+) -> None:
+    healthy, probing, capped = (
+        _account(name) for name in ("healthy-cleanup-peer", "provisional-probe", "capped-owner")
+    )
+    balancer, _, _, sticky = _balancer([healthy, probing, capped], selection_cache)
+    original_owner = capped.id if boundary == "affinity-preserved" else None
+    if original_owner is not None:
+        sticky.account_id = original_owner
+        balancer._runtime[capped.id] = load_balancer_module.RuntimeState(inflight_streams=1)
+    runtime = load_balancer_module.RuntimeState(health_tier=HEALTH_TIER_PROBING, last_selected_at=0.0, version=17)
+    balancer._runtime[probing.id] = runtime
+    cleanup_started, release_lease = asyncio.Event(), asyncio.Event()
+    affinity_write_waiting = asyncio.Event()
+    original_release, original_upsert = balancer.release_account_lease, sticky.upsert
+
+    def reject_commit(_reservation):
+        assert sticky.account_id == (original_owner or probing.id)
+        if boundary == "commit-error":
+            raise RuntimeError("probe commit failed")
+        return False
+
+    async def interrupt_upsert(*args, **kwargs):
+        if boundary == "affinity-write":
+            await original_upsert(*args, **kwargs)
+        affinity_write_waiting.set()
+        await asyncio.Future()
+
+    async def block_release(lease):
+        cleanup_started.set()
+        await release_lease.wait()
+        await original_release(lease)
+
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", reject_commit)
+    monkeypatch.setattr(balancer, "release_account_lease", block_release)
+    if boundary in ("before-affinity-write", "affinity-write"):
+        monkeypatch.setattr(sticky, "upsert", interrupt_upsert)
+    task = asyncio.create_task(_select_with_lease(balancer, sticky=True))
+    try:
+        if boundary in ("before-affinity-write", "affinity-write"):
+            await asyncio.wait_for(affinity_write_waiting.wait(), timeout=2)
+            task.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+        expected_during_cleanup = None if boundary == "before-affinity-write" else original_owner or probing.id
+        assert sticky.account_id == expected_during_cleanup
+        expected_owner = original_owner
+        if owner_replaced:
+            expected_owner = probing.id if boundary in ("before-affinity-write", "affinity-write") else healthy.id
+            await original_upsert("contract-session", expected_owner, kind=StickySessionKind.PROMPT_CACHE)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        release_lease.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert sticky.account_id == expected_owner
+        assert runtime.last_selected_at == 0.0
+        assert await balancer.account_pressure_snapshot(probing.id) == (0, 0, 0.0)
+    finally:
+        release_lease.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

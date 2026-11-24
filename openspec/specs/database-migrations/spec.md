@@ -3,7 +3,9 @@
 ## Purpose
 
 Define migration, drift detection, and Alembic governance contracts so deployments fail closed on schema mismatch.
+
 ## Requirements
+
 ### Requirement: Alembic as migration source of truth
 
 The system SHALL use Alembic as the only runtime migration mechanism and SHALL NOT execute custom migration runners. Dashboard settings schema changes, including weekly pace working days, MUST be represented by Alembic revisions and ORM metadata so startup drift detection can verify them.
@@ -573,3 +575,13 @@ Upgrade tooling MUST support the historical scalar, override, and merge usage-li
 
 - **WHEN** a canonical usage-limit schema is missing an index but retains its upstream table, column, and credential state
 - **THEN** upgrade tooling uses the ordinary migration ledger and reports index drift through the existing checks without treating the database as an unknown historical installation
+
+### Requirement: Relative upgrade target survives ledger repair
+
+A retry of a relative upgrade interrupted by historical usage-limit ledger repair MUST use the target resolved before the ledger was rewound. An explicit upgrade target MUST remain available after an interruption.
+
+#### Scenario: A relative upgrade stops after committing the checkpoint
+
+- **WHEN** a relative upgrade is interrupted after committing the historical repair checkpoint and before running Alembic
+- **AND** the same upgrade is retried
+- **THEN** it reaches the revision resolved against the original ledger

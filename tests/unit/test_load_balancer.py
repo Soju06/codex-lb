@@ -111,6 +111,7 @@ def test_opportunistic_account_cap_filter_keeps_pool_eligible_membership() -> No
         lease_kind="stream",
         caps=AccountConcurrencyCaps(response_create_limit=1, stream_limit=1),
         traffic_class="opportunistic",
+        now=now,
     )
 
     assert not exhausted

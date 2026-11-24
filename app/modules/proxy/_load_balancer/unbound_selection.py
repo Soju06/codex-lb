@@ -199,6 +199,7 @@ async def run_unbound_selection_path(
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 traffic_class=traffic_class,
+                now=selection_now,
             )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(

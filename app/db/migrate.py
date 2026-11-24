@@ -8,6 +8,7 @@ import warnings
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,10 +17,10 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from alembic.script.revision import RevisionError
+from alembic.script.revision import RevisionError, _relative_destination
 from alembic.util.exc import CommandError
 from anyio import to_thread
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import Connection
 
@@ -146,6 +147,8 @@ _USAGE_LIMIT_STAMPS = frozenset(
     }
 )
 _USAGE_LIMIT_REPAIR_SENTINEL = "usage_limit_upstream_repair"
+_USAGE_LIMIT_REPAIR_REQUEST_SENTINEL = "usage_limit_upstream_repair_request"
+_USAGE_LIMIT_REPAIR_TARGET_SENTINEL = "usage_limit_upstream_repair_target"
 # Distinctive markers for the observed historical parents, in upstream order.
 # Dots identify columns and @ indexes; bare names identify whole tables. This
 # recognizes those snapshots, not arbitrary drift in unrelated schema objects.
@@ -971,21 +974,30 @@ def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
 
     Keep the policy columns in place and replay from the proven upstream parent.
     The existing scalar/override migrations preserve those values. A durable
-    marker and the ledger move commit together, so an interrupted repair resumes
-    through Alembic's ordinary ledger instead of guessing another checkpoint.
+    marker and the ledger move commit together, along with the original target
+    for relative requests whose resolution could change after that move.
     """
     with _sync_transaction(_required_sqlalchemy_url(config)) as connection:
         tables = _read_table_names(connection)
         current = _read_current_revisions_from_connection(connection) if _ALEMBIC_VERSION_TABLE in tables else ()
         pending = _read_runtime_sentinel(connection, _USAGE_LIMIT_REPAIR_SENTINEL)
+        if pending is None and not set(current) & _USAGE_LIMIT_STAMPS:
+            return None
+        # Use Alembic's parser pattern and fit the request in the sentinel column.
+        relative_request = sha256(revision.encode()).hexdigest() if _relative_destination.match(revision) else None
         if pending is not None:
             if pending not in {item[0] for item in _USAGE_LIMIT_SCHEMA_CHECKPOINTS} or not _ledger_has_applied(
                 config, current, pending
             ):
                 raise MigrationBootstrapError("Unrecognized historical usage-limit repair ledger")
+            if relative_request is not None and relative_request == _read_runtime_sentinel(
+                connection, _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL
+            ):
+                target = _read_runtime_sentinel(connection, _USAGE_LIMIT_REPAIR_TARGET_SENTINEL)
+                if target is None:
+                    raise MigrationBootstrapError("Missing historical usage-limit repair target")
+                return target
             return revision
-        if not set(current) & _USAGE_LIMIT_STAMPS:
-            return None
         if len(current) != 1:
             raise MigrationBootstrapError("Unrecognized historical usage-limit stamp combination")
         if not {"accounts", "dashboard_settings", _RUNTIME_SENTINELS_TABLE} <= tables:
@@ -1014,9 +1026,17 @@ def _reconcile_usage_limit_ledger(config: Config, revision: str) -> str | None:
         steps = ScriptDirectory.from_config(config)._upgrade_revs(revision, cast("Any", current))
         target = steps[-1].revision.revision if steps else current[0]
         _ensure_alembic_version_table_capacity_for_connection(connection, required_length=len(checkpoint))
+        sentinels = [{"name": _USAGE_LIMIT_REPAIR_SENTINEL, "value": checkpoint}]
+        if relative_request is not None:
+            sentinels.extend(
+                [
+                    {"name": _USAGE_LIMIT_REPAIR_REQUEST_SENTINEL, "value": relative_request},
+                    {"name": _USAGE_LIMIT_REPAIR_TARGET_SENTINEL, "value": target},
+                ]
+            )
         connection.execute(
             text(f"INSERT INTO {_RUNTIME_SENTINELS_TABLE} (name, value) VALUES (:name, :value)"),
-            {"name": _USAGE_LIMIT_REPAIR_SENTINEL, "value": checkpoint},
+            sentinels,
         )
         connection.execute(
             text(f"UPDATE {_ALEMBIC_VERSION_TABLE} SET {_ALEMBIC_VERSION_COLUMN} = :revision"),
@@ -1194,11 +1214,18 @@ def _run_upgrade_locked(
             repair_complete = "usage_limit_5h_percent" not in {
                 column["name"] for column in inspect(connection).get_columns("accounts")
             }
-    if repair_complete:
+    if reconciled_target is not None:
+        # A successful command consumes the saved request even if the repair
+        # checkpoint is still needed for later upgrades.
+        names = [_USAGE_LIMIT_REPAIR_REQUEST_SENTINEL, _USAGE_LIMIT_REPAIR_TARGET_SENTINEL]
+        if repair_complete:
+            names.append(_USAGE_LIMIT_REPAIR_SENTINEL)
         with _sync_transaction(sync_database_url) as connection:
             connection.execute(
-                text(f"DELETE FROM {_RUNTIME_SENTINELS_TABLE} WHERE name = :name"),
-                {"name": _USAGE_LIMIT_REPAIR_SENTINEL},
+                text(f"DELETE FROM {_RUNTIME_SENTINELS_TABLE} WHERE name IN :names").bindparams(
+                    bindparam("names", expanding=True)
+                ),
+                {"names": names},
             )
 
     if bootstrap_result.unknown_migrations:

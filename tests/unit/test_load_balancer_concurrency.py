@@ -337,6 +337,7 @@ class _StubStickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
         self.account_ids_by_key: dict[str, str] | None = None
+        self.updated_at_by_key: dict[str, datetime] = {}
         # Keys reported as purge tombstones (see
         # purge_stale_hard_codex_session_mappings): get_account_id_and_abandonment
         # reports these as ownerless, same as a missing row, but flags them as
@@ -391,6 +392,10 @@ class _StubStickySessionsRepository:
         self.account_id = account_id
         if self.account_ids_by_key is not None:
             self.account_ids_by_key[sticky_key] = account_id
+        if (updated_at := kwargs.get("updated_at")) is not None:
+            self.updated_at_by_key[sticky_key] = updated_at
+        else:
+            self.updated_at_by_key.pop(sticky_key, None)
         self.upserts.append((sticky_key, account_id, kwargs.get("kind")))
         return None
 
@@ -428,6 +433,7 @@ class _StubStickySessionsRepository:
         if self.account_ids_by_key is not None:
             self.account_ids_by_key.pop(sticky_key, None)
         self.account_id = None
+        self.updated_at_by_key.pop(sticky_key, None)
         return True
 
     async def restore_if_current(
@@ -436,13 +442,15 @@ class _StubStickySessionsRepository:
         *,
         kind: StickySessionKind,
         expected_account_id: str | None,
+        expected_updated_at: datetime | None,
         restore_account_id: str | None,
     ) -> bool:
         current_account_id = (
             self.account_ids_by_key.get(key) if self.account_ids_by_key is not None else self.account_id
         )
-        if current_account_id != expected_account_id:
+        if current_account_id != expected_account_id or self.updated_at_by_key.get(key) != expected_updated_at:
             return False
+        self.updated_at_by_key.pop(key, None)
         if restore_account_id is None:
             self.deleted.append((key, kind))
             if self.account_ids_by_key is not None:

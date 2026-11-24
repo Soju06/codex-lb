@@ -23,6 +23,7 @@ from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage import repository as usage_repository
+from app.modules.usage.authorization import OwnerAuthorizationKind
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -128,6 +129,9 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
             cast(_HTTPBridgeSession, bridge_session),
         )
         assert decision.allowed is allowed
+        assert decision.kind is (
+            OwnerAuthorizationKind.ALLOWED if allowed else OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
+        )
 
     try:
         await select_owner()

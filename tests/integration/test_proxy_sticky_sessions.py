@@ -2211,6 +2211,47 @@ async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup)
 
 
 @pytest.mark.asyncio
+async def test_probe_affinity_restore_only_reverts_the_provisional_write(async_client, db_setup):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    owner = await _import_account(async_client, "probe-affinity-owner", "probe-affinity-owner@example.com")
+    previous = await _import_account(async_client, "previous-affinity-owner", "previous-affinity-owner@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    provisional_time = utcnow().replace(microsecond=123456)
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = StickySessionsRepository(session)
+        writer = StickySessionsRepository(writer_session)
+        for key, restore_owner in [("probe-insert", None), ("probe-rebind", previous)]:
+            if restore_owner is not None:
+                await repo.upsert(key, restore_owner, kind=kind)
+            provisional = await repo.upsert(key, owner, kind=kind, updated_at=provisional_time)
+            assert provisional.updated_at == provisional_time
+
+            await writer.upsert(key, owner, kind=kind)
+            assert not await repo.restore_if_current(
+                key,
+                kind=kind,
+                expected_account_id=owner,
+                expected_updated_at=provisional_time,
+                restore_account_id=restore_owner,
+            )
+            assert await writer.get_account_id(key, kind=kind) == owner
+            await writer.release_read_snapshot()
+
+            await repo.upsert(key, owner, kind=kind, updated_at=provisional_time)
+            assert await repo.restore_if_current(
+                key,
+                kind=kind,
+                expected_account_id=owner,
+                expected_updated_at=provisional_time,
+                restore_account_id=restore_owner,
+            )
+            assert await writer.get_account_id(key, kind=kind) == restore_owner
+            await writer.release_read_snapshot()
+
+
+@pytest.mark.asyncio
 async def test_sticky_prefix_purge_is_bounded_and_reserved_namespace_only(db_setup):
     from sqlalchemy import select, update
 

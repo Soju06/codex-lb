@@ -1334,6 +1334,34 @@ async def test_bulk_history_since_per_account_row_cap_keeps_newest_rows(db_setup
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("floor_minutes", [None, 5, 10], ids=["capped", "split", "all-recent"])
+async def test_capped_history_excludes_placeholders_before_counting_rows(db_setup, floor_minutes: int | None):
+    now = utcnow()
+    account_id = "acc-placeholder-cap"
+    since = now - timedelta(minutes=10)
+    floor = now - timedelta(minutes=floor_minutes) if floor_minutes is not None else None
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account(account_id))
+        repo = UsageRepository(session)
+        snapshots = [
+            await repo.add_entry(
+                account_id,
+                percent,
+                window="secondary",
+                recorded_at=now - timedelta(minutes=age),
+                window_minutes=10080 if measured else None,
+            )
+            for age, percent, measured in [(8, 5.0, True), (7, 0.0, False), (3, 0.0, True), (1, 0.0, False)]
+        ]
+        grouped = await repo.bulk_history_since(
+            [account_id], "secondary", since, per_account_row_cap=1, uncapped_recent_floor=floor
+        )
+
+    expected = snapshots[2:3] if floor is None else [snapshots[0], snapshots[2]]
+    assert [row.id for row in grouped[account_id]] == [row.id for row in expected]
+
+
+@pytest.mark.asyncio
 async def test_bulk_history_since_negative_row_cap_is_empty_on_sqlite(db_setup):
     """SQLite treats a negative cap as an empty tail, not an unlimited query."""
     now = utcnow()

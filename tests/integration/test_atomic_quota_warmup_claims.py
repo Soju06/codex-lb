@@ -9,7 +9,7 @@ separate processes, because separate processes never share that lock.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -46,7 +46,7 @@ pytestmark = pytest.mark.integration
 
 
 @asynccontextmanager
-async def _noop_writer_section() -> AsyncIterator[None]:
+async def _noop_writer_section() -> AsyncGenerator[None]:
     yield
 
 

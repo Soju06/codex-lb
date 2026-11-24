@@ -12,7 +12,7 @@ import queue
 import threading
 import time
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,7 +99,7 @@ _ARCHIVE_SUPPRESSED: ContextVar[bool] = ContextVar("conversation_archive_suppres
 
 
 @contextlib.contextmanager
-def suppress_conversation_archive() -> Iterator[None]:
+def suppress_conversation_archive() -> Generator[None]:
     """Keep generated diagnostic traffic out of the archive for this task.
 
     Scoped to the current context, so it covers the upstream calls awaited

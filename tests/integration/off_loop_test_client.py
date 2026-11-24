@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -102,7 +102,7 @@ async def flush_deferred_sqlite_writers(app: ASGIApp) -> None:
 
 
 @asynccontextmanager
-async def off_loop_test_client(app: ASGIApp, **client_kwargs: Any) -> AsyncIterator[TestClient]:
+async def off_loop_test_client(app: ASGIApp, **client_kwargs: Any) -> AsyncGenerator[TestClient]:
     """``async with off_loop_test_client(app) as client:`` for async tests.
 
     Drop-in for ``with TestClient(app) as client:``; the yielded client is the

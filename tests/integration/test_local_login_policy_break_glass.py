@@ -10,7 +10,7 @@ qualifying account answers ``409 last_break_glass_protected``.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import ExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -96,7 +96,7 @@ def _isolate_settings_cache():
 
 
 @asynccontextmanager
-async def _client(app) -> AsyncIterator[AsyncClient]:
+async def _client(app) -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
         yield client
 

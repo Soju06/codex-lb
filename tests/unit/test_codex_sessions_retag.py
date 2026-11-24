@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -126,7 +127,7 @@ def test_retag_streams_jsonl_rewrite_to_temp_file(monkeypatch: pytest.MonkeyPatc
     original_named_temporary_file = codex_sessions_retag.NamedTemporaryFile
 
     def capture_named_temporary_file(*args, **kwargs):
-        handle = original_named_temporary_file(*args, **kwargs)
+        handle: Any = original_named_temporary_file(*args, **kwargs)
         original_write = handle.write
 
         def capture_write(text: str) -> int:

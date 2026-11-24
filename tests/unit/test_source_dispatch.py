@@ -173,7 +173,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
             recorded.rows.append(kwargs)
 
     @contextlib.asynccontextmanager
-    async def fake_session() -> AsyncIterator[None]:
+    async def fake_session() -> AsyncGenerator[None]:
         yield None
 
     monkeypatch.setattr(dispatch_module, "RequestLogsRepository", _FakeRepository)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from hashlib import sha256
@@ -221,7 +221,7 @@ class RingMembershipService:
         return sha256(data.encode()).hexdigest()
 
     @asynccontextmanager
-    async def _session(self) -> AsyncIterator[AsyncSession]:
+    async def _session(self) -> AsyncGenerator[AsyncSession]:
         session = self._session_factory()
         try:
             yield session

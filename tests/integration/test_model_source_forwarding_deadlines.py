@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
@@ -75,7 +75,7 @@ class _SilentTcpUpstream:
 
 
 @asynccontextmanager
-async def _silent_tcp_upstream() -> AsyncIterator[_SilentTcpUpstream]:
+async def _silent_tcp_upstream() -> AsyncGenerator[_SilentTcpUpstream]:
     stub: _SilentTcpUpstream | None = None
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -399,7 +399,7 @@ async def test_saturated_source_pool_waits_for_a_slot_instead_of_failing_as_unre
     session = aiohttp.ClientSession(connector=connector)
 
     @asynccontextmanager
-    async def lease() -> AsyncIterator[aiohttp.ClientSession]:
+    async def lease() -> AsyncGenerator[aiohttp.ClientSession]:
         yield session
 
     monkeypatch.setattr(forwarding_module, "lease_model_source_session", lease)

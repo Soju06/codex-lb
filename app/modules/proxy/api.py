@@ -5,7 +5,17 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Generator,
+    Iterable,
+    Mapping,
+)
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1879,7 +1889,7 @@ def _translate_v1_reset_credit_refresh_error(exc: RefreshError) -> HTTPException
 
 
 @asynccontextmanager
-async def _serialize_v1_reset_credit_redeem(account_id: str, *, session: AsyncSession) -> AsyncIterator[None]:
+async def _serialize_v1_reset_credit_redeem(account_id: str, *, session: AsyncSession) -> AsyncGenerator[None]:
     """Serialize the v1 redeem section, mapping claim contention to the OpenAI envelope.
 
     The shared serializer raises ``RedeemClaimTimeoutError`` on SQLite claim
@@ -1898,7 +1908,7 @@ async def _serialize_v1_reset_credit_redeem(account_id: str, *, session: AsyncSe
 
 
 @asynccontextmanager
-async def _v1_reset_credit_accounts_refresh_scope() -> AsyncIterator[AccountsRepository]:
+async def _v1_reset_credit_accounts_refresh_scope() -> AsyncGenerator[AccountsRepository]:
     async with get_background_session() as session:
         yield AccountsRepository(session)
 
@@ -2375,7 +2385,7 @@ async def _guard_chat_bridge_reservation(
     ready, dispatched, rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     @contextmanager
-    def settlement_signals() -> Iterator[None]:
+    def settlement_signals() -> Generator[None]:
         ready_token = _bind_propagated_responses_service_cleanup_ready(ready)
         dispatched_token = _bind_propagated_responses_owner_forward_dispatched(dispatched)
         rejected_token = _bind_propagated_responses_owner_forward_rejected(rejected)

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from typing import TYPE_CHECKING, Final
 
 from app.core.config.settings import Settings
@@ -137,7 +137,7 @@ def reset_dashboard_overrides(token: contextvars.Token[DashboardOverlay | None])
 
 
 @contextlib.contextmanager
-def dashboard_overrides_bound(row: DashboardSettings) -> Iterator[None]:
+def dashboard_overrides_bound(row: DashboardSettings) -> Generator[None]:
     token = bind_dashboard_overrides(row)
     try:
         yield

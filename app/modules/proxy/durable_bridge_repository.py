@@ -3632,8 +3632,27 @@ class DurableBridgeRepository:
                 await self._session.commit()
                 return False
             result = await self._session.execute(statement)
+            if result.scalar_one_or_none() is not None:
+                await self._session.commit()
+                return True
+            # The CAS also matches nothing when a racing duplicate retired this
+            # row first. The caller's question is "is this owner retired now?",
+            # not "did I retire it", so answer that: otherwise the loser of the
+            # race falls through to the retryable owner-unavailable failure the
+            # winner just replaced, and a client retrying quickly sees both.
+            already_retired = (
+                await self._session.execute(
+                    select(
+                        HttpBridgeSessionRecord.continuity_abandoned_at,
+                        HttpBridgeSessionRecord.continuity_abandonment_scope,
+                    ).where(
+                        HttpBridgeSessionRecord.id == session_id,
+                        HttpBridgeSessionRecord.account_id == expected_account_id,
+                    )
+                )
+            ).one_or_none()
             await self._session.commit()
-        return result.scalar_one_or_none() is not None
+        return already_retired is not None and _bridge_continuity_is_abandoned(*already_retired)
 
     async def retire_stale_unavailable_bridge_owners(self, cutoff: datetime, *, now: datetime) -> int:
         """Retire continuity owners that have been unroutable since ``cutoff``.

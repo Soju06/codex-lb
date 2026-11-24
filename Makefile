@@ -209,7 +209,7 @@ package: frontend-build
 	uv sync --frozen --no-dev
 	uv run python -c "import app; import app.main; print('import ok')"
 	rm -rf build dist *.egg-info
-	uvx --from build==1.3.0 python -m build
+	uvx --from build==1.6.1 python -m build
 	uv run python scripts/verify-wheel-assets.py
 
 .PHONY: docker
@@ -261,7 +261,7 @@ helm-kubeconform:
 helm-check: helm-lint helm-template helm-kubeconform
 
 helm-smoke-kind:
-	kind create cluster --name codex-lb-smoke --image kindest/node:v1.35.0 --wait 120s
+	kind create cluster --name codex-lb-smoke --image kindest/node:v1.35.8 --wait 120s
 	docker build -t ghcr.io/soju06/codex-lb:ci .
 	kind load docker-image ghcr.io/soju06/codex-lb:ci --name codex-lb-smoke
 	KUBE_CONTEXT=kind-codex-lb-smoke IMAGE_REGISTRY=ghcr.io IMAGE_REPOSITORY=soju06/codex-lb IMAGE_TAG=ci ./scripts/helm-kind-smoke.sh bundled

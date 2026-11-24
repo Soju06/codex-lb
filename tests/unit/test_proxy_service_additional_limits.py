@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import cast
@@ -168,7 +168,7 @@ async def test_build_additional_rate_limits_aggregates_reset_metadata_determinis
     )
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async def repo_factory() -> AsyncGenerator[ProxyRepositories]:
         yield _proxy_repositories(additional_usage)
 
     service = ProxyService(repo_factory)

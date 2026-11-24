@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -36,7 +36,7 @@ class _HistorySeed:
 
 
 @contextmanager
-def _capture_select_statements() -> Iterator[list[str]]:
+def _capture_select_statements() -> Generator[list[str]]:
     statements: list[str] = []
 
     def _before_cursor_execute(

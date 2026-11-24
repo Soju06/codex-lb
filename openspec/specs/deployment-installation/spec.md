@@ -38,7 +38,7 @@ The project MUST run automated Helm smoke installs for the easy-setup install mo
 
 - **WHEN** CI runs kind-based Helm smoke checks after loading the application image into the cluster
 - **THEN** the Helm test pod image is overridden to the loaded application image
-- **AND** the chart default test pod image remains equivalent to `docker.io/library/busybox:1.37` for normal installs
+- **AND** the chart default test pod image remains equivalent to `docker.io/library/busybox:1.38` for normal installs
 
 #### Scenario: External DB smoke exercises the default two-replica topology
 

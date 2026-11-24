@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -59,6 +59,7 @@ from tests.fixtures.fake_idp import (
     json_response,
     provider_config_document,
 )
+from tests.integration.route_inventory import iter_routes
 
 pytestmark = pytest.mark.integration
 
@@ -87,7 +88,7 @@ def idp(monkeypatch: pytest.MonkeyPatch) -> FakeIdp:
 
 
 @asynccontextmanager
-async def _client(app) -> AsyncIterator[AsyncClient]:
+async def _client(app) -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
         yield client
 
@@ -713,8 +714,8 @@ def test_both_public_routes_are_safe_methods(app_instance) -> None:
 
     methods = {
         route.path: route.methods
-        for route in app_instance.routes
-        if getattr(route, "path", "").startswith("/api/dashboard-auth/oidc")
+        for route in iter_routes(app_instance)
+        if (route.path or "").startswith("/api/dashboard-auth/oidc")
     }
 
     assert methods[START] == {"GET"}

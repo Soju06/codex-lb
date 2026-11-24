@@ -128,7 +128,7 @@ class RealScheduler:
     monkeypatching ``asyncio.wait`` afterwards does not reach them.
     ``tests/unit/test_clock_real_parity.py`` pins the identities. ``sleep``
     stays a one-frame wrapper: ``asyncio.sleep`` is overloaded on ``result``
-    in typeshed, which ty 0.0.73 cannot match against the protocol member,
+    in typeshed, which ty (still as of 0.0.95) cannot match against the protocol member,
     and no per-event site sleeps (backoff and recovery waits only).
     """
 

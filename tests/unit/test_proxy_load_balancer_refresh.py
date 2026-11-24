@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncGenerator, Collection
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -338,7 +338,7 @@ async def _repo_factory(
     usage_repo: StubUsageRepository,
     sticky_repo: StubStickySessionsRepository,
     additional_usage_repo: StubAdditionalUsageRepository | None = None,
-) -> AsyncIterator[ProxyRepositories]:
+) -> AsyncGenerator[ProxyRepositories]:
     yield ProxyRepositories(
         accounts=accounts_repo,
         usage=usage_repo,
@@ -1772,7 +1772,7 @@ async def test_select_account_does_not_hold_runtime_lock_during_input_loading(mo
     monkeypatch.setattr(accounts_repo, "list_accounts", blocking_list_accounts)
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async def repo_factory() -> AsyncGenerator[ProxyRepositories]:
         yield ProxyRepositories(
             accounts=accounts_repo,
             usage=usage_repo,
@@ -1830,7 +1830,7 @@ async def test_select_account_does_not_open_repo_before_runtime_lock(monkeypatch
     release_repo = asyncio.Event()
 
     @asynccontextmanager
-    async def blocking_repo_factory() -> AsyncIterator[ProxyRepositories]:
+    async def blocking_repo_factory() -> AsyncGenerator[ProxyRepositories]:
         repo_entered.set()
         await release_repo.wait()
         yield ProxyRepositories(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -67,7 +67,7 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
             return api_key_data
 
     @asynccontextmanager
-    async def _fake_session() -> AsyncIterator[object]:
+    async def _fake_session() -> AsyncGenerator[object]:
         yield object()
 
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: _SettingsCache())
@@ -102,7 +102,7 @@ async def test_firewall_middleware_uses_cache_for_repeated_ip(monkeypatch: pytes
             return True
 
     @asynccontextmanager
-    async def _fake_session() -> AsyncIterator[object]:
+    async def _fake_session() -> AsyncGenerator[object]:
         yield object()
 
     monkeypatch.setattr(

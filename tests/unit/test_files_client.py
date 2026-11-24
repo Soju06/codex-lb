@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -173,7 +173,7 @@ async def test_create_file_leases_shared_session_when_session_not_supplied(monke
     events: list[str] = []
 
     @asynccontextmanager
-    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncGenerator[Any]:
         assert session_arg is None
         events.append("enter")
         try:
@@ -281,7 +281,7 @@ async def test_finalize_file_holds_shared_session_lease_across_poll_loop(monkeyp
         return None
 
     @asynccontextmanager
-    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncIterator[Any]:
+    async def _lease_session(session_arg: aiohttp.ClientSession | None) -> AsyncGenerator[Any]:
         assert session_arg is None
         events.append("enter")
         try:

@@ -84,7 +84,7 @@ async def _finish_chunks(writer: asyncio.StreamWriter) -> None:
 
 
 @asynccontextmanager
-async def _serve_http(handler: _HttpHandler) -> AsyncIterator[str]:
+async def _serve_http(handler: _HttpHandler) -> AsyncGenerator[str]:
     connections: set[asyncio.StreamWriter] = set()
     tasks: set[asyncio.Task[None]] = set()
 

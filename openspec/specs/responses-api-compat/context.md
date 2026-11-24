@@ -328,3 +328,10 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+## Local quarantine cleanup and durable adoption
+
+The [cleanup requirements](spec.md#requirement-completion-cleanup-distinguishes-local-failures-from-durable-adoption) distinguish a response's local failure cutoff from the durable evidence it later adopts. A cutoff captured only after loading can erase a concurrent first strike; moving every fence earlier instead delays durable-only cleanup. Keeping both authorities preserves the existing settlement and registration timing.
+
+For example, a local poison arm at time 100 with deadline 700 keeps deadline 700 after a longer durable poison contribution is settled. A first strike recorded during the same completion remains count 1, so the next timeout can reach the existing threshold. A verified replay retains the origin's older cutoff, including when a same-key completion load revokes durable poison before final cleanup.
+
+This change retains the poison-preserving soft cap and TTL behavior. It does not classify unrelated keys as poisoned when the registry fills; broader overflow and unconditional memory-bound choices remain separate.

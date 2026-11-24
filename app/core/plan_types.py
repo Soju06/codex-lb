@@ -7,6 +7,7 @@ ACCOUNT_PLAN_TYPES: Final[set[str]] = {
     "plus",
     "pro",
     "prolite",
+    "promax",
     "team",
     "business",
     "enterprise",
@@ -25,6 +26,7 @@ RATE_LIMIT_PLAN_TYPES: Final[set[str]] = {
 
 ACCOUNT_PLAN_EQUIVALENTS: Final[dict[str, frozenset[str]]] = {
     "prolite": frozenset({"pro"}),
+    "promax": frozenset({"pro"}),
 }
 
 

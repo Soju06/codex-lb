@@ -52,7 +52,6 @@ def _account_status_enum() -> sa.Enum:
         *_ACCOUNT_STATUS_VALUES,
         name="account_status",
         validate_strings=True,
-        create_type=False,
     )
 
 

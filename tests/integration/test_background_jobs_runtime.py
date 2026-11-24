@@ -8,7 +8,7 @@ from the environment is what the next tick honours.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
@@ -61,7 +61,7 @@ async def test_auth_guardian_pass_follows_dashboard_toggle_without_restart(async
     repo = _RecordingRepo()
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[_RecordingRepo]:
+    async def repo_factory() -> AsyncGenerator[_RecordingRepo]:
         yield repo
 
     scheduler = AuthGuardianScheduler(

@@ -11,7 +11,7 @@ import ssl
 import sys
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from datetime import timedelta
@@ -7765,7 +7765,7 @@ class _SessionGenerationHarness:
     async def lease_http_session(
         self,
         session: aiohttp.ClientSession | None = None,
-    ) -> AsyncIterator[aiohttp.ClientSession]:
+    ) -> AsyncGenerator[aiohttp.ClientSession]:
         assert session is None
         selected = self.current_session
         self.leased_sessions.append(selected)
@@ -26367,24 +26367,21 @@ async def test_websocket_lite_prewarm_acceptance_preserves_incremental_marker(
     }
     continuity_state = proxy_service._WebSocketContinuityState()
     first = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.6-sol",
-                "instructions": "",
-                "generate": False,
-                "input": [
-                    {
-                        "type": "additional_tools",
-                        "role": "developer",
-                        "tools": [{"type": "custom", "name": "shell"}],
-                    },
-                    {"type": "message", "role": "developer", "content": "use repository tools"},
-                ],
-                "client_metadata": {marker.upper(): "stale"},
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "generate": False,
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "developer", "content": "use repository tools"},
+            ],
+            "client_metadata": {marker.upper(): "stale"},
+        },
         headers=prewarm_headers,
         codex_session_affinity=False,
         openai_cache_affinity=True,
@@ -26595,21 +26592,18 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
     )
 
     trusted = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.6-sol",
-                "instructions": "",
-                "previous_response_id": "resp_ws_lite_prev",
-                "input": [
-                    {"role": "user", "content": "continue"},
-                    {"role": "user", "content": "with details"},
-                ],
-                "client_metadata": {marker: "true", "keep": "yes"},
-                "reasoning": {"context": "last_turn", "effort": "high"},
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "previous_response_id": "resp_ws_lite_prev",
+            "input": [
+                {"role": "user", "content": "continue"},
+                {"role": "user", "content": "with details"},
+            ],
+            "client_metadata": {marker: "true", "keep": "yes"},
+            "reasoning": {"context": "last_turn", "effort": "high"},
+        },
         headers={},
         codex_session_affinity=False,
         openai_cache_affinity=True,
@@ -26635,25 +26629,22 @@ async def test_websocket_lite_fresh_replay_strips_trusted_marker(monkeypatch):
     assert trusted.request_state.fresh_upstream_request_responses_lite_model is None
 
     body_lite = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.6-sol",
-                "instructions": "",
-                "previous_response_id": "resp_ws_lite_prev",
-                "input": [
-                    {
-                        "type": "additional_tools",
-                        "role": "developer",
-                        "tools": [{"type": "custom", "name": "shell"}],
-                    },
-                    {"role": "user", "content": "continue"},
-                ],
-                "client_metadata": {marker: "stale", "keep": "yes"},
-                "reasoning": {"context": 7, "summary": "auto", "vendor_hint": 9},
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "previous_response_id": "resp_ws_lite_prev",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            "client_metadata": {marker: "stale", "keep": "yes"},
+            "reasoning": {"context": 7, "summary": "auto", "vendor_hint": 9},
+        },
         headers={},
         codex_session_affinity=False,
         openai_cache_affinity=True,
@@ -26768,14 +26759,11 @@ async def test_prepare_websocket_response_create_request_injects_anchor_for_code
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "input": [*historical_input, new_input],
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [*historical_input, new_input],
+        },
         headers={"session_id": "turn_ws_trim"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -26852,14 +26840,11 @@ async def test_prepare_websocket_response_create_request_retires_injected_anchor
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "input": [*historical_input, new_input],
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [*historical_input, new_input],
+        },
         headers={"session_id": "turn_ws_stale_anchor"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -26929,17 +26914,12 @@ async def test_prepare_websocket_goal_restart_keeps_full_resend_without_injected
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "instructions": (
-                    '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
-                ),
-                "input": [*historical_input, retained_output, new_input],
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "instructions": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+            "input": [*historical_input, retained_output, new_input],
+        },
         headers={"session_id": "goal-restart-direct-websocket"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -26998,14 +26978,11 @@ async def test_prepare_websocket_response_create_request_does_not_fresh_retry_in
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "input": [*historical_input, new_input],
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "input": [*historical_input, new_input],
+        },
         headers={"session_id": "turn_ws_trim_tool_delta"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27061,15 +27038,12 @@ async def test_prepare_websocket_response_create_request_captures_client_full_re
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "previous_response_id": "resp_client_anchor",
-                "input": full_resend_input,
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "previous_response_id": "resp_client_anchor",
+            "input": full_resend_input,
+        },
         headers={"session_id": "turn_ws_client_full_resend"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27123,15 +27097,12 @@ async def test_prepare_websocket_response_create_request_does_not_fresh_retry_to
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "previous_response_id": "resp_client_anchor",
-                "input": tool_output_delta,
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "previous_response_id": "resp_client_anchor",
+            "input": tool_output_delta,
+        },
         headers={"session_id": "turn_ws_tool_delta"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27266,15 +27237,12 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_pendi
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "previous_response_id": "resp_pending_tool_calls",
-                "input": interrupted_input,
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "previous_response_id": "resp_pending_tool_calls",
+            "input": interrupted_input,
+        },
         headers={"session_id": "turn_ws_interrupted_tools"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27385,15 +27353,12 @@ async def test_prepare_websocket_response_create_request_fills_interrupted_custo
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.1",
-                "previous_response_id": "resp_pending_custom_tool_calls",
-                "input": interrupted_input,
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.1",
+            "previous_response_id": "resp_pending_custom_tool_calls",
+            "input": interrupted_input,
+        },
         headers={"session_id": "turn_ws_interrupted_custom_tools"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27471,15 +27436,12 @@ async def test_prepare_websocket_full_replay_retry_text_uses_size_guard(monkeypa
     monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
 
     prepared = await service._prepare_websocket_response_create_request(
-        cast(
-            dict[str, JsonValue],
-            {
-                "type": "response.create",
-                "model": "gpt-5.6-sol",
-                "input": [*historical_input, new_input],
-                "reasoning": {"context": "last_turn", "effort": "high"},
-            },
-        ),
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "input": [*historical_input, new_input],
+            "reasoning": {"context": "last_turn", "effort": "high"},
+        },
         headers={"session_id": "turn_ws_trim_size"},
         codex_session_affinity=True,
         openai_cache_affinity=True,
@@ -27544,14 +27506,11 @@ async def test_prepare_websocket_full_replay_rejects_oversized_unslimmable_paylo
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._prepare_websocket_response_create_request(
-            cast(
-                dict[str, JsonValue],
-                {
-                    "type": "response.create",
-                    "model": "gpt-5.1",
-                    "input": [*historical_input, new_input],
-                },
-            ),
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [*historical_input, new_input],
+            },
             headers={"session_id": "turn_ws_trim_too_large"},
             codex_session_affinity=True,
             openai_cache_affinity=True,
@@ -34722,7 +34681,7 @@ async def test_stream_api_key_settlement_detaches_and_closes_repo(monkeypatch):
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         try:
             yield repo
         finally:
@@ -34813,7 +34772,7 @@ async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monk
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     class FakeApiKeysService:
@@ -34893,7 +34852,7 @@ async def test_stream_api_key_settlement_wait_option_reports_fallback_release_re
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     class FakeApiKeysService:
@@ -34955,7 +34914,7 @@ async def test_stream_api_key_settlement_detached_finalizes_without_release(monk
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     class FakeApiKeysService:
@@ -35020,7 +34979,7 @@ async def test_stream_api_key_background_settlement_failure_falls_back_to_releas
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     class FakeApiKeysService:
@@ -35089,7 +35048,7 @@ async def test_stream_api_key_cancelled_settlement_transfers_to_release(monkeypa
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     class FakeApiKeysService:
@@ -35161,7 +35120,7 @@ async def test_image_api_key_settlement_maps_captured_usage_once(
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield repo
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -35259,7 +35218,7 @@ async def test_stream_api_key_release_retries_bound_concurrent_repository_attemp
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         nonlocal active_repository_attempts, max_active_repository_attempts, repository_entries
         active_repository_attempts += 1
         repository_entries += 1

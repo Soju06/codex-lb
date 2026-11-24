@@ -9,7 +9,7 @@ binds, the enable guard, the enrolment counts and the migration.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -54,7 +54,7 @@ _TARGET_REVISION = "20260910_000000_add_totp_required_for_admin_role"
 
 
 @asynccontextmanager
-async def _client(app) -> AsyncIterator[AsyncClient]:
+async def _client(app) -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
         yield client
 

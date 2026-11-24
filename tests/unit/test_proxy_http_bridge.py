@@ -23279,7 +23279,7 @@ async def test_close_all_http_bridge_sessions_fails_capacity_waiters_instead_of_
         account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=cast(deque[proxy_service._WebSocketRequestState], deque()),
+        pending_requests=deque(),
         pending_lock=anyio.Lock(),
         response_create_gate=asyncio.Semaphore(1),
         queued_request_count=1,
@@ -23351,7 +23351,7 @@ async def test_get_or_create_http_bridge_session_capacity_wait_times_out(
         account=cast(Any, SimpleNamespace(id="acc-existing", status=AccountStatus.ACTIVE)),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=cast(deque[proxy_service._WebSocketRequestState], deque()),
+        pending_requests=deque(),
         pending_lock=anyio.Lock(),
         response_create_gate=asyncio.Semaphore(1),
         queued_request_count=1,
@@ -23880,7 +23880,7 @@ async def test_get_or_create_http_bridge_session_cancel_during_stale_close_clean
         account=cast(Any, SimpleNamespace(id="acc-stale", status=AccountStatus.DEACTIVATED, plan_type="plus")),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=cast(deque[proxy_service._WebSocketRequestState], deque()),
+        pending_requests=deque(),
         pending_lock=anyio.Lock(),
         response_create_gate=asyncio.Semaphore(1),
         queued_request_count=0,
@@ -28296,7 +28296,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },
     ]
-    payload_data: dict[str, proxy_service.JsonValue] = {
+    payload_data: dict[str, Any] = {
         "model": "gpt-5.4",
         "instructions": "hi",
         "input": [

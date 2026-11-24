@@ -30,7 +30,7 @@ to the one an overview poll issues.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -47,7 +47,7 @@ def normalize_sql(statement: str) -> str:
 
 
 @asynccontextmanager
-async def capture_task_statements(async_engine: AsyncEngine) -> AsyncIterator[list[str]]:
+async def capture_task_statements(async_engine: AsyncEngine) -> AsyncGenerator[list[str]]:
     """Collect the normalized SQL the calling task and its child tasks issue."""
     window = object()
     token = _CAPTURE_WINDOW.set(window)

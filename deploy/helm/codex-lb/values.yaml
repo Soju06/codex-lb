@@ -23,7 +23,7 @@ revisionHistoryLimit: 3
 
 # @section Image parameters
 image:
-  # NOTE: Use fully qualified image names (e.g., docker.io/library/busybox:1.37)
+  # NOTE: Use fully qualified image names (e.g., docker.io/library/busybox:1.38)
   # for compatibility with cri-o runtimes that enforce short-name resolution policies.
   # @param image.registry Container image registry
   registry: ghcr.io
@@ -46,7 +46,7 @@ test:
     # @param test.image.repository Helm test pod image repository
     repository: library/busybox
     # @param test.image.tag Helm test pod image tag
-    tag: "1.37"
+    tag: "1.38"
     # @param test.image.digest Helm test pod image digest (overrides tag when set)
     digest: ""
     # @param test.image.pullPolicy Helm test pod image pull policy

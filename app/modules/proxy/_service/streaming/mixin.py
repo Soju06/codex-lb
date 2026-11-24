@@ -413,10 +413,9 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
+from app.modules.proxy.request_policy import client_reasoning_effort_for_log
 from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
-from app.modules.proxy.tool_call_dedupe import (
-    response_id_from_payload as tool_call_response_id_from_payload,
-)
+from app.modules.proxy.tool_call_dedupe import response_id_from_payload as tool_call_response_id_from_payload
 from app.modules.proxy.tool_call_dedupe import (
     rewrite_parallel_tool_call_sse_line as _rewrite_tool_call_line,
 )
@@ -504,7 +503,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
         actual_service_tier: str | None = None
-        reasoning_effort = payload.reasoning.effort if payload.reasoning else None
+        reasoning_effort = client_reasoning_effort_for_log(payload)
         session_id = _owner_lookup_session_id_from_headers(headers)
         # Keep selection/failover waits out of latency and TTFT, record them as
         # queue time, then re-anchor after this attempt's admission wait.

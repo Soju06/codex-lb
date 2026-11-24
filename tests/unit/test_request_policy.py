@@ -14,6 +14,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
+    client_reasoning_effort_for_log,
     normalize_source_reasoning_aliases,
     responses_source_route_excluded,
     validate_model_access,
@@ -924,8 +925,8 @@ def test_source_chat_reasoning_policy_materializes_model_alias_effort_for_canoni
     assert payload == {"reasoning_effort": "xhigh"}
 
 
-def _responses_request_with_input(input_value: object) -> ResponsesRequest:
-    return ResponsesRequest.model_validate({"model": "gpt-5", "instructions": "", "input": input_value})
+def _responses_request_with_input(input_value: object, model: str = "gpt-5") -> ResponsesRequest:
+    return ResponsesRequest.model_validate({"model": model, "instructions": "", "input": input_value})
 
 
 def test_source_route_excluded_is_false_for_plain_turns() -> None:
@@ -998,3 +999,188 @@ def test_source_route_excluded_raises_for_malformed_compaction_trigger() -> None
 
     with pytest.raises(ClientPayloadError):
         responses_source_route_excluded(request)
+
+
+def _configuration_update_item(effort: str) -> dict[str, JsonValue]:
+    return {"type": "configuration_update", "reasoning": {"effort": effort}}
+
+
+def test_configuration_update_is_the_effective_client_effort() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "reasoning": {"effort": "none", "summary": "auto"},
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                _configuration_update_item("low"),
+            ],
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    # The update outranks the request-level field, and the request-level field
+    # stays untouched so the prompt prefix keeps caching.
+    assert client_reasoning_effort_for_log(request) == "low"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "none"
+
+
+def test_configuration_update_outranks_model_alias_effort_for_logging() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-xhigh",
+            "instructions": "",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                _configuration_update_item("low"),
+            ],
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    # The alias keeps materializing into the request-level field, but the
+    # later update is the client's effective selection for observability.
+    assert client_reasoning_effort_for_log(request) == "low"
+
+
+def test_configuration_update_last_item_wins() -> None:
+    request = _responses_request_with_input(
+        [
+            _configuration_update_item("low"),
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            _configuration_update_item("high"),
+        ]
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    assert client_reasoning_effort_for_log(request) == "high"
+
+
+@pytest.mark.parametrize(
+    ("update_effort", "expected_log_effort"),
+    [("ultra", "max"), ("minimal", "low"), ("xhigh", "xhigh")],
+)
+def test_configuration_update_log_value_keeps_wire_safe_mapping(update_effort: str, expected_log_effort: str) -> None:
+    request = _responses_request_with_input([_configuration_update_item(update_effort)])
+
+    apply_api_key_enforcement(request, None)
+
+    assert client_reasoning_effort_for_log(request) == expected_log_effort
+
+
+def test_reasoning_effort_allowlist_rejects_disallowed_configuration_update() -> None:
+    request = _responses_request_with_input(
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            _configuration_update_item("max"),
+        ]
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-update-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low", "medium", "high", "xhigh"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="max") as raised:
+        apply_api_key_enforcement(request, api_key)
+
+    assert raised.value.code == "reasoning_effort_not_allowed"
+    assert client_reasoning_effort_for_log(request) == "max"
+
+
+def test_reasoning_effort_allowlist_rejects_update_that_outranks_allowed_alias() -> None:
+    request = _responses_request_with_input([_configuration_update_item("max")], model="gpt-5.6-sol-xhigh")
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-update-outranks-alias-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low", "xhigh"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="max") as raised:
+        apply_api_key_enforcement(request, api_key)
+
+    assert raised.value.code == "reasoning_effort_not_allowed"
+
+
+def test_reasoning_effort_allowlist_accepts_allowed_configuration_update() -> None:
+    request = _responses_request_with_input([_configuration_update_item("medium")])
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-update-allowed-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["medium"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert client_reasoning_effort_for_log(request) == "medium"
+
+
+def test_enforced_effort_rejects_conflicting_configuration_update() -> None:
+    request = _responses_request_with_input([_configuration_update_item("high")])
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-conflicts-with-update",
+            enforced_model=None,
+            enforced_reasoning_effort="low",
+            allowed_reasoning_efforts=None,
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed) as raised:
+        apply_api_key_enforcement(request, api_key)
+
+    assert raised.value.code == "reasoning_effort_not_allowed"
+
+
+def test_enforced_effort_accepts_matching_configuration_update() -> None:
+    request = _responses_request_with_input([_configuration_update_item("high")])
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-matches-update",
+            enforced_model=None,
+            enforced_reasoning_effort="high",
+            allowed_reasoning_efforts=None,
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert client_reasoning_effort_for_log(request) == "high"
+
+
+def test_log_effort_falls_back_to_request_level_effort_without_updates() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "reasoning": {"effort": "low"},
+            "input": [],
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    assert client_reasoning_effort_for_log(request) == "low"

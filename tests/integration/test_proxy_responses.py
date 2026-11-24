@@ -4322,3 +4322,49 @@ async def test_v1_responses_disconnect_stamp_reaches_traced_response_through_rea
         "request_id=req_delivery_trace_stamp surface=responses outcome=terminal_after_disconnect "
         "terminal=response.completed"
     ) in records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_logs_configuration_update_effort(async_client, monkeypatch):
+    email = "configuration-update-effort@example.com"
+    raw_account_id = "acc_configuration_update_effort"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        seen["input"] = payload.input
+        seen["effort"] = payload.reasoning.effort if payload.reasoning else None
+        yield 'data: {"type":"response.completed","response":{"id":"resp_config_update"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    request_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "start"}]},
+        {"type": "configuration_update", "reasoning": {"effort": "high"}},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": request_input,
+        "reasoning": {"effort": "low"},
+        "stream": True,
+    }
+    async with async_client.stream("POST", "/v1/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    # The update item is forwarded verbatim and the request-level field keeps
+    # the value the client sent at conversation start.
+    assert seen["input"] == request_input
+    assert seen["effort"] == "low"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+    assert latest_log is not None
+    assert latest_log.reasoning_effort == "high"

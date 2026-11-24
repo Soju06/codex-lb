@@ -19,7 +19,11 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, AutomationJob, AutomationRun, DashboardSettings
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.automations.repository import AutomationsRepository
+from app.modules.automations.repository import (
+    AutomationsRepository,
+    effective_compact_request_budget_seconds,
+    run_stale_started_before,
+)
 from app.modules.automations.service import (
     AutomationsService,
     _manual_slot_key,
@@ -4372,7 +4376,11 @@ async def test_automations_manual_cycle_reclaims_timed_out_claimed_run(async_cli
     accounts = await _create_accounts("auto-manual-stale-active-a")
     now = utcnow().replace(second=0, microsecond=0)
     scheduled_for = now - timedelta(hours=3)
-    claimed_started_at = now - timedelta(hours=2)
+    claimed_started_at = run_stale_started_before(
+        now_utc=now,
+        claim_budget_seconds=effective_compact_request_budget_seconds(),
+        fallback_budget_seconds=effective_compact_request_budget_seconds(),
+    ) - timedelta(seconds=1)
     called_chatgpt_account_ids: list[str | None] = []
 
     async def _fake_compact(*_args, **kwargs):
@@ -4511,7 +4519,11 @@ async def test_automations_scheduled_cycle_reclaims_claimed_ineligible_run(async
     accounts = await _create_accounts("auto-scheduled-stale-ineligible-a", "auto-scheduled-stale-fallback-a")
     now = utcnow().replace(second=0, microsecond=0)
     scheduled_for = now - timedelta(hours=3)
-    claimed_started_at = now - timedelta(hours=2)
+    claimed_started_at = run_stale_started_before(
+        now_utc=now,
+        claim_budget_seconds=effective_compact_request_budget_seconds(),
+        fallback_budget_seconds=effective_compact_request_budget_seconds(),
+    ) - timedelta(seconds=1)
     called_chatgpt_account_ids: list[str | None] = []
 
     async def _fake_compact(*_args, **kwargs):
@@ -4582,7 +4594,11 @@ async def test_automations_scheduled_cycle_reclaims_timed_out_claimed_run(async_
     accounts = await _create_accounts("auto-scheduled-stale-active-a")
     now = utcnow().replace(second=0, microsecond=0)
     scheduled_for = now - timedelta(hours=3)
-    claimed_started_at = now - timedelta(hours=2)
+    claimed_started_at = run_stale_started_before(
+        now_utc=now,
+        claim_budget_seconds=effective_compact_request_budget_seconds(),
+        fallback_budget_seconds=effective_compact_request_budget_seconds(),
+    ) - timedelta(seconds=1)
     called_chatgpt_account_ids: list[str | None] = []
 
     async def _fake_compact(*_args, **kwargs):
@@ -4653,7 +4669,11 @@ async def test_automations_scheduled_cycle_reclaim_keeps_all_account_failover_in
     )
     now = utcnow().replace(second=0, microsecond=0)
     scheduled_for = now - timedelta(hours=3)
-    claimed_started_at = now - timedelta(hours=2)
+    claimed_started_at = run_stale_started_before(
+        now_utc=now,
+        claim_budget_seconds=effective_compact_request_budget_seconds(),
+        fallback_budget_seconds=effective_compact_request_budget_seconds(),
+    ) - timedelta(seconds=1)
     called_chatgpt_account_ids: list[str | None] = []
 
     async def _fake_compact(*_args, **kwargs):
@@ -4729,7 +4749,11 @@ async def test_automations_scheduler_finds_old_cycle_with_only_stale_running_row
     now = utcnow().replace(second=0, microsecond=0)
     due_slot = now - timedelta(days=1)
     scheduled_for = due_slot
-    claimed_started_at = now - timedelta(hours=2)
+    claimed_started_at = run_stale_started_before(
+        now_utc=now,
+        claim_budget_seconds=effective_compact_request_budget_seconds(),
+        fallback_budget_seconds=effective_compact_request_budget_seconds(),
+    ) - timedelta(seconds=1)
     called_chatgpt_account_ids: list[str | None] = []
 
     async def _fake_compact(*_args, **kwargs):
@@ -6156,10 +6180,15 @@ async def test_list_due_manual_runs_limit_counts_only_eligible_rows(db_setup):
         assert in_flight is not None
         assert placeholder is not None
 
-        due = await automations_repository.list_due_manual_runs(now_utc=scheduled_for + timedelta(seconds=200), limit=1)
-        assert [due_run.id for due_run in due] == [placeholder.id]
+        # A lower current budget keeps the SQL bound looser than the pinned
+        # in-flight window, regardless of the configured production default.
+        with dashboard_overrides_bound(DashboardSettings(compact_request_budget_seconds=60.0)):
+            due = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=200), limit=1
+            )
+            assert [due_run.id for due_run in due] == [placeholder.id]
 
-        past_window = await automations_repository.list_due_manual_runs(
-            now_utc=scheduled_for + timedelta(seconds=700), limit=1
-        )
+            past_window = await automations_repository.list_due_manual_runs(
+                now_utc=scheduled_for + timedelta(seconds=700), limit=1
+            )
         assert [due_run.id for due_run in past_window] == [in_flight.id]

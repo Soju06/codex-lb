@@ -326,7 +326,7 @@ class Settings(BaseSettings):
     # T3 → dashboard (deprecated env alias, remove next minor)
     http_responses_stream_request_budget_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
-    compact_request_budget_seconds: float = Field(default=180.0, gt=0)
+    compact_request_budget_seconds: float = Field(default=900.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)
     stream_idle_timeout_seconds: float = Field(default=7200.0, gt=0)
     # T3 → dashboard (deprecated env alias, remove next minor)

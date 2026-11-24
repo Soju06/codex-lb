@@ -127,7 +127,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
     _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
-    _http_bridge_quarantine_clear_fence,
+    _http_bridge_quarantine_clear_fence_details,
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
@@ -2094,6 +2094,8 @@ class _HTTPBridgeStreamingMixin:
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
         verified_stale_anchor_generation: tuple[int, float, int, float, int, float, float] | None = None
         verified_stale_anchor_quarantine_generation: int | None = None
+        verified_stale_anchor_quarantine_raw_generation: int | None = None
+        verified_stale_anchor_quarantine_eventless_timeout_count = 0
 
         def durable_full_resend_retains_required_context() -> bool:
             nonlocal durable_full_resend_retains_required_context_cache
@@ -3497,16 +3499,16 @@ class _HTTPBridgeStreamingMixin:
                 recovery_session: "_HTTPBridgeSession",
             ) -> None:
                 nonlocal verified_stale_anchor_quarantine_generation
+                nonlocal verified_stale_anchor_quarantine_raw_generation
+                nonlocal verified_stale_anchor_quarantine_eventless_timeout_count
 
-                # Provenance-aware capture: the completion's clear fences a
-                # poison entry on its poison provenance, so capturing the raw
-                # generation here would mismatch whenever a weaker fence
-                # bumped it before this replay began, refusing the clear for
-                # a source the replay just recovered.
-                verified_stale_anchor_quarantine_generation = _http_bridge_quarantine_clear_fence(
+                quarantine_fence = _http_bridge_quarantine_clear_fence_details(
                     self,
                     recovery_session.key,
                 )
+                verified_stale_anchor_quarantine_generation = quarantine_fence.generation
+                verified_stale_anchor_quarantine_raw_generation = quarantine_fence.raw_generation
+                verified_stale_anchor_quarantine_eventless_timeout_count = quarantine_fence.eventless_timeout_count
 
             async for event_block in session_events:
                 yield event_block
@@ -3874,8 +3876,13 @@ class _HTTPBridgeStreamingMixin:
                 )
                 raise
             elif previous_response_rejected_full_resend:
-                await capture_verified_stale_anchor_circuit_generation(session)
+                # Capture the quarantine generation at rejection/authorization
+                # time, before the durable circuit lookup can yield to a
+                # concurrent retirement that arms a newer quarantine. An
+                # observed absence must remain an absence fence; otherwise
+                # completion of this recovery could clear that raced entry.
                 capture_verified_stale_anchor_quarantine_generation(session)
+                await capture_verified_stale_anchor_circuit_generation(session)
                 await reset_previous_response_recovery_operation_spool(session, request_state)
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
@@ -4156,6 +4163,12 @@ class _HTTPBridgeStreamingMixin:
                     )
                     retry_request_state.verified_stale_anchor_quarantine_generation = (
                         verified_stale_anchor_quarantine_generation
+                    )
+                    retry_request_state.verified_stale_anchor_quarantine_raw_generation = (
+                        verified_stale_anchor_quarantine_raw_generation
+                    )
+                    retry_request_state.verified_stale_anchor_quarantine_eventless_timeout_count = (
+                        verified_stale_anchor_quarantine_eventless_timeout_count
                     )
                 # Keep the durable operation identity attached to the
                 # server-owned recovery attempt. Re-registering the same

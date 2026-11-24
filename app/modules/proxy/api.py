@@ -343,7 +343,7 @@ from app.modules.proxy.schemas import (
     WarmupSkippedAccount,
     WarmupSubmittedAccount,
 )
-from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, unattempted_selector_headers
 from app.modules.proxy.source_admission import try_claim as try_claim_source_admission
 from app.modules.proxy.source_dispatch import (
     ABANDON_CLIENT_DISCONNECTED_BEFORE_BODY,
@@ -6552,6 +6552,8 @@ async def _stream_responses(
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent(clock=turn_clock)
     payload.stream = True
+    selector_refusal_headers: dict[str, str] = {}
+    selector_proof_allowed = not bridge_active and not forwarded_request
 
     def build_response_stream() -> AsyncIterator[str]:
         if prefer_http_bridge:
@@ -6608,6 +6610,7 @@ async def _stream_responses(
             stream, startup_error = await _probe_stream_startup_error(
                 stream,
                 convert_event_errors=bridge_active and enforce_openai_sdk_contract,
+                selector_refusal_headers=selector_refusal_headers if selector_proof_allowed else None,
                 timeout_seconds=(
                     _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
                     if prefer_http_bridge
@@ -6636,6 +6639,8 @@ async def _stream_responses(
         ):
             await reservation_cleanup.release(action="responses startup")
         raise
+    if selector_proof_allowed and isinstance(startup_error, ProxyResponseError):
+        selector_refusal_headers.update(unattempted_selector_headers(startup_error))
     if startup_error is not None:
         startup_error_code = (
             _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
@@ -6675,6 +6680,7 @@ async def _stream_responses(
                 headers={
                     **rate_limit_headers,
                     **_owner_forward_local_refusal_headers(startup_error, forwarded_request=forwarded_request),
+                    **selector_refusal_headers,
                 },
             )
     stream = _normalize_public_responses_stream(
@@ -6728,6 +6734,7 @@ async def _stream_responses(
             "X-Accel-Buffering": "no",
             **turn_state_headers,
             **rate_limit_headers,
+            **selector_refusal_headers,
         },
     )
 
@@ -6883,6 +6890,7 @@ async def _collect_responses(
             client_ip=client_ip,
         )
     captured_turn_state_headers: dict[str, str] = {}
+    selector_refusal_headers: dict[str, str] = {}
     responses_owner_forward_dispatched_token = _bind_propagated_responses_owner_forward_dispatched(
         responses_owner_forward_dispatched_event
     )
@@ -6896,6 +6904,7 @@ async def _collect_responses(
         response_payload = await _collect_responses_payload(
             stream,
             captured_turn_state_headers=captured_turn_state_headers,
+            captured_selector_refusal_headers=selector_refusal_headers if not bridge_active else None,
             upstream_stream_false=upstream_stream_false,
         )
     except asyncio.CancelledError:
@@ -6907,6 +6916,8 @@ async def _collect_responses(
             await reservation_cleanup.release(action="responses collection cancellation")
         raise
     except ProxyResponseError as exc:
+        if not bridge_active:
+            selector_refusal_headers.update(unattempted_selector_headers(exc))
         if _responses_origin_may_release_reservation(
             service_cleanup_ready_event=responses_service_cleanup_ready_event,
             owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
@@ -6922,7 +6933,7 @@ async def _collect_responses(
             request,
             status_code,
             error.model_dump(mode="json", exclude_none=True),
-            headers={**captured_turn_state_headers, **rate_limit_headers},
+            headers={**captured_turn_state_headers, **rate_limit_headers, **selector_refusal_headers},
         )
     except BaseException:
         if _responses_origin_may_release_reservation(
@@ -6944,18 +6955,28 @@ async def _collect_responses(
                 request,
                 status_code,
                 error_payload.model_dump(mode="json", exclude_none=True),
-                headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
+                headers={
+                    **turn_state_headers,
+                    **captured_turn_state_headers,
+                    **rate_limit_headers,
+                    **selector_refusal_headers,
+                },
             )
         return JSONResponse(
             content=response_payload.model_dump(mode="json", exclude_none=True),
-            headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
+            headers={
+                **turn_state_headers,
+                **captured_turn_state_headers,
+                **rate_limit_headers,
+                **selector_refusal_headers,
+            },
         )
     status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
     return _logged_error_json_response(
         request,
         status_code,
         response_payload.model_dump(mode="json", exclude_none=True),
-        headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
+        headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers, **selector_refusal_headers},
     )
 
 
@@ -7632,6 +7653,7 @@ async def _probe_stream_startup_error(
     stream: AsyncIterator[str],
     *,
     convert_event_errors: bool = False,
+    selector_refusal_headers: dict[str, str] | None = None,
     timeout_seconds: float | None = None,
     capacity_wait_event: asyncio.Event | None = None,
     capacity_ready_event: asyncio.Event | None = None,
@@ -7712,6 +7734,8 @@ async def _probe_stream_startup_error(
                 )
             except ProxyResponseError as exc:
                 return _prepend_first(None, stream), exc
+            if selector_refusal_headers is not None:
+                selector_refusal_headers.update(unattempted_selector_headers(first))
             if convert_event_errors:
                 first_error = _stream_event_error_envelope(first)
                 if first_error is not None:
@@ -7746,6 +7770,8 @@ async def _probe_stream_startup_error(
         return _prepend_first(None, stream), None
     except ProxyResponseError as exc:
         return _prepend_first(None, stream), exc
+    if selector_refusal_headers is not None:
+        selector_refusal_headers.update(unattempted_selector_headers(first))
     if convert_event_errors:
         first_error = _stream_event_error_envelope(first)
         if first_error is not None:
@@ -8909,6 +8935,7 @@ async def _collect_responses_payload(
     stream: AsyncIterator[str],
     *,
     captured_turn_state_headers: dict[str, str] | None = None,
+    captured_selector_refusal_headers: dict[str, str] | None = None,
     upstream_stream_false: bool = False,
 ) -> OpenAIResponseResult:
     output_items: dict[int, dict[str, JsonValue]] = {}
@@ -8916,6 +8943,8 @@ async def _collect_responses_payload(
     nonterminal_result: OpenAIResponsePayload | None = None
     contract_violation_kind: str | None = None
     async for line in stream:
+        if captured_selector_refusal_headers is not None:
+            captured_selector_refusal_headers.update(unattempted_selector_headers(line))
         payload = _parse_sse_payload(line)
         if not payload:
             if _looks_like_sse_data_block(line):

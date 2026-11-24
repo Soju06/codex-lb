@@ -111,7 +111,12 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.http_continuation import http_continuation_signal
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
-from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
+from app.modules.proxy.selection_errors import (
+    USAGE_LIMIT_REACHED,
+    UnattemptedSelectorError,
+    UnattemptedSelectorEvent,
+    selection_failure_response,
+)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -501,6 +506,8 @@ class _StreamingRetryMixin:
         max_attempts = _facade()._STREAM_MAX_ACCOUNT_ATTEMPTS
         settled = False
         any_attempt_logged = False
+        # Selecting any account retires proof before freshness work can contact upstream.
+        selector_proof_unattempted = True
         upstream_transport_metric_status: str | None = None
         upstream_transport_metric_recorded = False
         network_recovery = ProcessNetworkRecovery(transport="stream", request_id=request_id)
@@ -1479,6 +1486,8 @@ class _StreamingRetryMixin:
                         yield format_sse_event(event)
                         return
                     account = selection.account
+                    if account is not None:
+                        selector_proof_unattempted = False
                     current_account_lease = selection.lease
                     if selection.lease is not None:
                         account_leases.append(selection.lease)
@@ -1665,8 +1674,10 @@ class _StreamingRetryMixin:
                             client_ip=client_ip,
                         )
                         if propagate_http_errors:
-                            raise ProxyResponseError(status_code, error_payload)
-                        yield format_sse_event(
+                            raise (UnattemptedSelectorError if selector_proof_unattempted else ProxyResponseError)(
+                                status_code, error_payload
+                            )
+                        event = format_sse_event(
                             response_failed_event(
                                 USAGE_LIMIT_REACHED,
                                 no_accounts_msg,
@@ -1675,6 +1686,7 @@ class _StreamingRetryMixin:
                                 resets_at=selection.resets_at,
                             )
                         )
+                        yield UnattemptedSelectorEvent(event) if selector_proof_unattempted else event
                         return
                     if selection.error_code in _LOCAL_ACCOUNT_CAP_ERROR_CODES:
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -1707,7 +1719,7 @@ class _StreamingRetryMixin:
                             client_ip=client_ip,
                         )
                         if propagate_http_errors:
-                            raise ProxyResponseError(
+                            raise (UnattemptedSelectorError if selector_proof_unattempted else ProxyResponseError)(
                                 429,
                                 openai_error(
                                     error_code,
@@ -1715,7 +1727,8 @@ class _StreamingRetryMixin:
                                     error_type="rate_limit_error",
                                 ),
                             )
-                        yield format_sse_event(event)
+                        line = format_sse_event(event)
+                        yield UnattemptedSelectorEvent(line) if selector_proof_unattempted else line
                         return
                     if (
                         require_preferred_account
@@ -1859,7 +1872,8 @@ class _StreamingRetryMixin:
                         else "server_error",
                         response_id=request_id,
                     )
-                    yield format_sse_event(event)
+                    line = format_sse_event(event)
+                    yield UnattemptedSelectorEvent(line) if selector_proof_unattempted else line
                     await proxy._write_request_log(
                         affinity_observation=affinity_observation,
                         account_id=None,

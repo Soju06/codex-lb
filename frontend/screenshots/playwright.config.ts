@@ -11,6 +11,7 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   use: {
+    channel: process.env.SCREENSHOT_BROWSER_CHANNEL,
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 2,
     launchOptions: {

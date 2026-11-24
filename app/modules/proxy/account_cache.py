@@ -139,6 +139,9 @@ class RoutingAvailabilityCache:
         status = snapshot.get(account_id)
         return status is None or status in _ROUTING_UNAVAILABLE_STATUSES
 
+    def is_locally_unavailable(self, account_id: str) -> bool:
+        return account_id in self._local_marks
+
     async def refresh_from_db(self) -> None:
         """Rebuild the snapshot from committed account statuses.
 
@@ -212,6 +215,10 @@ def clear_all_account_routing_unavailable() -> None:
 
 def is_account_routing_unavailable(account_id: str) -> bool:
     return _routing_availability_cache.is_unavailable(account_id)
+
+
+def is_account_locally_routing_unavailable(account_id: str) -> bool:
+    return _routing_availability_cache.is_locally_unavailable(account_id)
 
 
 async def propagate_account_routing_change() -> bool:

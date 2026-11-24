@@ -137,10 +137,16 @@ export function useAccountMutations() {
   });
 
   const probeMutation = useMutation({
-    mutationFn: ({ accountId, model }: { accountId: string; model?: string }) =>
-      probeAccount(accountId, model ? { model } : undefined),
-    onSuccess: (_data, variables) => {
-      toast.success(t("accounts.toasts.probed"));
+    mutationFn: ({ accountId, model, mode }: { accountId: string; model?: string; mode?: "wakeup" | "completion" }) =>
+      probeAccount(accountId, { ...(model ? { model } : {}), ...(mode ? { mode } : {}) }),
+    onSuccess: (data, variables) => {
+      if (data.outcome === "completed") {
+        toast.success(t("accounts.test.completed", { defaultValue: "Response completed" }));
+      } else if (data.outcome || !data.probeStatusCode || data.probeStatusCode < 200 || data.probeStatusCode >= 300) {
+        toast.error(data.errorMessage || t("accounts.toasts.probeFailed"));
+      } else {
+        toast.success(t("accounts.toasts.probed"));
+      }
       void invalidateAccountRelatedQueries(queryClient, variables.accountId);
     },
     onError: (error: Error) => {

@@ -8,6 +8,8 @@ import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
+import { AccountTestDialog } from "@/features/accounts/components/account-test-dialog";
+import { AccountRoutingObservation } from "@/features/accounts/components/account-routing-observation";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
@@ -70,6 +72,7 @@ export function AccountsPage() {
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
   const usageResetDialog = useDialogState<string>();
+  const probeDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -161,6 +164,17 @@ export function AccountsPage() {
         </p>
       </div>
 
+      {settingsQuery.data ? (
+        <div className="space-y-1 rounded-lg border bg-muted/20 p-3 text-sm">
+          <p className="font-medium">{t("accounts.routing.title", { defaultValue: "Routing" })}: {settingsQuery.data.routingStrategy}
+            {selectedAccount ? ` · ${selectedAccount.routingPolicy ?? "normal"} · ${selectedAccount.status}` : ""}
+          </p>
+          <p className="text-xs text-muted-foreground">{t("accounts.routing.description", {
+            defaultValue: "Fill first concentrates traffic; burn first gives selected accounts priority; preserve holds capacity back. Sticky ownership, model/API-key restrictions, health and quota also affect selection. Pause stops new selection without deleting credentials. Inspect individual requests on Dashboard and soft mappings in Settings → Sticky sessions.",
+          })}</p>
+        </div>
+      ) : null}
+
       {mutationError ? (
         <AlertMessage variant="error">{mutationError}</AlertMessage>
       ) : null}
@@ -204,7 +218,7 @@ export function AccountsPage() {
             readOnly={!canWrite}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
-            onProbe={(accountId) => void probeMutation.mutateAsync({ accountId })}
+            onProbe={(accountId) => probeDialog.show(accountId)}
             onResetUsage={(accountId) => usageResetDialog.show(accountId)}
             onSetAlias={(accountId, alias) =>
               setAliasMutation.mutateAsync({ accountId, alias })
@@ -254,6 +268,17 @@ export function AccountsPage() {
           />
         </div>
       )}
+
+      {selectedAccount && canWrite ? <AccountRoutingObservation key={`routing-${selectedAccount.accountId}`} accountId={selectedAccount.accountId} /> : null}
+
+      <AccountTestDialog
+        key={probeDialog.data ?? "account-test"}
+        open={probeDialog.open}
+        onOpenChange={probeDialog.onOpenChange}
+        accountName={accounts.find((item) => item.accountId === probeDialog.data)?.displayName ?? ""}
+        busy={probeMutation.isPending}
+        onRun={(model) => probeMutation.mutateAsync({ accountId: probeDialog.data!, model, mode: "completion" })}
+      />
 
       <ImportDialog
         open={importDialog.open}

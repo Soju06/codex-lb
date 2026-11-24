@@ -92,6 +92,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
+from app.modules.proxy._load_balancer.observations import account_routing_observation
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
@@ -143,6 +144,7 @@ from app.modules.proxy._load_balancer.types import (
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
+    AccountRoutingObservation,
     ProbeReservation,
     RuntimeState,
 )
@@ -393,6 +395,9 @@ class LoadBalancer:
             if runtime is None:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
+
+    async def account_routing_observation(self, account_id: str) -> AccountRoutingObservation:
+        return await account_routing_observation(self, account_id)
 
     def _acquire_account_lease_locked(
         self,

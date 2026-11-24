@@ -4,8 +4,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import StickySessionKind
+from app.core.auth import token_expiry_epoch_ms
+from app.core.balancer.logic import PERMANENT_FAILURE_CODES
+from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardBadRequestError, DashboardConflictError
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.db.models import AccountStatus, StickySessionKind
+from app.modules.proxy.account_cache import is_account_locally_routing_unavailable
 from app.modules.proxy.sticky_repository import (
     StickySessionListEntryRecord,
     StickySessionsRepository,
@@ -18,6 +23,7 @@ from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessi
 @dataclass(frozen=True, slots=True)
 class StickySessionEntryData:
     key: str
+    account_id: str
     display_name: str
     kind: StickySessionKind
     created_at: datetime
@@ -59,6 +65,34 @@ class StickySessionsService:
     ) -> None:
         self._repository = repository
         self._settings_repository = settings_repository
+
+    async def reassign(self, *, key: str, kind: StickySessionKind, expected_account_id: str, account_id: str) -> None:
+        if kind != StickySessionKind.PROMPT_CACHE or is_reserved_sticky_session_key(key):
+            raise DashboardBadRequestError("Only non-reserved prompt-cache preferences can be switched")
+        if account_id == expected_account_id:
+            raise DashboardBadRequestError("Choose a different account")
+        target = await self._repository.get_reassignment_target(account_id)
+        if (
+            target is None
+            or target.status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+            or target.routing_policy == "preserve"
+            or is_account_locally_routing_unavailable(account_id)
+            or target.deactivation_reason
+            in {
+                PERMANENT_FAILURE_CODES["token_invalidated"],
+                PERMANENT_FAILURE_CODES["account_auth_invalidated"],
+                "Authentication token revoked - re-login required",
+            }
+        ):
+            raise DashboardConflictError("Target account is unavailable for routing")
+        if target.status == AccountStatus.REAUTH_REQUIRED:
+            expiry_ms = token_expiry_epoch_ms(TokenEncryptor().decrypt(target.access_token_encrypted))
+            if expiry_ms is not None and expiry_ms <= naive_utc_to_epoch(utcnow()) * 1000:
+                raise DashboardConflictError("Target account needs reauthentication")
+        if not await self._repository.reassign_prompt_cache(
+            key, expected_account_id=expected_account_id, target=target
+        ):
+            raise DashboardConflictError("Mapping or target changed; reload and try again")
 
     async def list_entries(
         self,
@@ -174,6 +208,7 @@ class StickySessionsService:
             is_stale = expires_at <= utcnow()
         return StickySessionEntryData(
             key=sticky_session.key,
+            account_id=sticky_session.account_id,
             display_name=row.display_name,
             kind=sticky_session.kind,
             created_at=sticky_session.created_at,

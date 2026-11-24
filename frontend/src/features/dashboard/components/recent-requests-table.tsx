@@ -594,6 +594,14 @@ export function RecentRequestsTable({
                 copyLabel={t("dashboard.requestDetails.copyRequestId")}
                 compactCopy
               />
+              <RequestDetailField
+                label={t("dashboard.requestDetails.accountId", { defaultValue: "Account ID" })}
+                value={selectedRequest?.accountId ?? "—"}
+                mono
+                copyValue={selectedRequest?.accountId ?? undefined}
+                copyLabel={t("dashboard.requestDetails.copyAccountId", { defaultValue: "Copy account ID" })}
+                compactCopy
+              />
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.status")} value={selectedRequest ? t(`dashboard.requestStatus.${selectedRequest.status}`, { defaultValue: REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status }) : "—"} />
                 <RequestDetailField label={t("dashboard.requests.columns.model")} value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
@@ -705,6 +713,41 @@ export function RecentRequestsTable({
                 </div>
               ) : null}
             </div>
+
+            {canReadConversations ? (
+              <div className="space-y-3 rounded-md border bg-muted/30 p-4">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-medium">
+                    {t("dashboard.requestDetails.historicalRouting", { defaultValue: "Historical routing" })}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    {t("dashboard.requestDetails.historicalRoutingDescription", {
+                      defaultValue: "Routing recorded for this request. Current session ownership may differ.",
+                    })}
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.stickyKeySource", { defaultValue: "Sticky key source" })}
+                    value={selectedRequest?.stickyKeySource ?? "—"}
+                    mono
+                  />
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.stickyKind", { defaultValue: "Sticky kind" })}
+                    value={selectedRequest?.stickyKind ?? "—"}
+                    mono
+                  />
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.stickyKeyHash", { defaultValue: "Sticky key hash" })}
+                    value={selectedRequest?.stickyKeyHash ?? "—"}
+                    mono
+                    copyValue={selectedRequest?.stickyKeyHash ?? undefined}
+                    copyLabel={t("dashboard.requestDetails.copyStickyKeyHash", { defaultValue: "Copy sticky key hash" })}
+                    compactCopy
+                  />
+                </div>
+              </div>
+            ) : null}
 
             {canReadConversations ? (
               <RequestArchivePanel

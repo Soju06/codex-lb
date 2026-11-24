@@ -201,6 +201,9 @@ describe("RequestLogsResponseSchema", () => {
           model: "gpt-5.1",
           transport: "websocket",
           upstreamProxyRouteMode: "account_bound",
+            stickyKeySource: "thread_header",
+            stickyKind: "prompt_cache",
+            stickyKeyHash: "safe-hash",
           upstreamProxyPoolId: "pool-1",
           upstreamProxyEndpointId: "endpoint-1",
           upstreamProxyFallbackUsed: true,
@@ -246,6 +249,9 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
     expect(parsed.requests[0]?.upstreamProxyRouteMode).toBe("account_bound");
+      expect(parsed.requests[0]?.stickyKeySource).toBe("thread_header");
+      expect(parsed.requests[0]?.stickyKind).toBe("prompt_cache");
+      expect(parsed.requests[0]?.stickyKeyHash).toBe("safe-hash");
     expect(parsed.requests[0]?.upstreamProxyPoolId).toBe("pool-1");
     expect(parsed.requests[0]?.upstreamProxyEndpointId).toBe("endpoint-1");
     expect(parsed.requests[0]?.upstreamProxyFallbackUsed).toBe(true);

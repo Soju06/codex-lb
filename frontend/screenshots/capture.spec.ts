@@ -81,6 +81,27 @@ async function interceptApi(
       return fulfill(route, createConversationDetails({ conversationId: "conv_abc" }));
     }
     if (p === "/api/accounts") return fulfill(route, { accounts: accountList });
+    if (p === "/api/model-sources/") return fulfill(route, { sources: [] });
+    const observationMatch = p.match(/^\/api\/accounts\/([^/]+)\/routing-observation$/);
+    if (observationMatch) return fulfill(route, {
+      accountId: observationMatch[1], scope: "replica_local", healthTier: 0, recentErrors: 0,
+      inflightStreams: 0, inflightResponseCreates: 0, lastSelectedAt: new Date().toISOString(),
+      cooldownUntil: null, overloadBackoffUntil: null, burstBackoffUntil: null,
+    });
+    const probeMatch = p.match(/^\/api\/accounts\/([^/]+)\/probe$/);
+    if (probeMatch) return fulfill(route, {
+      status: "probed", accountId: probeMatch[1], probeStatusCode: 200, model: "gpt-6-astra",
+      outcome: "completed", latencyMs: 890, errorCode: null, errorMessage: null,
+      primaryUsedPercentBefore: 5, primaryUsedPercentAfter: 5,
+      secondaryUsedPercentBefore: 20, secondaryUsedPercentAfter: 20,
+      accountStatusBefore: "active", accountStatusAfter: "active",
+    });
+    if (p === "/api/sticky-sessions") return fulfill(route, {
+      entries: [{ key: "demo-thread-soft-cache", accountId: accountList[0].accountId,
+        displayName: accountList[0].displayName, kind: "prompt_cache", isStale: false,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), expiresAt: null }],
+      total: 1, hasMore: false, stalePromptCacheCount: 0,
+    });
     const trendsMatch = p.match(/^\/api\/accounts\/([^/]+)\/trends$/);
     if (trendsMatch) {
       const trends = accountTrends[trendsMatch[1]];
@@ -88,6 +109,17 @@ async function interceptApi(
       return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: { code: "account_not_found", message: "Account not found" } }) });
     }
     if (p === "/api/settings") return fulfill(route, settings);
+    if (p === "/api/settings/model-context-window-overrides") return fulfill(route, { overrides: [] });
+    if (p === "/api/settings/telemetry") return fulfill(route, {
+      state: "disabled", source: "persisted", active: false, preview: null,
+    });
+    if (p === "/api/diagnostics/cache-isolation-probe") return fulfill(route, {
+      model: "gpt-6-astra", seedAccount: null, availableOtherAccounts: [], seedRepetitions: 1,
+      totalCalls: 0, estimatedInputTokensPerCall: 28000, estimatedTotalInputTokens: 0,
+      maxSeedRepetitions: 3, maxOtherAccounts: 8,
+      pressure: { underPressure: false, selectableAccountCount: accountList.length,
+        eligibleAccountCount: accountList.length, pressuredAccountCount: 0 },
+    });
     if (p === "/api/settings/upstream-proxy") return fulfill(route, upstreamProxyAdmin);
     const usageResetCreditsMatch = p.match(/^\/api\/accounts\/([^/]+)\/usage-reset-credits$/);
     if (usageResetCreditsMatch) {
@@ -131,6 +163,7 @@ async function capture(
     theme: Theme;
     route: string;
     fullPage?: boolean;
+    dialogName?: string;
     session?: SessionOverride;
     waitFor?: string;
     beforeScreenshot?: (page: Page) => Promise<void>;
@@ -174,6 +207,12 @@ async function capture(
     });
   }
 
+  if (opts.dialogName) {
+    await page.getByRole("dialog", { name: opts.dialogName }).screenshot({
+      path: path.join(SCREENSHOT_DIR, opts.file), type: "jpeg", quality: 90,
+    });
+    return;
+  }
   await page.screenshot({
     path: path.join(SCREENSHOT_DIR, opts.file),
     type: "jpeg",
@@ -231,6 +270,32 @@ test("accounts — light", async ({ page }) => {
 
 test("accounts — dark", async ({ page }) => {
   await capture(page, { file: "accounts-dark.jpg", theme: "dark", route: "/accounts" });
+});
+
+test("routing account completion test", async ({ page }) => {
+  await capture(page, {
+    file: "routing-account-test.jpg", theme: "light", route: "/accounts", dialogName: "Test account",
+    beforeScreenshot: async (current) => {
+      await current.getByRole("button", { name: "Test account" }).click();
+      await current.getByRole("textbox", { name: "Model (optional)" }).fill("gpt-6-astra");
+      await current.getByRole("button", { name: "Run test" }).click();
+      await expect(current.getByRole("status").filter({ hasText: "Response completed" })).toBeVisible();
+    },
+  });
+});
+
+test("routing soft account switch", async ({ page }) => {
+  await capture(page, {
+    file: "routing-account-switch.jpg", theme: "light", route: "/settings", dialogName: "Switch account",
+    beforeScreenshot: async (current) => {
+      await current.getByRole("button", { name: "Show advanced settings" }).click();
+      await current.getByRole("button", { name: "Switch account", exact: true }).click();
+      await expect(current.getByRole("dialog", { name: "Switch account" })).toBeVisible();
+      await current.getByRole("combobox", { name: "Target account" }).click();
+      await current.getByRole("option").first().click();
+      await expect(current.getByRole("listbox")).toBeHidden();
+    },
+  });
 });
 
 test("accounts list keeps many rows in an internal scroll region", async ({ page }) => {

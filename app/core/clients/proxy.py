@@ -409,7 +409,7 @@ async def _service_circuit_breaker_context(
     *,
     settings: Settings | None = None,
     account_id: str | None = None,
-) -> AsyncIterator[aiohttp.ClientResponse]:
+) -> AsyncGenerator[aiohttp.ClientResponse]:
     """Wrap an async context manager with circuit breaker protection."""
     effective_settings = settings or get_settings()
     cb = _account_circuit_breaker(account_id, effective_settings)
@@ -3575,10 +3575,10 @@ async def _resolve_global_ips(host: str, *, timeout_seconds: float) -> list[str]
     resolved_ips: list[str] = []
     seen: set[str] = set()
     for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
+        try:
+            addr = info[4][0]
+        except (IndexError, TypeError):  # resolvers can return an empty or None sockaddr despite the typeshed stub
             return None
-        addr = sockaddr[0]
         if not isinstance(addr, str):
             return None
         ip = _parse_ip_literal(addr)
@@ -4040,7 +4040,7 @@ async def _stream_responses_with_session(
                             raise cancellation
 
         @asynccontextmanager
-        async def _direct_response_context() -> AsyncIterator[aiohttp.ClientResponse | NativeEgressResponse]:
+        async def _direct_response_context() -> AsyncGenerator[aiohttp.ClientResponse | NativeEgressResponse]:
             if active_native_egress_client is not None:
                 try:
                     native_response = await active_native_egress_client.request(
@@ -4960,7 +4960,7 @@ class _CompactCommandTransport:
         )
 
         @asynccontextmanager
-        async def _direct_response_context() -> AsyncIterator[aiohttp.ClientResponse | NativeEgressResponse]:
+        async def _direct_response_context() -> AsyncGenerator[aiohttp.ClientResponse | NativeEgressResponse]:
             native_client = discover_native_egress_client()
             if native_client is not None:
                 try:
@@ -4989,7 +4989,7 @@ class _CompactCommandTransport:
                 yield python_response
 
         @asynccontextmanager
-        async def _response_context() -> AsyncIterator[
+        async def _response_context() -> AsyncGenerator[
             aiohttp.ClientResponse | NativeEgressResponse | _CodexSSEResponse
         ]:
             if self.route is None:

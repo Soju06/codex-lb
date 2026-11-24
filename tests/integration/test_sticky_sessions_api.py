@@ -933,3 +933,12 @@ async def test_sticky_sessions_api_deletes_filtered_chunks_large_match_set(async
             )
         ).scalar_one()
     assert remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_purge_sticky_sessions_accepts_null_and_empty_body(async_client):
+    json_headers = {"content-type": "application/json"}
+    for kwargs in ({"content": b"null", "headers": json_headers}, {"json": {}}, {}):
+        response = await async_client.post("/api/sticky-sessions/purge", **kwargs)
+        assert response.status_code == 200, kwargs
+        assert response.json()["deletedCount"] == 0

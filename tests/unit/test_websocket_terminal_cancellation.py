@@ -4,9 +4,10 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -168,7 +169,7 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -345,7 +346,7 @@ async def test_cancelled_websocket_scope_cleanup_draws_on_published_post_drain_r
     """
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -501,7 +502,7 @@ async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -585,7 +586,7 @@ async def test_cancelled_scope_isolates_owned_reconnect_child_failure_and_finish
     failing_child: str,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     settings = SimpleNamespace(
@@ -787,7 +788,7 @@ async def test_drain_start_during_admission_rejects_turn_before_connect_or_send(
     release_failure: str | None,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     settings = SimpleNamespace(
@@ -967,7 +968,7 @@ async def test_terminal_send_failure_does_not_skip_mandatory_cleanup_or_next_sta
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1084,7 +1085,7 @@ async def test_pending_failure_cancellation_after_claim_remains_drain_owned(
     request_logs = _RequestLogsRecorder()
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=request_logs, api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1243,7 +1244,7 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
     api_keys_repo = object()
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=request_logs, api_keys=api_keys_repo)
 
     finalized: list[dict[str, object]] = []
@@ -1449,7 +1450,7 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
 )
 async def test_websocket_owned_child_kinds_are_persistence_drained(task_name: str) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1474,7 +1475,7 @@ async def test_terminal_message_cancellation_is_bounded_by_shared_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1591,7 +1592,7 @@ async def test_terminal_message_cancellation_without_drain_leaves_owned_task_run
 @pytest.mark.asyncio
 async def test_stuck_upstream_close_is_cancelled_after_scope_cleanup_timeout() -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1630,7 +1631,7 @@ async def test_upstream_close_cleanup_uses_injected_scheduler_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     clock = VirtualClock()
@@ -1684,7 +1685,7 @@ async def test_upstream_close_cleanup_uses_injected_scheduler_timeout(
 @pytest.mark.asyncio
 async def test_upstream_close_is_cancelled_when_cleanup_budget_is_exhausted() -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1725,7 +1726,7 @@ async def test_reader_cancellation_remains_cancelled_when_owned_child_fails(
     message_kind: str,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1806,7 +1807,7 @@ async def test_reader_cancellation_after_transport_end_claim_waits_for_child_own
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
@@ -1891,7 +1892,7 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     request_logs = _RequestLogsRecorder()
 
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=request_logs, api_keys=object())
 
     settings = SimpleNamespace(
@@ -2095,7 +2096,7 @@ async def test_scope_cancellation_while_waiting_for_reconnect_reader_preserves_a
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     @asynccontextmanager
-    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+    async def repo_factory() -> AsyncGenerator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
 
     settings = SimpleNamespace(

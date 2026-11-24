@@ -3012,3 +3012,17 @@ def test_a_multi_head_ledger_does_not_break_the_drain_check(tmp_path: Path, capl
     with caplog.at_level("WARNING", logger="app.db.migrate"):
         check_legacy_credential_drop(config, forked, "head", has_existing_schema=True)
     assert len(_drain_warnings(caplog)) == 1
+
+
+def test_stable_diff_repr_drops_object_and_function_addresses() -> None:
+    from app.db.migrate import _stable_diff_repr
+
+    def make_default():
+        return lambda: None
+
+    first = ("add_table", object(), make_default())
+    second = ("add_table", object(), make_default())
+
+    assert repr(first) != repr(second)
+    assert _stable_diff_repr(first) == _stable_diff_repr(second)
+    assert " at 0x" not in _stable_diff_repr(first)

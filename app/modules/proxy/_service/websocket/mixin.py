@@ -5,10 +5,11 @@ import json
 import logging
 import sys
 from collections import deque
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Iterator, Mapping, NoReturn, cast
+from typing import Any, Mapping, NoReturn, cast
 
 import aiohttp
 import anyio
@@ -62,6 +63,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
+    normalize_native_websocket_failure_phase,
 )
 from app.core.clock import Clock, Scheduler, clock_for, scheduler_for
 from app.core.errors import (
@@ -683,7 +685,7 @@ async def _close_downstream_after_sequenced_replay_refusal(
 
 
 @contextmanager
-def _websocket_archive_request_context(request_id: str | None) -> Iterator[None]:
+def _websocket_archive_request_context(request_id: str | None) -> Generator[None]:
     token = set_request_id(request_id)
     try:
         yield
@@ -1332,6 +1334,12 @@ async def _process_upstream_websocket_transport_end(
             _facade().logger.debug("Failed to close upstream websocket for replay", exc_info=True)
         return True
 
+    failure_phase = normalize_native_websocket_failure_phase(getattr(message, "failure_phase", None))
+    if failure_phase is not None:
+        for state in reader_owned:
+            # Continuity and bridge classifications carry stronger provenance.
+            if state.failure_phase_override is None:
+                state.failure_phase_override = failure_phase
     sequenced_downstream_replay_refused = "sequenced_downstream_frame" in replay_refusal_reasons
     await proxy._fail_pending_websocket_requests(
         account=account,

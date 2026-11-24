@@ -1,6 +1,11 @@
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # pin-utils has no maintained release; it arrives only through hyper 1.8.1,
+    # which the Codex release family pins on purpose.
+    { id = "RUSTSEC-2026-0441", reason = "transitive via the pinned hyper 1.8.1; no patched release exists" },
+]
 
 [bans]
 multiple-versions = "warn"

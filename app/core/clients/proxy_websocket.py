@@ -197,10 +197,37 @@ class UpstreamWebSocketMessage:
     close_reason: str | None = None
     error: str | None = None
     error_code: str | None = None
+    failure_phase: str | None = None
     responses_interpreted: bool = False
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
     routing: NativeWebSocketRoutingMetadata | None = None
+
+
+# Helper phases are untrusted strings. Only stable transport classifications
+# may reach request logs; raw errors can contain credentials or peer payloads.
+_NATIVE_WEBSOCKET_FAILURE_PHASES = frozenset(
+    {
+        "cancelled",
+        "connect",
+        "consumer_backpressure",
+        "helper_exit",
+        "helper_read",
+        "helper_write",
+        "liveness_timeout",
+        "protocol",
+        "request",
+        "shutdown",
+        "timeout",
+        "websocket",
+        "websocket_receive",
+        "websocket_send",
+    }
+)
+
+
+def normalize_native_websocket_failure_phase(phase: object) -> str | None:
+    return phase if isinstance(phase, str) and phase in _NATIVE_WEBSOCKET_FAILURE_PHASES else None
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
@@ -446,6 +473,9 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                failure_phase=normalize_native_websocket_failure_phase(
+                    exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+                ),
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,
@@ -1098,8 +1128,14 @@ async def _connect_upstream_websocket(
     )
     proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
     try:
-        subprotocol_kwargs = {"subprotocols": cast(Sequence[Subprotocol], subprotocols)} if subprotocols else {}
-        ssl_kwargs = {"ssl": _shared_system_ssl_context()} if urlparse(url).scheme == "wss" else {}
+        # Optional kwargs are only passed when set; the heterogeneous values are
+        # unpacked, so type them as Any instead of letting the dict value type
+        # be checked against every ``connect`` parameter.
+        optional_kwargs: dict[str, Any] = {}
+        if subprotocols:
+            optional_kwargs["subprotocols"] = cast(Sequence[Subprotocol], subprotocols)
+        if urlparse(url).scheme == "wss":
+            optional_kwargs["ssl"] = _shared_system_ssl_context()
         response = await websocket_connect(
             url,
             origin=origin,
@@ -1113,8 +1149,7 @@ async def _connect_upstream_websocket(
             # the direct path's default offer aligned with the routed aiohttp
             # path (``compress=15`` above).
             compression="deflate",
-            **subprotocol_kwargs,
-            **ssl_kwargs,
+            **optional_kwargs,
         )
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(

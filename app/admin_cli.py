@@ -25,7 +25,7 @@ import argparse
 import getpass
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -358,7 +358,7 @@ def _reset_login_policy() -> _Report:
 
 
 @contextmanager
-def _transaction() -> Iterator[Session]:
+def _transaction() -> Generator[Session]:
     """One engine, one transaction, disposed on the way out (as ``codex-lb-db`` does)."""
 
     url = to_sync_database_url(get_settings().database_url)

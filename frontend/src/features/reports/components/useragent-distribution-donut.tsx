@@ -158,7 +158,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               <div className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-                  style={{ background: entry.fill }}
+                  style={{ backgroundColor: entry.fill }}
                 />
                 <span className="text-foreground">{entry.displayUseragent}</span>
               </div>

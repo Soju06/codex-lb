@@ -8,7 +8,7 @@ import os
 import socket
 import ssl
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
 
@@ -374,7 +374,7 @@ async def acquire_http_client() -> HttpClientLease:
 
 
 @contextlib.asynccontextmanager
-async def lease_http_client() -> AsyncIterator[HttpClient]:
+async def lease_http_client() -> AsyncGenerator[HttpClient]:
     lease = await acquire_http_client()
     try:
         yield lease.client
@@ -385,7 +385,7 @@ async def lease_http_client() -> AsyncIterator[HttpClient]:
 @contextlib.asynccontextmanager
 async def lease_http_session(
     session: aiohttp.ClientSession | None = None,
-) -> AsyncIterator[aiohttp.ClientSession]:
+) -> AsyncGenerator[aiohttp.ClientSession]:
     if session is not None:
         yield session
         return
@@ -394,7 +394,7 @@ async def lease_http_session(
 
 
 @contextlib.asynccontextmanager
-async def lease_model_source_session() -> AsyncIterator[aiohttp.ClientSession]:
+async def lease_model_source_session() -> AsyncGenerator[aiohttp.ClientSession]:
     """Lease the model-source session of the current client generation (falls back to ``session`` when ``None``).
 
     The lease is the same generation lease as ``lease_http_session``: rotation
@@ -410,7 +410,7 @@ async def lease_model_source_session() -> AsyncIterator[aiohttp.ClientSession]:
 @contextlib.asynccontextmanager
 async def lease_retry_client(
     client: RetryClient | None = None,
-) -> AsyncIterator[RetryClient]:
+) -> AsyncGenerator[RetryClient]:
     if client is not None:
         yield client
         return

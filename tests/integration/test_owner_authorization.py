@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
@@ -62,7 +62,7 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
         await session.commit()
 
     @asynccontextmanager
-    async def repositories() -> AsyncIterator[ProxyRepositories]:
+    async def repositories() -> AsyncGenerator[ProxyRepositories]:
         async with SessionLocal() as session:
             yield ProxyRepositories(
                 accounts=AccountsRepository(session),

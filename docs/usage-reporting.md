@@ -35,6 +35,12 @@ The Codex client-version fallback is also retained across restarts. Bundled pric
 
 *Spec: [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*
 
+## Redeeming reset credits on every account
+
+When at least one account holds a banked rate-limit reset credit, the Accounts page shows **Redeem all resets (N)** above the account list (operators with account write access only). It opens a confirmation listing each account that will redeem and how many credits it holds; paused, re-authentication-required and deactivated accounts are left out. Confirming redeems the soonest-expiring credit on each listed account, one account at a time, through the same per-account redemption used by the **Reset** button, so every account only ever spends its own credit and credits are never pooled. Each account's result is shown in the dialog, and a failure on one account does not stop the rest. A run never redeems more than one credit per account; run it again to spend the next one. It is never automatic: use the auto-redeem setting for redemption shortly before expiry.
+
+Spec: [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits).
+
 ## Sorting account quota
 
 On the Accounts page, use the sort selector to order accounts by status or by remaining 5-hour, weekly, or monthly quota, in either direction. Unknown quota values stay last; zero means a known exhausted quota. The choice lasts while the page is open and does not change request routing. The default remains **Most reset credits**.

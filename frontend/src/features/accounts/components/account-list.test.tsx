@@ -637,4 +637,67 @@ describe("AccountList", () => {
       ),
     ).not.toBeInTheDocument();
   });
+  describe("redeem all reset credits action", () => {
+    const accounts = [
+      {
+        accountId: "acc-1",
+        email: "primary@example.com",
+        displayName: "Primary",
+        planType: "plus",
+        status: "active",
+        limitWarmupEnabled: false,
+        additionalQuotas: [],
+        availableResetCredits: 2,
+      },
+    ];
+
+    it("shows the count and triggers the handler", async () => {
+      const user = userEvent.setup();
+      const onRedeemAll = vi.fn();
+
+      render(
+        <AccountList
+          accounts={accounts}
+          selectedAccountId="acc-1"
+          onSelect={() => {}}
+          onOpenImport={() => {}}
+          onOpenOauth={() => {}}
+          redeemAllAccountCount={1}
+          onRedeemAllResetCredits={onRedeemAll}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Redeem all resets (1)" }));
+      expect(onRedeemAll).toHaveBeenCalledTimes(1);
+    });
+
+    it("is hidden when no account can redeem or the session is read-only", () => {
+      const { rerender } = render(
+        <AccountList
+          accounts={accounts}
+          selectedAccountId="acc-1"
+          onSelect={() => {}}
+          onOpenImport={() => {}}
+          onOpenOauth={() => {}}
+          redeemAllAccountCount={0}
+          onRedeemAllResetCredits={() => {}}
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /Redeem all resets/ })).not.toBeInTheDocument();
+
+      rerender(
+        <AccountList
+          accounts={accounts}
+          selectedAccountId="acc-1"
+          onSelect={() => {}}
+          onOpenImport={() => {}}
+          onOpenOauth={() => {}}
+          redeemAllAccountCount={1}
+          onRedeemAllResetCredits={() => {}}
+          readOnly
+        />,
+      );
+      expect(screen.queryByRole("button", { name: /Redeem all resets/ })).not.toBeInTheDocument();
+    });
+  });
 });

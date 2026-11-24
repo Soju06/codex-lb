@@ -11,6 +11,7 @@ import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { RedeemAllResetCreditsDialog } from "@/features/accounts/components/redeem-all-reset-credits-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
 import {
@@ -22,6 +23,7 @@ import {
   sortAccountsForDisplay,
   type AccountSortMode,
 } from "@/features/accounts/sorting";
+import { getRedeemAllTargets, type RedeemAllTarget } from "@/features/accounts/redeem-all";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
@@ -69,6 +71,7 @@ export function AccountsPage() {
   const deleteDialog = useDialogState<string>();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
+  const redeemAllDialog = useDialogState<RedeemAllTarget[]>();
   const usageResetDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
@@ -77,6 +80,7 @@ export function AccountsPage() {
     () => accountsQuery.data ?? [],
     [accountsQuery.data],
   );
+  const redeemAllTargets = useMemo(() => getRedeemAllTargets(accounts), [accounts]);
   const showResetCreditBadges = settingsQuery.data?.showResetCreditBadges ?? true;
   const showResetCreditExpiryBadge = settingsQuery.data?.showResetCreditExpiryBadge ?? true;
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
@@ -187,6 +191,8 @@ export function AccountsPage() {
                 sortMode={accountSortMode}
                 onSortModeChange={setAccountSortMode}
                 showResetCreditBadges={showResetCreditBadges}
+                redeemAllAccountCount={redeemAllTargets.length}
+                onRedeemAllResetCredits={() => redeemAllDialog.show(redeemAllTargets)}
                 onOpenImport={() => importDialog.show()}
                 onOpenOauth={() => {
                   setOauthAccountId(null);
@@ -300,6 +306,14 @@ export function AccountsPage() {
           accountId={resetCreditDialog.data.accountId}
           summaryAvailableCount={resetCreditDialog.data.availableResetCredits}
           onOpenChange={resetCreditDialog.onOpenChange}
+        />
+      ) : null}
+
+      {redeemAllDialog.data ? (
+        <RedeemAllResetCreditsDialog
+          open={redeemAllDialog.open}
+          targets={redeemAllDialog.data}
+          onOpenChange={redeemAllDialog.onOpenChange}
         />
       ) : null}
 

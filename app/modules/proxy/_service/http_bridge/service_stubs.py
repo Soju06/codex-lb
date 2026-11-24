@@ -271,6 +271,10 @@ def _websocket_event_error_message(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_event_error_message")(*args, **kwargs)
 
 
+def _websocket_event_health_error(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_websocket_event_health_error")(*args, **kwargs)
+
+
 def _build_rewritten_stream_response_failed_event(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_build_rewritten_stream_response_failed_event")(*args, **kwargs)
 

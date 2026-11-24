@@ -6555,16 +6555,15 @@ async def test_http_bridge_transport_close_with_a_precreated_sibling_fails_both_
     ("message", "expect_retry"),
     [
         (UpstreamWebSocketMessage(kind="binary", data=b"\x00\x01"), False),
-        (UpstreamWebSocketMessage(kind="close", close_code=1011), True),
+        (UpstreamWebSocketMessage(kind="close", close_code=1011), False),
     ],
 )
-async def test_http_bridge_accepted_replay_requires_a_terminal_transport_message(
+async def test_http_bridge_transport_messages_do_not_replay_an_accepted_turn(
     monkeypatch: pytest.MonkeyPatch,
     message: UpstreamWebSocketMessage,
     expect_retry: bool,
 ) -> None:
-    """A protocol-invalid binary frame carries no close code but did not end
-    the socket: it must never replay an accepted turn, while a real close does."""
+    """Neither a protocol-invalid frame nor a socket close may replay response events."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = _accepted_bridge_request_state(request_id="req-accepted-binary")
     session = _make_bridge_session(
@@ -30580,7 +30579,7 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
         ),
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    retry_precreated = AsyncMock(return_value=True)
+    retry_precreated = AsyncMock(return_value=False)
     fail_pending = AsyncMock()
     retire = AsyncMock()
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
@@ -30589,7 +30588,7 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
 
     await service._relay_http_bridge_upstream_messages(session)
 
-    retry_precreated.assert_not_awaited()
+    retry_precreated.assert_awaited_once_with(session, zero_event_replay=True)
     fail_pending.assert_awaited_once()
     fail_pending_args = fail_pending.await_args
     assert fail_pending_args is not None
@@ -47793,3 +47792,58 @@ async def test_http_bridge_reader_stamps_the_upstream_terminal_when_it_parses_th
 
     assert observed == {"terminal_at": 112.0, "finalizer_entered_at": 122.0}
     assert request_state.upstream_terminal_at == 112.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "blocked", [None, "events", "buffered", "second", "anchor", "acknowledged", "draining", "cancelled"]
+)
+async def test_zero_event_replay_preserves_safety_guards(monkeypatch, blocked):
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    state = proxy_service._WebSocketRequestState(
+        request_id="zero-event",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        account_response_create_lease=cast(Any, object()),
+    )
+    if blocked == "events":
+        state.response_event_count = 1
+    elif blocked == "buffered":
+        state.deferred_reasoning_downstream_texts.append("buffered reasoning")
+    elif blocked == "second":
+        state.replay_count = 1
+    elif blocked == "anchor":
+        state.previous_response_id = "resp_only_on_dead_socket"
+    elif blocked == "acknowledged":
+        state.operation_id = "op-acknowledged"
+        monkeypatch.setattr(
+            service._durable_bridge, "get_operation", AsyncMock(return_value=SimpleNamespace(state="acknowledged"))
+        )
+    elif blocked == "draining":
+        state.draining_until_terminal = True
+    session = _make_bridge_session(pending_requests=deque([state]), queued_request_count=1)
+    session.last_upstream_close_code = 1000
+    session.last_upstream_close_generation = 1
+    send = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send, close=AsyncMock()))
+
+    async def reconnect_without_consumer(*args, **kwargs):
+        session.pending_requests.clear()
+
+    reconnect = AsyncMock(side_effect=reconnect_without_consumer if blocked == "cancelled" else None)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    monkeypatch.setattr(service, "_release_request_state_account_response_create_lease", AsyncMock())
+    assert await service._retry_http_bridge_precreated_request(session, zero_event_replay=True) is (blocked is None)
+    assert send.await_count == (1 if blocked is None else 0)
+    if blocked is None:
+        assert state.preferred_account_id == session.account.id
+        assert session.account.id not in state.excluded_account_ids
+        assert await service._retry_http_bridge_precreated_request(session, zero_event_replay=True) is False
+        assert send.await_count == 1

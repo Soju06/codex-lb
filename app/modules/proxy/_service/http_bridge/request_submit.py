@@ -3713,6 +3713,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        zero_event_replay: bool = False,
     ) -> bool:
         # The admitted body's admission gate can claim the half-open probe;
         # any exit that never advances a send attempt past its baseline must
@@ -3721,15 +3722,45 @@ class _HTTPBridgeRequestSubmitMixin:
         # flight — the same handback contract the submit finalizer applies.
         admission_claimed_leases: list[float] = []
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] = []
+        outcome = "refused"
         try:
-            return await self._retry_http_bridge_precreated_request_admitted(
+            if zero_event_replay:
+                async with session.pending_lock:
+                    candidate = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                if candidate is None or session.liveness_settlement_owner == "send":
+                    return False
+                if request_state is not None and request_state is not candidate:
+                    return False
+                request_state = candidate
+                if candidate.operation_id is not None:
+                    operation = await self._durable_bridge.get_operation(operation_id=candidate.operation_id)
+                    if operation is None or operation.state != "submitted":
+                        return False
+            retried = await self._retry_http_bridge_precreated_request_admitted(
                 session,
                 request_state=request_state,
                 restart_reader=restart_reader,
+                zero_event_replay=zero_event_replay,
                 admission_claimed_leases=admission_claimed_leases,
                 retry_send_baselines=retry_send_baselines,
             )
+            outcome = "resent" if retried else "refused"
+            return retried
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "failed"
+            raise
         finally:
+            if zero_event_replay:
+                _log_http_bridge_event(
+                    "zero_event_replay",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail=outcome,
+                )
             retry_claimed_half_open_until = admission_claimed_leases[-1] if admission_claimed_leases else 0.0
             if retry_claimed_half_open_until > 0.0:
                 send_attempt_advanced = bool(retry_send_baselines) and (
@@ -3751,6 +3782,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        zero_event_replay: bool = False,
         admission_claimed_leases: list[float] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
@@ -3762,6 +3794,18 @@ class _HTTPBridgeRequestSubmitMixin:
         )
 
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
+            if zero_event_replay and (
+                request_state.replay_count != 0
+                or request_state.response_event_count != 0
+                or request_state.upstream_model_output_seen
+                or request_state.deferred_reasoning_downstream_texts
+                or request_state.pending_function_call_ids
+                or request_state.pending_tool_call_types
+                or request_state.downstream_visible
+                or request_state.operation_persisted_response_id is not None
+                or request_state.previous_response_id is not None
+            ):
+                return False
             transport_only_unanchored_replay = bool(
                 request_state.precreated_replay_reason is None
                 and (
@@ -3974,6 +4018,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 if account_neutral_recovery or account_bound_replay:
                     request_state.preferred_account_id = session.account.id
+                elif zero_event_replay:
+                    request_state.preferred_account_id = session.account.id
                 elif not request_state.file_required_preferred_account:
                     if hard_owner_bound and not model_fallback_replay and not fresh_hard_request_account_switch_allowed:
                         request_state.preferred_account_id = session.account.id
@@ -4017,6 +4063,8 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         reconnect_reader_kwargs = {"restart_reader": True} if restart_reader else {}
+        if zero_event_replay:
+            reconnect_reader_kwargs["prefer_same_account"] = True
         try:
             if retry_jitter_seconds > 0:
                 logger.info(
@@ -4129,6 +4177,14 @@ class _HTTPBridgeRequestSubmitMixin:
                 if not retry_consumer_attached:
                     request_state.response_create_admission.release()
                     request_state.response_create_admission = None
+                    await self._release_request_state_account_response_create_lease(request_state)
+                    return False
+            if zero_event_replay:
+                async with session.pending_lock:
+                    still_owned = (
+                        request_state in session.pending_requests and not request_state.draining_until_terminal
+                    )
+                if not still_owned:
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
             request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)

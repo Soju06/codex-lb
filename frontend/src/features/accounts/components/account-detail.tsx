@@ -14,6 +14,7 @@ import { AccountUsagePanel } from "@/features/accounts/components/account-usage-
 import type {
   AccountRoutingPolicy,
   AccountSummary,
+  AccountUsageLimitUpdateRequest,
   AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
@@ -45,6 +46,10 @@ export type AccountDetailProps = {
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
   ) => void;
+  onUsageLimitChange: (
+    accountId: string,
+    update: AccountUsageLimitUpdateRequest,
+  ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
@@ -71,6 +76,7 @@ export function AccountDetail({
   showResetCreditExpiryBadge = true,
   onLimitWarmupChange,
   onRoutingPolicyChange,
+  onUsageLimitChange,
   onSecurityWorkAuthorizedChange,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
@@ -186,6 +192,7 @@ export function AccountDetail({
         showResetCreditExpiryBadge={showResetCreditExpiryBadge}
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
+        onUsageLimitChange={onUsageLimitChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
     </div>

@@ -152,7 +152,7 @@ async def test_ingestor_throttles_identical_snapshots(monkeypatch: pytest.Monkey
     async def fake_ingest(item: live_ingest._QueuedSnapshot) -> None:
         assert item.account_id is not None
         writes.append((item.account_id, item.snapshot))
-        ingestor._last_write[item.account_id] = (live_ingest._fingerprint(item.snapshot), time.monotonic())
+        ingestor._last_write[item.account_id] = (item.snapshot, time.monotonic())
 
     monkeypatch.setattr(ingestor, "_ingest", fake_ingest)
     ingestor.start()

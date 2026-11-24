@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import String, and_, case, cast, delete, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,6 +80,7 @@ class StickyOwnerLookup:
     # the deadline against the clock immediately before omitting the write,
     # and must never skip a write that changes the owner account.
     refresh_skip_deadline: datetime | None = None
+    observed_updated_at: datetime | None = None
 
 
 def _continuity_is_abandoned_for_source(
@@ -132,6 +133,7 @@ def _owner_lookup_from_row(
         account_id=row.account_id,
         continuity_abandoned=False,
         refresh_skip_deadline=refresh_skip_deadline,
+        observed_updated_at=to_utc_naive(row.updated_at),
     )
 
 
@@ -161,6 +163,15 @@ def _same_owner_refresh_skip_deadline(
     if age_seconds > skip_window_seconds:
         return None
     return observed_updated_at + timedelta(seconds=skip_window_seconds)
+
+
+def _sqlite_sticky_timestamp():
+    # SQLite defaults omit the fractional part that SQLAlchemy binds.
+    stored = cast(StickySession.updated_at, String)
+    return case(
+        (func.length(stored) == 19, stored.concat(".000000")),
+        else_=func.substr(stored.concat("000000"), 1, 26),
+    )
 
 
 class StickySessionsRepository:
@@ -282,7 +293,11 @@ class StickySessionsRepository:
                     continuity_source,
                 ),
             )
-        return StickyOwnerLookup(account_id=current_account_id, continuity_abandoned=False)
+        return StickyOwnerLookup(
+            account_id=current_account_id,
+            continuity_abandoned=False,
+            observed_updated_at=to_utc_naive(current_updated_at),
+        )
 
     async def release_read_snapshot(self) -> None:
         """End the session's current read transaction.
@@ -455,53 +470,73 @@ class StickySessionsRepository:
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
-    async def restore_if_current(
+    async def write_probe_affinity(
         self,
         key: str,
+        account_id: str,
         *,
         kind: StickySessionKind,
-        expected_account_id: str | None,
-        restore_account_id: str | None,
+        observed: StickyOwnerLookup,
+        updated_at: datetime,
     ) -> bool:
-        """Restore a sticky owner only if the provisional owner is still current."""
-
-        if not key:
+        """Publish a provisional owner only while the lookup still matches."""
+        if observed.account_id is None:
+            statement = self._build_insert_do_nothing_statement(key, account_id, kind).values(updated_at=updated_at)
+        elif observed.observed_updated_at is None:
             return False
-        if expected_account_id is None:
-            if restore_account_id is None:
-                return True
-            statement = self._build_insert_do_nothing_statement(key, restore_account_id, kind).returning(
-                StickySession.key
-            )
-        elif restore_account_id is None:
-            statement = (
-                delete(StickySession)
-                .where(
-                    StickySession.key == key,
-                    StickySession.kind == kind,
-                    StickySession.account_id == expected_account_id,
-                )
-                .returning(StickySession.key)
-            )
         else:
+            observed_time = observed.observed_updated_at
+            if self._session.get_bind().dialect.name == "sqlite":
+                same_timestamp = _sqlite_sticky_timestamp() == observed_time.isoformat(sep=" ", timespec="microseconds")
+            else:
+                same_timestamp = StickySession.updated_at == observed_time
             statement = (
                 update(StickySession)
                 .where(
                     StickySession.key == key,
                     StickySession.kind == kind,
-                    StickySession.account_id == expected_account_id,
+                    StickySession.account_id == observed.account_id,
+                    same_timestamp,
+                    StickySession.continuity_abandoned_at.is_(None),
+                    StickySession.continuity_abandonment_scope.is_(None),
                 )
-                .values(
-                    account_id=restore_account_id,
-                    updated_at=func.now(),
-                    continuity_abandoned_at=None,
-                    continuity_abandonment_scope=None,
-                )
-                .returning(StickySession.key)
+                .values(account_id=account_id, updated_at=updated_at)
+            )
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement.returning(StickySession.key))
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def restore_if_current(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+        expected_updated_at: datetime,
+        observed: StickyOwnerLookup,
+    ) -> bool:
+        """Restore the observed binding only while the probe's write is current."""
+        current_write = (
+            StickySession.key == key,
+            StickySession.kind == kind,
+            StickySession.account_id == expected_account_id,
+            StickySession.updated_at == expected_updated_at,
+            StickySession.continuity_abandoned_at.is_(None),
+            StickySession.continuity_abandonment_scope.is_(None),
+        )
+        if observed.account_id is None:
+            statement = delete(StickySession).where(*current_write)
+        else:
+            assert observed.observed_updated_at is not None
+            statement = (
+                update(StickySession)
+                .where(*current_write)
+                .values(account_id=observed.account_id, updated_at=observed.observed_updated_at)
             )
 
         async with sqlite_writer_section():
-            result = await self._session.execute(statement)
+            result = await self._session.execute(statement.returning(StickySession.key))
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
@@ -746,12 +781,27 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        written_at = utcnow()
+        if dialect == "sqlite":
+            # SQLite strftime emits milliseconds. Bump by one millisecond
+            # when repeating a write at the same or an earlier clock tick.
+            time_format = "%Y-%m-%d %H:%M:%f"
+            previous = _sqlite_sticky_timestamp()
+            bumped = func.strftime(time_format, StickySession.updated_at, "+0.001 seconds").concat("000")
+            refreshed_at = case(
+                (previous < written_at.isoformat(sep=" ", timespec="microseconds"), written_at),
+                else_=bumped,
+            )
+        else:
+            refreshed_at = func.greatest(
+                StickySession.updated_at + literal_column("INTERVAL '1 microsecond'"), written_at
+            )
+        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind, updated_at=written_at)
         return statement.on_conflict_do_update(
             index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
-                "updated_at": func.now(),
+                "updated_at": refreshed_at,
                 # A fresh pin fully re-establishes ownership, so any earlier
                 # purge tombstone (see purge_stale_hard_codex_session_mappings)
                 # no longer applies — otherwise this row would keep reporting
@@ -769,7 +819,7 @@ class StickySessionsRepository:
             insert_fn = sqlite_insert
         else:
             raise RuntimeError(f"StickySession insert unsupported for dialect={dialect!r}")
-        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
+        statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind, updated_at=utcnow())
         return statement.on_conflict_do_nothing(index_elements=[StickySession.key, StickySession.kind])
 
     @staticmethod

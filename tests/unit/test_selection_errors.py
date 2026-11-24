@@ -24,6 +24,25 @@ def test_pool_usage_exhaustion_is_codex_compatible_429():
     }
 
 
+def test_local_account_usage_limit_is_429_without_upstream_reset():
+    status, payload = selection_failure_response(
+        AccountSelection(
+            account=None,
+            error_message="Account usage limit reached",
+            error_code="account_usage_limit_reached",
+        )
+    )
+
+    assert status == 429
+    assert payload == {
+        "error": {
+            "message": "Account usage limit reached",
+            "type": "rate_limit_error",
+            "code": "account_usage_limit_reached",
+        }
+    }
+
+
 def test_unusable_pool_remains_no_accounts_503():
     status, payload = selection_failure_response(
         AccountSelection(

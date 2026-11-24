@@ -65,6 +65,9 @@ export const AccountAdditionalQuotaSchema = z.object({
   secondaryWindow: AccountAdditionalWindowSchema.nullable().optional(),
 });
 
+// A maximum-used cap: 100 keeps nothing back, and 0 is rejected because it would block every request.
+const UsageLimitPercentSchema = z.number().gt(0).max(100);
+
 export const AccountSummarySchema = z.object({
   accountId: z.string(),
   chatgptAccountId: z.string().nullable().optional(),
@@ -76,6 +79,14 @@ export const AccountSummarySchema = z.object({
   seatType: z.string().nullable().optional(),
   planType: z.string(),
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  usageLimitEnabled: z.boolean().optional(),
+  usageLimitPercent: UsageLimitPercentSchema.nullable().optional(),
+  usageLimit5HPercent: UsageLimitPercentSchema.nullable().optional(),
+  usageLimitWeeklyPercent: UsageLimitPercentSchema.nullable().optional(),
+  effectiveLimitPrimary: z.number().nullable().optional(),
+  effectiveLimitSecondary: z.number().nullable().optional(),
+  effectiveLimitMonthly: z.number().nullable().optional(),
+  usageLimitState: z.enum(["disabled", "available", "reached", "data_unavailable"]).optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
@@ -263,6 +274,22 @@ export const AccountRoutingPolicyUpdateResponseSchema = z.object({
   routingPolicy: AccountRoutingPolicySchema,
 });
 
+// An omitted percentage keeps the saved value; null clears it.
+export const AccountUsageLimitUpdateRequestSchema = z.object({
+  enabled: z.boolean(),
+  percent: UsageLimitPercentSchema.nullable().optional(),
+  percent5H: UsageLimitPercentSchema.nullable().optional(),
+  percentWeekly: UsageLimitPercentSchema.nullable().optional(),
+});
+
+export const AccountUsageLimitUpdateResponseSchema = z.object({
+  accountId: z.string(),
+  enabled: z.boolean(),
+  percent: UsageLimitPercentSchema.nullable(),
+  percent5H: UsageLimitPercentSchema.nullable(),
+  percentWeekly: UsageLimitPercentSchema.nullable(),
+});
+
 export const AccountUpdateRequestSchema = z.object({
   securityWorkAuthorized: z.boolean().optional(),
 });
@@ -343,6 +370,12 @@ export type ConsumeRateLimitResetCreditResponse = z.infer<
   typeof ConsumeRateLimitResetCreditResponseSchema
 >;
 export type AccountRoutingPolicy = z.infer<typeof AccountRoutingPolicySchema>;
+export type AccountUsageLimitUpdateRequest = z.infer<
+  typeof AccountUsageLimitUpdateRequestSchema
+>;
+export type AccountUsageLimitUpdateResponse = z.infer<
+  typeof AccountUsageLimitUpdateResponseSchema
+>;
 export type AccountAliasResponse = z.infer<typeof AccountAliasResponseSchema>;
 export type AccountLimitWarmupStatus = z.infer<
   typeof AccountLimitWarmupStatusSchema

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import type { AccountSummary } from "@/features/dashboard/schemas";
-import { normalizeStatus } from "@/utils/account-status";
+import { getAccountDisplayStatus } from "@/utils/account-status";
 
 type AccountSummaryLineProps = {
   accounts: AccountSummary[];
@@ -10,7 +10,10 @@ type AccountSummaryLineProps = {
 export function AccountSummaryLine({ accounts }: AccountSummaryLineProps) {
   const { t } = useTranslation();
   const registeredCount = accounts.length;
-  const activeCount = accounts.filter((account) => normalizeStatus(account.status) === "active").length;
+  const activeCount = accounts.filter(
+    (account) =>
+      getAccountDisplayStatus(account.status, account.usageLimitState) === "active",
+  ).length;
   const unavailableCount = registeredCount - activeCount;
 
   return (

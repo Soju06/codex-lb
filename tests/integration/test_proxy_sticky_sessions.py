@@ -909,7 +909,7 @@ async def test_proxy_compact_reallocates_sticky_mapping(async_client, monkeypatc
     }
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
     assert response.status_code == 200
-    assert stream_seen == ["acc_c1"]
+    assert stream_seen == ["acc_c1"], response.text
 
     async with SessionLocal() as session:
         usage_repo = UsageRepository(session)
@@ -2211,6 +2211,105 @@ async def test_sticky_upsert_returning_refreshes_identity_map_instance(db_setup)
 
 
 @pytest.mark.asyncio
+async def test_probe_affinity_restore_only_reverts_the_provisional_write(async_client, db_setup):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    owner = await _import_account(async_client, "probe-affinity-owner", "probe-affinity-owner@example.com")
+    previous = await _import_account(async_client, "previous-affinity-owner", "previous-affinity-owner@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    provisional_time = utcnow().replace(microsecond=123456)
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = StickySessionsRepository(session)
+        writer = StickySessionsRepository(writer_session)
+        for key, restore_owner in [("probe-insert", None), ("probe-rebind", previous)]:
+            if restore_owner is not None:
+                await repo.upsert(key, restore_owner, kind=kind)
+            observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+            await repo.release_read_snapshot()
+            assert observed.account_id == restore_owner
+            assert await repo.write_probe_affinity(
+                key, owner, kind=kind, observed=observed, updated_at=provisional_time
+            )
+            assert await repo.restore_if_current(
+                key,
+                kind=kind,
+                expected_account_id=owner,
+                expected_updated_at=provisional_time,
+                observed=observed,
+            )
+            restored = await writer.get_account_id_and_abandonment(key, kind=kind)
+            await writer.release_read_snapshot()
+            assert restored == observed
+
+            assert await repo.write_probe_affinity(
+                key, owner, kind=kind, observed=observed, updated_at=provisional_time
+            )
+            await writer.upsert(key, owner, kind=kind)
+            assert not await repo.restore_if_current(
+                key,
+                kind=kind,
+                expected_account_id=owner,
+                expected_updated_at=provisional_time,
+                observed=observed,
+            )
+            assert await writer.get_account_id(key, kind=kind) == owner
+            await writer.release_read_snapshot()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("had_owner", [False, True])
+async def test_probe_affinity_write_preserves_binding_committed_after_lookup(async_client, db_setup, had_owner):
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    old_owner = await _import_account(async_client, "old-probe-owner", "old-probe-owner@example.com")
+    new_owner = await _import_account(async_client, "new-probe-owner", "new-probe-owner@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    key = "concurrent-probe-affinity"
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = StickySessionsRepository(session)
+        writer = StickySessionsRepository(writer_session)
+        if had_owner:
+            await writer.upsert(key, old_owner, kind=kind)
+        observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+        await repo.release_read_snapshot()
+        assert observed.account_id == (old_owner if had_owner else None)
+
+        await writer.upsert(key, new_owner, kind=kind)
+        assert not await repo.write_probe_affinity(key, old_owner, kind=kind, observed=observed, updated_at=utcnow())
+        assert await writer.get_account_id(key, kind=kind) == new_owner
+
+
+@pytest.mark.asyncio
+async def test_same_tick_affinity_refresh_invalidates_probe_observation(async_client, db_setup, monkeypatch):
+    from app.modules.proxy import sticky_repository
+
+    owner = await _import_account(async_client, "current-probe-owner", "current-probe-owner@example.com")
+    probe = await _import_account(async_client, "stale-probe-sibling", "stale-probe-sibling@example.com")
+    kind = StickySessionKind.PROMPT_CACHE
+    key = "same-tick-probe-affinity"
+    frozen_time = utcnow().replace(microsecond=123456)
+    monkeypatch.setattr(sticky_repository, "utcnow", lambda: frozen_time)
+
+    async with SessionLocal() as session, SessionLocal() as writer_session:
+        repo = sticky_repository.StickySessionsRepository(session)
+        writer = sticky_repository.StickySessionsRepository(writer_session)
+        await writer.upsert(key, owner, kind=kind)
+        observed = await repo.get_account_id_and_abandonment(key, kind=kind)
+        await repo.release_read_snapshot()
+        assert observed.observed_updated_at == frozen_time
+
+        first_refresh = (await writer.upsert(key, owner, kind=kind)).updated_at
+        second_refresh = (await writer.upsert(key, owner, kind=kind)).updated_at
+        assert frozen_time < first_refresh < second_refresh
+        assert not await repo.write_probe_affinity(
+            key, probe, kind=kind, observed=observed, updated_at=frozen_time + timedelta(seconds=1)
+        )
+        assert await writer.get_account_id(key, kind=kind) == owner
+
+
+@pytest.mark.asyncio
 async def test_sticky_prefix_purge_is_bounded_and_reserved_namespace_only(db_setup):
     from sqlalchemy import select, update
 
@@ -3221,3 +3320,59 @@ async def test_cleanup_retires_derived_prompt_cache_rows_and_keeps_client_sticky
 
     assert set(client_thread_keys) <= remaining, "a client-supplied sticky_thread row was swept by key prefix"
     assert not set(derived_prompt_cache_keys) & remaining, "derived prompt_cache rows should expire at the TTL"
+
+
+@pytest.mark.asyncio
+async def test_v1_prompt_cache_key_survives_generation_bump_during_sticky_persist(async_client, monkeypatch):
+    """A generation bump after sticky persistence retries instead of failing the request."""
+    from app.modules.proxy.account_cache import get_account_selection_cache
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _set_routing_settings(async_client, sticky_threads_enabled=True)
+    acc_id = await _import_account(async_client, "acc_gen_bump", "gen_bump@example.com")
+
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(
+            account_id=acc_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    real_upsert = StickySessionsRepository.upsert
+    bumps = 0
+
+    async def bump_once(self, key, account_id, *, kind):
+        nonlocal bumps
+        result = await real_upsert(self, key, account_id, kind=kind)
+        if bumps == 0:
+            bumps += 1
+            # Matches the cache-invalidation poller's ambient local bump.
+            get_account_selection_cache().invalidate(propagate=False)
+        return result
+
+    monkeypatch.setattr(StickySessionsRepository, "upsert", bump_once)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "stream": True,
+        "prompt_cache_key": "thread_gen_bump",
+    }
+    response = await async_client.post("/backend-api/codex/responses", json=payload)
+    assert response.status_code == 200
+    assert bumps == 1
+    # Upstream receives the imported ChatGPT account id, not the DB row id.
+    assert seen == ["acc_gen_bump"]

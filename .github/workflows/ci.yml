@@ -430,7 +430,9 @@ jobs:
   test-integration-core:
     name: Tests (pytest, integration-core-${{ matrix.shard }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Migration-heavy shards can exceed 20 minutes on slower hosted runners;
+    # pytest still enforces the per-test timeout in the make target.
+    timeout-minutes: 30
     needs: changes
     strategy:
       fail-fast: false

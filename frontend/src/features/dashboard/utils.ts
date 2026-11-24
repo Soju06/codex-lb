@@ -14,6 +14,7 @@ import type {
 } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { buildDonutPalette } from "@/utils/colors";
+import { quotaBreakdown } from "@/utils/quota";
 import {
   formatCachedTokensMeta,
   formatCompactNumber,
@@ -36,6 +37,7 @@ export type RemainingItem = {
   isEmail: boolean;
   value: number;
   remainingPercent: number | null;
+  reservedValue?: number;
   color: string;
 };
 
@@ -161,16 +163,25 @@ export function applySecondaryConstraint(
     const secondaryItem = secondaryByAccount.get(item.accountId);
     if (!secondaryItem) return item;
     if (secondaryItem.remainingPercent == null) return item;
-    if (secondaryItem.value >= item.value) return item;
+    // Apply the provider constraint separately so a weekly reserve cannot
+    // become consumed quota (or preserve reserves after provider exhaustion).
+    const providerRemaining = Math.min(
+      item.value + (item.reservedValue ?? 0),
+      secondaryItem.value + (secondaryItem.reservedValue ?? 0),
+    );
+    const usable = Math.max(0, Math.min(item.value, secondaryItem.value));
+    const reserved = Math.max(0, providerRemaining - usable);
+    if (usable === item.value && reserved === (item.reservedValue ?? 0)) return item;
 
     const effectivePercent =
       item.remainingPercent != null && item.value > 0
-        ? item.remainingPercent * (secondaryItem.value / item.value)
+        ? item.remainingPercent * (usable / item.value)
         : item.remainingPercent;
 
     return {
       ...item,
-      value: Math.max(0, secondaryItem.value),
+      value: usable,
+      reservedValue: reserved,
       remainingPercent: effectivePercent != null ? Math.max(0, effectivePercent) : null,
     };
   });
@@ -192,7 +203,13 @@ export function buildRemainingItems(
       if (windowKey === "primary" && isWeeklyOnlyAccount(account)) {
         return null;
       }
-      const remaining = usageIndex.get(account.accountId) ?? 0;
+      const providerRemaining = usageIndex.get(account.accountId) ?? 0;
+      const providerPercent = accountRemainingPercent(account, windowKey);
+      const cap = windowKey === "primary" ? account.effectiveLimitPrimary : account.effectiveLimitSecondary;
+      const capacity = windowKey === "primary" ? account.capacityCreditsPrimary : account.capacityCreditsSecondary;
+      const reserved = (capacity ?? 0) * (100 - (cap ?? 100)) / 100;
+      const remaining = Math.max(0, providerRemaining - reserved);
+      const usablePercent = providerPercent == null ? null : quotaBreakdown(providerPercent, cap).usable;
       const rawLabel = account.displayName || account.email || account.accountId;
       const labelIsEmail = !!account.email && rawLabel === account.email;
       const labelSuffix = account.isEmailDuplicate === true
@@ -204,7 +221,8 @@ export function buildRemainingItems(
         labelSuffix,
         isEmail: labelIsEmail,
         value: remaining,
-        remainingPercent: accountRemainingPercent(account, windowKey),
+        ...(reserved > 0 ? { reservedValue: Math.min(providerRemaining, reserved) } : {}),
+        remainingPercent: usablePercent,
         color: palette[index % palette.length],
       };
     })

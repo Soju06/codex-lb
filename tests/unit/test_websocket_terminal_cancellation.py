@@ -17,14 +17,25 @@ from fastapi import WebSocket
 from app.core import shutdown as shutdown_state
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.clock import REAL_SCHEDULER, Scheduler
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.time import utcnow
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
+from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def authorize_account_fresh(_self: LoadBalancer, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 class _RequestLogsRecorder:
@@ -1874,9 +1885,11 @@ async def test_reader_cancellation_after_transport_end_claim_waits_for_child_own
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expire_before_dispatch", [False, True], ids=["after-dispatch", "expired-handoff"])
 async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    expire_before_dispatch: bool,
 ) -> None:
     request_logs = _RequestLogsRecorder()
 
@@ -1891,7 +1904,7 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
         prohibit_fast_mode=False,
         proxy_downstream_websocket_idle_timeout_seconds=30.0,
         proxy_request_budget_seconds=30.0,
-        stream_idle_timeout_seconds=30.0,
+        stream_idle_timeout_seconds=60.0 if expire_before_dispatch else 30.0,
         sse_keepalive_interval_seconds=0.0,
     )
 
@@ -1937,11 +1950,13 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     captured_response_create_gate: asyncio.Semaphore | None = None
     upstream_send_completed = asyncio.Event()
     upstream_closed = asyncio.Event()
+    expiry_claim_cancelled = False
 
     class _Downstream:
         def __init__(self) -> None:
             self._request_sent = False
             self.close_calls: list[tuple[int, str | None]] = []
+            self.sent_text: list[str] = []
 
         async def receive(self) -> dict[str, object]:
             if not self._request_sent:
@@ -1950,8 +1965,8 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
-        async def send_text(self, _text: str) -> None:
-            return None
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
 
         async def send_bytes(self, _data: bytes) -> None:
             raise AssertionError("binary send is not expected")
@@ -2019,7 +2034,31 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
         )
 
     async def acquire_create_lease(**_kwargs: object) -> object:
+        if expire_before_dispatch:
+            request_state.started_at -= settings.proxy_request_budget_seconds + 1
         return account_create_lease
+
+    original_fail_expired = service._fail_expired_pending_websocket_requests
+
+    async def cancel_during_expiry_handoff(*, pending_requests, pending_lock, **kwargs) -> None:
+        nonlocal expiry_claim_cancelled
+        lock_type = type(pending_lock)
+        original_release = lock_type.release
+
+        def release_and_cancel(lock: anyio.Lock) -> None:
+            nonlocal expiry_claim_cancelled
+            original_release(lock)
+            if lock is not pending_lock:
+                return
+            assert request_state not in pending_requests
+            expiry_claim_cancelled = True
+            sender = asyncio.current_task()
+            assert sender is not None
+            sender.cancel()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(lock_type, "release", release_and_cancel)
+            await original_fail_expired(pending_requests=pending_requests, pending_lock=pending_lock, **kwargs)
 
     async def release_lease(lease: object | None) -> None:
         release_calls.append(lease)
@@ -2045,6 +2084,8 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", acquire_create_lease)
     monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
     monkeypatch.setattr(service, "_next_websocket_receive_timeout", AsyncMock(return_value=None))
+    if expire_before_dispatch:
+        monkeypatch.setattr(service, "_fail_expired_pending_websocket_requests", cancel_during_expiry_handoff)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
     caplog.set_level(logging.WARNING)
 
@@ -2057,9 +2098,9 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
             api_key=api_key,
         )
     )
-    await asyncio.wait_for(upstream_send_completed.wait(), timeout=1)
-
-    scope_task.cancel()
+    if not expire_before_dispatch:
+        await asyncio.wait_for(upstream_send_completed.wait(), timeout=1)
+        scope_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(scope_task, timeout=1)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
@@ -2075,9 +2116,19 @@ async def test_scope_cancellation_finalizes_turn_when_connection_lease_release_f
     assert request_state.account_response_create_lease is None
     assert len(request_logs.calls) == 1
     assert request_logs.calls[0]["request_id"] == request_state.request_id
-    assert request_logs.calls[0]["status"] == "cancelled"
     assert "Failed to release websocket connection lease during scope cleanup" in caplog.messages
     assert service._background_cleanup_tasks == set()
+    if expire_before_dispatch:
+        assert expiry_claim_cancelled
+        assert not upstream_send_completed.is_set()
+        assert request_logs.calls[0]["status"] == "error"
+        assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+        assert len(downstream.sent_text) == 1
+        failure = json.loads(downstream.sent_text[0])
+        assert failure["type"] == "response.failed"
+        assert failure["response"]["error"]["code"] == "upstream_request_timeout"
+    else:
+        assert request_logs.calls[0]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

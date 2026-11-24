@@ -2,6 +2,7 @@ PYTEST_ARGS := -q -ra -o faulthandler_timeout=300 -o faulthandler_exit_on_timeou
 POSTGRES_TEST_DATABASE_URL ?= postgresql+asyncpg://codex_lb:codex_lb@127.0.0.1:5432/codex_lb
 INTEGRATION_CORE_SHARD_COUNT := 3
 POSTGRES_PYTEST_TARGETS := \
+	tests/integration/test_usage_limit_historical_migrations.py \
 	tests/integration/test_affinity_invite_migration.py \
 	tests/integration/test_affinity_identity_migration.py \
 	tests/integration/test_cost_backfill.py \
@@ -11,6 +12,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_migrations.py::test_account_usage_limits_migrations_upgrade_and_downgrade[postgresql] \
 	tests/integration/test_auth_provider_abstraction.py \
 	tests/integration/test_migration_serialization.py::test_concurrent_upgrades_on_fresh_postgresql_database_apply_head_exactly_once \
 	tests/integration/test_migration_serialization.py::test_postgresql_run_upgrade_times_out_when_advisory_lock_is_held \

@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import Float, case, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -121,6 +122,25 @@ class AccountRequestUsageSummary:
     total_tokens: int
     cached_input_tokens: int
     total_cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
+class AccountUsageLimitConfiguration:
+    enabled: bool
+    percent: float | None
+    percent_5h: float | None = None
+    percent_weekly: float | None = None
+
+
+class InvalidAccountUsageLimitError(ValueError):
+    """An enabled policy would have no configured threshold after an update."""
+
+
+_USAGE_LIMIT_COLUMNS = {
+    "percent": "usage_limit_percent",
+    "percent_5h": "usage_limit_5h_percent",
+    "percent_weekly": "usage_limit_weekly_percent",
+}
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -998,6 +1018,61 @@ class AccountsRepository:
             )
             await self._session.commit()
             return result.scalar_one_or_none() is not None
+
+    async def update_usage_limit(
+        self,
+        account_id: str,
+        *,
+        enabled: bool,
+        thresholds: Mapping[str, float | None],
+    ) -> AccountUsageLimitConfiguration | None:
+        """Set the enabled flag and replace only the thresholds present in ``thresholds``."""
+        values = {_USAGE_LIMIT_COLUMNS[name]: value for name, value in thresholds.items()}
+        async with sqlite_writer_section():
+            statement = (
+                update(Account)
+                .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                .values(usage_limit_enabled=enabled, **values)
+            )
+            if enabled:
+                # Evaluate omitted thresholds against the current row in the same
+                # UPDATE so a concurrent writer cannot invalidate a prior read.
+                resulting = (
+                    literal(values[column], Float()) if column in values else getattr(Account, column)
+                    for column in _USAGE_LIMIT_COLUMNS.values()
+                )
+                statement = statement.where(or_(*(threshold.is_not(None) for threshold in resulting)))
+            row = (
+                await self._session.execute(
+                    statement.returning(
+                        Account.usage_limit_enabled,
+                        Account.usage_limit_percent,
+                        Account.usage_limit_5h_percent,
+                        Account.usage_limit_weekly_percent,
+                    )
+                )
+            ).one_or_none()
+            account_exists = False
+            if row is None and enabled:
+                account_exists = (
+                    await self._session.scalar(
+                        select(Account.id).where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                    )
+                    is not None
+                )
+            await self._session.commit()
+            if account_exists:
+                raise InvalidAccountUsageLimitError(
+                    "at least one percentage is required when the usage limit is enabled"
+                )
+            if row is None:
+                return None
+            return AccountUsageLimitConfiguration(
+                enabled=bool(row.usage_limit_enabled),
+                percent=row.usage_limit_percent,
+                percent_5h=row.usage_limit_5h_percent,
+                percent_weekly=row.usage_limit_weekly_percent,
+            )
 
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         """Mark an account for background deletion; commits in milliseconds.

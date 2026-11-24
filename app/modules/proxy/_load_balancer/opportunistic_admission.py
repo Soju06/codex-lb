@@ -39,7 +39,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
@@ -65,6 +65,8 @@ class StatesBuilder(Protocol):
         latest_primary: Mapping[str, UsageHistory | AdditionalUsageHistory],
         latest_secondary: Mapping[str, UsageHistory | AdditionalUsageHistory],
         latest_monthly: Mapping[str, UsageHistory],
+        standard_latest_primary: Mapping[str, UsageHistory] | None = None,
+        standard_latest_secondary: Mapping[str, UsageHistory] | None = None,
         runtime: dict[str, RuntimeState],
         now: float | None = None,
         routing_policy_override: str | None = None,
@@ -232,6 +234,8 @@ def _observe_selection_states(
         latest_primary=selection_inputs.latest_primary,
         latest_secondary=selection_inputs.latest_secondary,
         latest_monthly=selection_inputs.latest_monthly,
+        standard_latest_primary=selection_inputs.standard_latest_primary,
+        standard_latest_secondary=selection_inputs.standard_latest_secondary,
         runtime=runtime_snapshot,
         now=owner._clock.time(),
         routing_policy_override=selection_inputs.routing_policy_override,
@@ -249,15 +253,19 @@ def _observe_selection_states(
 def _account_cap_closed(
     request: OpportunisticAdmissionRequest,
     states: list[AccountState],
+    *,
+    now: float,
 ) -> tuple[list[AccountState], OpportunisticAdmissionOutcome | None]:
     lease_kind = request.lease_kind
-    selection_states = _filter_states_for_account_caps(
+    selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
         states,
         lease_kind=lease_kind,
         caps=request.concurrency_caps,
         stream_reserve_slots=request.stream_reserve_slots,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+        now=now,
     )
-    if selection_states or not states:
+    if not account_caps_exhausted:
         return selection_states, None
     logger.warning(
         "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
@@ -298,7 +306,7 @@ async def run_opportunistic_admission(
             soft_drain_enabled=request.soft_drain_enabled,
             model=request.model,
         )
-        selection_states, cap_closed = _account_cap_closed(request, states)
+        selection_states, cap_closed = _account_cap_closed(request, states, now=owner._clock.time())
         if cap_closed is not None:
             return cap_closed
     else:
@@ -311,7 +319,7 @@ async def run_opportunistic_admission(
                 soft_drain_enabled=request.soft_drain_enabled,
                 model=request.model,
             )
-            selection_states, cap_closed = _account_cap_closed(request, states)
+            selection_states, cap_closed = _account_cap_closed(request, states, now=owner._clock.time())
             if cap_closed is not None:
                 return cap_closed
     result = _select_account_preferring_budget_safe(
@@ -338,7 +346,7 @@ async def run_opportunistic_admission(
         return OpportunisticAdmissionOutcome(
             account=None,
             error_message=result.error_message,
-            error_code=OPPORTUNISTIC_BURN_WINDOW_CLOSED,
+            error_code=result.error_code or OPPORTUNISTIC_BURN_WINDOW_CLOSED,
         )
     account = account_map.get(result.account.account_id)
     if account is None:

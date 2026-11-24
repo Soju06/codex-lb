@@ -32,6 +32,7 @@ from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.settings.repository import SettingsRepository
 from app.modules.usage import updater as usage_updater_module
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import build_background_usage_updater
 
@@ -312,6 +313,8 @@ class UsageRefreshScheduler:
                             monthly_entries=warmup_after_monthly,
                             secondary_entries=after_secondary,
                         ),
+                        usage_limit_secondary=after_secondary,
+                        usage_limit_monthly=after_monthly,
                         previous_plan_types=previous_plan_types,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=self.interval_seconds,
@@ -496,18 +499,26 @@ def _short_window_blocks_recovery(entry: UsageHistory | None, *, account: Accoun
       (an unrecognized stored plan, which ``coerce_account_plan_type``
       preserves) is not evidence that a reported window does not exist, so it
       does not exclude the slot.
+    * A stored no-data placeholder is not an available short-window sample.
+      With positive or unknown primary capacity, it cannot justify early
+      recovery from a confirmed long-window reset.
     * An elapsed window is stale exhaustion evidence rather than a live block
       (see "Usage refresh does not trust elapsed reset windows"), which also
       covers upstream having stopped reporting the short window. A 100% row with
       no reset metadata is treated as current because nothing proves it rolled.
     """
 
-    if entry is None or entry.used_percent < 100.0:
+    if entry is None:
         return False
     if _is_long_window_minutes(entry.window_minutes):
         return False
     capacity = capacity_for_plan(account.plan_type, "primary")
     if capacity is not None and capacity <= 0:
+        return False
+    used_percent = usage_history_to_window_row(entry).used_percent
+    if used_percent is None:
+        return True
+    if used_percent < 100.0:
         return False
     return entry.reset_at is None or entry.reset_at > now
 
@@ -559,7 +570,8 @@ def _confirmed_window_reset_recovery(
         return False
     if not usage_reset_confirmed(before=before, after=after):
         return False
-    if after.used_percent >= 100.0 or latest.used_percent >= 100.0:
+    latest_used_percent = usage_history_to_window_row(latest).used_percent
+    if after.used_percent >= 100.0 or latest_used_percent is None or latest_used_percent >= 100.0:
         return False
     if window != "primary" and _short_window_blocks_recovery(latest_by_window.get("primary"), account=account, now=now):
         return False

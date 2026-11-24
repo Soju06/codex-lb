@@ -18,13 +18,16 @@ from app.core.clients import usage as usage_client_module
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
-from app.core.usage.models import UsagePayload
+from app.core.usage.account_limits import AccountUsageLimitState
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.usage.refresh_scheduler import _select_long_window_entries
 from app.core.utils.shared_future import _WAITERS_ATTR, wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.mappers import evaluate_account_usage_limit
 from app.modules.usage.repository import UsageWindowWrite
 from app.modules.usage.updater import UsageUpdater
 
@@ -912,6 +915,205 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
         last_refresh=datetime.now(tz=timezone.utc),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_limit_enabled", [True, False])
+async def test_committed_snapshot_invalidates_selection_cache_only_for_enabled_usage_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    usage_limit_enabled: bool,
+) -> None:
+    account = _make_account("acc_limit_cache_bump", "workspace_limit_cache_bump")
+    account.usage_limit_enabled = usage_limit_enabled
+    account.usage_limit_percent = 50.0
+    repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(repo)
+    invalidations: list[bool] = []
+    monkeypatch.setattr(
+        get_account_selection_cache(),
+        "invalidate",
+        lambda *args, **kwargs: invalidations.append(True),
+    )
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=10.0, reset_at=int(time.time()) + 3600, limit_window_seconds=300
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert result.usage_written is True
+    assert invalidations == ([True] if usage_limit_enabled else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["recovery_error", "policy_cancel"])
+async def test_committed_limit_snapshot_invalidates_when_post_commit_work_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    account = _make_account("acc_limit_recovery_failure", "workspace_limit_recovery_failure")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(repo)
+    invalidations: list[bool] = []
+    monkeypatch.setattr(
+        get_account_selection_cache(),
+        "invalidate",
+        lambda *args, **kwargs: invalidations.append(True),
+    )
+    if interruption == "recovery_error":
+        monkeypatch.setattr(
+            updater,
+            "_recover_quota_status_from_usage",
+            AsyncMock(side_effect=RuntimeError("status recovery failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            updater,
+            "_usage_limit_enabled_now",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=80.0,
+                    reset_at=int(time.time()) + 3600,
+                    limit_window_seconds=300,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    expected_error = RuntimeError if interruption == "recovery_error" else asyncio.CancelledError
+    with pytest.raises(expected_error):
+        await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert repo.snapshot_calls
+    assert invalidations == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observation", ["measured", "null", "absent-window"])
+async def test_enable_during_refresh_persists_authoritative_observation_and_reinvalidates_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    observation: str,
+) -> None:
+    refresh_account = _make_account("acc_limit_enable_race", "workspace_limit_enable_race")
+    enabled_account = _make_account("acc_limit_enable_race", "workspace_limit_enable_race")
+    enabled_account.usage_limit_enabled = True
+    enabled_account.usage_limit_percent = 50.0
+    usage_repo = StubUsageRepository(return_rows=True)
+    await usage_repo.add_entry(
+        refresh_account.id,
+        10.0,
+        window="primary",
+        reset_at=int(time.time()) + 3600,
+        window_minutes=300,
+    )
+    accounts_repo = StubAccountsRepository()
+    accounts_repo.accounts_by_id[refresh_account.id] = refresh_account
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    fetch_started = asyncio.Event()
+    finish_fetch = asyncio.Event()
+    invalidations: list[str] = []
+    monkeypatch.setattr(
+        get_account_selection_cache(),
+        "invalidate",
+        lambda *args, **kwargs: invalidations.append("invalidated"),
+    )
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        fetch_started.set()
+        await finish_fetch.wait()
+        if observation == "measured":
+            rate_limit = RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=80.0,
+                    reset_at=int(time.time()) + 3600,
+                    limit_window_seconds=300,
+                )
+            )
+        elif observation == "null":
+            rate_limit = RateLimitPayload(primary_window=UsageWindow(used_percent=None))
+        else:
+            rate_limit = RateLimitPayload()
+        return UsagePayload(plan_type="plus", rate_limit=rate_limit)
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    refresh = asyncio.create_task(
+        updater._refresh_account(refresh_account, usage_account_id=refresh_account.chatgpt_account_id)
+    )
+    await fetch_started.wait()
+    accounts_repo.accounts_by_id[refresh_account.id] = enabled_account
+    get_account_selection_cache().invalidate()
+    finish_fetch.set()
+    result = await refresh
+
+    assert result.usage_written is True
+    assert invalidations == ["invalidated", "invalidated"]
+    written = usage_repo.snapshot_calls[-1].windows
+    assert len(written) == (3 if observation == "absent-window" else 1)
+    assert written[0].window == "primary"
+    if observation == "measured":
+        assert written[0].used_percent == pytest.approx(80.0)
+        assert written[0].window_minutes == 5
+    else:
+        assert written[0] == UsageWindowWrite(window="primary", used_percent=0.0)
+
+
+@pytest.mark.asyncio
+async def test_present_window_without_used_percent_persists_no_data_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc_limit_no_data", "workspace_limit_no_data")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(repo)
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=None,
+                    reset_at=int(time.time()) + 3600,
+                    limit_window_seconds=300,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert result.usage_written is True
+    assert len(repo.snapshot_calls) == 1
+    assert repo.snapshot_calls[0].windows == (
+        UsageWindowWrite(
+            window="primary",
+            used_percent=0.0,
+            reset_at=None,
+            window_minutes=None,
+        ),
     )
 
 
@@ -3466,7 +3668,7 @@ async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_miss
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate({})
 
-    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", stub_fetch_usage)
 
     usage_repo = StubUsageRepository(return_rows=True)
     updater = UsageUpdater(usage_repo, accounts_repo=None)
@@ -3476,6 +3678,37 @@ async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_miss
 
     assert refreshed is False
     assert len(usage_repo.entries) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["plus", "free"])
+async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_missing(monkeypatch, plan_type) -> None:
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate({})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_no_rate", "workspace_no_rate", email="no-rate@example.com")
+
+    acc.plan_type = plan_type
+    acc.usage_limit_enabled = True
+    acc.usage_limit_weekly_percent = 90
+    for window, minutes in [("primary", 10080 if plan_type == "free" else 300), ("secondary", 10080)]:
+        await usage_repo.add_entry(acc.id, 5, window=window, window_minutes=minutes, reset_at=int(time.time()) + 3600)
+    refreshed = await updater._refresh_account(acc, usage_account_id=acc.chatgpt_account_id)
+
+    assert refreshed.usage_written is True
+    state = evaluate_account_usage_limit(
+        acc,
+        primary=await usage_repo.latest_entry_for_account(acc.id, window="primary"),
+        secondary=await usage_repo.latest_entry_for_account(acc.id, window="secondary"),
+        monthly=await usage_repo.latest_entry_for_account(acc.id, window="monthly"),
+        refresh_interval_seconds=60,
+    )
+    assert state is AccountUsageLimitState.DATA_UNAVAILABLE
 
 
 @pytest.mark.asyncio

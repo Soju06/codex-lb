@@ -680,6 +680,39 @@ describe("buildWeeklyCreditPace", () => {
 });
 
 describe("buildDashboardView", () => {
+  it.each([
+    { primaryCap: null, weeklyCap: 1, weeklyRemaining: 7560, usable: 75.6, reserved: 149.4 },
+    { primaryCap: 50, weeklyCap: 1, weeklyRemaining: 7560, usable: 75.6, reserved: 149.4 },
+    { primaryCap: null, weeklyCap: null, weeklyRemaining: 75.6, usable: 75.6, reserved: 0 },
+    { primaryCap: 20, weeklyCap: null, weeklyRemaining: 100, usable: 45, reserved: 55 },
+    { primaryCap: 50, weeklyCap: 99, weeklyRemaining: 100, usable: 24.4, reserved: 75.6 },
+    { primaryCap: 50, weeklyCap: 99, weeklyRemaining: 0, usable: 0, reserved: 0 },
+  ])("separates consumed and reserved credits across both quota windows: %j", (fixture) => {
+    const summary = {
+      ...account({ accountId: "reserve", email: "reserve@example.test" }),
+      windowMinutesPrimary: 300, windowMinutesSecondary: 10080,
+      capacityCreditsPrimary: 225, capacityCreditsSecondary: 7560,
+      effectiveLimitPrimary: fixture.primaryCap, effectiveLimitSecondary: fixture.weeklyCap,
+      usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: fixture.weeklyRemaining / 75.6 },
+    };
+    const overview = createDashboardOverview({
+      accounts: [summary],
+      windows: {
+        primary: { windowKey: "primary", windowMinutes: 300, accounts: [
+          { accountId: "reserve", capacityCredits: 225, remainingCredits: 225, remainingPercentAvg: 100 },
+        ] },
+        secondary: { windowKey: "secondary", windowMinutes: 10080, accounts: [
+          { accountId: "reserve", capacityCredits: 7560, remainingCredits: fixture.weeklyRemaining,
+            remainingPercentAvg: fixture.weeklyRemaining / 75.6 },
+        ] },
+      },
+    });
+    const view = buildDashboardView(overview, [], false);
+    expect(view.primaryUsageItems[0].value).toBeCloseTo(fixture.usable);
+    expect(view.primaryUsageItems[0].reservedValue ?? 0).toBeCloseTo(fixture.reserved);
+    expect(view.primaryTotal).toBeCloseTo(fixture.usable);
+  });
+
   function serverWeeklyPace(overrides: Partial<WeeklyCreditPace> = {}): WeeklyCreditPace {
     return {
       totalFullCredits: 100_800,

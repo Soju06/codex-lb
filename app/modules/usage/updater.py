@@ -728,72 +728,87 @@ class UsageUpdater:
 
         rate_limit = payload.rate_limit
         if rate_limit is None:
-            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-            return AccountRefreshResult(usage_written=additional_synced)
-        # Treat both None and empty rate_limit (both windows absent) as
-        # additional-only to avoid falling through to window processing.
-        normalized_windows = usage_core.normalize_rate_limit_windows(
-            rate_limit.primary_window,
-            rate_limit.secondary_window,
-        )
-        primary = normalized_windows.primary
-        secondary = normalized_windows.secondary
-        monthly = normalized_windows.monthly
-        if primary is None and secondary is None:
-            if monthly is None:
-                additional_synced = (
-                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-                )
-                return AccountRefreshResult(usage_written=additional_synced)
-        if primary is None and secondary is None and monthly is None:
+            primary = secondary = monthly = None
+        else:
+            normalized_windows = usage_core.normalize_rate_limit_windows(
+                rate_limit.primary_window,
+                rate_limit.secondary_window,
+            )
+            primary = normalized_windows.primary
+            secondary = normalized_windows.secondary
+            monthly = normalized_windows.monthly
+        standard_data_unavailable = primary is None and secondary is None and monthly is None
+        # No-data placeholders supersede older measurements only for an enabled
+        # policy, so it fails closed. Re-read after the fetch in case the policy
+        # changed while waiting; disabled accounts keep earlier rows.
+        write_placeholders = (
+            standard_data_unavailable
+            or any(window is not None and window.used_percent is None for window in (primary, secondary, monthly))
+        ) and await self._usage_limit_enabled_now(account)
+        if standard_data_unavailable and not write_placeholders:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
-        if primary and primary.used_percent is not None:
-            snapshot_windows.append(
-                UsageWindowWrite(
-                    window="primary",
-                    used_percent=float(primary.used_percent),
-                    reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(primary.limit_window_seconds),
+        if standard_data_unavailable:
+            snapshot_windows.extend(
+                _unavailable_standard_window_writes(
+                    account,
                     credits_has=credits_has,
                     credits_unlimited=credits_unlimited,
                     credits_balance=credits_balance,
                 )
             )
 
-        if secondary and secondary.used_percent is not None:
-            snapshot_windows.append(
-                UsageWindowWrite(
-                    window="secondary",
-                    used_percent=float(secondary.used_percent),
-                    reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(secondary.limit_window_seconds),
+        for window, usage_window in (("primary", primary), ("secondary", secondary), ("monthly", monthly)):
+            if usage_window is not None and (usage_window.used_percent is not None or write_placeholders):
+                carries_credits = window != "secondary"
+                snapshot_windows.append(
+                    _standard_usage_window_write(
+                        window=window,
+                        usage_window=usage_window,
+                        now_epoch=now_epoch,
+                        credits_has=credits_has if carries_credits else None,
+                        credits_unlimited=credits_unlimited if carries_credits else None,
+                        credits_balance=credits_balance if carries_credits else None,
+                    )
                 )
-            )
-
-        if monthly and monthly.used_percent is not None:
-            snapshot_windows.append(
-                UsageWindowWrite(
-                    window="monthly",
-                    used_percent=float(monthly.used_percent),
-                    reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(monthly.limit_window_seconds),
-                    credits_has=credits_has,
-                    credits_unlimited=credits_unlimited,
-                    credits_balance=credits_balance,
-                )
-            )
 
         entries = await self._usage_repo.add_account_snapshot(
             account.id,
             snapshot_windows,
         )
-        usage_written = any(_usage_entry_written(entry) for entry in entries)
-        await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        return AccountRefreshResult(usage_written=usage_written)
+        usage_written = bool(entries)
+        # The telemetry commit already succeeded: invalidate cached routing
+        # eligibility unless a completed post-commit read shows the policy is
+        # disabled, even if that read or the recovery write fails or is cancelled.
+        invalidate_selection = usage_written
+        try:
+            if usage_written:
+                invalidate_selection = await self._usage_limit_enabled_now(account)
+            await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
+        finally:
+            if invalidate_selection:
+                get_account_selection_cache().invalidate()
+        additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+        return AccountRefreshResult(usage_written=usage_written or (standard_data_unavailable and additional_synced))
+
+    async def _usage_limit_enabled_now(self, account: Account) -> bool:
+        if self._accounts_repo is None:
+            return bool(account.usage_limit_enabled)
+        try:
+            current = await self._accounts_repo.get_by_id_fresh(account.id)
+        except Exception:
+            # Fail toward invalidation so cached routing cannot outlive a concurrent enable.
+            logger.warning(
+                "Usage refresh could not re-read account policy after snapshot account_id=%s request_id=%s",
+                account.id,
+                get_request_id(),
+                exc_info=True,
+            )
+            return True
+        return current is not None and bool(current.usage_limit_enabled)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
@@ -1175,8 +1190,59 @@ async def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
     await _plan_downgrade_observation_store().clear(account_id)
 
 
-def _usage_entry_written(entry: UsageHistory | None) -> bool:
-    return entry is not None
+def _standard_usage_window_write(
+    *,
+    window: str,
+    usage_window: UsageWindow,
+    now_epoch: int,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
+) -> UsageWindowWrite:
+    used_percent = usage_window.used_percent
+    if used_percent is None:
+        # UsageHistory.used_percent is non-nullable. Persist the established
+        # no-data placeholder shape so this successful fetch supersedes an
+        # older measured row while hard usage limits still fail closed.
+        return UsageWindowWrite(
+            window=window,
+            used_percent=0.0,
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        )
+    return UsageWindowWrite(
+        window=window,
+        used_percent=float(used_percent),
+        reset_at=_reset_at(usage_window.reset_at, usage_window.reset_after_seconds, now_epoch),
+        window_minutes=_window_minutes(usage_window.limit_window_seconds),
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
+
+
+def _unavailable_standard_window_writes(
+    account: Account,
+    *,
+    credits_has: bool | None,
+    credits_unlimited: bool | None,
+    credits_balance: float | None,
+) -> list[UsageWindowWrite]:
+    # An entirely unavailable snapshot must also replace old weekly data,
+    # including weekly-only observations persisted in the primary slot.
+    window = "monthly" if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None else "primary"
+    slots = ("primary", "secondary", "monthly")
+    return [
+        UsageWindowWrite(
+            window=window,
+            used_percent=0.0,
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        ),
+        *(UsageWindowWrite(window=slot, used_percent=0.0) for slot in slots if slot != window),
+    ]
 
 
 def _window_has_available_quota(window: UsageWindow) -> bool:

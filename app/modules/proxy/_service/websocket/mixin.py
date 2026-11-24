@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -27,6 +27,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -209,6 +210,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_previous_response_owner_unavailable_error as _http_bridge_previous_response_owner_unavailable_error,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -291,6 +295,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
+)
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _load_owner_authorization,
+    _owner_authorization_error,
 )
 from app.modules.proxy._service.http_bridge.request_submit import (
     _text_with_account_installation_id as _text_with_account_installation_id,
@@ -460,6 +468,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_eligibility import account_access_token_expires_at
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -533,6 +542,7 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS = 5.0
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -1360,6 +1370,23 @@ async def _process_upstream_websocket_transport_end(
             downstream_activity,
         )
     return True
+
+
+async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> None:
+    owner_authorization = await _load_owner_authorization(
+        proxy,
+        account.id,
+        timeout_seconds=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+        surface="WebSocket",
+    )
+    access_token_expires_at = (
+        account_access_token_expires_at(account, proxy._encryptor)
+        if owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
+        else None
+    )
+    error = _owner_authorization_error(owner_authorization, access_token_expires_at)
+    if error is not None:
+        raise error
 
 
 class _WebSocketMixin:
@@ -2656,14 +2683,22 @@ class _WebSocketMixin:
                     )
 
                 try:
-                    if (
+                    is_response_create = (
                         text_data is not None
                         and request_state is not None
                         and payload is not None
                         and account is not None
                         and _is_websocket_response_create(payload)
+                    )
+                    if (
+                        is_response_create
+                        and request_state is not None
+                        and account is not None
                         and request_state.account_response_create_lease is None
                     ):
+                        # Reject a blocked owner before lease admission; the
+                        # later check covers policy changes during that await.
+                        await _authorize_websocket_dispatch_owner(proxy, account)
                         # Account-cap spillover belongs to connect selection.
                         # Once this shared socket exists, a late create-cap race
                         # rejects only this frame; switching/retiring the socket
@@ -2679,11 +2714,10 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                     ):
                         text_data = _websocket_text_with_account_installation_id(text_data, account)
                         if request_state.fresh_upstream_request_text is not None:
@@ -2695,13 +2729,81 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
+                        await _authorize_websocket_dispatch_owner(proxy, account)
+                        # The reader can retire the socket or finalize an
+                        # unsent request while authorization awaits. Sample
+                        # reconnect and claim dispatch under the same lock as
+                        # expiry, with no further await before send_text().
+                        request_budget_seconds = _facade()._stream_request_budget_seconds(
+                            runtime_settings, request_transport="websocket"
+                        )
+                        dispatch_owner_bound = False
+                        async with pending_lock:
+                            dispatch_requires_reconnect = (
+                                upstream_control is not None and upstream_control.reconnect_requested
+                            )
+                            if not dispatch_requires_reconnect:
+                                dispatch_pending = request_state in pending_requests
+                                dispatch_expired = (
+                                    dispatch_pending
+                                    and clock.monotonic() >= request_state.started_at + request_budget_seconds
+                                )
+                                if dispatch_pending and not dispatch_expired:
+                                    dispatch_owner_bound = _bind_websocket_request_dispatch_owner(
+                                        request_state,
+                                        account_id=account.id,
+                                        exact_request_text=text_data,
+                                    )
+                                    if dispatch_owner_bound:
+                                        request_state.response_create_sent_at = clock.monotonic()
+                        if not dispatch_requires_reconnect:
+                            if not dispatch_pending:
+                                # Admission may have acquired a lease after the
+                                # reader finalized this unsent frame.
+                                retired_create_lease_release_task = scheduler_for(proxy).create_task(
+                                    proxy._release_request_state_account_response_create_lease(request_state),
+                                    name="proxy-websocket-finalization-late-create-lease",
+                                )
+                                _track_websocket_owned_task(proxy, retired_create_lease_release_task)
+                                await asyncio.shield(retired_create_lease_release_task)
+                                retired_create_lease_release_task = None
+                                continue
+                            if dispatch_expired:
+                                expired_timeout = _websocket_receive_timeout_for_pending_requests(
+                                    (request_state.started_at,),
+                                    proxy_request_budget_seconds=request_budget_seconds,
+                                    stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                                    now=clock.monotonic(),
+                                )
+                                assert expired_timeout is not None
+                                await proxy._fail_expired_pending_websocket_requests(
+                                    account_id_value=account.id,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    request_budget_seconds=request_budget_seconds,
+                                    error_code=expired_timeout.error_code,
+                                    error_message=expired_timeout.error_message,
+                                    api_key=api_key,
+                                    websocket=websocket,
+                                    client_send_lock=client_send_lock,
+                                    response_create_gate=response_create_gate,
+                                )
+                                continue
+                            if not dispatch_owner_bound:
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "previous_response_owner_unavailable",
+                                        "Request payload owner account is unavailable; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
-                        and _is_websocket_response_create(payload)
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at
@@ -2779,20 +2881,8 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
-                            if account is None or not _bind_websocket_request_dispatch_owner(
-                                request_state,
-                                account_id=account.id,
-                                exact_request_text=text_data,
-                            ):
-                                raise ProxyResponseError(
-                                    502,
-                                    openai_error(
-                                        "previous_response_owner_unavailable",
-                                        "Request payload owner account is unavailable; retry later.",
-                                        error_type="server_error",
-                                    ),
-                                )
-                            request_state.response_create_sent_at = clock.monotonic()
+                            if account is None:
+                                raise _http_bridge_previous_response_owner_unavailable_error()
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
@@ -2801,26 +2891,79 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
-                        await proxy._release_websocket_request_state_reservation(request_state)
+
+                        async def finalize_rejection(state: _WebSocketRequestState, owns_rejection: bool) -> None:
+                            if not owns_rejection:
+                                # The reader already settled and reported this frame.
+                                await proxy._release_request_state_account_response_create_lease(state)
+                                return
+                            await _release_websocket_response_create_ownership_for_cleanup(state, response_create_gate)
+                            settlement_failed = False
+                            try:
+                                await proxy._release_websocket_request_state_reservation(state)
+                            except Exception:
+                                settlement_failed = True
+                                _facade().logger.warning(
+                                    "Failed to release rejected websocket reservation request_id=%s",
+                                    state.request_log_id or state.request_id,
+                                    exc_info=True,
+                                )
+                            try:
+                                try:
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=account.id if account is not None else None,
+                                        api_key=api_key,
+                                        request_state=state,
+                                        error_code=error_code or "upstream_error",
+                                        error_message=error_message,
+                                    )
+                                except Exception:
+                                    _facade().logger.warning(
+                                        "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                        state.request_log_id or state.request_id,
+                                        exc_info=True,
+                                    )
+                                await proxy._emit_websocket_terminal_error(
+                                    websocket,
+                                    client_send_lock=client_send_lock,
+                                    request_state=state,
+                                    error_code=error_code or "upstream_error",
+                                    error_message=error_message,
+                                    error_type=error_type,
+                                    error_param=error.param_state if error else None,
+                                    downstream_activity=downstream_activity,
+                                )
+                            finally:
+                                if settlement_failed:
+                                    # This registered task retains the retry even
+                                    # after scope cleanup's bounded wait expires.
+                                    try:
+                                        await proxy._release_websocket_request_state_reservation(state)
+                                    except Exception:
+                                        _facade().logger.warning(
+                                            "Failed to retry rejected websocket reservation settlement request_id=%s",
+                                            state.request_log_id or state.request_id,
+                                            exc_info=True,
+                                        )
+
                         if request_state_registered:
-                            async with pending_lock:
-                                if request_state in pending_requests:
-                                    pending_requests.remove(request_state)
-                            await _release_websocket_response_create_gate(
-                                request_state,
-                                response_create_gate,
-                                scheduler=scheduler_for(proxy),
+                            await pending_lock.acquire()
+                        try:
+                            rejection_owned = not request_state_registered or request_state in pending_requests
+                            if request_state_registered and rejection_owned:
+                                pending_requests.remove(request_state)
+                            request_state_failure_task = scheduler_for(proxy).create_task(
+                                finalize_rejection(request_state, rejection_owned),
+                                name="proxy-websocket-finalization-dispatch-rejection",
                             )
-                        await proxy._emit_websocket_terminal_error(
-                            websocket,
-                            client_send_lock=client_send_lock,
-                            request_state=request_state,
-                            error_code=error_code or "upstream_error",
-                            error_message=error_message,
-                            error_type=error_type,
-                            error_param=error.param_state if error else None,
-                            downstream_activity=downstream_activity,
-                        )
+                            _track_websocket_owned_task(proxy, request_state_failure_task)
+                        finally:
+                            if request_state_registered:
+                                pending_lock.release()
+                        # The removed frame is owned before the next cancellation
+                        # point; scope cleanup and lifespan draining can await it.
+                        await asyncio.shield(request_state_failure_task)
+                        request_state_failure_task = None
                     continue
                 except UpstreamWebSocketTransportError as exc:
                     # send_str/send_bytes may fail after handing bytes to the
@@ -4107,7 +4250,7 @@ class _WebSocketMixin:
             )
             return None
         if require_preferred_account and preferred_account_id is not None:
-            if _facade()._is_local_account_cap_code(error_code):
+            if error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE or _facade()._is_local_account_cap_code(error_code):
                 status_code, error_payload = selection_failure_response(selection)
                 await proxy._emit_websocket_connect_failure(
                     websocket,
@@ -6353,26 +6496,17 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         now = clock_for(proxy).monotonic()
-        async with pending_lock:
-            expired_requests = [
-                request_state
-                for request_state in list(pending_requests)
-                if now >= request_state.started_at + request_budget_seconds
-            ]
-            for request_state in expired_requests:
-                pending_requests.remove(request_state)
-        if not expired_requests:
-            return
         await proxy._fail_pending_websocket_requests(
             account_id_value=account_id_value,
-            pending_requests=deque(expired_requests),
-            pending_lock=anyio.Lock(),
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
             error_code=error_code,
             error_message=error_message,
             api_key=api_key,
             websocket=websocket,
             client_send_lock=client_send_lock,
             response_create_gate=response_create_gate,
+            claim_pending_request=lambda state: now >= state.started_at + request_budget_seconds,
         )
 
     async def _finalize_websocket_request_state(
@@ -6892,14 +7026,20 @@ class _WebSocketMixin:
         status: str = "error",
         penalize_account: bool = True,
         suppress_sequenced_downstream_errors: bool = False,
+        claim_pending_request: Callable[[_WebSocketRequestState], bool] | None = None,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         finalization_task: asyncio.Task[bool] | None = None
         await pending_lock.acquire()
         try:
-            remaining = list(pending_requests)
-            pending_requests.clear()
+            if claim_pending_request is None:
+                remaining = list(pending_requests)
+                pending_requests.clear()
+            else:
+                remaining = [state for state in pending_requests if claim_pending_request(state)]
+                for state in remaining:
+                    pending_requests.remove(state)
             if remaining:
                 scheduler = scheduler_for(proxy)
                 finalization_task = scheduler.create_task(
@@ -6922,9 +7062,8 @@ class _WebSocketMixin:
                 )
                 _track_websocket_owned_task(proxy, finalization_task)
         finally:
-            # anyio.Lock.release() is synchronous: once the shared deque is
-            # emptied, the registered child is published before another
-            # cancellation point can strand the claimed request states.
+            # The registered child owns the removed frames before the next
+            # cancellation point. anyio.Lock.release() is synchronous.
             pending_lock.release()
 
         if finalization_task is None:

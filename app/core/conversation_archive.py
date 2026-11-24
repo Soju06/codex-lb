@@ -5,10 +5,12 @@ import base64
 import contextlib
 import errno
 import gzip
+import hashlib
 import json
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 import zlib
@@ -17,6 +19,8 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+
+import zstandard
 
 from app.core.config.inheritable import resolve_inheritable
 from app.core.config.settings import Settings, get_settings
@@ -59,6 +63,24 @@ _DISK_PRESSURE_LAST_WARNING_AT = -_DISK_PRESSURE_WARNING_INTERVAL_SECONDS
 _DISK_PRESSURE_LOCK = threading.Lock()
 _ARCHIVE_DIR_MODE = 0o700
 _ARCHIVE_FILE_MODE = 0o600
+_GZIP_SUFFIX = ".jsonl.gz"
+_ZSTD_SUFFIX = ".jsonl.zst"
+_HOUR_STEM_FORMAT = "%Y-%m-%dT%H"
+# 128 MiB window: repeated conversation context across requests dedupes inside
+# it, and it is the default decoder limit, so ``zstd -d`` and python readers
+# need no ``--long`` / ``max_window_size`` override.
+_ZSTD_LEVEL = 9
+_ZSTD_WINDOW_LOG = 27
+_ZSTD_CHUNK_BYTES = 1024 * 1024
+# A closed hour is only sealed once nothing touched it for this long, so a
+# replica with a slightly lagging clock can still finish its last append.
+_SEAL_QUIET_SECONDS = 300.0
+# Margin added to a quiet-period retry timer so the file is surely past the quiet period.
+_SEAL_RETRY_SLACK_SECONDS = 1.0
+_SEAL_LOCK = threading.Lock()
+_SEALED_UP_TO: dict[Path, str] = {}
+# Unreadable gzip files stay as they are; remember them so each process warns once.
+_UNSEALABLE: set[Path] = set()
 
 
 # M5 conversation archive: ``dashboard_settings`` column, ``Settings`` field and
@@ -241,7 +263,7 @@ def _redact_headers(headers: Mapping[str, str] | None) -> dict[str, str] | None:
 def _archive_path() -> Path:
     settings = get_settings()
     directory = Path(getattr(settings, "conversation_archive_dir")).expanduser()
-    filename = f"{datetime.now(UTC).strftime('%Y-%m-%dT%H')}.jsonl.gz"
+    filename = f"{datetime.now(UTC).strftime(_HOUR_STEM_FORMAT)}{_GZIP_SUFFIX}"
     return directory / filename
 
 
@@ -360,6 +382,9 @@ def _append_records(items: Sequence[tuple[Path, Mapping[str, Any], int]]) -> Non
                     _pause_archive_for_disk_pressure(path, exc)
                     return
                 logger.warning("Failed to append conversation archive record", exc_info=True)
+
+    for path in grouped:
+        _schedule_seal_of_closed_hours(path)
 
 
 def _serialized_record_size(record: Mapping[str, Any]) -> int:
@@ -546,6 +571,213 @@ def _gzip_archive_is_readable(path: Path) -> bool:
     except (EOFError, gzip.BadGzipFile, zlib.error):
         return False
     return True
+
+
+def _schedule_seal_of_closed_hours(active_path: Path, *, retry: bool = False) -> None:
+    """Seal closed hours in the background, once per hour rollover of ``active_path``.
+
+    A pass that skipped a closed hour only because it was still inside the quiet
+    period re-arms itself with a timer for the moment that hour becomes
+    eligible, so it is sealed even when no later write arrives. ``retry`` marks
+    that timer path: it bypasses the once-per-hour suppression and, on
+    ``_SEAL_LOCK`` contention, re-arms instead of dropping the retry.
+    """
+    directory = active_path.parent
+    if not retry and _SEALED_UP_TO.get(directory) == active_path.name:
+        return
+    if not _SEAL_LOCK.acquire(blocking=False):
+        if retry:
+            _arm_seal_retry(active_path, _SEAL_RETRY_SLACK_SECONDS)
+        return
+    _SEALED_UP_TO[directory] = active_path.name
+
+    def run() -> None:
+        retry_in: float | None = None
+        try:
+            _sealed, retry_in = _seal_pass(
+                directory, active_stem=active_path.name.removesuffix(_GZIP_SUFFIX), quiet_seconds=_SEAL_QUIET_SECONDS
+            )
+        except Exception:
+            logger.warning("Failed to seal closed conversation archive hours", exc_info=True)
+        finally:
+            _SEAL_LOCK.release()
+        if retry_in is not None:
+            _arm_seal_retry(active_path, retry_in + _SEAL_RETRY_SLACK_SECONDS)
+
+    threading.Thread(target=run, name="conversation-archive-sealer", daemon=True).start()
+
+
+def _arm_seal_retry(active_path: Path, delay: float) -> None:
+    timer = threading.Timer(delay, _schedule_seal_of_closed_hours, args=(active_path,), kwargs={"retry": True})
+    timer.daemon = True
+    timer.start()
+
+
+def seal_closed_archive_hours(directory: Path, *, active_stem: str, quiet_seconds: float | None = None) -> int:
+    """Re-encode closed hourly ``.jsonl.gz`` files as ``.jsonl.zst``; return the count sealed."""
+    sealed, _retry_in = _seal_pass(
+        directory,
+        active_stem=active_stem,
+        quiet_seconds=_SEAL_QUIET_SECONDS if quiet_seconds is None else quiet_seconds,
+    )
+    return sealed
+
+
+def _seal_pass(directory: Path, *, active_stem: str, quiet_seconds: float) -> tuple[int, float | None]:
+    """One sealing scan; also return seconds until the soonest quiet-period skip becomes eligible."""
+    sealed = 0
+    retry_in: float | None = None
+    now = time.time()
+    for path in sorted(directory.glob(f"*{_GZIP_SUFFIX}")):
+        stem = path.name.removesuffix(_GZIP_SUFFIX)
+        if stem >= active_stem or path in _UNSEALABLE:
+            continue
+        try:
+            idle = now - path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if idle < quiet_seconds:
+            remaining = quiet_seconds - idle
+            retry_in = remaining if retry_in is None else min(retry_in, remaining)
+            continue
+        if seal_gzip_archive(path):
+            sealed += 1
+    return sealed, retry_in
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def _read_exact(reader: Any, size: int) -> bytes:
+    parts: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = reader.read(remaining)
+        if not chunk:
+            break
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(parts)
+
+
+def zstd_is_prefix_of_gzip(gzip_path: Path, zstd_path: Path) -> bool:
+    """Whether the decompressed ``zstd_path`` content is a leading prefix of the decompressed ``gzip_path``.
+
+    Both files present for one hour means either an interrupted format switch
+    (the gzip holds everything the zstd holds, so the zstd is a prefix of it) or
+    late appends that recreated the gzip after sealing (disjoint content that
+    must be kept as well). Raises ``zstandard.ZstdError`` / gzip errors when a
+    file is unreadable; callers then keep both files.
+    """
+    with (
+        gzip.open(gzip_path, "rb") as gz,
+        zstd_path.open("rb") as raw,
+        zstandard.ZstdDecompressor().stream_reader(raw, read_across_frames=True) as zs,
+    ):
+        while True:
+            expected = _read_exact(zs, _ZSTD_CHUNK_BYTES)
+            actual = _read_exact(gz, len(expected))
+            if actual != expected:
+                return False
+            if len(expected) < _ZSTD_CHUNK_BYTES:
+                return True
+
+
+def seal_gzip_archive(path: Path) -> bool:
+    """Re-encode one gzip archive file as zstd and drop the original only after a content check.
+
+    Invariants (losing archive records is the one unacceptable outcome):
+
+    * The decompressed bytes of the new file are hashed and compared with the
+      decompressed bytes of the gzip original before the original is removed.
+    * The final swap (``replace`` + ``unlink``) runs under ``_WRITE_LOCK`` and only
+      if the gzip file still has the size/mtime it had when reading started; an
+      append that landed meanwhile keeps the gzip file and the next pass seals
+      it again.
+    * If a ``.jsonl.zst`` for the hour already exists (interrupted switch, or
+      late appends recreated the gzip), it is never overwritten with less: when
+      it is a prefix of the gzip content the new file replaces it, otherwise the
+      gzip content is appended to it as one more zstd frame.
+    * A corrupt or unreadable original or any mismatch leaves the gzip file untouched.
+    """
+    target = path.with_name(path.name.removesuffix(_GZIP_SUFFIX) + _ZSTD_SUFFIX)
+    partial = path.with_name(f".{target.name}.partial")
+    try:
+        target_signature: tuple[int, int] | None = None
+        keep_target_content = False
+        if target.exists():
+            try:
+                keep_target_content = not zstd_is_prefix_of_gzip(path, target)
+            except (EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
+                _UNSEALABLE.add(path)
+                logger.warning(
+                    "Cannot reconcile conversation archive gzip with existing zstd; keeping both",
+                    extra={"archive_file": str(path)},
+                )
+                return False
+            target_signature = _file_signature(target)
+        source_signature = _file_signature(path)
+        source_digest = hashlib.sha256()
+        params = zstandard.ZstdCompressionParameters.from_level(
+            _ZSTD_LEVEL, window_log=_ZSTD_WINDOW_LOG, enable_ldm=True, threads=-1
+        )
+        compressor = zstandard.ZstdCompressor(compression_params=params)
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _ARCHIVE_FILE_MODE)
+        with os.fdopen(fd, "wb") as out:
+            if keep_target_content:
+                with target.open("rb") as existing:
+                    shutil.copyfileobj(existing, out, _ZSTD_CHUNK_BYTES)
+                with (
+                    target.open("rb") as existing,
+                    zstandard.ZstdDecompressor().stream_reader(existing, read_across_frames=True) as reader,
+                ):
+                    for chunk in iter(lambda: reader.read(_ZSTD_CHUNK_BYTES), b""):
+                        source_digest.update(chunk)
+            with gzip.open(path, "rb") as source:
+                with compressor.stream_writer(out, closefd=False) as writer:
+                    for chunk in iter(lambda: source.read(_ZSTD_CHUNK_BYTES), b""):
+                        source_digest.update(chunk)
+                        writer.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        if _zstd_content_digest(partial) != source_digest.hexdigest():
+            logger.warning(
+                "Sealed conversation archive failed verification; keeping gzip file", extra={"archive_file": str(path)}
+            )
+            partial.unlink(missing_ok=True)
+            return False
+        with _WRITE_LOCK:
+            unchanged = _file_signature(path) == source_signature and (
+                _file_signature(target) == target_signature if target_signature is not None else not target.exists()
+            )
+            if not unchanged:
+                logger.info(
+                    "Conversation archive changed while sealing; keeping gzip file", extra={"archive_file": str(path)}
+                )
+                partial.unlink(missing_ok=True)
+                return False
+            partial.replace(target)
+            path.unlink()
+        return True
+    except (EOFError, gzip.BadGzipFile, zlib.error, zstandard.ZstdError):
+        _UNSEALABLE.add(path)
+        logger.warning("Cannot seal unreadable conversation archive file", extra={"archive_file": str(path)})
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.warning("Failed to seal conversation archive file", extra={"archive_file": str(path)}, exc_info=True)
+    partial.unlink(missing_ok=True)
+    return False
+
+
+def _zstd_content_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh, zstandard.ZstdDecompressor().stream_reader(fh, read_across_frames=True) as reader:
+        for chunk in iter(lambda: reader.read(_ZSTD_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stop_writer() -> None:

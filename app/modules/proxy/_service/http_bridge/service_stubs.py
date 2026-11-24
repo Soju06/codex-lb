@@ -219,6 +219,10 @@ def _responses_request_contains_input_image(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_responses_request_contains_input_image")(*args, **kwargs)
 
 
+def _responses_request_requires_image_bridge_bypass(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_responses_request_requires_image_bridge_bypass")(*args, **kwargs)
+
+
 def _responses_request_uses_image_generation(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_responses_request_uses_image_generation")(*args, **kwargs)
 

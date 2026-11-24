@@ -320,6 +320,7 @@ class StickySelectionOwner(Protocol):
         initial_preferred_account_id: str | None,
         preserve_existing_mapping_on_fallback: bool,
         preserve_reason_request_local: bool = False,
+        pinned_grace_blocked: bool = False,
         traffic_class: TrafficClass,
         ignore_standard_quota: bool,
         allow_usage_exhaustion_error: bool = True,
@@ -841,6 +842,26 @@ async def run_sticky_selection_path(
                     now=owner._clock.time(),
                 )
                 selection_states = response_create_states or selection_states
+            grace_deadline = selection_now + _STICKY_GRACE_PERIOD_SECONDS
+            pinned_grace_blocked = (
+                lease_kind is not None
+                and not hard_sticky
+                and not reallocate_sticky
+                and (not bare_session_key or cap_spillover_allowed)
+                and isinstance(sticky_existing_account_id, str)
+                and any(
+                    state.account_id == sticky_existing_account_id
+                    and state.status == AccountStatus.RATE_LIMITED
+                    and state.reset_at is not None
+                    and state.reset_at <= grace_deadline
+                    and (state.cooldown_until is None or state.cooldown_until <= grace_deadline)
+                    and not state.usage_limit_state.blocks_account_use
+                    for state in selection_states
+                )
+                and not owner._account_lease_allowed_locked(
+                    sticky_existing_account_id, kind=lease_kind, caps=caps, stream_reserve_slots=stream_reserve_slots
+                )
+            )
             # Cap spillover is request-local: the mapping is preserved so the
             # session returns to its owner once the cap clears. Overload
             # isolation is request-local for the same reason (see
@@ -871,7 +892,10 @@ async def run_sticky_selection_path(
                     # preference, so a caller cannot waive it.
                     and not reallocate_sticky
                     and any(state.account_id == sticky_existing_account_id for state in states)
-                    and not any(state.account_id == sticky_existing_account_id for state in selection_states)
+                    and (
+                        pinned_grace_blocked
+                        or not any(state.account_id == sticky_existing_account_id for state in selection_states)
+                    )
                 )
             )
             preserve_existing_mapping = preserve_reason_request_local or (
@@ -1057,6 +1081,7 @@ async def run_sticky_selection_path(
                         ),
                         preserve_existing_mapping_on_fallback=preserve_existing_mapping,
                         preserve_reason_request_local=preserve_reason_request_local,
+                        pinned_grace_blocked=pinned_grace_blocked,
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
@@ -1071,11 +1096,16 @@ async def run_sticky_selection_path(
                         result.account is None
                         and result.error_code is None
                         and lease_kind is not None
-                        and len(selection_states) < len(states)
-                        and any(
-                            state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
-                            for state in states
-                            if state not in selection_states
+                        and (
+                            pinned_grace_blocked
+                            or (
+                                len(selection_states) < len(states)
+                                and any(
+                                    state.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                                    for state in states
+                                    if state not in selection_states
+                                )
+                            )
                         )
                     ):
                         selection_error_code = _account_cap_error_code(lease_kind)
@@ -1115,7 +1145,12 @@ async def run_sticky_selection_path(
                 traffic_class=traffic_class,
                 now=owner._clock.time(),
             )
-            if should_reserve_probe and probing_result_requires_reservation:
+            if should_reserve_probe and probing_result_requires_reservation and seed_initialization_pending:
+                # A reversible probe write cannot publish an immutable seed.
+                # Retry without discretionary probes to initialize both rows.
+                suppress_recovery_probe_candidates = True
+                probe_reservation_invalidated = True
+            elif should_reserve_probe and probing_result_requires_reservation:
                 # Sticky persistence happens outside the runtime lock.
                 # Delay the reversible reservation until after sticky
                 # selection proves we are not simply retaining a
@@ -1592,6 +1627,7 @@ async def _select_with_stickiness(
     initial_preferred_account_id: str | None = None,
     preserve_existing_mapping_on_fallback: bool = False,
     preserve_reason_request_local: bool = False,
+    pinned_grace_blocked: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     allow_usage_exhaustion_error: bool = True,
@@ -1977,7 +2013,7 @@ async def _select_with_stickiness(
             # A shallow copy is used so the time-advanced selection does
             # not mutate the original state (which is later synced to DB
             # by _sync_state for all accounts).
-            if not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
+            if not pinned_grace_blocked and not reallocate_sticky and pinned.status == AccountStatus.RATE_LIMITED:
                 grace_copy = replace(pinned)
                 grace_result = select_account(
                     [grace_copy],

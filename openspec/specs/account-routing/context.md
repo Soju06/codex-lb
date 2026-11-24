@@ -185,6 +185,11 @@ first token (multiplier 0.5), its sol weight would be 0.5, not 0.3.
   waits for the write result before cleanup considers restoring the prior row.
   Restoration also checks that the provisional owner and timestamp are current
   and that the row still represents live continuity.
+- A first thread that needs a process seed defers a discretionary probe while a
+  healthy account can serve the request. The ordinary write binds the thread
+  and inserts the seed together.
+- Rate-limit grace can keep an under-cap soft owner just before its reset. At
+  capacity, a spillable request can use a sibling while retaining its affinity.
 - A failed real request can drain the account again through the ordinary error
   path. Recovery never permits replay after downstream output is visible.
 - Restarting a replica clears advisory health as before; persisted account

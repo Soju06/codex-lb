@@ -2393,9 +2393,7 @@ async def test_sticky_probe_reservation_restores_affinity_after_repeated_commit_
 
 
 @pytest.mark.asyncio
-async def test_provisional_recovery_probe_does_not_publish_process_seed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_first_thread_defers_recovery_probe_until_process_seed_is_initialized() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     healthy = _make_account("acc-probe-seed-healthy")
     probing = _make_account("acc-probe-seed-probing")
@@ -2426,8 +2424,6 @@ async def test_provisional_recovery_probe_does_not_publish_process_seed(
         version=37,
         health_version=13,
     )
-    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", lambda *args, **kwargs: False)
-
     selected = await balancer.select_account(
         sticky_key="thread-after-probe-loss",
         sticky_kind=StickySessionKind.PROMPT_CACHE,
@@ -2443,6 +2439,7 @@ async def test_provisional_recovery_probe_does_not_publish_process_seed(
     assert selected.account is not None
     assert selected.account.id == healthy.id
     assert selected.lease is not None
+    assert balancer._runtime[probing.id].last_selected_at == 0.0
     assert sticky_repo.account_ids_by_key == {
         "process-seed-after-probe-loss": healthy.id,
         "thread-after-probe-loss": healthy.id,
@@ -3197,6 +3194,42 @@ def _thread_row_kwargs(
         "routing_strategy": "usage_weighted",
         "lease_kind": lease_kind,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capped", [False, True], ids=["under-cap", "at-cap"])
+@pytest.mark.parametrize("bare_session", [False, True], ids=["prompt-cache", "bare-session"])
+async def test_rate_limit_grace_respects_soft_owner_stream_cap(capped: bool, bare_session: bool) -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("grace-cap-spill")
+    assert alternate is not None
+    owner.status = AccountStatus.RATE_LIMITED
+    owner.reset_at = int(balancer._clock.time()) + 5
+    raw_session = "grace-cap-process"
+    key = _codex_session_selection_key(raw_session) if bare_session else "grace-cap-thread"
+    sticky_repo.account_ids_by_key = {key: owner.id}
+    caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=1)
+    lease = await balancer.acquire_account_lease(owner.id, kind="stream") if capped else None
+
+    try:
+        selected = await balancer.select_account(
+            sticky_key=key,
+            sticky_kind=StickySessionKind.CODEX_SESSION if bare_session else StickySessionKind.PROMPT_CACHE,
+            sticky_source="session_header" if bare_session else None,
+            legacy_sticky_key=raw_session if bare_session else None,
+            sticky_max_age_seconds=None if bare_session else 600,
+            spill_bare_session_on_account_cap=bare_session,
+            routing_strategy="usage_weighted",
+            lease_kind="stream",
+            concurrency_caps=caps,
+        )
+        try:
+            assert selected.account is not None
+            assert selected.account.id == (alternate.id if capped else owner.id)
+            assert sticky_repo.account_ids_by_key == {key: owner.id}
+        finally:
+            await balancer.release_account_lease(selected.lease)
+    finally:
+        await balancer.release_account_lease(lease)
 
 
 @pytest.mark.asyncio

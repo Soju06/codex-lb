@@ -75,6 +75,11 @@ def test_postgresql_only_skipif_tests_are_registered_in_postgres_pytest_targets(
     )
 
 
+def test_credit_accounting_runs_in_the_postgresql_ci_selection() -> None:
+    targets = _postgres_pytest_targets(MAKEFILE.read_text(encoding="utf-8"))
+    assert "tests/integration/test_api_key_credits.py" in targets
+
+
 def test_postgresql_only_skipif_detection_sees_the_known_migration_tests() -> None:
     node_ids = set(_postgresql_only_skipif_test_ids())
 

@@ -2020,6 +2020,7 @@ class ApiKeyUsageReservation(Base):
         nullable=False,
     )
     model: Mapped[str] = mapped_column(String, nullable=False)
+    credit_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="reserved")
     input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

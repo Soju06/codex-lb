@@ -9,6 +9,7 @@ import pytest
 from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnapshot, ResetCreditItem
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse
 from app.core.crypto import TokenEncryptor
+from app.core.usage.credit_pricing import CREDIT_SCALE
 from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
@@ -530,8 +531,8 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.FIVE_HOURS,
-                    max_value=60,
-                    current_value=12,
+                    max_value=60 * CREDIT_SCALE,
+                    current_value=12 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(hours=5),
                 ),
@@ -539,8 +540,8 @@ async def test_codex_usage_accepts_api_key_callers(async_client, db_setup):
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.SEVEN_DAYS,
-                    max_value=1000,
-                    current_value=250,
+                    max_value=1000 * CREDIT_SCALE,
+                    current_value=250 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(days=7),
                 ),
@@ -588,8 +589,8 @@ async def test_codex_usage_api_key_exposes_monthly_credit_window(async_client, d
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.MONTHLY,
-                    max_value=1000,
-                    current_value=250,
+                    max_value=1000 * CREDIT_SCALE,
+                    current_value=250 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(days=30),
                 ),
@@ -672,8 +673,8 @@ async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_clie
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.FIVE_HOURS,
-                    max_value=100,
-                    current_value=5,
+                    max_value=100 * CREDIT_SCALE,
+                    current_value=5 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(hours=5),
                 ),
@@ -681,8 +682,8 @@ async def test_codex_usage_api_key_ignores_aggregate_workspace_limits(async_clie
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.SEVEN_DAYS,
-                    max_value=500,
-                    current_value=50,
+                    max_value=500 * CREDIT_SCALE,
+                    current_value=50 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(days=7),
                 ),

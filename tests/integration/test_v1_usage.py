@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.usage.credit_pricing import CREDIT_SCALE
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
@@ -535,8 +536,8 @@ async def test_v1_usage_returns_api_key_and_upstream_credit_limits_separately(as
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.FIVE_HOURS,
-                    max_value=60,
-                    current_value=999,
+                    max_value=60 * CREDIT_SCALE,
+                    current_value=999 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(hours=5),
                 ),
@@ -544,8 +545,8 @@ async def test_v1_usage_returns_api_key_and_upstream_credit_limits_separately(as
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.SEVEN_DAYS,
-                    max_value=1000,
-                    current_value=10,
+                    max_value=1000 * CREDIT_SCALE,
+                    current_value=10 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=now + timedelta(days=7),
                 ),
@@ -676,8 +677,8 @@ async def test_v1_usage_falls_back_to_raw_credit_limits_when_aggregate_reset_is_
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.FIVE_HOURS,
-                    max_value=60,
-                    current_value=12,
+                    max_value=60 * CREDIT_SCALE,
+                    current_value=12 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=primary_reset,
                 ),
@@ -685,8 +686,8 @@ async def test_v1_usage_falls_back_to_raw_credit_limits_when_aggregate_reset_is_
                     api_key_id=key_id,
                     limit_type=LimitType.CREDITS,
                     limit_window=LimitWindow.SEVEN_DAYS,
-                    max_value=1000,
-                    current_value=250,
+                    max_value=1000 * CREDIT_SCALE,
+                    current_value=250 * CREDIT_SCALE,
                     model_filter=None,
                     reset_at=secondary_reset,
                 ),

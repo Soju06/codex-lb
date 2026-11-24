@@ -4,6 +4,12 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](api-keys.md) i
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
+Images use a separate compatibility route: `gpt-image-*` models may be absent
+from that catalog even when `POST /v1/images/generations` and
+`POST /v1/images/edits` are available. Do not use catalog absence alone to
+diagnose missing image support. See the
+[Images API example and troubleshooting notes](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/images-api-compat/context.md#model-discovery-and-direct-api-example).
+
 The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all with a 272k default input budget and an 872k upstream maximum ([opt-in, Codex CLI only](#opting-into-the-872k-context-window)). `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
 
 | Client | Endpoint | Config |

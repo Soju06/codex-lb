@@ -1571,6 +1571,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "hanmin6",
+      "name": "hanmin6",
+      "avatar_url": "https://avatars.githubusercontent.com/u/226948540?v=4",
+      "profile": "https://github.com/hanmin6",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

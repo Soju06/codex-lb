@@ -349,6 +349,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/TheFoolThatDoesntBelongToThisEra"><img src="https://avatars.githubusercontent.com/u/252236154?v=4?s=100" width="100px;" alt="⃟"/><br /><sub><b>⃟</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=TheFoolThatDoesntBelongToThisEra" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=TheFoolThatDoesntBelongToThisEra" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=TheFoolThatDoesntBelongToThisEra" title="Documentation">📖</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/alinne"><img src="https://avatars.githubusercontent.com/u/3752110?v=4?s=100" width="100px;" alt="alinne"/><br /><sub><b>alinne</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=alinne" title="Code">💻</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/hanmin6"><img src="https://avatars.githubusercontent.com/u/226948540?v=4&size=100" width="100px" height="100px" alt="hanmin6"/><br /><sub><b>hanmin6</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=hanmin6" title="Documentation">📖</a></td>
+    </tr>
   </tbody>
 </table>
 

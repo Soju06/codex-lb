@@ -309,7 +309,7 @@ async def test_probe_active_account_returns_snapshot(
     captured: dict = {}
     record_probe_result = AsyncMock()
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):
         captured["model"] = model
         captured["chatgpt_account_id"] = chatgpt_account_id
         # Do not capture the access token — only assert it was non-empty.
@@ -407,7 +407,7 @@ async def test_probe_route_omits_unsupported_output_limit(async_client, monkeypa
 
 @pytest.mark.asyncio
 async def test_probe_active_account_returns_snapshot_when_advisory_settlement_fails(async_client, monkeypatch):
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):
         del access_token
         del chatgpt_account_id
         del model
@@ -500,7 +500,7 @@ async def test_probe_failure_still_records_advisory_settlement_after_usage_refre
 
 @pytest.mark.asyncio
 async def test_force_probe_persists_free_to_plus_plan_upgrade(async_client, monkeypatch):
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         return 200
 
     async def _fake_fetch_usage(**_kwargs):
@@ -531,7 +531,7 @@ async def test_force_probe_confirms_paid_to_free_plan_downgrade(async_client, mo
     a workspace-less account must surface as ``free`` on /api/accounts once a
     second probe confirms it, instead of keeping a stale paid label forever."""
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         return 200
 
     async def _fake_fetch_usage(**_kwargs):
@@ -567,7 +567,7 @@ async def test_force_probe_keeps_paid_plan_for_unrecognized_payload_plan(async_c
     """The confirmation path is scoped to ``free``: an unrecognized plan value
     must never rewrite a stored paid plan, however often it repeats."""
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         return 200
 
     async def _fake_fetch_usage(**_kwargs):
@@ -607,7 +607,7 @@ async def test_pending_downgrade_evidence_is_persisted_for_all_replicas(async_cl
     from app.db.models import AccountPlanDowngradeObservation
     from app.db.session import get_background_session
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         return 200
 
     async def _fake_fetch_usage(**_kwargs):
@@ -674,7 +674,7 @@ async def test_reimport_clears_pending_downgrade_evidence(async_client, monkeypa
     from app.db.models import AccountPlanDowngradeObservation
     from app.db.session import get_background_session
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         return 200
 
     async def _fake_fetch_usage(**_kwargs):
@@ -738,7 +738,7 @@ async def test_reimport_clears_pending_downgrade_evidence(async_client, monkeypa
 async def test_probe_uses_default_model_when_body_omitted(async_client, monkeypatch):
     captured: dict = {}
 
-    async def _fake_probe(self, *, access_token, chatgpt_account_id, model):  # noqa: ARG001
+    async def _fake_probe(self, *, access_token, chatgpt_account_id, model, route=None):  # noqa: ARG001
         captured["model"] = model
         return 200
 

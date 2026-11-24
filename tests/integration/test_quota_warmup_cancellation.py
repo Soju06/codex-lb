@@ -133,6 +133,7 @@ async def test_cancelled_warmup_settles_known_usage(
             account: Account,
             model: str,
             request_id: str,
+            route_trace=None,
         ) -> WarmupUsage:
             del self, account, model, request_id
             return WarmupUsage(

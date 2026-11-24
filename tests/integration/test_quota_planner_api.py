@@ -525,7 +525,7 @@ async def test_quota_planner_warm_now_keeps_bootstrap_for_metadata_less_primary_
                 confidence="observed",
             )
 
-        async def fake_send(self, *, account, model, request_id):
+        async def fake_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
@@ -744,7 +744,7 @@ async def test_quota_planner_warm_now_claims_planned_decision_before_probe(monke
         )
         seen_statuses: list[str] = []
 
-        async def fake_send(self, *, account, model, request_id):
+        async def fake_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             async with SessionLocal() as observe_session:
                 status = await observe_session.scalar(
@@ -847,7 +847,7 @@ async def test_quota_planner_scheduler_reclaims_expired_executing_warmup_claim(m
         ],
     )
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
@@ -940,7 +940,7 @@ async def test_quota_planner_warm_now_executes_when_explicitly_gated(monkeypatch
             confidence="observed",
         )
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
@@ -1005,7 +1005,7 @@ async def test_quota_planner_warm_now_ignores_failed_effect_after_prior_observed
             observed_at=utcnow(),
         )
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
@@ -1166,7 +1166,7 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
             ):
                 failed_reservations.append((reservation_id, model, input_tokens, output_tokens, cached_input_tokens))
 
-        async def cancel_probe(self, *, account, model, request_id):
+        async def cancel_probe(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             raise asyncio.CancelledError()
 
@@ -1233,7 +1233,7 @@ async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(
                 del args, kwargs
                 raise AssertionError("limit-free warmup must not fail a reservation")
 
-        async def fake_send(self, *, account, model, request_id):
+        async def fake_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
@@ -1304,7 +1304,7 @@ async def test_quota_planner_warm_now_limit_free_admission_keeps_shared_session_
 
         probed_tokens: list[str] = []
 
-        async def fake_send(self, *, account, model, request_id):
+        async def fake_send(self, *, account, model, request_id, route_trace=None):
             del model, request_id
             # Mirror the real probe's first attribute access on the shared
             # session's tracked account: raises MissingGreenlet if admission
@@ -1373,7 +1373,7 @@ async def test_quota_planner_warm_now_api_key_not_found_is_skipped(monkeypatch, 
                 del args, kwargs
                 raise ApiKeyNotFoundError("API key not found: not-existing")
 
-        async def fail_send(self, *, account, model, request_id):
+        async def fail_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             raise AssertionError("invalid API key should skip before sending warmup probe")
 
@@ -1430,7 +1430,7 @@ async def test_quota_planner_warm_now_invalid_api_key_is_skipped(monkeypatch, db
                 del args, kwargs
                 raise ApiKeyInvalidError("API key has expired")
 
-        async def fail_send(self, *, account, model, request_id):
+        async def fail_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             raise AssertionError("expired API key should skip before sending warmup probe")
 
@@ -1487,7 +1487,7 @@ async def test_quota_planner_warm_now_rate_limited_api_key_is_skipped(monkeypatc
                 del args, kwargs
                 raise ApiKeyRateLimitExceededError(message="Too many requests", reset_at=utcnow())
 
-        async def fail_send(self, *, account, model, request_id):
+        async def fail_send(self, *, account, model, request_id, route_trace=None):
             del self, account, model, request_id
             raise AssertionError("rate-limited API key should skip before sending warmup probe")
 

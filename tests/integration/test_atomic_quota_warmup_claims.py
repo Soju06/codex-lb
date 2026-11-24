@@ -107,7 +107,7 @@ async def test_concurrent_warm_now_sends_at_most_one_probe_within_count_budget(m
 
     probes: list[str] = []
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, model, request_id
         probes.append(account.id)
         return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
@@ -290,7 +290,7 @@ async def test_claim_refuses_spent_credit_budget_after_stale_gate_read(monkeypat
         del self, settings, account, model, force_probe
         return True, "ready"
 
-    async def fail_send(self, *, account, model, request_id):
+    async def fail_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         raise AssertionError("claim must refuse the spent credit budget before any probe is sent")
 
@@ -320,7 +320,7 @@ async def test_warm_now_claim_ttl_covers_stream_budget(monkeypatch, db_setup):
     settings.http_responses_stream_request_budget_seconds = 1234.0
     decision_id: str | None = None
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         assert decision_id is not None
         async with SessionLocal() as verification_session:
@@ -384,7 +384,7 @@ async def test_warm_now_claim_ttl_honours_dashboard_stream_budget_over_environme
     await get_settings_cache().invalidate(propagate=False)
     decision_id: str | None = None
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         assert decision_id is not None
         async with SessionLocal() as verification_session:
@@ -470,7 +470,7 @@ async def test_scheduler_reconciles_expired_warmup_claim_without_current_action(
     simulation = type("Simulation", (), {"loss": 0.0, "unmet_demand": 0.0})()
     calls: list[str] = []
 
-    async def fake_send(self, *, account, model, request_id):
+    async def fake_send(self, *, account, model, request_id, route_trace=None):
         del self, model, request_id
         calls.append(account.id)
         return WarmupUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
@@ -539,7 +539,7 @@ async def test_scheduler_reconciles_existing_success_log_without_resending_probe
     forecast = type("Forecast", (), {"peak_slot_start": None, "peak_demand_units": 0.0})()
     simulation = type("Simulation", (), {"loss": 0.0, "unmet_demand": 0.0})()
 
-    async def fail_send(self, *, account, model, request_id):
+    async def fail_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         raise AssertionError("reconciled warmup log should prevent a second probe")
 
@@ -624,7 +624,7 @@ async def test_scheduler_reconciles_success_log_shadowed_by_a_later_error_row(mo
     forecast = type("Forecast", (), {"peak_slot_start": None, "peak_demand_units": 0.0})()
     simulation = type("Simulation", (), {"loss": 0.0, "unmet_demand": 0.0})()
 
-    async def fail_send(self, *, account, model, request_id):
+    async def fail_send(self, *, account, model, request_id, route_trace=None):
         del self, account, model, request_id
         raise AssertionError("a shadowed success log must still prevent a second probe")
 

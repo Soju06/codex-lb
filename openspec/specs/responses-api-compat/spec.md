@@ -5483,7 +5483,10 @@ including a `response.failed` payload that carries `response.id` even when
 `response.created` was not observed or an `error` payload with top-level
 `response_id`, a nonterminal `response.*`
 event, downstream sequence/output, another pending request on the shared
-socket, or an earlier replay. If no compatible replacement is available, or
+socket, or an earlier replay other than a completed pre-created WebSocket auth
+refresh on the rejecting account. That auth refresh MUST NOT consume the one account/model rejection
+move; a request MUST NOT make a second account/model rejection move even if it
+later refreshes another account. If no compatible replacement is available, or
 the request is account-bound, the proxy MUST preserve the original upstream
 400 error instead of replacing it with `no_accounts`, `stream_incomplete`, or
 another proxy-generated failure.
@@ -5527,8 +5530,21 @@ another proxy-generated failure.
 
 #### Scenario: accepted or visible request is never replayed
 
-- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay
+- **WHEN** the account/model unsupported envelope arrives after a response id, a nonterminal response event, downstream sequence/output, or an earlier replay other than a completed pre-created WebSocket auth refresh on the rejecting account
 - **THEN** the proxy does not transparently replay the request on another account
+
+#### Scenario: completed WebSocket auth refresh preserves the model move
+
+- **GIVEN** a movable pre-created WebSocket request has refreshed account A and replayed there after an auth failure
+- **WHEN** A rejects the model before accepting the response
+- **THEN** the proxy may move the request once to an eligible account B
+- **AND** a further account/model rejection cannot trigger another move
+
+#### Scenario: reauthentication without refresh does not replenish the model move
+
+- **GIVEN** account A fails authentication and the proxy moves a pre-created WebSocket request to B without completing a forced refresh
+- **WHEN** B rejects the requested model before acceptance
+- **THEN** the proxy does not move the request to a third account
 
 #### Scenario: account-bound request is never migrated
 

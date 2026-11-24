@@ -270,11 +270,23 @@ const RequestLogApiKeyOptionSchema = z.object({
   keyPrefix: z.string().nullable().optional().default(null),
 });
 
+export const SUBSCRIPTION_POOL_UPSTREAM = "subscription_pool";
+
+const RequestLogUpstreamOptionSchema = z.object({
+  id: z.string(),
+  type: z.enum(["subscription_pool", "model_source"]),
+  displayName: z.string().nullable().optional().default(null),
+  modelSourceKind: z.string().nullable().optional().default(null),
+  isDeleted: z.boolean().optional().default(false),
+});
+
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
   modelOptions: z.array(RequestLogModelOptionSchema),
   apiKeys: z.array(RequestLogApiKeyOptionSchema),
   statuses: z.array(z.string()),
+  // Older backends omit the upstream facet; treat it as empty (#1870).
+  upstreams: z.array(RequestLogUpstreamOptionSchema).optional().default([]),
 });
 
 const RequestLogTimeframeSchema = z.enum(["all", "1h", "24h", "7d"]);
@@ -287,6 +299,7 @@ export const FilterStateSchema = z.object({
   apiKeyIds: z.array(z.string()),
   modelOptions: z.array(z.string()),
   statuses: z.array(z.string()),
+  upstreams: z.array(z.string()).optional().default([]),
   conversationId: z.string().nullable().optional().default(null),
   limit: z.number().int().positive(),
   offset: z.number().int().nonnegative(),
@@ -303,6 +316,7 @@ export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 export type RequestLog = z.infer<typeof RequestLogSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
+export type RequestLogUpstreamOption = z.infer<typeof RequestLogUpstreamOptionSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
 export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;

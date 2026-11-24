@@ -14,6 +14,8 @@ export type RequestFiltersProps = {
   apiKeyOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   statusOptions: MultiSelectOption[];
+  /** Observed upstreams (subscription pool and model sources). */
+  upstreamOptions?: MultiSelectOption[];
   /** Hide the API key filter (read-only guests receive no key options). */
   showApiKeyFilter?: boolean;
   onSearchChange: (value: string) => void;
@@ -22,6 +24,7 @@ export type RequestFiltersProps = {
   onApiKeyChange: (values: string[]) => void;
   onModelChange: (values: string[]) => void;
   onStatusChange: (values: string[]) => void;
+  onUpstreamChange?: (values: string[]) => void;
   onConversationDismiss: () => void;
   onReset: () => void;
 };
@@ -32,6 +35,7 @@ export function RequestFilters({
   apiKeyOptions,
   modelOptions,
   statusOptions,
+  upstreamOptions = [],
   showApiKeyFilter = true,
   onSearchChange,
   onTimeframeChange,
@@ -39,10 +43,14 @@ export function RequestFilters({
   onApiKeyChange,
   onModelChange,
   onStatusChange,
+  onUpstreamChange,
   onConversationDismiss,
   onReset,
 }: RequestFiltersProps) {
   const { t } = useTranslation();
+  // Subscription-only installs observe one upstream; keep their filter bar
+  // unchanged unless an upstream filter is already active (#1870).
+  const showUpstreamFilter = upstreamOptions.length > 1 || filters.upstreams.length > 0;
 
   return (
     <div className="space-y-2 rounded-xl border bg-card p-4">
@@ -87,6 +95,14 @@ export function RequestFilters({
           options={statusOptions}
           onChange={onStatusChange}
         />
+        {showUpstreamFilter && onUpstreamChange ? (
+          <MultiSelectFilter
+            label={t("dashboard.filters.upstreams")}
+            values={filters.upstreams}
+            options={upstreamOptions}
+            onChange={onUpstreamChange}
+          />
+        ) : null}
         {filters.conversationId ? (
           <Badge variant="outline" className="h-8 gap-1.5 px-3 text-xs font-normal">
             <span className="max-w-[200px] truncate" title={filters.conversationId}>

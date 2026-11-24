@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ApiKey
+from app.db.models import Account, AccountStatus, ApiKey, ModelSource
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -724,3 +724,305 @@ async def test_request_logs_options_facet_probes_use_live_row_indexes_postgresql
             assert index_names == {expected_index}, f"{sql}: {scans}"
             assert sum(int(node.get("Rows Removed by Filter", 0)) for node in scans) == 0, f"{sql}: {scans}"
             assert all(int(node.get("Actual Rows", 0)) <= _PROBE_ROW_BOUND for node in scans), f"{sql}: {scans}"
+
+
+# --- Upstream facet (issue #1870) -------------------------------------------
+
+
+async def _add_upstream_log(
+    logs_repo: RequestLogsRepository,
+    request_id: str,
+    *,
+    source_id: str | None,
+    kind: str | None = "openai_compatible",
+    model: str = "gpt-5.1",
+    requested_at=None,
+):
+    return await logs_repo.add_log(
+        account_id=None,
+        request_id=request_id,
+        model=model,
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=10,
+        status="success",
+        error_code=None,
+        requested_at=requested_at or utcnow(),
+        model_source_id=source_id,
+        model_source_kind=kind if source_id else None,
+        source="model_source" if source_id else None,
+    )
+
+
+def _model_source(source_id: str, name: str, kind: str = "openai_compatible") -> ModelSource:
+    return ModelSource(id=source_id, name=name, kind=kind, base_url=f"https://{source_id}.example.invalid/v1")
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_return_upstream_facet(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_model_source("src_vllm", "Local vLLM"))
+        await session.commit()
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_up_pool", source_id=None)
+        await _add_upstream_log(logs_repo, "req_up_vllm", source_id="src_vllm")
+
+    response = await async_client.get("/api/request-logs/options")
+
+    assert response.status_code == 200
+    assert response.json()["upstreams"] == [
+        {
+            "id": "subscription_pool",
+            "type": "subscription_pool",
+            "displayName": None,
+            "modelSourceKind": None,
+            "isDeleted": False,
+        },
+        {
+            "id": "src_vllm",
+            "type": "model_source",
+            "displayName": "Local vLLM",
+            "modelSourceKind": "openai_compatible",
+            "isDeleted": False,
+        },
+    ]
+    assert "example.invalid" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_upstream_facet_is_empty_without_logs(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_model_source("src_idle", "Idle source"))
+        await session.commit()
+
+    response = await async_client.get("/api/request-logs/options")
+
+    assert response.json()["upstreams"] == []
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_upstream_rename_keeps_id(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_model_source("src_rename", "Before"))
+        await session.commit()
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_rename", source_id="src_rename")
+        source = await session.get(ModelSource, "src_rename")
+        assert source is not None
+        source.name = "After"
+        await session.commit()
+
+    response = await async_client.get("/api/request-logs/options")
+
+    upstreams = response.json()["upstreams"]
+    assert [(option["id"], option["displayName"]) for option in upstreams] == [("src_rename", "After")]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_deleted_source_keeps_option_and_filter(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_model_source("src_gone", "Gone soon", kind="anthropic_compatible"))
+        await session.commit()
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_gone", source_id="src_gone", kind="anthropic_compatible")
+        await _add_upstream_log(logs_repo, "req_gone_pool", source_id=None)
+        source = await session.get(ModelSource, "src_gone")
+        assert source is not None
+        await session.delete(source)
+        await session.commit()
+
+    options = await async_client.get("/api/request-logs/options")
+    listing = await async_client.get("/api/request-logs", params={"upstream": "src_gone"})
+
+    assert options.json()["upstreams"][1] == {
+        "id": "src_gone",
+        "type": "model_source",
+        "displayName": None,
+        "modelSourceKind": "anthropic_compatible",
+        "isDeleted": True,
+    }
+    assert [row["requestId"] for row in listing.json()["requests"]] == ["req_gone"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_upstream_ignores_self_filter(async_client, db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_self_pool", source_id=None, model="pool-model")
+        await _add_upstream_log(logs_repo, "req_self_a", source_id="src_self_a", model="source-model")
+
+    selected = await async_client.get("/api/request-logs/options", params={"upstream": "src_self_a"})
+
+    payload = selected.json()
+    assert [option["id"] for option in payload["upstreams"]] == ["subscription_pool", "src_self_a"]
+    # Every other facet applies the upstream selection.
+    assert payload["modelOptions"] == [{"model": "source-model", "reasoningEffort": None}]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_upstream_narrowed_by_other_facets(async_client, db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_cross_pool", source_id=None, model="pool-model")
+        await _add_upstream_log(logs_repo, "req_cross_a", source_id="src_cross_a", model="source-model")
+
+    response = await async_client.get("/api/request-logs/options", params={"modelOption": "source-model"})
+
+    assert [option["id"] for option in response.json()["upstreams"]] == ["src_cross_a"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_upstream_excludes_soft_deleted(async_client, db_setup):
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_soft_pool", source_id=None)
+        deleted = await _add_upstream_log(logs_repo, "req_soft_src", source_id="src_soft_only")
+        deleted.deleted_at = utcnow()
+        await session.commit()
+
+    response = await async_client.get("/api/request-logs/options")
+
+    assert [option["id"] for option in response.json()["upstreams"]] == ["subscription_pool"]
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_unfiltered_upstream_matches_distinct_path(async_client, db_setup):
+    """Parity oracle for the upstream skip-scan: the unfiltered response must
+    equal a since-filtered (DISTINCT) response covering every row, and the
+    unfiltered call must not run a DISTINCT pass."""
+    import re
+
+    from sqlalchemy import event
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        session.add_all([_model_source("src_par_b", "Beta"), _model_source("src_par_a", "Alpha")])
+        await session.commit()
+        logs_repo = RequestLogsRepository(session)
+        for index, source_id in enumerate((None, "src_par_b", "src_par_a", "src_par_b", None, "src_par_gone")):
+            await _add_upstream_log(
+                logs_repo,
+                f"req_par_up_{index}",
+                source_id=source_id,
+                requested_at=now - timedelta(minutes=index),
+            )
+        hidden = await _add_upstream_log(logs_repo, "req_par_up_hidden", source_id="src_par_hidden")
+        hidden.deleted_at = utcnow()
+        await session.commit()
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        unfiltered = await async_client.get("/api/request-logs/options")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+    filtered = await async_client.get(
+        "/api/request-logs/options", params={"since": (now - timedelta(days=1)).isoformat()}
+    )
+
+    assert unfiltered.json()["upstreams"] == filtered.json()["upstreams"]
+    assert [option["id"] for option in unfiltered.json()["upstreams"]] == [
+        "subscription_pool",
+        "src_par_a",
+        "src_par_b",
+        "src_par_gone",
+    ]
+    request_log_statements = [stmt for stmt in statements if "request_logs" in stmt]
+    assert not any(re.search(r"SELECT\s+DISTINCT\b", stmt, re.IGNORECASE) for stmt in request_log_statements)
+
+
+@pytest.mark.asyncio
+async def test_request_logs_options_subscription_pool_probe_uses_source_index_sqlite(async_client, db_setup):
+    """With planner statistics and no NULL-source rows, the subscription-pool
+    probe must still walk idx_logs_model_source_time instead of every live row."""
+    from sqlalchemy import event, insert
+
+    from app.db.models import RequestLog
+
+    if engine.sync_engine.dialect.name != "sqlite":
+        pytest.skip("SQLite-only query plan test")
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        await session.execute(
+            insert(RequestLog),
+            [
+                {
+                    "request_id": f"req_plan_{index}",
+                    "model": "gpt-5.1",
+                    "status": "success",
+                    "requested_at": now - timedelta(seconds=index),
+                    "model_source_id": f"src_plan_{index % 3}",
+                    "model_source_kind": "openai_compatible",
+                }
+                for index in range(5000)
+            ],
+        )
+        await session.commit()
+    async with engine.begin() as conn:
+        await conn.execute(text("ANALYZE"))
+
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "model_source_id IS NULL" in statement:
+            captured.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        response = await async_client.get("/api/request-logs/options")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert response.status_code == 200
+    assert [option["id"] for option in response.json()["upstreams"]] == ["src_plan_0", "src_plan_1", "src_plan_2"]
+    assert len(captured) == 1
+    statement, parameters = captured[0]
+    async with engine.connect() as conn:
+        plan_rows = (await conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)).fetchall()
+    details = " | ".join(str(row[-1]) for row in plan_rows)
+    assert "idx_logs_model_source_time" in details, details
+    assert "idx_logs_deleted_at_requested_at_id" not in details, details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_pool_row", "expected_upstreams"),
+    [
+        (True, ["subscription_pool", "src_deleted_pool_case"]),
+        (False, ["src_deleted_pool_case"]),
+    ],
+    ids=["deleted-pool-row-before-live-one", "only-deleted-pool-rows"],
+)
+async def test_request_logs_options_subscription_pool_skips_soft_deleted_rows(
+    async_client, db_setup, live_pool_row, expected_upstreams
+):
+    """The subscription-pool probe must ignore soft-deleted NULL-source rows,
+    including one that sorts ahead of a live row in idx_logs_model_source_time."""
+    now = utcnow()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await _add_upstream_log(logs_repo, "req_pool_source_row", source_id="src_deleted_pool_case", requested_at=now)
+        for index in range(2):
+            deleted = await _add_upstream_log(
+                logs_repo,
+                f"req_pool_deleted_{index}",
+                source_id=None,
+                requested_at=now - timedelta(hours=2, minutes=index),
+            )
+            deleted.deleted_at = utcnow()
+        if live_pool_row:
+            await _add_upstream_log(logs_repo, "req_pool_live", source_id=None, requested_at=now - timedelta(hours=1))
+        await session.commit()
+
+    unfiltered = await async_client.get("/api/request-logs/options")
+    filtered = await async_client.get(
+        "/api/request-logs/options", params={"since": (now - timedelta(days=1)).isoformat()}
+    )
+
+    assert [option["id"] for option in unfiltered.json()["upstreams"]] == expected_upstreams
+    assert [option["id"] for option in filtered.json()["upstreams"]] == expected_upstreams

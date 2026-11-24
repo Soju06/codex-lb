@@ -38,6 +38,7 @@ import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { REQUEST_LOG_COLUMN_OPTIONS } from "@/features/dashboard/request-log-columns";
+import { buildUpstreamOptions } from "@/features/dashboard/upstream-options";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
@@ -277,6 +278,15 @@ export function DashboardPage() {
     [optionsQuery.data?.modelOptions],
   );
 
+  const upstreamOptions = useMemo(
+    () => buildUpstreamOptions(optionsQuery.data?.upstreams ?? [], t),
+    [optionsQuery.data?.upstreams, t],
+  );
+  const modelSourceLabels = useMemo(
+    () => new Map(upstreamOptions.map((option) => [option.value, option.label])),
+    [upstreamOptions],
+  );
+
   const blurred = usePrivacyStore((s) => s.blurred);
 
   const conversationSummary = useMemo(() => {
@@ -327,6 +337,11 @@ export function DashboardPage() {
       });
       suffixParts.push(labels.join(", "));
     }
+    if (filters.upstreams.length > 0) {
+      // Fall back to the stable id when the options have not loaded or no longer list it.
+      const labels = filters.upstreams.map((id) => upstreamOptions.find((o) => o.value === id)?.label ?? id);
+      suffixParts.push(labels.join(", "));
+    }
     if (filters.search) {
       suffixParts.push(`"${filters.search}"`);
     }
@@ -338,6 +353,10 @@ export function DashboardPage() {
         <Trans
           i18nKey="dashboard.conversation.summaryWithFilters"
           values={{ id: filters.conversationId, count, cost, filters: suffixParts.join(", ") }}
+          // Filter labels include operator-named sources; escape them so Trans
+          // cannot parse a name as component markup, then show them as text.
+          tOptions={{ interpolation: { escapeValue: true } }}
+          shouldUnescape
           components={[
             <code key="id" className={codeClass} />,
             <code key="count" className={codeClass} />,
@@ -357,7 +376,7 @@ export function DashboardPage() {
         ]}
       />
     );
-  }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, blurred]);
+  }, [logPage?.conversation, filters, t, accountOptions, apiKeyOptions, modelOptions, upstreamOptions, blurred]);
 
   const statusOptions = useMemo(
     () =>
@@ -607,6 +626,7 @@ export function DashboardPage() {
                       apiKeyOptions={apiKeyOptions}
                       modelOptions={modelOptions}
                       statusOptions={statusOptions}
+                      upstreamOptions={upstreamOptions}
                       showApiKeyFilter={canReadApiKeys}
                       onSearchChange={(search) => updateFilters({ search, offset: 0 })}
                       onTimeframeChange={(timeframe) => updateFilters({ timeframe, offset: 0 })}
@@ -616,6 +636,7 @@ export function DashboardPage() {
                         updateFilters({ modelOptions: modelOptionsSelected, offset: 0 })
                       }
                       onStatusChange={(statuses) => updateFilters({ statuses, offset: 0 })}
+                      onUpstreamChange={(upstreams) => updateFilters({ upstreams, offset: 0 })}
                       onConversationDismiss={handleConversationDismiss}
                       onReset={() =>
                         updateFilters({
@@ -625,6 +646,7 @@ export function DashboardPage() {
                           apiKeyIds: [],
                           modelOptions: [],
                           statuses: [],
+                          upstreams: [],
                           conversationId: null,
                           offset: 0,
                         })
@@ -639,6 +661,7 @@ export function DashboardPage() {
                       <RecentRequestsTable
                         requests={view.requestLogs}
                         accounts={overview?.accounts ?? []}
+                        modelSourceLabels={modelSourceLabels}
                         total={logPage.total}
                         visibleColumns={visibleColumns}
                         columnWidths={columnWidths}

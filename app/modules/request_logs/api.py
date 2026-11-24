@@ -24,6 +24,7 @@ from app.modules.request_logs.schemas import (
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
     RequestLogsResponse,
+    RequestLogUpstreamOption,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
 
@@ -60,6 +61,11 @@ def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:
     return ServiceRequestLogModelOption(model=model, reasoning_effort=effort or None)
 
 
+def _normalize_upstreams(values: list[str] | None) -> list[str] | None:
+    normalized = sorted({value.strip() for value in values or () if value and value.strip()})
+    return normalized or None
+
+
 def _resolve_request_log_since(
     timeframe: str | None,
     since: datetime | None,
@@ -83,6 +89,7 @@ async def list_request_logs(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    upstream: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -110,6 +117,7 @@ async def list_request_logs(
         models=model,
         reasoning_efforts=reasoning_effort,
         status=status,
+        upstreams=_normalize_upstreams(upstream),
         cache_mode="timeframe" if cache_timeframe is not None else "since",
         timeframe=cache_timeframe,
         include_sensitive_metadata=principal.has(Permission.CONVERSATIONS_READ),
@@ -132,6 +140,7 @@ async def list_request_log_filter_options(
     model: list[str] | None = Query(default=None),
     reasoning_effort: list[str] | None = Query(default=None, alias="reasoningEffort"),
     model_option: list[str] | None = Query(default=None, alias="modelOption"),
+    upstream: list[str] | None = Query(default=None),
     timeframe: str | None = Query(default=None, pattern="^(1h|24h|7d)$"),
     since: datetime | None = Query(default=None),
     until: datetime | None = Query(default=None),
@@ -152,6 +161,7 @@ async def list_request_log_filter_options(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        upstreams=_normalize_upstreams(upstream),
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,
@@ -167,6 +177,16 @@ async def list_request_log_filter_options(
         if principal.has(Permission.API_KEYS_READ)
         else [],
         statuses=options.statuses,
+        upstreams=[
+            RequestLogUpstreamOption(
+                id=option.id,
+                type=option.type,
+                display_name=option.display_name,
+                model_source_kind=option.model_source_kind,
+                is_deleted=option.is_deleted,
+            )
+            for option in options.upstreams
+        ],
     )
 
 

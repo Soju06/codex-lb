@@ -227,6 +227,7 @@ describe("DashboardPage", () => {
         timeframe: "all",
         accountIds: [],
         apiKeyIds: [],
+        upstreams: [],
         modelOptions: [],
         statuses: [],
         limit: 25,
@@ -238,6 +239,7 @@ describe("DashboardPage", () => {
         offset: 0,
         accountIds: [],
         apiKeyIds: [],
+        upstreams: [],
         statuses: [],
         modelOptions: [],
         since: undefined,
@@ -246,6 +248,7 @@ describe("DashboardPage", () => {
         since: undefined,
         accountIds: [],
         apiKeyIds: [],
+        upstreams: [],
         modelOptions: [],
       },
       logsQuery: {
@@ -673,6 +676,7 @@ describe("DashboardPage", () => {
         timeframe: "all",
         accountIds: [],
         apiKeyIds: [],
+        upstreams: [],
         modelOptions: [],
         statuses: ["ok"],
         conversationId: "conv_page_badge",
@@ -729,6 +733,7 @@ describe("DashboardPage", () => {
         timeframe: "24h",
         accountIds: ["acc_primary"],
         apiKeyIds: ["key_1"],
+        upstreams: ["src_vllm", "src_markup", "src_not_in_options"],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
         conversationId: "conv_page_summary",
@@ -757,6 +762,11 @@ describe("DashboardPage", () => {
           apiKeys: [{ id: "key_1", name: "Primary Key" }],
           modelOptions: [{ model: "gpt-5.1", reasoningEffort: "high" }],
           statuses: ["ok"],
+          upstreams: [
+            { id: "src_vllm", type: "model_source", displayName: "Local vLLM", modelSourceKind: "openai_compatible", isDeleted: false },
+            // A source name that Trans would otherwise parse as component markup.
+            { id: "src_markup", type: "model_source", displayName: '<0 style="color:red">x</0> & "q"', modelSourceKind: "openai_compatible", isDeleted: false },
+          ],
         },
         error: null,
       },
@@ -816,6 +826,10 @@ describe("DashboardPage", () => {
     expect(summaryEl.textContent).toMatch(/primary@example\.com/);
     // Uses user-facing API key name, not raw ID
     expect(summaryEl.textContent).toMatch(/Primary Key/);
+    // Lists the upstream selection by label, falling back to the id when options lack it;
+    // a label containing markup is shown as literal text, not parsed by Trans
+    expect(summaryEl.textContent).toContain('Local vLLM, <0 style="color:red">x</0> & "q", src_not_in_options');
+    expect(summaryEl.textContent).not.toMatch(/src_vllm/);
     // Uses search value, not raw API key ID
     expect(summaryEl.textContent).toMatch(/"quota"/);
     // No raw IDs or internal encodings leak
@@ -834,6 +848,7 @@ describe("DashboardPage", () => {
         timeframe: "7d",
         accountIds: ["acc_missing"],
         apiKeyIds: ["key_missing"],
+        upstreams: [],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["error"],
         conversationId: "conv_safety",
@@ -904,6 +919,7 @@ describe("DashboardPage", () => {
         timeframe: "all",
         accountIds: [],
         apiKeyIds: [],
+        upstreams: [],
         modelOptions: [],
         statuses: [],
         conversationId: "conv_no_suffix",
@@ -964,6 +980,7 @@ describe("DashboardPage", () => {
         timeframe: "7d",
         accountIds: ["acc_primary"],
         apiKeyIds: [],
+        upstreams: [],
         modelOptions: [],
         statuses: ["ok"],
         conversationId: "conv_dismiss_preserve",
@@ -1024,6 +1041,7 @@ describe("DashboardPage", () => {
         timeframe: "7d",
         accountIds: ["acc_primary"],
         apiKeyIds: ["key_1"],
+        upstreams: [],
         modelOptions: ["gpt-5.1:::high"],
         statuses: ["ok"],
         conversationId: "conv_reset_all",
@@ -1075,6 +1093,7 @@ describe("DashboardPage", () => {
       timeframe: "all",
       accountIds: [],
       apiKeyIds: [],
+      upstreams: [],
       modelOptions: [],
       statuses: [],
       conversationId: null,

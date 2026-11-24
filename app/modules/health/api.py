@@ -17,6 +17,7 @@ from app.db.models import BridgeRingMember
 from app.db.session import get_session
 from app.modules.health.schemas import BridgeRingInfo, HealthCheckResponse, HealthResponse
 from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
+from app.modules.read_snapshots.repository import SnapshotRepository
 
 router = APIRouter(tags=["health"])
 
@@ -90,6 +91,19 @@ async def health_ready() -> HealthCheckResponse:
         )
 
     raise HTTPException(status_code=503, detail="Service unavailable")
+
+
+@router.get("/health/read-snapshots", response_model=HealthCheckResponse)
+async def health_read_snapshots() -> HealthCheckResponse:
+    # Separate from infrastructure readiness: a report refresh failure must
+    # never evict healthy inference capacity or interrupt its live sessions.
+    try:
+        async for session in get_session():
+            if await SnapshotRepository(session).ready_for_traffic():
+                return HealthCheckResponse(status="ok", checks={"read_snapshots": "ok"})
+    except Exception:
+        pass
+    raise HTTPException(status_code=503, detail="Analytical snapshots are not ready", headers={"Retry-After": "2"})
 
 
 @router.post("/internal/drain/start", include_in_schema=False)

@@ -68,7 +68,7 @@ _RELEASE_DRAIN_GRACE_SECONDS = 5.0
 _POSTGRES_ACQUIRE_SQL = text(
     """
     INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at)
-    VALUES (1, :leader_id, clock_timestamp(), clock_timestamp() + make_interval(secs => :ttl))
+    VALUES (:lease_id, :leader_id, clock_timestamp(), clock_timestamp() + make_interval(secs => :ttl))
     ON CONFLICT (id) DO UPDATE SET
         leader_id = excluded.leader_id,
         acquired_at = clock_timestamp(),
@@ -97,7 +97,7 @@ _POSTGRES_RENEW_SQL = text(
     """
     UPDATE scheduler_leader
     SET expires_at = clock_timestamp() + make_interval(secs => :ttl)
-    WHERE id = 1 AND leader_id = :leader_id AND expires_at > clock_timestamp()
+    WHERE id = :lease_id AND leader_id = :leader_id AND expires_at > clock_timestamp()
     RETURNING extract(epoch FROM (expires_at - clock_timestamp()))
     """
 ).bindparams(bindparam("ttl", type_=Float))
@@ -143,7 +143,7 @@ _SQLITE_REMAINING = "((julianday(expires_at) - julianday('now')) * 86400.0)"
 _SQLITE_ACQUIRE_SQL = text(
     f"""
     INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at)
-    VALUES (1, :leader_id, {_SQLITE_NOW}, {_SQLITE_NOW_PLUS_TTL})
+    VALUES (:lease_id, :leader_id, {_SQLITE_NOW}, {_SQLITE_NOW_PLUS_TTL})
     ON CONFLICT (id) DO UPDATE SET
         leader_id = excluded.leader_id,
         acquired_at = {_SQLITE_NOW},
@@ -163,7 +163,7 @@ _SQLITE_RENEW_SQL = text(
     f"""
     UPDATE scheduler_leader
     SET expires_at = {_SQLITE_NOW_PLUS_TTL}
-    WHERE id = 1 AND leader_id = :leader_id AND expires_at > {_SQLITE_NOW}
+    WHERE id = :lease_id AND leader_id = :leader_id AND expires_at > {_SQLITE_NOW}
     RETURNING {_SQLITE_REMAINING}
     """
 ).bindparams(bindparam("ttl", type_=Float))
@@ -193,7 +193,10 @@ def _returned_remaining(result: Result[Any]) -> float | None:
 
 
 class LeaderElection:
-    def __init__(self, leader_id: str | None = None) -> None:
+    def __init__(self, leader_id: str | None = None, *, lease_id: int = 1) -> None:
+        if not 1 <= lease_id <= 2**31 - 1:
+            raise ValueError("scheduler lease ID must be a positive database integer")
+        self._lease_id = lease_id
         self._leader_id = leader_id or str(uuid.uuid4())
         self._is_leader = False
         # Monotonic (event-loop clock) estimate of when the lease we hold
@@ -226,6 +229,10 @@ class LeaderElection:
         self._release_keeper_stop: asyncio.Event | None = None
 
     @property
+    def lease_id(self) -> int:
+        return self._lease_id
+
+    @property
     def leader_id(self) -> str:
         return self._leader_id
 
@@ -235,7 +242,7 @@ class LeaderElection:
 
     async def try_acquire(self) -> bool:
         settings = get_settings()
-        if not settings.leader_election_enabled:
+        if self._lease_id == 1 and not settings.leader_election_enabled:
             self._is_leader = True
             return True
 
@@ -246,7 +253,7 @@ class LeaderElection:
                 acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
                 result = await session.execute(
                     acquire_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
+                    {"leader_id": self._leader_id, "ttl": ttl, "lease_id": self._lease_id},
                 )
                 # The statement RETURNS the lease still remaining, measured on
                 # the database's OWN clock (``expires_at`` minus ``db_now`` in
@@ -331,7 +338,7 @@ class LeaderElection:
             return False
 
         settings = get_settings()
-        if not settings.leader_election_enabled:
+        if self._lease_id == 1 and not settings.leader_election_enabled:
             return True
 
         ttl = settings.leader_election_ttl_seconds
@@ -346,7 +353,7 @@ class LeaderElection:
             renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
             result = await session.execute(
                 renew_sql,
-                {"leader_id": self._leader_id, "ttl": ttl},
+                {"leader_id": self._leader_id, "ttl": ttl, "lease_id": self._lease_id},
             )
             # The statement RETURNS the renewed lease's remaining (on the
             # database's OWN clock) or nothing. Read it BEFORE the commit: a
@@ -423,7 +430,7 @@ class LeaderElection:
         self._is_leader = False
         self._lease_deadline = None
         settings = get_settings()
-        if not settings.leader_election_enabled:
+        if self._lease_id == 1 and not settings.leader_election_enabled:
             await self._stop_release_keeper()
             return True
         await self._stop_release_keeper()
@@ -438,7 +445,7 @@ class LeaderElection:
             async with get_background_session() as session:
                 await session.execute(
                     delete(SchedulerLeader).where(
-                        SchedulerLeader.id == 1,
+                        SchedulerLeader.id == self._lease_id,
                         SchedulerLeader.leader_id == self._leader_id,
                     )
                 )
@@ -487,7 +494,7 @@ class LeaderElection:
         to start unconditionally at shutdown-begin regardless of current
         leadership.
         """
-        if not get_settings().leader_election_enabled:
+        if self._lease_id == 1 and not get_settings().leader_election_enabled:
             return
         if self._release_keeper is not None and not self._release_keeper.done():
             return
@@ -602,7 +609,7 @@ class LeaderElection:
             return None
 
         settings = get_settings()
-        if not settings.leader_election_enabled:
+        if self._lease_id == 1 and not settings.leader_election_enabled:
             return await fn()
 
         ttl = settings.leader_election_ttl_seconds
@@ -938,7 +945,7 @@ class LeaderElection:
                 renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
                 result = await session.execute(
                     renew_sql,
-                    {"leader_id": self._leader_id, "ttl": ttl},
+                    {"leader_id": self._leader_id, "ttl": ttl, "lease_id": self._lease_id},
                 )
                 # A RETURNING row means the guarded UPDATE extended the row; no
                 # row means it was expired/taken over (a harmless no-op here).

@@ -184,7 +184,7 @@ async def test_renew_guards_on_unexpired_lease_on_sqlite(monkeypatch: pytest.Mon
     # The guard and the new expiry both use SQLite's statement-execution clock.
     assert "expires_at > (strftime('%Y-%m-%d %H:%M:%f', 'now')" in renew_sql
     assert "SET expires_at = (strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds')" in renew_sql
-    assert session.params[1] == {"leader_id": "node-a", "ttl": 30}
+    assert session.params[1] == {"leader_id": "node-a", "ttl": 30, "lease_id": 1}
 
 
 @pytest.mark.asyncio
@@ -487,7 +487,7 @@ async def test_try_acquire_uses_execution_time_clock_upsert_on_sqlite_dialect(
     assert sql.count("strftime('%Y-%m-%d %H:%M:%f', 'now', '+' || :ttl || ' seconds')") == 2
     # The takeover predicate necessarily shares that same execution-time clock.
     assert "scheduler_leader.expires_at < (strftime('%Y-%m-%d %H:%M:%f', 'now')" in sql
-    assert session.params[0] == {"leader_id": "node-a", "ttl": 30}
+    assert session.params[0] == {"leader_id": "node-a", "ttl": 30, "lease_id": 1}
 
 
 @pytest.mark.asyncio

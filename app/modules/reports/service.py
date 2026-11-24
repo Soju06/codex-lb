@@ -74,6 +74,7 @@ class ReportsService:
         earliest_activity_at = await self._repository.earliest_report_activity_at(
             account_ids, model, useragent_group, api_key_ids
         )
+        history_bound = earliest_activity_at if await self._repository.has_repeatable_history_view() else None
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
             end_date,
@@ -82,6 +83,7 @@ class ReportsService:
             model,
             useragent_group,
             api_key_ids,
+            earliest_activity_at=history_bound,
         )
         daily = [
             DailyReportRow(
@@ -129,6 +131,9 @@ class ReportsService:
         )
 
         return ReportsResponse(
+            observed_history_start=None
+            if earliest_activity_at is None
+            else earliest_activity_at.replace(tzinfo=timezone.utc),
             speed_metrics_available=window_days <= MAX_SPEED_REPORT_DAYS,
             speed_metrics_max_days=MAX_SPEED_REPORT_DAYS,
             summary=ReportSummary(

@@ -1,3 +1,5 @@
+import { ReadSnapshotStatus } from "@/components/read-snapshot-status";
+import { isSnapshotWarming } from "@/schemas/read-snapshot";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -188,11 +190,12 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     [filterCatalogQuery.data],
   );
 
-  const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
-  const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
+  const reportsWarming = isSnapshotWarming(reportsQuery.error);
+  const mainReportsError = reportsWarming ? null : getErrorMessageOrNull(reportsQuery.error);
+  const sharedOptionsError = (isSnapshotWarming(filterCatalogQuery.error) ? null : getErrorMessageOrNull(filterCatalogQuery.error));
   const accountOptionsError = getErrorMessageOrNull(accountsError);
   const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
-  const threadIdentityError = getErrorMessageOrNull(threadIdentityQuery.error);
+  const threadIdentityError = (isSnapshotWarming(threadIdentityQuery.error) ? null : getErrorMessageOrNull(threadIdentityQuery.error));
 
   const hasAnyError = Boolean(
     mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
@@ -323,10 +326,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           {t("reports.refresh")}
         </Button>
       </div>
+      <ReadSnapshotStatus snapshot={reportsQuery.data?.snapshot} warming={reportsWarming} />
       {reportsQuery.data?.speedMetricsAvailable === false ? (
         <p className="text-sm text-muted-foreground">{t("reports.speedUnavailable", { days: reportsQuery.data.speedMetricsMaxDays ?? 7 })}</p>
       ) : null}
-      {reportsQuery.isLoading ? (
+      {(reportsQuery.isLoading || reportsWarming) && !reportsQuery.data ? (
         <div className="flex items-center justify-center py-20 text-sm text-muted-foreground">
           {t("common.loading")}
         </div>

@@ -15,6 +15,7 @@ from app.modules.accounts.schemas import AccountSummary
 from app.modules.dashboard.weekly_pace import _weekly_timing
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -112,6 +113,7 @@ async def test_dashboard_overview_combines_data(async_client, db_setup):
             requested_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -200,6 +202,7 @@ async def test_dashboard_overview_carries_weekly_runway_fields_and_attribution(
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
 
     assert response.status_code == 200
@@ -237,6 +240,7 @@ async def test_dashboard_overview_omits_weekly_pace_value_without_weekly_data(
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(_make_account("acc-no-weekly", "no-weekly@example.com"))
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
 
     assert response.status_code == 200
@@ -350,6 +354,7 @@ async def test_dashboard_overview_counts_distinct_nonblank_conversations_in_time
         )
         await session.commit()
 
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
 
     assert response.status_code == 200
@@ -416,6 +421,7 @@ async def test_conversation_list_agrees_with_dashboard_activity_window(
         await session.commit()
 
     conversations_response = await async_client.get("/api/conversations", params={"since": since.isoformat()})
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     dashboard_response = await async_client.get("/api/dashboard/overview?timeframe=1d")
 
     assert conversations_response.status_code == 200
@@ -452,6 +458,7 @@ async def test_dashboard_overview_metrics_keep_soft_deleted_request_logs(async_c
     delete_response = await async_client.delete("/api/accounts/acc_dash_deleted")
     assert delete_response.status_code == 200
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     overview = await async_client.get("/api/dashboard/overview")
     assert overview.status_code == 200
     payload = overview.json()
@@ -496,6 +503,7 @@ async def test_dashboard_overview_maps_weekly_only_primary_to_secondary(async_cl
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -546,6 +554,7 @@ async def test_dashboard_overview_weekly_primary_beats_no_data_secondary_placeho
             recorded_at=now,
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -576,6 +585,7 @@ async def test_dashboard_overview_exposes_monthly_only_free_account(async_client
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -614,6 +624,7 @@ async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -649,6 +660,7 @@ async def test_dashboard_overview_counts_prolite_capacity(async_client, db_setup
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     payload = response.json()
@@ -747,6 +759,7 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
@@ -805,6 +818,7 @@ async def test_dashboard_projections_weekly_credit_pace_forecast_uses_recent_slo
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
@@ -856,6 +870,7 @@ async def test_dashboard_projections_weekly_credit_pace_smooths_displayed_gap(
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
@@ -905,6 +920,7 @@ async def test_dashboard_projections_weekly_credit_pace_smoothing_resets_with_qu
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
@@ -943,6 +959,7 @@ async def test_dashboard_projections_weekly_credit_pace_uses_configured_working_
             recorded_at=fixed_now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
     payload = response.json()
@@ -981,6 +998,7 @@ async def test_dashboard_projections_compute_depletion_from_recent_db_history(as
             recorded_at=now - timedelta(minutes=5),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
 
@@ -1034,6 +1052,7 @@ async def test_dashboard_projections_weekly_only_depletion_uses_current_stream(a
             recorded_at=now - timedelta(minutes=1),
         )
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     response = await async_client.get("/api/dashboard/projections")
     assert response.status_code == 200
 
@@ -1107,6 +1126,7 @@ async def test_dashboard_projections_ewma_tail_cap_matches_uncapped_history(asyn
         session.add_all(rows)
         await session.commit()
 
+    await prepare_read_snapshot("/api/dashboard/projections")
     capped = await async_client.get("/api/dashboard/projections")
     assert capped.status_code == 200
     capped_payload = capped.json()
@@ -1117,6 +1137,7 @@ async def test_dashboard_projections_ewma_tail_cap_matches_uncapped_history(asyn
     # Same database, same instant: lift the cap so every in-cutoff row is
     # hydrated, and compare against the capped response.
     monkeypatch.setattr(dashboard_service, "_PROJECTION_EWMA_TAIL_ROWS", 10**6)
+    await prepare_read_snapshot("/api/dashboard/projections")
     uncapped = await async_client.get("/api/dashboard/projections")
     assert uncapped.status_code == 200
     uncapped_payload = uncapped.json()
@@ -1195,6 +1216,7 @@ async def test_dashboard_overview_respects_selected_timeframe(
             requested_at=now - timedelta(days=2),
         )
 
+    await prepare_read_snapshot(f"/api/dashboard/overview?timeframe={timeframe}")
     response = await async_client.get(f"/api/dashboard/overview?timeframe={timeframe}")
     assert response.status_code == 200
     payload = response.json()
@@ -1274,6 +1296,7 @@ async def test_dashboard_overview_error_rate_excludes_cancelled_requests(async_c
             requested_at=now - timedelta(minutes=30),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview")
     response = await async_client.get("/api/dashboard/overview")
     assert response.status_code == 200
     metrics = response.json()["summary"]["metrics"]
@@ -1287,6 +1310,7 @@ async def test_dashboard_overview_error_rate_excludes_cancelled_requests(async_c
 
 @pytest.mark.asyncio
 async def test_dashboard_overview_invalid_timeframe_returns_validation_error(async_client):
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=90d")
     response = await async_client.get("/api/dashboard/overview?timeframe=90d")
     assert response.status_code == 422
 
@@ -1333,6 +1357,7 @@ async def test_dashboard_overview_summary_uses_exact_timeframe_even_when_trends_
             requested_at=fixed_now - timedelta(hours=23, minutes=52),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
     assert response.status_code == 200
 
@@ -1405,6 +1430,7 @@ async def test_dashboard_overview_includes_previous_window_summary_when_history_
             requested_at=fixed_now - timedelta(hours=2),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
     assert response.status_code == 200
 
@@ -1471,6 +1497,7 @@ async def test_dashboard_overview_hides_previous_window_summary_when_history_doe
             requested_at=fixed_now - timedelta(hours=2),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
     assert response.status_code == 200
 
@@ -1528,6 +1555,7 @@ async def test_dashboard_overview_exposes_zero_previous_window_totals_when_full_
             requested_at=fixed_now - timedelta(hours=2),
         )
 
+    await prepare_read_snapshot("/api/dashboard/overview?timeframe=1d")
     response = await async_client.get("/api/dashboard/overview?timeframe=1d")
     assert response.status_code == 200
 

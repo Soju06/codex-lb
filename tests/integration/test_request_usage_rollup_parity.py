@@ -726,8 +726,16 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
         )
         await session.commit()
 
-    before = await async_client.get("/api/dashboard/overview?timeframe=7d")
+    from tests.snapshot_helpers import prepare_read_snapshot
+
+    path = "/api/dashboard/overview?timeframe=7d"
+    await prepare_read_snapshot(path)
+    before = await async_client.get(path)
     assert before.status_code == 200
+    before_payload = before.json()
+    before_snapshot = before_payload.pop("snapshot")
+    assert before_snapshot["stale"] is False
+    assert before_snapshot["lastError"] is None
 
     folded_slices = await run_hourly_fold_pass()  # real now: rows are > fold lag old
     assert folded_slices > 0
@@ -738,9 +746,17 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
     assert folded  # the window flipped to rollup-served
     assert folded_conversations  # conversation series flipped as well
 
-    after = await async_client.get("/api/dashboard/overview?timeframe=7d")
+    await prepare_read_snapshot(path)
+    after = await async_client.get(path)
     assert after.status_code == 200
-    assert after.json() == before.json()
+    after_payload = after.json()
+    after_snapshot = after_payload.pop("snapshot")
+    assert after_snapshot["stale"] is False
+    assert after_snapshot["lastError"] is None
+    # Prove the second read uses a newly prepared rollup-backed generation,
+    # rather than accidentally comparing the same cached payload twice.
+    assert after_snapshot["generation"] > before_snapshot["generation"]
+    assert after_payload == before_payload
 
 
 @pytest.mark.asyncio

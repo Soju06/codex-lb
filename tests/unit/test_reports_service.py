@@ -63,6 +63,7 @@ async def test_get_reports_averages_use_inclusive_local_calendar_days(
         active_accounts=1,
     )
     repo = SimpleNamespace(
+        has_repeatable_history_view=AsyncMock(return_value=False),
         aggregate_summary=AsyncMock(side_effect=[summary, summary]),
         aggregate_daily_rows=AsyncMock(return_value=[]),
         aggregate_by_model=AsyncMock(return_value=[]),
@@ -87,6 +88,7 @@ async def test_get_reports_rejects_oversized_range_after_applying_default_end_da
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = SimpleNamespace(
+        has_repeatable_history_view=AsyncMock(return_value=False),
         aggregate_summary=AsyncMock(),
         aggregate_daily_rows=AsyncMock(),
         aggregate_by_model=AsyncMock(),
@@ -112,6 +114,7 @@ async def test_get_reports_rejects_inverted_defaulted_range_before_repository_wo
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = SimpleNamespace(
+        has_repeatable_history_view=AsyncMock(return_value=False),
         aggregate_summary=AsyncMock(),
         aggregate_daily_rows=AsyncMock(),
         aggregate_by_model=AsyncMock(),
@@ -140,6 +143,7 @@ async def test_get_reports_rejects_inverted_defaulted_range_before_repository_wo
 @pytest.mark.asyncio
 async def test_get_reports_serializes_conversation_and_breakdown_request_counts() -> None:
     repo = SimpleNamespace(
+        has_repeatable_history_view=AsyncMock(return_value=False),
         aggregate_summary=AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -223,6 +227,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        earliest_activity_at=None,
     )
     repo.aggregate_by_model.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),

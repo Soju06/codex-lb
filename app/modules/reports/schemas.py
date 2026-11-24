@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from pydantic import Field
 
+from app.modules.read_snapshots.schemas import ReadSnapshotMetadata
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -73,11 +74,14 @@ class ReportComparison(DashboardModel):
 
 
 class ReportsOptionsResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     models: list[str]
     useragents: list[str]
 
 
 class ReportsResponse(DashboardModel):
+    observed_history_start: datetime | None = None
+    snapshot: ReadSnapshotMetadata | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     speed_metrics_available: bool = True
     speed_metrics_max_days: int = 7
@@ -110,6 +114,7 @@ class ThreadIdentityFacet(DashboardModel):
 
 
 class ThreadIdentityResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     available: bool = True
     max_days: int

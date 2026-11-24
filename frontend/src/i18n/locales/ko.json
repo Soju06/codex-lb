@@ -2036,5 +2036,8 @@
   "organisation.automaticAccounts.secret.warning": "지금 복사하세요. 한 번만 표시되고 다시 볼 수 없습니다. 잃어버렸다면 자격 증명을 교체하세요.",
   "organisation.automaticAccounts.secret.copy": "자격 증명 복사",
   "organisation.errors.scim_token_not_found": "그 자격 증명은 더 이상 없습니다.",
-  "accounts.importDialog.selectedFiles": "선택한 파일"
+  "accounts.importDialog.selectedFiles": "선택한 파일",
+  "readSnapshot": {
+    "delayed": "업데이트가 지연되고 있습니다. 마지막으로 준비된 데이터를 표시합니다."
+  }
 }

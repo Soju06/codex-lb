@@ -1287,3 +1287,20 @@ async def test_clean_shutdown_is_not_recorded_when_disposal_does_not_complete(
         )
 
     assert marked is False
+
+
+@pytest.mark.asyncio
+async def test_independent_snapshot_stop_uses_existing_bounded_release_policy() -> None:
+    gate = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def snapshot_stop() -> bool:
+        await gate.wait()
+        finished.set()
+        return True
+
+    start = asyncio.get_running_loop().time()
+    assert await _release_leader_lease_within(0.05, snapshot_stop()) is False
+    assert asyncio.get_running_loop().time() - start < 0.5
+    gate.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)

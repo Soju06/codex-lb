@@ -12,6 +12,7 @@ from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.dashboard import repository as dashboard_repository_module
 from app.modules.usage.repository import UsageRepository
+from tests.snapshot_helpers import prepare_read_snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -58,19 +59,25 @@ async def _weekly_demand_statements(async_client, paths: list[str]) -> tuple[lis
         statements.append(statement)
 
     payloads: list[dict] = []
-    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    event.listen(type(engine.sync_engine), "before_cursor_execute", _capture)
     try:
+        await prepare_read_snapshot("/api/dashboard/overview")
+        await prepare_read_snapshot("/api/dashboard/overview")
+        before_reads = len(statements)
         for path in paths:
             response = await async_client.get(path)
             assert response.status_code == 200
             payloads.append(response.json())
+        assert not any("weekly_demand_samples" in sql for sql in statements[before_reads:])
     finally:
-        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+        event.remove(type(engine.sync_engine), "before_cursor_execute", _capture)
     return [statement for statement in statements if "weekly_demand_samples" in statement], payloads
 
 
 @pytest.mark.asyncio
-async def test_overview_and_projections_share_one_trailing_demand_query(async_client, db_setup, monkeypatch):
+async def test_background_generations_share_trailing_demand_and_http_never_queries_it(
+    async_client, db_setup, monkeypatch
+):
     monkeypatch.setattr("app.modules.dashboard.service.utcnow", lambda: _FIXED_NOW)
     monkeypatch.setattr(dashboard_repository_module, "_TRAILING_DEMAND_TTL_SECONDS", 60.0)
     await _seed_weekly_account("acc-memo")

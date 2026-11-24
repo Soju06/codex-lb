@@ -58,6 +58,7 @@ function appendMany(params: URLSearchParams, key: string, values?: string[]): vo
 export function getDashboardOverview(params: DashboardOverviewParams = {}) {
   const query = new URLSearchParams();
   query.set("timeframe", params.timeframe ?? DEFAULT_OVERVIEW_TIMEFRAME);
+  query.set("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone);
   return get(`${DASHBOARD_PATH}/overview?${query.toString()}`, DashboardOverviewSchema);
 }
 

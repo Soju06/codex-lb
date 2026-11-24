@@ -131,6 +131,7 @@ exclude = [".agents/hooks/"]
 
 [tool.ty.environment]
 python-version = "3.13"
+extra-paths = [".github/scripts"]
 
 [project.scripts]
 codex-lb = "app.cli:main"

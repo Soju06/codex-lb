@@ -48,8 +48,8 @@ class _NoopScheduler:
     async def start(self) -> None:
         return None
 
-    async def stop(self) -> None:
-        return None
+    async def stop(self) -> bool:
+        return True
 
 
 # Every background loop the app lifespan builds through an ``app.main``
@@ -66,6 +66,7 @@ class _NoopScheduler:
 # themselves (e.g. test_otel, test_telemetry_consent,
 # test_model_registry_replication) and keep working.
 BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
+    "build_read_snapshot_scheduler",
     "build_metadata_refresh_scheduler",
     "build_usage_refresh_scheduler",
     "build_model_refresh_scheduler",

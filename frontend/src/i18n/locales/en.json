@@ -2036,5 +2036,8 @@
   "organisation.automaticAccounts.secret.warning": "Copy it now. It is shown once and cannot be read again; if you lose it, replace the credential.",
   "organisation.automaticAccounts.secret.copy": "Copy credential",
   "organisation.errors.scim_token_not_found": "That credential no longer exists.",
-  "accounts.importDialog.selectedFiles": "Selected files"
+  "accounts.importDialog.selectedFiles": "Selected files",
+  "readSnapshot": {
+    "delayed": "Updates are delayed. Showing the last prepared data."
+  }
 }

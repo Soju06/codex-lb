@@ -6,6 +6,7 @@ from typing import List, Literal
 from pydantic import Field
 
 from app.modules.accounts.schemas import AccountSummary
+from app.modules.read_snapshots.schemas import ReadSnapshotMetadata
 from app.modules.shared.schemas import DashboardModel
 from app.modules.usage.schemas import MetricsTrends, UsageWindow, UsageWindowResponse
 
@@ -131,6 +132,7 @@ class WeeklyCreditPaceResponse(DashboardModel):
 
 
 class DashboardOverviewResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     last_sync_at: datetime | None = None
     timeframe: DashboardOverviewTimeframe
     accounts: List[AccountSummary] = Field(default_factory=list)
@@ -143,6 +145,7 @@ class DashboardOverviewResponse(DashboardModel):
 
 
 class DashboardProjectionsResponse(DashboardModel):
+    snapshot: ReadSnapshotMetadata | None = None
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None

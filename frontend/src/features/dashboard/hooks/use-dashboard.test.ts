@@ -41,7 +41,8 @@ describe("useDashboard", () => {
     const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview", "30d"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
-    expect(refetchInterval).toBe(15_000);
+    expect(refetchInterval).toBeTypeOf("function");
+    expect((refetchInterval as (value: unknown) => number)(query)).toBe(15_000);
   });
 
   it("passes timeframe to the overview endpoint", async () => {
@@ -94,7 +95,8 @@ describe("useDashboard", () => {
     const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
-    expect(refetchInterval).toBe(5_000);
+    expect(refetchInterval).toBeTypeOf("function");
+    expect((refetchInterval as (value: unknown) => number)(query)).toBe(5_000);
   });
 
   it("exposes error state on request failure", async () => {

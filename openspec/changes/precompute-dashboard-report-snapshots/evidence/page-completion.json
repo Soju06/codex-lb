@@ -1,0 +1,774 @@
+{
+  "baselineCommit": "72630bbfeee9e3b0d9acfb95e2b1e706b8b0188e",
+  "candidateImplementationCommit": "89ee795763af962f457fb21dbf487c289a6bd25c",
+  "workload": {
+    "accounts": 24,
+    "requestLogs": 50000,
+    "quotaObservations": 13824
+  },
+  "summaryParity": "Exact equality across all matched samples and pages",
+  "before": [
+    {
+      "sample": 0,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.371460532071069,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 3323.2142679999997,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4455.486627,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 0,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.371460532071069,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2651.508094,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 3992.7889110000006,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 1,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.2874018298462033,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 3284.349025,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4438.177944000001,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 1,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.2874018298462033,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2683.4218539999997,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 3975.6494500000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 2,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.2403970339801162,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 3295.619781,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4444.643402000001,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 2,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.2403970339801162,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2700.294141,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 3937.285095,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 3,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.296929797856137,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 3272.527526,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4435.346204,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 3,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.296929797856137,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2653.007721,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 3997.5521879999997,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 4,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.241243132855743,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 3393.432931,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4397.61578,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 4,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.241243132855743,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2958.142147,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4027.905823,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "sample": 0,
+      "phase": "first",
+      "startupToReadinessSeconds": 7.225560023915023,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2494.0165199999997,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4011.4257730000004,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 0,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 7.225560023915023,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2458.292993,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4028.325523,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 1,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.300254601985216,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2466.932253,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4012.9378030000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 1,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.300254601985216,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2352.5752820000002,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 3973.6426340000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 2,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.25994780799374,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2494.6325580000002,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4092.235538,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 2,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.25994780799374,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2438.025467,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4028.3137650000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 3,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.310247777029872,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2500.097217,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4028.542753,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 3,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.310247777029872,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2477.0483050000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4061.702117,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 4,
+      "phase": "first",
+      "startupToReadinessSeconds": 3.459276349050924,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2482.91639,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4060.1527180000003,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    },
+    {
+      "sample": 4,
+      "phase": "repeat",
+      "startupToReadinessSeconds": 3.459276349050924,
+      "pages": [
+        {
+          "name": "dashboard",
+          "completionMs": 2455.328465,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/dashboard/projections",
+            "/api/request-logs",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        },
+        {
+          "name": "reports",
+          "completionMs": 4043.3190820000004,
+          "completed": [
+            "/api/accounts",
+            "/api/dashboard-auth/session",
+            "/api/dashboard/overview",
+            "/api/reports",
+            "/api/reports/options",
+            "/api/reports/thread-identity",
+            "/api/request-logs/options",
+            "/api/runtime/version",
+            "/api/settings",
+            "/api/settings/telemetry"
+          ]
+        }
+      ]
+    }
+  ]
+}

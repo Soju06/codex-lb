@@ -12,6 +12,7 @@ from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
+    responses_payload_has_only_encrypted_account_scoped_state,
     responses_payload_is_account_neutral_fresh_replay,
 )
 
@@ -2613,3 +2614,50 @@ def test_account_neutral_replay_marker_requires_tagged_existing_hard_kind() -> N
 def test_account_neutral_replay_marker_rejects_empty_nonce() -> None:
     with pytest.raises(ValueError, match="nonce"):
         make_http_bridge_account_neutral_replay_key("")
+
+
+@pytest.mark.parametrize("encrypted_type", ["reasoning", "compaction"])
+def test_only_encrypted_account_scoped_state_accepts_retained_ciphertext(encrypted_type: str) -> None:
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.4",
+        "input": [
+            {"type": encrypted_type, "encrypted_content": "ciphertext"},
+            {"role": "user", "content": "continue"},
+        ],
+    }
+
+    assert responses_payload_has_only_encrypted_account_scoped_state(payload) is True
+
+
+@pytest.mark.parametrize(
+    "unsafe_item",
+    [
+        {"type": "input_file", "file_id": "file_account_a"},
+        {"type": "input_text", "text": "hi", "container_id": "ctr_account_a"},
+        {"type": "input_text", "text": "hi", "vector_store_id": "vs_account_a"},
+        {"type": "input_file", "file_url": "file-account-a://document"},
+        {"type": "future_account_item", "value": "account-a"},
+    ],
+)
+def test_only_encrypted_account_scoped_state_rejects_other_nonportable_state(
+    unsafe_item: dict[str, JsonValue],
+) -> None:
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.4",
+        "input": [
+            {"type": "compaction", "encrypted_content": "ciphertext"},
+            unsafe_item,
+            {"role": "user", "content": "continue"},
+        ],
+    }
+
+    assert responses_payload_has_only_encrypted_account_scoped_state(payload) is False
+
+
+def test_only_encrypted_account_scoped_state_requires_ciphertext() -> None:
+    assert (
+        responses_payload_has_only_encrypted_account_scoped_state(
+            {"model": "gpt-5.4", "input": [{"role": "user", "content": "hello"}]}
+        )
+        is False
+    )

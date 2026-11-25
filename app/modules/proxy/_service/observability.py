@@ -79,13 +79,15 @@ def _is_reasoning_replay_rejection(
 ) -> bool:
     """Return whether upstream rejected replayed reasoning items with a 400.
 
-    Observation only: a forked thread that replays reasoning ciphertext minted
-    for another account dies on ChatGPT's 400 and is undetectable from ids,
-    so this predicate feeds ``codex_lb_upstream_reasoning_replay_400_total``
-    to size that residual. It never alters classification, account health,
-    or failover. Without an HTTP status (terminal ``error`` /
-    ``response.failed`` frames) only the ``invalid_request_error`` code
-    qualifies.
+    Feeds ``codex_lb_upstream_reasoning_replay_400_total`` to size the residual
+    where a forked thread replays reasoning ciphertext minted for another
+    account; that case is undetectable from ids. The same predicate also
+    exempts the rejection from account-health penalties in
+    ``_is_account_neutral_request_rejection`` only for a failover replay
+    (``failover_replay``), so a match here is an account-neutral request
+    rejection, not an account fault, on that replay. Without an HTTP
+    status (terminal ``error`` / ``response.failed`` frames) only the
+    ``invalid_request_error`` code qualifies.
     """
     if http_status is None:
         if code != "invalid_request_error":

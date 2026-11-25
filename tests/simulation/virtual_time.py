@@ -186,6 +186,17 @@ class _VirtualTimeout:
         if not future.cancelled():
             self._on_timeout()
 
+    async def __aenter__(self) -> _VirtualTimeout:
+        return self.__enter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.__exit__(exc_type, exc, traceback)
+
     def _on_timeout(self) -> None:
         # ``_exited`` guards the tick where the awaitable completed and the
         # body left the scope before this callback ran; CPython avoids the
@@ -338,6 +349,9 @@ class VirtualScheduler:
             return await timer.future
         finally:
             self._disarm(timer)
+
+    def timeout(self, delay: float) -> _VirtualTimeout:
+        return _VirtualTimeout(self, delay)
 
     async def wait_for(self, awaitable: Awaitable[T], timeout: float | None) -> T:
         if timeout is None:

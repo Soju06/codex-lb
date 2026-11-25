@@ -1,0 +1,107 @@
+{
+  "head": "103f624c5b511f0732fc0122cde44be3cb86ff53",
+  "dirty": false,
+  "python": "3.13.5 (main, Jun 12 2025, 12:22:43) [Clang 20.1.4 ]",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "events": 10000,
+  "repeats": 5,
+  "bounded": true,
+  "modes": {
+    "producer_ahead": {
+      "median_cpu_us_per_event": 0.8603,
+      "median_wall_us_per_event": 0.8616875,
+      "tasks_per_event": 0,
+      "samples": [
+        {
+          "cpu_us_per_event": 0.8603,
+          "wall_us_per_event": 0.8616875,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 0.8579,
+          "wall_us_per_event": 0.8606584,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 0.8744,
+          "wall_us_per_event": 0.8769874999999999,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 0.8007000000000001,
+          "wall_us_per_event": 0.8007124999999999,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 0.8686,
+          "wall_us_per_event": 0.8711917,
+          "tasks_per_event": 0
+        }
+      ]
+    },
+    "interleaved": {
+      "median_cpu_us_per_event": 11.962399999999999,
+      "median_wall_us_per_event": 34.5276292,
+      "tasks_per_event": 0.0001,
+      "samples": [
+        {
+          "cpu_us_per_event": 11.962399999999999,
+          "wall_us_per_event": 34.5276292,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 11.9291,
+          "wall_us_per_event": 34.507208299999995,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 12.0605,
+          "wall_us_per_event": 34.713300000000004,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 10.866200000000001,
+          "wall_us_per_event": 33.2678333,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 12.218,
+          "wall_us_per_event": 34.8079708,
+          "tasks_per_event": 0
+        }
+      ]
+    },
+    "burst": {
+      "median_cpu_us_per_event": 19.9239,
+      "median_wall_us_per_event": 53.952179199999996,
+      "tasks_per_event": 1,
+      "samples": [
+        {
+          "cpu_us_per_event": 19.9239,
+          "wall_us_per_event": 54.4625791,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 20.0477,
+          "wall_us_per_event": 53.952179199999996,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 19.4011,
+          "wall_us_per_event": 53.5040958,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 20.2039,
+          "wall_us_per_event": 54.231158300000004,
+          "tasks_per_event": 0
+        },
+        {
+          "cpu_us_per_event": 18.329099999999997,
+          "wall_us_per_event": 51.9269875,
+          "tasks_per_event": 0
+        }
+      ]
+    }
+  }
+}

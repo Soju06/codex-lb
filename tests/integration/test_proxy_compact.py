@@ -159,7 +159,7 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
 
     response = await async_client.post(
         "/internal/bridge/responses",
-        json=forwarded_payload.model_dump_for_forwarding(),
+        json=forwarded_payload.model_dump_for_http_bridge_owner_forwarding(),
         headers=headers,
     )
 
@@ -1817,7 +1817,7 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
 
     response = await async_client.post(
         "/internal/bridge/responses",
-        json=forwarded_payload.model_dump_for_forwarding(),
+        json=forwarded_payload.model_dump_for_http_bridge_owner_forwarding(),
         headers=headers,
     )
 

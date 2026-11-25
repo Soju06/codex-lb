@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_reader_handoff_reconnect_failed,
+    _owner_process_epoch,
     _persist_http_bridge_replacement_account,
     _persistent_http_bridge_affinity,
     _plan_http_bridge_lru_capacity_closes,
@@ -1056,6 +1057,7 @@ class _HTTPBridgeMixin(
                                             owner_instance=owner_instance,
                                             owner_endpoint=owner_endpoint,
                                             key=key,
+                                            owner_process_epoch=_owner_process_epoch(durable_lookup, owner_instance),
                                         )
                             else:
                                 if _http_bridge_has_durable_recovery_anchor(

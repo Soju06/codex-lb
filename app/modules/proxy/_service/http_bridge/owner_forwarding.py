@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from enum import StrEnum
 from typing import Any, AsyncIterator, Mapping, TypeVar
 
@@ -143,6 +144,7 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy.affinity import (
     _extract_model_class,
+    _is_synthesized_turn_state,
 )
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS,
@@ -155,7 +157,9 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext,
     OwnerForwardRelayFailure,
+    _http_bridge_owner_forward_requires_shape_upgrade,
 )
+from app.modules.proxy.ring_membership import HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
@@ -420,6 +424,9 @@ class _HTTPBridgeOwnerForwardingMixin:
             reservation=api_key_reservation,
             codex_session_affinity=codex_session_affinity,
             downstream_turn_state=forwarded_turn_state,
+            downstream_turn_state_synthesized=(
+                forwarded_turn_state is not None and _is_synthesized_turn_state(forwarded_turn_state)
+            ),
             original_request_unanchored=(
                 recovery_forward
                 or (
@@ -477,6 +484,30 @@ class _HTTPBridgeOwnerForwardingMixin:
             if api_key_reservation is not None:
                 _signal_propagated_responses_owner_forward_rejected()
 
+        owner_supports_input_shape_classifier = False
+        if (
+            _http_bridge_owner_forward_requires_shape_upgrade(payload)
+            and self._ring_membership is not None
+            and owner_forward.owner_process_epoch is not None
+        ):
+            try:
+                owner_supports_input_shape_classifier = await self._ring_membership.owner_supports_capability(
+                    owner_forward.owner_instance,
+                    owner_process_epoch=owner_forward.owner_process_epoch,
+                    capability=HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to prove HTTP bridge owner input-shape capability",
+                    exc_info=True,
+                )
+
+        if owner_supports_input_shape_classifier:
+            forward_context = replace(
+                forward_context,
+                expected_owner_process_epoch=owner_forward.owner_process_epoch,
+            )
+
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -484,6 +515,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                owner_supports_input_shape_classifier=owner_supports_input_shape_classifier,
                 on_request_dispatched=owner_request_dispatched,
                 on_response_rejected=owner_response_rejected,
                 on_response_wait=_signal_propagated_capacity_startup_wait,

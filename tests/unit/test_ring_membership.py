@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 
@@ -8,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.utils.time import utcnow
 from app.db.models import Base, BridgeRingMember
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.ring_membership import (
+    HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
     RING_HEARTBEAT_INTERVAL_SECONDS,
     RING_STALE_GRACE_SECONDS,
     RING_STALE_THRESHOLD_SECONDS,
@@ -179,6 +182,53 @@ async def test_resolve_endpoint_returns_advertised_base_url(ring_service: RingMe
     endpoint = await ring_service.resolve_endpoint("pod-endpoint")
 
     assert endpoint == "http://10.0.0.12:8080"
+
+
+@pytest.mark.asyncio
+async def test_owner_capability_proof_is_bound_to_current_process_epoch(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-capable", endpoint_base_url="http://10.0.0.13:8080")
+
+    assert await ring_service.owner_supports_capability(
+        "pod-capable",
+        owner_process_epoch=http_bridge_owner_process_epoch(),
+        capability=HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
+    )
+    assert not await ring_service.owner_supports_capability(
+        "pod-capable",
+        owner_process_epoch="stale-process-epoch",
+        capability=HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_owner_advertisement_does_not_prove_current_classifier(
+    ring_service: RingMembershipService,
+) -> None:
+    await ring_service.register("pod-legacy", endpoint_base_url="http://10.0.0.14:8080")
+    async with ring_service._session() as session:
+        from sqlalchemy import update
+
+        await session.execute(
+            update(BridgeRingMember)
+            .where(BridgeRingMember.instance_id == "pod-legacy")
+            .values(
+                metadata_json=json.dumps(
+                    {
+                        "endpoint_base_url": "http://10.0.0.14:8080",
+                        "owner_process_epoch": http_bridge_owner_process_epoch(),
+                    }
+                )
+            )
+        )
+        await session.commit()
+
+    assert not await ring_service.owner_supports_capability(
+        "pod-legacy",
+        owner_process_epoch=http_bridge_owner_process_epoch(),
+        capability=HTTP_BRIDGE_INPUT_SHAPE_CLASSIFIER_CAPABILITY,
+    )
 
 
 @pytest.mark.asyncio

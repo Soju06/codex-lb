@@ -146,3 +146,12 @@ class DashboardProjectionsResponse(DashboardModel):
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
+
+
+class DashboardRequestActivityDay(DashboardModel):
+    date: str
+    requests: int = Field(ge=0)
+
+
+class DashboardRequestActivityResponse(DashboardModel):
+    days: list[DashboardRequestActivityDay] = Field(default_factory=list)

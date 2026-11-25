@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
@@ -15,6 +17,7 @@ from app.modules.dashboard.schemas import (
     DashboardOverviewResponse,
     DashboardOverviewTimeframeKey,
     DashboardProjectionsResponse,
+    DashboardRequestActivityResponse,
 )
 from app.modules.model_sources.catalog import source_models_to_upstream_models
 from app.modules.model_sources.repository import ModelSourcesRepository
@@ -51,6 +54,18 @@ async def get_projections(
     context: DashboardContext = Depends(get_dashboard_context),
 ) -> DashboardProjectionsResponse:
     return await context.service.get_projections()
+
+
+@router.get(
+    "/dashboard/request-activity",
+    response_model=DashboardRequestActivityResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_READ))],
+)
+async def get_request_activity(
+    timezone_name: Annotated[str | None, Query(alias="timezone")] = None,
+    context: DashboardContext = Depends(get_dashboard_context),
+) -> DashboardRequestActivityResponse:
+    return await context.service.get_request_activity(timezone_name)
 
 
 @router.get("/models", dependencies=[Depends(require_dashboard_permission(Permission.DASHBOARD_READ))])

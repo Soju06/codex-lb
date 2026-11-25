@@ -2324,6 +2324,77 @@ async def test_v1_responses_http_bridge_codex_session_prewarms_first_request(asy
     assert "generate" not in json.loads(fake_upstream.sent_text[1])
 
 
+class _MultiLineErrorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Rejects response.create with a pretty-printed JSON error frame, the way
+    the upstream sends some request errors (JSON mode without the word json)."""
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        error = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": None,
+                "message": "Response input messages must contain the word 'json' in some form to use "
+                "'text.format' of type 'json_object'.",
+                "param": "input",
+            },
+            "status": 400,
+        }
+        await self._messages.put(_FakeUpstreamMessage("text", text=json.dumps(error, indent=2)))
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_returns_multi_line_upstream_error(async_client, monkeypatch):
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client, "acc_http_bridge_multi_line_error", "http-bridge-multi-line-error@example.com"
+    )
+    account = await _get_account(account_id)
+    fake_upstream = _MultiLineErrorUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers, access_token, account_id_header, *, base_url=None, session=None
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return fake_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    started = time.monotonic()
+    response = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            headers={"x-codex-turn-state": "turn_state_multi_line_error"},
+            json={
+                "model": "gpt-5.4",
+                "instructions": "",
+                "text": {"format": {"type": "json_object"}},
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "Say hi."}]}],
+            },
+        ),
+        timeout=10,
+    )
+
+    assert time.monotonic() - started < 5
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "input"
+    assert "must contain the word 'json'" in error["message"]
+    assert len(fake_upstream.sent_text) == 1
+
+
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_codex_session_does_not_prewarm_by_default(async_client, monkeypatch):
     _install_bridge_settings_with_limits(monkeypatch, enabled=True, codex_idle_ttl_seconds=600.0)

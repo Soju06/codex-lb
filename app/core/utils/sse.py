@@ -217,10 +217,9 @@ def parse_sse_data_json_text(text: str) -> dict[str, JsonValue] | None:
     """Parse one ``data:`` value as a JSON object.
 
     Equivalent to ``parse_sse_data_json(f"data: {text}\\n\\n")`` but skips SSE
-    line parsing when ``text`` is a single-line JSON object — the shape every
-    upstream websocket frame has. Other inputs (blank, ``[DONE]``, multi-line or
-    whitespace-prefixed text) take the exact SSE field path so the ``None`` and
-    line-joining semantics stay identical.
+    line parsing when ``text`` is a single-line JSON object. Other inputs
+    (blank, ``[DONE]``, multi-line or whitespace-prefixed text) take the exact
+    SSE field path so the ``None`` and line-joining semantics stay identical.
     """
     if _is_single_line_json_object_text(text):
         try:
@@ -231,6 +230,22 @@ def parse_sse_data_json_text(text: str) -> dict[str, JsonValue] | None:
             return payload
         return None
     return parse_sse_data_json(f"data: {text}\n\n")
+
+
+def parse_websocket_json_text(text: str) -> dict[str, JsonValue] | None:
+    """Parse one websocket text frame as a JSON object.
+
+    A websocket frame carries one whole JSON document, which may span several
+    lines (upstream pretty-prints some error frames). Framing it as SSE with
+    ``data: {text}`` would keep only the first line, so decode it directly.
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if is_json_dict(payload):
+        return payload
+    return None
 
 
 def parse_sse_data_json(event_block: str) -> dict[str, JsonValue] | None:

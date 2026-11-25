@@ -50,7 +50,12 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.shared_future import wait_on_shared_future
-from app.core.utils.sse import format_sse_event, format_sse_event_from_text, parse_sse_data_json_text
+from app.core.utils.sse import (
+    format_sse_data,
+    format_sse_event,
+    format_sse_event_from_text,
+    parse_websocket_json_text,
+)
 from app.db.models import Account
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -2512,9 +2517,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_type = message.event_type
             routing = message.routing
         else:
-            payload = parse_sse_data_json_text(text)
+            # A multi-line frame (upstream pretty-prints some request errors) is
+            # still one JSON document; SSE framing would keep only its first line.
+            payload = parse_websocket_json_text(text)
             event_type = classify_event_type(payload)
             routing = None
+            if payload is not None and ("\n" in text or "\r" in text):
+                event_block = format_sse_data(payload)
         event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []

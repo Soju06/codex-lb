@@ -167,6 +167,36 @@ class TestAppendStability:
         assert second == first
 
 
+class TestJsonModeInstruction:
+    def test_key_is_stable_across_a_growing_json_mode_thread(self) -> None:
+        """A retained JSON instruction stays in the prefix of an anchored thread."""
+
+        def json_mode_turn(items: Sequence[object]) -> ResponsesRequest:
+            return ResponsesRequest.model_validate(
+                {
+                    "model": "gpt-5.4",
+                    "input": [{"role": "system", "content": "Answer in JSON."}, *items],
+                    "text": {"format": {"type": "json_object"}},
+                }
+            )
+
+        api_key = _make_api_key()
+        # Start with enough history for the four-item anchor overlap floor,
+        # independently of the retained JSON instruction.
+        items: list[object] = [_env_item(), _user("review file a"), _assistant("{}"), _user("review file b")]
+        opening = json_mode_turn(items)
+        assert isinstance(opening.input, list)
+        assert opening.input[0] == {"role": "developer", "content": "Answer in JSON."}
+        initial = _derive_prompt_cache_key(opening, api_key)
+        assert initial is not None
+        items = [*items, _assistant("{}"), _user("continue 0")]
+        assert _derive_prompt_cache_key(json_mode_turn(items), api_key) == initial
+        for turn in range(1, 5):
+            text = "add a date field to that json" if turn == 2 else f"continue {turn}"
+            items = [*items, _assistant("{}"), _user(text)]
+            assert _derive_prompt_cache_key(json_mode_turn(items), api_key) == initial
+
+
 class TestLeadingTrimStability:
     def test_key_survives_the_client_trimming_leading_history(self):
         api_key = _make_api_key()

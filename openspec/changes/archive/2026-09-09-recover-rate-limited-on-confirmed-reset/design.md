@@ -57,7 +57,14 @@ Alternative considered: send warm-up while `rate_limited` and promote on a 2xx r
 
 After a successful recovery, the scheduler will pass the same resolved monthly before/after pair into the existing selected-window warm-up evaluation. Candidate construction therefore derives the new monthly reset tuple even after a restart, while the existing atomic attempt claim continues to enforce at most one account/window/reset attempt across workers.
 
-Reset confirmation no longer requires the previous sample to be exhausted. A real temporal reset with newly available quota is eligible regardless of how much of the old window was used, subject to existing opt-in and availability gates. Timestamp jitter without a real boundary crossing or re-anchor remains ineligible.
+Reset confirmation itself no longer requires the previous sample to be
+exhausted. Warm-up eligibility additionally uses the configurable pre-reset
+usage threshold defined by the superseding
+`restore-limit-warmup-threshold` change. Its zero default keeps every real
+temporal reset with newly available quota eligible, while a positive value
+requires the old-window sample to meet the configured floor. Existing opt-in
+and availability gates remain required, and timestamp jitter without a real
+boundary crossing or re-anchor remains ineligible.
 
 Alternative considered: add a recovery-specific sender or dedupe key. That would duplicate safety checks and could create two attempts for the same reset.
 
@@ -71,7 +78,14 @@ Alternative considered: add a recovery-specific sender or dedupe key. That would
 
 ## Migration Plan
 
-No data or configuration migration is required. Deploy the scheduler and warm-up changes together, then verify that qualifying Free accounts transition to `active`, clear both block markers, and create at most one monthly warm-up attempt while genuinely exhausted Plus accounts remain blocked. Rollback restores the prior conservative behavior; already recovered account rows remain valid active state and require no data repair.
+No data or configuration migration is required for the recovery behavior in
+this change. The superseding `restore-limit-warmup-threshold` change owns its
+separate expand/contract settings migration. Deploy the scheduler and warm-up
+changes together, then verify that qualifying Free accounts transition to
+`active`, clear both block markers, and create at most one monthly warm-up
+attempt while genuinely exhausted Plus accounts remain blocked. Rollback
+restores the prior conservative recovery behavior; already recovered account
+rows remain valid active state and require no data repair.
 
 ## Open Questions
 

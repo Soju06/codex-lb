@@ -12,10 +12,15 @@
 
 ## 3. Active-Only Warm-up
 
-- [x] 3.1 Make reset-confirmed candidates eligible after every real selected-window reset regardless of previous usage or the legacy exhaustion-threshold setting while retaining post-reset availability, opt-in, and jitter gates.
+- [x] 3.1 Make reset-confirmed candidates eligible after real selected-window
+  resets subject to the configured pre-reset usage threshold, while retaining
+  post-reset availability, opt-in, and jitter gates. The superseding
+  `restore-limit-warmup-threshold` change owns the final threshold contract.
 - [x] 3.2 Restrict both warm-up candidate evaluation and the sender's fresh preflight to `active` accounts so a failed CAS or later re-block prevents upstream traffic.
 - [x] 3.3 Reuse the recovered monthly reset tuple with the existing atomic account/window/reset attempt claim so restart recovery cannot duplicate warm-up.
-- [x] 3.4 Keep `limit_warmup_cooldown_seconds` scoped to staggered idle candidates and record the follow-up removal plan for the now-unused exhaustion-threshold setting.
+- [x] 3.4 Keep `limit_warmup_cooldown_seconds` scoped to staggered idle
+  candidates and leave the exhaustion-threshold setting active for the
+  superseding threshold change.
 
 ## 4. Regression Coverage
 
@@ -23,7 +28,8 @@
 - [x] 4.2 Cover recovery from persisted transition history after restart, including an ineligible matching row exactly at `blocked_at` and an unanchored current transition before fallback to a later valid baseline, and prove the same monthly reset tuple is deduplicated.
 - [x] 4.3 Cover the 30-second floor, missing or mismatched markers, stale/pre-block evidence, timestamp jitter, exhausted after/latest usage, generic Retry-After cooldown, and a Plus account with primary usage at `100%`.
 - [x] 4.4 Cover compare-and-set contention and re-block-after-candidate races, proving neither stale recovery nor warm-up traffic occurs.
-- [x] 4.5 Cover active-only warm-up plus a non-exhausted-to-available real reset to prove prior exhaustion is no longer required.
+- [x] 4.5 Cover active-only warm-up plus a non-exhausted-to-available real reset
+  under the superseding change's zero default.
 
 ## 5. Verification
 

@@ -3,6 +3,16 @@
 ## Purpose
 Authorization and resource bounds for importing account auth material (auth.json uploads and equivalent flows) into the pool.
 ## Requirements
+### Requirement: Single-account auth.json import remains distinct
+
+The existing `POST /api/accounts/import` auth.json flow and dashboard chooser option MUST remain independently visible and behavior-compatible when portable account-bundle import is available.
+
+#### Scenario: Operator imports auth.json after bundles are enabled
+
+- **WHEN** an operator chooses the auth.json import option and uploads one valid auth.json file
+- **THEN** the existing single-account import endpoint and response behavior apply
+- **AND** no account-bundle passphrase or conflict step is required
+
 ### Requirement: Account auth imports are authorized and bounded
 
 `POST /api/accounts/import` MUST authenticate the dashboard session and require dashboard write access before reading any request-body bytes. It MUST accept exactly one file part named `auth_json`, no text parts, a file size no greater than 1 MiB (1,048,576 bytes), and a complete multipart body no greater than 2 MiB (2,097,152 bytes).
@@ -62,4 +72,3 @@ Byte-limit failures MUST return HTTP 413 with dashboard error `code = payload_to
 - **WHEN** the client disconnects or request processing is cancelled during account multipart parsing
 - **THEN** every created spool is closed
 - **AND** the disconnect or cancellation propagates without being converted to HTTP 413
-

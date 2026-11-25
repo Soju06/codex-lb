@@ -6,6 +6,10 @@ from asyncio import Semaphore
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.core.middleware.multipart_content_encoding import (
+    account_bundle_no_store_headers,
+    audit_account_bundle_request_failure,
+)
 from app.core.middleware.path_rewrite import redact_realtime_live_path
 from app.core.resilience.memory_monitor import is_memory_pressure, is_memory_warning
 from app.core.resilience.overload import (
@@ -88,6 +92,8 @@ class BulkheadMiddleware:
 
         if is_memory_pressure():
             message = "codex-lb is temporarily unavailable due to local memory pressure"
+            headers = merge_retry_after_headers(account_bundle_no_store_headers(scope))
+            audit_account_bundle_request_failure(scope, status_code=503)
             await self._log_rejection(
                 path=diagnostic_path,
                 scope_type=scope["type"],
@@ -102,14 +108,14 @@ class BulkheadMiddleware:
                     send,
                     status_code=503,
                     payload=local_unavailable_error(message) if is_proxy_path(path) else {"detail": message},
-                    headers=merge_retry_after_headers(),
+                    headers=headers,
                 )
                 return
             await send_json_http_response(
                 send,
                 status_code=503,
                 payload=local_unavailable_error(message) if is_proxy_path(path) else {"detail": message},
-                headers=merge_retry_after_headers(),
+                headers=headers,
             )
             return
 
@@ -120,6 +126,8 @@ class BulkheadMiddleware:
 
         if sem.locked():
             message = f"codex-lb is temporarily overloaded in the {lane} lane"
+            headers = merge_retry_after_headers(account_bundle_no_store_headers(scope))
+            audit_account_bundle_request_failure(scope, status_code=429)
             await self._log_rejection(
                 path=diagnostic_path,
                 scope_type=scope["type"],
@@ -134,14 +142,14 @@ class BulkheadMiddleware:
                     send,
                     status_code=429,
                     payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
-                    headers=merge_retry_after_headers(),
+                    headers=headers,
                 )
                 return
             await send_json_http_response(
                 send,
                 status_code=429,
                 payload=local_overload_error(message) if is_proxy_path(path) else {"detail": message},
-                headers=merge_retry_after_headers(),
+                headers=headers,
             )
             return
 

@@ -238,6 +238,47 @@ async def test_routed_request_prefers_native_single_endpoint_attempt(
 
 
 @pytest.mark.asyncio
+async def test_routed_stream_request_uses_identity_response_encoding(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    native = _NativeClient()
+    client = CodexClient(_Session(), native_egress_client=cast(Any, native))
+
+    await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test/responses",
+        route=route,
+        json={"input": "hello"},
+        headers={"Accept-Encoding": "gzip, br, zstd"},
+        buffer_response=False,
+        native_sse=NativeSseOptions(3, 1024),
+    )
+
+    request = native.request_calls[0]
+    assert {name.lower(): value for name, value in request.headers.items()}["accept-encoding"] == "identity"
+
+
+@pytest.mark.asyncio
+async def test_routed_stream_fallback_uses_same_identity_headers(route: ResolvedUpstreamRoute) -> None:
+    session = _Session()
+    native = _NativeClient(request_results=[NativeEgressUnavailable("missing helper")])
+    client = CodexClient(session, native_egress_client=cast(Any, native))
+
+    await client.request_with_route_metadata(
+        "POST",
+        "https://upstream.test/responses",
+        route=route,
+        json={"input": "hello"},
+        headers={"Accept-Encoding": "gzip, br, zstd"},
+        buffer_response=False,
+        native_sse=NativeSseOptions(3, 1024),
+    )
+
+    forwarded = session.calls[0]["headers"]
+    assert {name.lower(): value for name, value in forwarded.items()}["accept-encoding"] == "identity"
+
+
+@pytest.mark.asyncio
 async def test_routed_native_request_serializes_multipart_once(route: ResolvedUpstreamRoute) -> None:
     native = _NativeClient()
     client = CodexClient(_Session(), native_egress_client=cast(Any, native))

@@ -224,8 +224,14 @@ def stop_drain() -> bool:
     return not _shutdown_committed
 
 
+def drain_deadline_monotonic() -> float | None:
+    """Return the active process drain's absolute monotonic deadline, if set."""
+
+    return _effective_drain_deadline()
+
+
 def remaining_drain_timeout_seconds() -> float | None:
-    deadline = _effective_drain_deadline()
+    deadline = drain_deadline_monotonic()
     if deadline is None:
         return None
     return max(deadline - time.monotonic(), 0.0)
@@ -238,14 +244,23 @@ def set_post_drain_cleanup_timeout_seconds(timeout_seconds: float) -> None:
     _post_drain_cleanup_timeout_seconds = max(float(timeout_seconds), 0.0)
 
 
-def remaining_post_drain_cleanup_timeout_seconds() -> float | None:
-    """Return the unused portion of the shared drain-plus-reserve deadline."""
+def post_drain_cleanup_deadline_monotonic() -> float | None:
+    """Return the absolute drain-plus-reserve deadline, when configured."""
 
-    deadline = _effective_drain_deadline()
+    deadline = drain_deadline_monotonic()
     reserve = _post_drain_cleanup_timeout_seconds
     if deadline is None or reserve is None:
         return None
-    return max(deadline + reserve - time.monotonic(), 0.0)
+    return deadline + reserve
+
+
+def remaining_post_drain_cleanup_timeout_seconds() -> float | None:
+    """Return the unused portion of the shared drain-plus-reserve deadline."""
+
+    deadline = post_drain_cleanup_deadline_monotonic()
+    if deadline is None:
+        return None
+    return max(deadline - time.monotonic(), 0.0)
 
 
 def is_draining() -> bool:

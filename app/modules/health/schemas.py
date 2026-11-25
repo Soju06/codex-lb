@@ -16,6 +16,7 @@ class BridgeRingInfo(BaseModel):
     ring_size: int = 0
     instance_id: str | None = None
     is_member: bool = False
+    heartbeat_age_seconds: float | None = None
     error: str | None = None
 
 
@@ -25,3 +26,7 @@ class HealthCheckResponse(BaseModel):
     status: str
     checks: dict[str, str] | None = None
     bridge_ring: BridgeRingInfo | None = None
+
+
+class HealthCheckUnavailableResponse(HealthCheckResponse):
+    detail: str

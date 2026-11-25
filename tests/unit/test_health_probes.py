@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import OperationalError
 
 pytestmark = pytest.mark.unit
@@ -17,10 +21,28 @@ def _bridge_ring_ok():
 
     return BridgeRingInfo(
         ring_fingerprint="abc",
-        ring_size=0,
+        ring_size=1,
         instance_id="pod-a",
-        is_member=False,
+        is_member=True,
+        heartbeat_age_seconds=1.0,
     )
+
+
+def _assert_readiness_unavailable(response: object, detail: str) -> dict[str, Any]:
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 503
+    payload = json.loads(bytes(response.body))
+    assert set(payload) == {"status", "checks", "bridge_ring", "detail"}
+    assert payload["status"] == "unavailable"
+    assert payload["detail"] == detail
+    return payload
+
+
+def _assert_readiness_available(response: object):
+    from app.modules.health.schemas import HealthCheckResponse
+
+    assert isinstance(response, HealthCheckResponse)
+    return response
 
 
 @pytest.mark.asyncio
@@ -72,9 +94,11 @@ async def test_health_ready_db_ok():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        response = await health_ready()
+        response = _assert_readiness_available(await health_ready())
         assert response.status == "ok"
         assert response.checks == {"database": "ok"}
+        assert response.bridge_ring is not None
+        assert response.bridge_ring.heartbeat_age_seconds == 1.0
 
 
 @pytest.mark.asyncio
@@ -95,9 +119,11 @@ async def test_health_ready_db_error():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_ready()
-        assert exc_info.value.status_code == 503
+        response = await health_ready()
+
+    payload = _assert_readiness_unavailable(response, "Service unavailable")
+    assert payload["checks"] is None
+    assert payload["bridge_ring"] is None
 
 
 @pytest.mark.asyncio
@@ -115,9 +141,9 @@ async def test_health_ready_draining():
 
         mock_import.side_effect = import_side_effect
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_ready()
-        assert exc_info.value.status_code == 503
+        response = await health_ready()
+
+    _assert_readiness_unavailable(response, "Service is draining")
 
 
 @pytest.mark.asyncio
@@ -130,11 +156,9 @@ async def test_health_ready_uses_committed_shutdown_state_when_operator_flag_is_
     shutdown_state.commit_shutdown(timeout_seconds=30)
     monkeypatch.setattr(shutdown_state, "_draining", False)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await health_ready()
+    response = await health_ready()
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Service is draining"
+    _assert_readiness_unavailable(response, "Service is draining")
 
 
 @pytest.mark.asyncio
@@ -160,7 +184,7 @@ async def test_health_ready_ignores_upstream_state():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        response = await health_ready()
+        response = _assert_readiness_available(await health_ready())
 
     assert response.status == "ok"
     assert response.checks == {"database": "ok"}
@@ -189,7 +213,7 @@ async def test_health_ready_circuit_breaker_disabled_returns_200():
 
             mock_get_session.return_value = mock_get_session_context()
 
-            response = await health_ready()
+            response = _assert_readiness_available(await health_ready())
 
     assert response.status == "ok"
     assert response.checks == {"database": "ok"}
@@ -224,15 +248,16 @@ async def test_health_ready_fails_when_active_ring_exists_but_instance_is_missin
 
         mock_get_session.return_value = mock_get_session_context()
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_ready()
+        response = cast(JSONResponse, await health_ready())
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Service is not an active bridge ring member"
+    payload = _assert_readiness_unavailable(response, "Service is not an active bridge ring member")
+    assert payload["checks"] == {"database": "ok"}
+    assert payload["bridge_ring"]["is_member"] is False
 
 
 @pytest.mark.asyncio
-async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
+@pytest.mark.parametrize("heartbeat_age_seconds", [None, 31.0])
+async def test_health_ready_preserves_empty_ring_exemption(heartbeat_age_seconds: float | None):
     from app.modules.health.api import health_ready
     from app.modules.health.schemas import BridgeRingInfo
 
@@ -260,9 +285,76 @@ async def test_health_ready_allows_empty_bridge_ring_while_instance_registers():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        response = await health_ready()
+        mock_bridge_ring.return_value.heartbeat_age_seconds = heartbeat_age_seconds
+        response = _assert_readiness_available(await health_ready())
 
-    assert response.status == "ok"
+    assert response.bridge_ring is not None
+    assert response.bridge_ring.ring_size == 0
+    assert response.bridge_ring.heartbeat_age_seconds == heartbeat_age_seconds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("heartbeat_age_seconds", "error", "expected_detail"),
+    [
+        (31.0, None, "Service is not an active bridge ring member"),
+        (None, None, "Service is not an active bridge ring member"),
+        (None, "unavailable: OperationalError", "Service bridge ring metadata is unavailable"),
+    ],
+)
+async def test_health_ready_503_payload_exposes_local_heartbeat_health(
+    heartbeat_age_seconds: float | None,
+    error: str | None,
+    expected_detail: str,
+) -> None:
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.modules.health import api as health_api
+    from app.modules.health.schemas import BridgeRingInfo
+
+    test_app = FastAPI()
+    test_app.include_router(health_api.router)
+    mock_session = AsyncMock()
+    ring_size = 1  # Nonempty ring still requires local membership.
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.core.startup._bridge_durable_schema_ready", True),
+        patch("app.core.startup._bridge_registration_complete", True),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(http_responses_session_bridge_enabled=True),
+        ),
+        patch(
+            "app.modules.health.api._get_bridge_ring_info",
+            new=AsyncMock(
+                return_value=BridgeRingInfo(
+                    ring_fingerprint="abc",
+                    ring_size=ring_size,
+                    instance_id="pod-a",
+                    is_member=False,
+                    heartbeat_age_seconds=heartbeat_age_seconds,
+                    error=error,
+                )
+            ),
+        ),
+    ):
+
+        async def session_generator():
+            yield mock_session
+
+        mock_get_session.return_value = session_generator()
+        async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://testserver") as client:
+            response = await client.get("/health/ready")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert set(payload) == {"status", "checks", "bridge_ring", "detail"}
+    assert payload["status"] == "unavailable"
+    assert payload["detail"] == expected_detail
+    assert payload["bridge_ring"]["heartbeat_age_seconds"] == heartbeat_age_seconds
+    assert payload["bridge_ring"]["error"] == error
 
 
 @pytest.mark.asyncio
@@ -295,11 +387,12 @@ async def test_health_ready_fails_when_bridge_ring_lookup_errors():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_ready()
+        response = cast(JSONResponse, await health_ready())
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Service bridge ring metadata is unavailable"
+    payload = _assert_readiness_unavailable(response, "Service bridge ring metadata is unavailable")
+    assert payload["checks"] == {"database": "ok"}
+    assert payload["bridge_ring"]["heartbeat_age_seconds"] is None
+    assert payload["bridge_ring"]["error"] == "unavailable: ProgrammingError"
 
 
 @pytest.mark.asyncio
@@ -325,11 +418,11 @@ async def test_health_ready_fails_when_bridge_registration_is_not_complete():
 
         mock_get_session.return_value = mock_get_session_context()
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_ready()
+        response = await health_ready()
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Service bridge registration is not complete"
+    payload = _assert_readiness_unavailable(response, "Service bridge registration is not complete")
+    assert payload["checks"] == {"database": "ok"}
+    assert payload["bridge_ring"]["is_member"] is True
 
 
 @pytest.mark.asyncio
@@ -342,6 +435,7 @@ async def test_health_ready_fails_when_bridge_durable_schema_is_not_ready():
         patch("app.core.startup._bridge_registration_complete", True),
         patch("app.modules.health.api.get_settings") as mock_settings,
         patch("app.modules.health.api.get_session") as mock_get_session,
+        patch("app.modules.health.api._get_bridge_ring_info", new=AsyncMock(return_value=_bridge_ring_ok())),
     ):
         mock_settings.return_value.http_responses_session_bridge_enabled = True
         mock_session = AsyncMock()
@@ -352,11 +446,131 @@ async def test_health_ready_fails_when_bridge_durable_schema_is_not_ready():
 
         mock_get_session.return_value = session_generator()
 
-        with pytest.raises(HTTPException) as exc_info:
-            await health_api.health_ready()
+        response = await health_api.health_ready()
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Service bridge durable schema is not ready"
+    payload = _assert_readiness_unavailable(response, "Service bridge durable schema is not ready")
+    assert payload["checks"] == {"database": "ok"}
+    assert payload["bridge_ring"]["is_member"] is True
+
+
+@pytest.mark.asyncio
+async def test_health_ready_ignores_all_bridge_state_when_bridge_is_disabled() -> None:
+    from app.modules.health.api import health_ready
+    from app.modules.health.schemas import BridgeRingInfo
+
+    mock_session = AsyncMock()
+    ring_lookup = AsyncMock(
+        return_value=BridgeRingInfo(
+            ring_fingerprint=None,
+            ring_size=0,
+            instance_id="pod-a",
+            is_member=False,
+            error="bridge ring lookup unavailable",
+        )
+    )
+    with (
+        patch("app.core.draining._draining", False),
+        patch("app.modules.health.api.get_session") as mock_get_session,
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(http_responses_session_bridge_enabled=False),
+        ),
+        patch("app.core.startup._bridge_durable_schema_ready", False),
+        patch("app.core.startup._bridge_registration_complete", False),
+        patch("app.modules.health.api._get_bridge_ring_info", new=ring_lookup),
+    ):
+
+        async def session_generator():
+            yield mock_session
+
+        mock_get_session.return_value = session_generator()
+        response = _assert_readiness_available(await health_ready())
+
+    assert response.status == "ok"
+    ring_lookup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rows", "expected_size", "expected_member", "expected_age"),
+    [
+        ([("pod-a", -5), ("pod-b", -2)], 2, True, 5.0),
+        ([("pod-b", -2), ("pod-a", -5)], 2, True, 5.0),
+        ([("pod-a", -31), ("pod-b", -2)], 1, False, 31.0),
+        ([("pod-b", -2)], 1, False, None),
+        ([("pod-a", 1)], 1, True, 0.0),
+    ],
+)
+async def test_bridge_ring_info_reports_database_backed_local_heartbeat_age(
+    rows: list[tuple[str, int]],
+    expected_size: int,
+    expected_member: bool,
+    expected_age: float | None,
+) -> None:
+    from app.modules.health.api import _get_bridge_ring_info
+
+    now = datetime(2026, 8, 29, 12, 0, 0)
+    result = MagicMock()
+    result.all.return_value = [(instance_id, now + timedelta(seconds=offset)) for instance_id, offset in rows]
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    with (
+        patch("app.modules.health.api.utcnow", return_value=now),
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(http_responses_session_bridge_instance_id="pod-a"),
+        ),
+    ):
+        info = await _get_bridge_ring_info(session)
+
+    active_member_ids = sorted(instance_id for instance_id, offset in rows if offset >= -30)
+    expected_fingerprint = sha256(",".join(active_member_ids).encode()).hexdigest()
+    assert info.ring_fingerprint == expected_fingerprint
+    assert info.ring_size == expected_size
+    assert info.is_member is expected_member
+    assert info.heartbeat_age_seconds == expected_age
+    assert info.error is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_ring_info_normalizes_postgresql_timezone_aware_heartbeat() -> None:
+    from app.modules.health.api import _get_bridge_ring_info
+
+    now = datetime(2026, 8, 29, 12, 0, 0)
+    result = MagicMock()
+    result.all.return_value = [("pod-a", (now - timedelta(seconds=5)).replace(tzinfo=timezone.utc))]
+    session = AsyncMock()
+    session.execute.return_value = result
+
+    with (
+        patch("app.modules.health.api.utcnow", return_value=now),
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(http_responses_session_bridge_instance_id="pod-a"),
+        ),
+    ):
+        info = await _get_bridge_ring_info(session)
+
+    assert info.is_member is True
+    assert info.heartbeat_age_seconds == 5.0
+
+
+@pytest.mark.asyncio
+async def test_bridge_ring_info_reports_unknown_age_when_lookup_fails() -> None:
+    from app.modules.health.api import _get_bridge_ring_info
+
+    session = AsyncMock()
+    session.execute.side_effect = RuntimeError("database unavailable")
+    with patch(
+        "app.modules.health.api.get_settings",
+        return_value=SimpleNamespace(http_responses_session_bridge_instance_id="pod-a"),
+    ):
+        info = await _get_bridge_ring_info(session)
+
+    assert info.heartbeat_age_seconds is None
+    assert info.is_member is False
+    assert info.error == "unavailable: RuntimeError"
 
 
 @pytest.mark.asyncio

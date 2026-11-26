@@ -51,3 +51,20 @@ docker run --rm \
   codex-lb codex-sessions retag --from openai --to codex-lb \
     --codex-home /codex-home --yes
 ```
+
+## Whole-home retag planning
+
+See [the operator guide](../../../docs/session-retag.md) for `--progress-json`,
+metadata bounds and recovery behavior. Whole-home retag caches one metadata plan
+and grouped database counts, then verifies only matched targets. JSONL discovery
+is capped at 64 KiB and recognizes leading canonical or legacy metadata; it does
+not search transcript content. For example, a dry run against a 2 MiB transcript
+reads the same bounded prefix as one against a 100 KiB transcript.
+
+Clients must remain stopped during writes. Hard-link backups are preserved by
+replacing the working file, but an external in-place writer can still change the
+backup inode. Failure reports retained backups without promising automatic
+rollback across files and databases. Targeted repair remains a separate command
+proposal in PR #2323.
+
+If a progress reader exits early, retag disables progress output and finishes the confirmed operation. For example, a supervisor can stop reading stderr without interrupting file writes. The CLI replaces the closed stderr stream to prevent Python from failing a second flush at shutdown. Stdout still reports the verified result.

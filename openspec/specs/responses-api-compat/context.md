@@ -328,3 +328,8 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+## Scheduled retry cleanup races
+
+Scheduled cleanup compares the selected observation timestamp, admission generation, failure count and null-safe failure detail before deletion. For example, an old row at generation 3 survives if a replay claims generation 4 after cleanup selected it, even when the timestamp still meets the age cutoff. A conditional-delete miss ends that cleanup pass after its selected batch; the next scheduled pass applies the normal retention rules to the surviving state. See the scheduled cleanup requirement in [spec.md](spec.md).
+
+This uses existing columns and does not establish leased-receipt lifetime protection. The receipt lifecycle and stranded-owner and success-versus-claim policy decisions remain separate in #2271 and PR #1954.

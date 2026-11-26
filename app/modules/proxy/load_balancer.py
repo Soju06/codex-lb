@@ -2612,6 +2612,7 @@ def _normalize_usage_inputs(
     if (
         effective_secondary_entry is not None
         and effective_secondary_entry.window == "monthly"
+        and effective_secondary_entry.used_percent is None
         and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
     ):
         effective_secondary_entry = None
@@ -2803,6 +2804,28 @@ def background_recovery_state_from_account(
     return state
 
 
+def _monthly_entry_supersedes_secondary(
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+) -> bool:
+    """Check whether an observed monthly row is the current long-window signal.
+
+    Plans without a monthly credit-capacity estimate still report observed
+    monthly exhaustion after reclassification; such a row is routing-relevant
+    when no secondary row exists or the monthly snapshot is at least as fresh
+    as the secondary one.
+    """
+    if monthly_entry is None or monthly_entry.used_percent is None:
+        return False
+    if secondary_entry is None:
+        return True
+    monthly_recorded = getattr(monthly_entry, "recorded_at", None)
+    secondary_recorded = getattr(secondary_entry, "recorded_at", None)
+    if monthly_recorded is None or secondary_recorded is None:
+        return False
+    return monthly_recorded >= secondary_recorded
+
+
 def _select_long_window_entry(
     *,
     account: Account,
@@ -2810,6 +2833,9 @@ def _select_long_window_entry(
     secondary_entry: UsageHistory | AdditionalUsageHistory | None,
 ) -> UsageHistory | AdditionalUsageHistory | None:
     if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    if _monthly_entry_supersedes_secondary(monthly_entry, secondary_entry):
+        assert monthly_entry is not None
         return monthly_entry
     return secondary_entry
 
@@ -2830,6 +2856,7 @@ def _rate_limited_freshness_entry(
     if (
         long_window_entry is not None
         and long_window_entry.window == "monthly"
+        and long_window_entry.used_percent is None
         and usage_core.capacity_for_plan(account.plan_type, "monthly") is None
     ):
         long_window_entry = None

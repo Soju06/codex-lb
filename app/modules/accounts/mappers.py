@@ -123,7 +123,16 @@ def _account_to_summary(
         secondary_usage,
     )
 
-    if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
+    if (
+        monthly_usage is not None
+        and usage_core.capacity_for_plan(plan_type, "monthly") is None
+        and any(
+            row is not None
+            and row.window_minutes
+            and row.recorded_at > monthly_usage.recorded_at
+            for row in (primary_usage, secondary_usage)
+        )
+    ):
         monthly_usage = None
     usage_refreshed_at = _latest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage)
     monthly_used_percent = _normalize_used_percent(monthly_usage)

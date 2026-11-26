@@ -2840,6 +2840,47 @@ def test_state_from_account_ignores_stale_monthly_usage_after_upgrade(monkeypatc
     assert state.capacity_credits == usage_core.capacity_for_plan("plus", "secondary")
 
 
+def test_state_from_account_keeps_observed_monthly_exhaustion_without_monthly_capacity(monkeypatch):
+    now = 1_700_000_000.0
+    monthly_reset = int(now + 30 * 24 * 3600)
+    monkeypatch.setattr("time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    account = _make_test_account(status=AccountStatus.ACTIVE, plan_type="plus")
+    # Paid plans report observed monthly usage after duration reclassification
+    # (e.g. 43,800 minutes) but have no monthly credit-capacity estimate.
+    assert usage_core.capacity_for_plan(account.plan_type, "monthly") is None
+
+    monthly_entry = _make_test_usage(
+        window="monthly",
+        used_percent=100.0,
+        reset_at=monthly_reset,
+        recorded_at=_epoch_to_naive_utc(now - 30),
+        window_minutes=43200,
+    )
+
+    # The observed monthly row is the current long-window signal and must stay
+    # routing-relevant without any monthly credit-capacity estimate.
+    selected_entry = _select_long_window_entry(
+        account=account,
+        monthly_entry=monthly_entry,
+        secondary_entry=None,
+    )
+    assert selected_entry is monthly_entry
+
+    state = _state_from_account(
+        account=account,
+        primary_entry=None,
+        secondary_entry=monthly_entry,
+        runtime=RuntimeState(),
+    )
+
+    # A 100%-used account must keep its routing quota signal instead of
+    # losing it and remaining selectable.
+    assert state.secondary_used_percent == 100.0
+    assert state.secondary_reset_at == monthly_reset
+
+
 def test_state_from_account_ignores_zero_capacity_monthly_primary_window(monkeypatch):
     now = 1_700_000_000.0
     future_reset = int(now + 14 * 24 * 3600)
@@ -4011,14 +4052,12 @@ def test_background_recovery_state_ignores_only_unsupported_monthly_exhaustion(
         secondary_entry=monthly,
     )
 
-    if usage_core.capacity_for_plan(plan_type, "monthly") is None:
-        assert state.status == AccountStatus.ACTIVE
-        assert state.reset_at is None
-        assert state.blocked_at is None
-    else:
-        assert state.status == AccountStatus.RATE_LIMITED
-        assert state.reset_at == account.reset_at
-        assert state.blocked_at == account.blocked_at
+    # Observed monthly exhaustion (used_percent set) is routing-relevant on
+    # every plan per the review requirement; only unsupported (unobserved)
+    # monthly rows may be ignored when monthly capacity is unknown.
+    assert state.status == AccountStatus.RATE_LIMITED
+    assert state.reset_at == account.reset_at
+    assert state.blocked_at == account.blocked_at
 
 
 def test_background_recovery_state_recovers_monthly_only_rate_limited_after_reset_elapses(monkeypatch):

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-24T06:40:33.241057+00:00",
+  "updated_at": "2026-11-26T06:36:51.634804+00:00",
   "sources": [
     "https://models.dev/api.json",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -650,6 +650,18 @@
       "flex_long_context_output_per_1m": 37.5,
       "flex_long_context_cached_input_per_1m": 1.0
     },
+    "gpt-6-astra-healthcare": {
+      "input_per_1m": 10.0,
+      "output_per_1m": 50.0,
+      "cached_input_per_1m": 1.0,
+      "priority_input_per_1m": 20.0,
+      "priority_output_per_1m": 100.0,
+      "priority_cached_input_per_1m": 2.0,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 20.0,
+      "long_context_output_per_1m": 75.0,
+      "long_context_cached_input_per_1m": 2.0
+    },
     "gpt-6-astra-law": {
       "input_per_1m": 10.0,
       "output_per_1m": 50.0,
@@ -740,6 +752,18 @@
       "flex_long_context_output_per_1m": 7.5,
       "flex_long_context_cached_input_per_1m": 0.09999999999999999
     },
+    "gpt-6.1-sol-healthcare": {
+      "input_per_1m": 2.0,
+      "output_per_1m": 10.0,
+      "cached_input_per_1m": 0.1,
+      "priority_input_per_1m": 4.0,
+      "priority_output_per_1m": 20.0,
+      "priority_cached_input_per_1m": 0.2,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 4.0,
+      "long_context_output_per_1m": 15.0,
+      "long_context_cached_input_per_1m": 0.2
+    },
     "gpt-6.1-terra": {
       "input_per_1m": 1.0,
       "output_per_1m": 5.0,
@@ -776,6 +800,18 @@
       "priority_long_context_output_per_1m": 120.0,
       "priority_long_context_cached_input_per_1m": 1.5999999999999999
     },
+    "gpt-6.2-astra-healthcare": {
+      "input_per_1m": 8.0,
+      "output_per_1m": 40.0,
+      "cached_input_per_1m": 0.4,
+      "priority_input_per_1m": 16.0,
+      "priority_output_per_1m": 80.0,
+      "priority_cached_input_per_1m": 0.8,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 16.0,
+      "long_context_output_per_1m": 60.0,
+      "long_context_cached_input_per_1m": 0.8
+    },
     "gpt-6.2-astra-law": {
       "input_per_1m": 8.0,
       "output_per_1m": 40.0,
@@ -799,6 +835,18 @@
       "priority_long_context_input_per_1m": 8.0,
       "priority_long_context_output_per_1m": 30.0,
       "priority_long_context_cached_input_per_1m": 0.39999999999999997
+    },
+    "gpt-6.2-sol-healthcare": {
+      "input_per_1m": 2.0,
+      "output_per_1m": 10.0,
+      "cached_input_per_1m": 0.1,
+      "priority_input_per_1m": 4.0,
+      "priority_output_per_1m": 20.0,
+      "priority_cached_input_per_1m": 0.2,
+      "long_context_threshold_tokens": 272000.0,
+      "long_context_input_per_1m": 4.0,
+      "long_context_output_per_1m": 15.0,
+      "long_context_cached_input_per_1m": 0.2
     },
     "gpt-daybreak-blue-latest": {
       "input_per_1m": 4.0,

@@ -56,3 +56,8 @@ GROUP BY sticky_key_source, sticky_kind, sticky_key_hash;
 The affinity history converges with dashboard roles, users, the final compatibility-credential projection and audit actor columns through a no-op merge. Published revisions remain unchanged. Databases already on the authentication branch retain their current credentials and session generations; the earlier credential projection is not replayed on merge-only reupgrade. Databases on the older affinity history run the existing authentication backfills once. Ledgerless schema bootstrap retains those migrations' existing legacy-credential projection behavior.
 
 The subsequent invite migration converges through a second no-op join. Pending, consumed and revoked invite rows retain their hashes, expiry/consumption/revocation times, creator snapshots and flags. The older affinity history creates an empty invite table through the unchanged upstream migration.
+## Request persistence during reversible drain
+
+`/internal/drain/status` reports `request_persistence_state` separately from request and bridge activity. For example, a closed HTTP stream can have global and bridge pending counts of0 while its detached API-key finalizer remains pending1. The count includes registered owners whose completion callback has not yet transferred fallback work. Unknown observation omits the count; consumers must not treat it as zero.
+
+The signal observes current ownership without waiting, DB access or changing admission. Drained does not certify historical write success or atomic stop safety. Admission, bridge activity and graceful lifecycle remain separate controls, and installing this field in a new candidate does not retrofit its running predecessor.

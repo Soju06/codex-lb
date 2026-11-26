@@ -142,8 +142,13 @@ when upstream reports a different actual tier.
 - `file_search_call.results`
 - `message.input_image.image_url`
 - `message.output_text.logprobs`
+- `output.encrypted_content`
 - `reasoning.encrypted_content`
 - `web_search_call.action.sources`
+
+The output selector is additive: clients may request it alongside reasoning encryption.
+The proxy forwards the selector unchanged and continues to reject unknown include values.
+The allowlist change does not alter encrypted item handling or account routing.
 
 ## Failure Modes
 

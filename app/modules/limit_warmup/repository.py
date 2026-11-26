@@ -42,6 +42,21 @@ class LimitWarmupRepository:
         result = await self._session.execute(stmt)
         return {entry.account_id: entry for entry in result.scalars().all()}
 
+    async def has_attempt(self, account_id: str, window: str, reset_at: int, *, tolerance_seconds: int) -> bool:
+        return bool(
+            await self._session.scalar(
+                select(
+                    select(AccountLimitWarmup.id)
+                    .where(
+                        AccountLimitWarmup.account_id == account_id,
+                        AccountLimitWarmup.window == window,
+                        AccountLimitWarmup.reset_at.between(reset_at - tolerance_seconds, reset_at + tolerance_seconds),
+                    )
+                    .exists()
+                )
+            )
+        )
+
     async def try_create_attempt(
         self,
         *,

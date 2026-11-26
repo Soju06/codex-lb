@@ -1092,7 +1092,7 @@ async def test_fleet_refresh_uses_route_local_usage_updater_and_invalidates_on_w
                 ],
                 recorded_at=refreshed_usage_at,
             )
-            return True
+            return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
     class FakeRateLimitHeadersCache:
         async def invalidate(self):
@@ -1174,7 +1174,7 @@ async def test_fleet_refresh_respects_account_scoped_api_key(async_client, db_se
             assert own_singleflight_sessions is True
             refresh_calls.append([account.id for account in accounts])
             assert set(latest_primary) <= {"acc_refresh_scope_visible"}
-            return False
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=True)
 
     monkeypatch.setattr("app.modules.fleet.api.UsageUpdater", FakeUsageUpdater)
 
@@ -1245,11 +1245,11 @@ async def test_fleet_refresh_owns_session_until_shielded_refresh_finishes(db_set
         async def refresh_accounts(self, accounts, latest_primary, *, own_singleflight_sessions=False):
             assert own_singleflight_sessions is True
 
-            async def shielded_refresh() -> bool:
+            async def shielded_refresh() -> AccountRefreshResult:
                 refresh_started.set()
                 await allow_refresh_finish.wait()
                 session_was_open_during_refresh.append(not session_exited.is_set())
-                return True
+                return AccountRefreshResult(usage_written=True, fetch_succeeded=True)
 
             return await asyncio.shield(asyncio.create_task(shielded_refresh()))
 

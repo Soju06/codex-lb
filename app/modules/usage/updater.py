@@ -293,8 +293,13 @@ class UsageUpdater:
         *,
         own_singleflight_sessions: bool = False,
         join_existing: bool | None = None,
-    ) -> bool:
-        """Refresh usage for all accounts. Returns True if usage rows were written.
+    ) -> AccountRefreshResult:
+        """Refresh usage for all accounts.
+
+        Returns an aggregate :class:`AccountRefreshResult`: ``usage_written``
+        is True when any account wrote usage rows; ``fetch_succeeded`` is
+        False when any attempted upstream fetch failed. Freshness skips and
+        REAUTH/DEACTIVATED/cooldown skips leave ``fetch_succeeded`` True.
 
         ``own_singleflight_sessions`` makes each detached singleflight refresh
         acquire and release its own DB session instead of using this updater's
@@ -308,6 +313,7 @@ class UsageUpdater:
             join_existing = not own_singleflight_sessions
 
         refreshed = False
+        fetch_succeeded = True
         now = utcnow()
         interval = USAGE_REFRESH_INTERVAL_SECONDS
         _prune_usage_refresh_auth_cooldowns()
@@ -379,6 +385,8 @@ class UsageUpdater:
                 if join_existing:
                     await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
+                if not result.fetch_succeeded:
+                    fetch_succeeded = False
                 # Only cache when the upstream fetch actually succeeded.
                 # Transient errors (401 retry failure, 5xx, etc.) must not
                 # suppress retries within the interval.
@@ -394,8 +402,9 @@ class UsageUpdater:
                     exc_info=True,
                 )
                 # swallow per-account failures so the whole refresh loop keeps going
+                fetch_succeeded = False
                 continue
-        return refreshed
+        return AccountRefreshResult(usage_written=refreshed, fetch_succeeded=fetch_succeeded)
 
     async def force_refresh(
         self,

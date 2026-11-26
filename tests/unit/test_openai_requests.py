@@ -772,6 +772,42 @@ def test_responses_accepts_known_include_values():
     assert request.include == ["reasoning.encrypted_content", "web_search_call.action.sources"]
 
 
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+@pytest.mark.parametrize(
+    "include",
+    [
+        ["reasoning.encrypted_content"],
+        ["output.encrypted_content"],
+        ["reasoning.encrypted_content", "output.encrypted_content"],
+    ],
+)
+def test_responses_accepts_encrypted_output_include(
+    request_class: type[ResponsesRequest] | type[V1ResponsesRequest], include: list[str]
+) -> None:
+    request = request_class.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "include": include}
+    )
+    native_request = request.to_responses_request() if isinstance(request, V1ResponsesRequest) else request
+    assert native_request.to_payload()["include"] == include
+
+
+@pytest.mark.parametrize("request_class", [ResponsesRequest, V1ResponsesRequest])
+def test_responses_rejects_unknown_include_with_encrypted_output(
+    request_class: type[ResponsesRequest] | type[V1ResponsesRequest],
+) -> None:
+    with pytest.raises(ValidationError, match=r"Unsupported include value: output\.unsupported"):
+        request = request_class.model_validate(
+            {
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": [],
+                "include": ["output.encrypted_content", "output.unsupported"],
+            }
+        )
+        if isinstance(request, V1ResponsesRequest):
+            request.to_responses_request()
+
+
 def test_responses_accepts_previous_response_id_without_conversation():
     payload = {
         "model": "gpt-5.1",

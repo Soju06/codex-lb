@@ -2603,3 +2603,49 @@ async def test_sqlite_watchdog_never_reconnects_an_invalidated_transaction_durin
             assert (await connection.execute(sa_text("SELECT 1"))).scalar_one() == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_init_db_disabled_migration_ahead_schema_uses_shared_recovery_hint(monkeypatch, tmp_path) -> None:
+    from app.db.migrate import schema_ahead_recovery_hint
+
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda path, *, mode=SqliteIntegrityCheckMode.FULL: IntegrityCheck(ok=True, details=None),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="20990101_000000_future",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=True,
+                unknown_revisions=("20990101_000000_future",),
+                is_ahead=True,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await session_module.init_db()
+
+    message = str(exc_info.value)
+    assert "20990101_000000_future" in message
+    assert schema_ahead_recovery_hint() in message

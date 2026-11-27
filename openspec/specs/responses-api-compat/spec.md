@@ -1276,7 +1276,9 @@ string-valued event type only when it is exactly `error` or begins with
 `response.`. Other string-valued event types MUST be dropped before they reach
 the public stream. OpenAI-shaped backend requests with public contract
 enforcement enabled MUST follow the same filtering rule. Native Codex requests
-with public contract enforcement disabled MUST retain upstream vendor events.
+with public contract enforcement disabled MUST retain upstream vendor events
+(a WebSocket relay reports the pool in `codex.rate_limits`, see the requirement
+on Codex rate-limit events below).
 
 #### Scenario: Codex-internal rate-limit event is dropped before response.created
 
@@ -1312,6 +1314,37 @@ When serving streaming `POST /v1/responses`, if the upstream's terminal `respons
 #### Scenario: Terminal response.completed already carries output
 - **WHEN** the upstream's terminal `response.completed` event already includes a non-empty `output` array
 - **THEN** the public stream's terminal event MUST carry that `output` array unchanged
+
+### Requirement: Codex rate-limit events on WebSocket streams report the pool
+
+When relaying a `codex.rate_limits` event of the default `codex` limit family (no `limit_id`, `metered_limit_name` or
+`limit_name`, or one equal to `codex`) to a WebSocket client, the proxy MUST
+replace `rate_limits.primary`, `rate_limits.secondary` and `credits` with the
+pool aggregate it sends in its `x-codex-*` rate-limit headers. A window or
+credits block the aggregate does not report MUST be removed rather than kept
+from upstream, and when upstream quota is hidden from the caller (an API-key
+client with `hide_upstream_quota_from_api_keys`) all three MUST be removed.
+Every other field and the event's position in the stream MUST stay unchanged.
+Events of other limit families MUST be relayed unchanged. The rewrite applies
+only to what the client receives; archived upstream frames MUST keep the
+upstream values.
+
+#### Scenario: A per-account event is relayed with the pool's windows
+
+- **GIVEN** the pool aggregate reports a 5-hour window at 4% and a weekly window at 9%
+- **WHEN** upstream emits a default-family `codex.rate_limits` event with the serving account's 100% / 49%
+- **THEN** the WebSocket client receives that event with `rate_limits.primary.used_percent` 4 and `rate_limits.secondary.used_percent` 9, with the aggregate's window lengths and reset times
+- **AND** its other fields and its position among the stream's events are unchanged
+
+#### Scenario: Hidden upstream quota leaves the event without windows
+
+- **WHEN** an API-key client receives a default-family `codex.rate_limits` event while `hide_upstream_quota_from_api_keys` is on
+- **THEN** the event carries no `rate_limits.primary`, `rate_limits.secondary` or `credits`
+
+#### Scenario: Other limit families are not rewritten
+
+- **WHEN** upstream emits a `codex.rate_limits` event whose `metered_limit_name` is not `codex`
+- **THEN** the WebSocket client receives it unchanged
 
 ### Requirement: Public /v1 responses SSE stream starts with response.created
 When serving streaming `POST /v1/responses`, the first OpenAI-contract event the public stream emits MUST be `response.created`. When the upstream's first standard `response.*` event is not `response.created` (for example when the Codex backend jumps directly to `response.failed` on upstream rejection mid-stream), the service MUST synthesize a `response.created` SSE event from the source event's `response` envelope and emit it before forwarding the source event, so that consumers using the OpenAI Python SDK's `responses.stream(...)` parser do not raise `RuntimeError`.

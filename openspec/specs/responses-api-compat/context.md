@@ -328,3 +328,11 @@ File operations follow the existing pre-visible unary retry policy. The file cli
 For example, an unpinned upload whose account A cannot connect to its proxy can complete through account B, and the resulting file owner pin belongs to B. Finalization of a file pinned to A remains on A. Ambiguous request delivery, body-read failures, and host-wide network failures do not permit cross-account retries.
 
 Finalization may issue several upstream polls within one downstream call. A refused connection on its first poll can still use an eligible fallback account. After a poll has returned `retry` from A, however, a later refused connection must fail the operation on A: the pre-dispatch status of the later request does not undo the earlier poll's account-local progress. This applies even when no file owner pin was found; direct transport polling retains its existing behavior.
+
+## Pool quota in Codex rate-limit events
+
+Upstream `codex.rate_limits` events describe the one account that served the turn. The proxy's `x-codex-*` rate-limit headers and `/backend-api/wham/usage` describe the pool, and Codex treats all three as the quota of its endpoint. Codex CLI parses the event only on its WebSocket transport (`codex-rs/codex-api/src/endpoint/responses_websocket.rs`) and reads headers on HTTP, so a WebSocket session used to show the pool once at the handshake and then the serving account's quota after every response. With sticky routing that looked like a steady single-account reading for the whole session, and a client such as T3 Code reported an exhausted 5-hour window while the pool still had room.
+
+The relay therefore rewrites the default-family event with the same aggregate the headers carry, at the point where frames go to the client: request ownership, archives and diagnostics keep the upstream frame. Model-specific families (`metered_limit_name` other than `codex`) have no pool aggregate and pass through unchanged.
+
+Example: the pool reports 4% / 300 min and 9% / 10080 min; upstream sends `{"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true,"primary":{"used_percent":100,...},"secondary":{"used_percent":49,...}}}`. The client receives the same event with `primary.used_percent` 4 and `secondary.used_percent` 9 and the aggregate's `window_minutes` and `reset_at`.

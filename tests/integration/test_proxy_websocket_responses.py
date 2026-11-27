@@ -9,6 +9,7 @@ import threading
 import time
 import tomllib
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14767,3 +14768,88 @@ def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
+def _rate_limit_relay_upstream(account_event: Mapping[str, object]) -> _FakeUpstreamWebSocket:
+    created, completed = _websocket_response_batch("resp_ws_pool_rate_limits")
+    return _FakeUpstreamWebSocket(
+        [created, _FakeUpstreamMessage("text", text=json.dumps(account_event, separators=(",", ":"))), completed]
+    )
+
+
+def _patch_rate_limit_relay_account(monkeypatch, upstream: _FakeUpstreamWebSocket) -> None:
+    account = SimpleNamespace(id="acct_ws_pool_rate_limits", security_work_authorized=False)
+
+    async def select_account(self, *args, **kwargs):
+        del self, args, kwargs
+        return account
+
+    async def open_account(self, selected_account, headers, **kwargs):
+        del self, headers, kwargs
+        return selected_account, upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", select_account)
+    monkeypatch.setattr(proxy_module.ProxyService, "_try_open_websocket_connect_attempt", open_account)
+
+
+_SERVING_ACCOUNT_RATE_LIMITS = {
+    "type": "codex.rate_limits",
+    "plan_type": "pro",
+    "rate_limits": {
+        "allowed": True,
+        "primary": {"used_percent": 100.0, "window_minutes": 300, "reset_at": 1795706807},
+        "secondary": {"used_percent": 49.0, "window_minutes": 10080, "reset_at": 1795936293},
+    },
+}
+
+
+def _relay_one_turn(app_instance) -> list[dict[str, Any]]:
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        with client.websocket_connect("ws://localhost/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(_websocket_response_create("report the pool quota")))
+            return [json.loads(websocket.receive_text()) for _ in range(3)]
+
+
+def test_backend_responses_websocket_relays_codex_rate_limits_with_the_pool_quota(app_instance, monkeypatch):
+    upstream = _rate_limit_relay_upstream(_SERVING_ACCOUNT_RATE_LIMITS)
+    _patch_rate_limit_relay_account(monkeypatch, upstream)
+
+    async def pool_headers(self):
+        del self
+        return {
+            "x-codex-primary-used-percent": "4.0",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": "1795700000",
+            "x-codex-secondary-used-percent": "9.0",
+            "x-codex-secondary-window-minutes": "10080",
+            "x-codex-secondary-reset-at": "1796300000",
+        }
+
+    monkeypatch.setattr(proxy_module.ProxyService, "rate_limit_headers", pool_headers)
+
+    events = _relay_one_turn(app_instance)
+
+    assert [event["type"] for event in events] == ["response.created", "codex.rate_limits", "response.completed"]
+    assert events[1]["plan_type"] == "pro"
+    assert events[1]["rate_limits"] == {
+        "allowed": True,
+        "primary": {"used_percent": 4.0, "window_minutes": 300, "reset_at": 1795700000},
+        "secondary": {"used_percent": 9.0, "window_minutes": 10080, "reset_at": 1796300000},
+    }
+    assert json.loads(upstream.archived_receive_texts[1]) == _SERVING_ACCOUNT_RATE_LIMITS
+
+
+def test_backend_responses_websocket_drops_account_quota_when_the_pool_cannot_be_read(app_instance, monkeypatch):
+    upstream = _rate_limit_relay_upstream(_SERVING_ACCOUNT_RATE_LIMITS)
+    _patch_rate_limit_relay_account(monkeypatch, upstream)
+
+    async def unreadable_pool(self):
+        del self
+        raise RuntimeError("usage store unavailable")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "rate_limit_headers", unreadable_pool)
+
+    events = _relay_one_turn(app_instance)
+
+    assert [event["type"] for event in events] == ["response.created", "codex.rate_limits", "response.completed"]
+    assert events[1]["rate_limits"] == {"allowed": True}

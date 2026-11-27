@@ -1089,11 +1089,12 @@ async def _process_and_forward_upstream_websocket_text(
     upstream_control.downstream_sequence_number = None
     if downstream_texts is not None:
         for emitted_text in downstream_texts:
+            pooled_text = await proxy.pooled_rate_limit_event(emitted_text, hide_for_api_key=api_key is not None)
             try:
                 await proxy._send_downstream_websocket_text(
                     websocket,
                     client_send_lock=client_send_lock,
-                    text=emitted_text,
+                    text=pooled_text,
                     downstream_activity=downstream_activity,
                 )
             except Exception:
@@ -1125,11 +1126,12 @@ async def _process_and_forward_upstream_websocket_text(
         if downstream_activity.disconnected:
             return True
     elif not suppress_downstream_event:
+        pooled_text = await proxy.pooled_rate_limit_event(downstream_text, hide_for_api_key=api_key is not None)
         try:
             await proxy._send_downstream_websocket_text(
                 websocket,
                 client_send_lock=client_send_lock,
-                text=downstream_text,
+                text=pooled_text,
                 downstream_activity=downstream_activity,
             )
             if downstream_sequence_request_state is not None and downstream_sequence_number is not None:

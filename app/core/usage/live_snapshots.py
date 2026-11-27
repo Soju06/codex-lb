@@ -124,10 +124,8 @@ def parse_rate_limit_event(payload: Mapping[str, Any]) -> LiveRateLimitSnapshot 
     # usage rows; events for model-specific or individual limit buckets
     # (discriminated by limit_id / metered_limit_name / limit_name) must not
     # corrupt global selection state.
-    for discriminator in ("limit_id", "metered_limit_name", "limit_name"):
-        value = payload.get(discriminator)
-        if value is not None and value != "codex":
-            return None
+    if not _is_default_limit_family(payload):
+        return None
     rate_limits = payload.get("rate_limits")
     if not isinstance(rate_limits, dict):
         return None
@@ -147,6 +145,54 @@ def parse_rate_limit_event(payload: Mapping[str, Any]) -> LiveRateLimitSnapshot 
         credits_unlimited=_parse_bool(credits.get("unlimited")),
         credits_balance=_parse_float(credits.get("balance")),
     )
+
+
+def _is_default_limit_family(payload: Mapping[str, Any]) -> bool:
+    return all(payload.get(key) in (None, "codex") for key in ("limit_id", "metered_limit_name", "limit_name"))
+
+
+def _event_window_payload(window: LiveUsageWindow) -> dict[str, Any]:
+    return {
+        "used_percent": window.used_percent,
+        "window_minutes": window.window_minutes,
+        "reset_at": window.reset_at,
+    }
+
+
+def pooled_rate_limit_event_text(text: str, pool_headers: Mapping[str, str]) -> str:
+    """Return a WebSocket ``codex.rate_limits`` frame with the pool's quota.
+
+    Upstream reports the account that served the turn; the client reads the
+    event as its endpoint's quota, so the default family carries the aggregate
+    the proxy's ``x-codex-*`` headers report, and nothing when they report none.
+    """
+    if EVENT_MARKER not in text:
+        return text
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(payload, dict) or payload.get("type") != _EVENT_TYPE or not _is_default_limit_family(payload):
+        return text
+    pool = parse_rate_limit_headers(pool_headers)
+    rate_limits = payload.get("rate_limits")
+    rate_limits = dict(rate_limits) if isinstance(rate_limits, dict) else {}
+    rate_limits.pop("credits", None)
+    payload.pop("credits", None)
+    for slot in ("primary", "secondary"):
+        window = getattr(pool, slot) if pool is not None else None
+        if window is None:
+            rate_limits.pop(slot, None)
+        else:
+            rate_limits[slot] = _event_window_payload(window)
+    payload["rate_limits"] = rate_limits
+    if pool is not None and pool.credits_has is not None and pool.credits_unlimited is not None:
+        payload["credits"] = {
+            "has_credits": pool.credits_has,
+            "unlimited": pool.credits_unlimited,
+            "balance": None if pool.credits_balance is None else f"{pool.credits_balance:.2f}",
+        }
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def parse_rate_limit_event_text(text: str) -> LiveRateLimitSnapshot | None:

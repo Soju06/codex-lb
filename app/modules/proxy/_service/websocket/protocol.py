@@ -71,4 +71,5 @@ class _WebSocketServiceProtocol(Protocol):
     _websocket_previous_response_account_index: Any
     _write_request_log: Any
     _write_websocket_connect_failure: Any
+    pooled_rate_limit_event: Any
     proxy_responses_websocket: Any

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol, cast
 
 from app.core import usage as usage_core
+from app.core.config.settings_cache import get_settings_cache
+from app.core.usage.live_snapshots import EVENT_MARKER, pooled_rate_limit_event_text
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, UsageHistory
 from app.db.session import detach_session_objects
@@ -34,6 +37,8 @@ from app.modules.usage.updater import UsageUpdater
 
 if TYPE_CHECKING:
     from app.modules.proxy.load_balancer import LoadBalancer
+
+logger = logging.getLogger(__name__)
 
 
 class _RateLimitServiceProtocol(Protocol):
@@ -92,6 +97,22 @@ class _RateLimitMixin:
 
     async def rate_limit_headers(self) -> dict[str, str]:
         return await get_rate_limit_headers_cache().get(self._compute_rate_limit_headers)
+
+    async def pooled_rate_limit_event(self, text: str, *, hide_for_api_key: bool) -> str:
+        """Give a relayed ``codex.rate_limits`` frame the pool quota the headers report."""
+        if EVENT_MARKER not in text:
+            return text
+        try:
+            hidden = hide_for_api_key and bool(
+                getattr(await get_settings_cache().get(), "hide_upstream_quota_from_api_keys", False)
+            )
+            pool_headers = {} if hidden else await self.rate_limit_headers()
+        except Exception:
+            # The relay must not fail a turn over quota telemetry; without the
+            # aggregate the event carries no windows rather than one account's.
+            logger.warning("Pool rate limits unavailable for a relayed codex.rate_limits event", exc_info=True)
+            pool_headers = {}
+        return pooled_rate_limit_event_text(text, pool_headers)
 
     async def _compute_rate_limit_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
